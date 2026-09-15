@@ -7,7 +7,8 @@ pub mod term;
 
 pub use ast::{
     AstError, DEFDEF_TAG, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory,
-    PACKAGE_TAG, PackageNode, RawNode, RawNodes, TERMREFPKG_TAG, TYPEDEF_TAG, VALDEF_TAG,
+    PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterNode, RawNode, RawNodes, TEMPLATE_TAG,
+    TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, VALDEF_TAG,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};

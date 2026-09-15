@@ -197,12 +197,23 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                     "fixture {} has an unresolved definition name",
                     path.display()
                 );
-                stat.decode_definition_body().unwrap_or_else(|error| {
+                let body = stat.decode_definition_body().unwrap_or_else(|error| {
                     panic!(
                         "failed to parse definition body in {}: {error}",
                         path.display()
                     )
                 });
+                if let tasty_rs::DefinitionBody::TypeDef {
+                    type_or_template: tasty_rs::RawTree::LengthNode(template),
+                    ..
+                } = body
+                {
+                    if template.tag == tasty_rs::TEMPLATE_TAG {
+                        template.decode_template().unwrap_or_else(|error| {
+                            panic!("failed to parse template in {}: {error}", path.display())
+                        });
+                    }
+                }
             }
         }
     }

@@ -7,6 +7,9 @@ pub const PACKAGE_TAG: u8 = 128;
 pub const VALDEF_TAG: u8 = 129;
 pub const DEFDEF_TAG: u8 = 130;
 pub const TYPEDEF_TAG: u8 = 131;
+pub const TYPEPARAM_TAG: u8 = 133;
+pub const PARAM_TAG: u8 = 134;
+pub const TEMPLATE_TAG: u8 = 156;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -82,6 +85,33 @@ pub enum DefinitionBody<'a> {
 pub enum DefinitionTail<'a> {
     Modifier(u8),
     Annotation(RawNode<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParameterNode<'a> {
+    TypeParam { name: u32, body: &'a [u8] },
+    TermParam { name: u32, body: &'a [u8] },
+}
+
+impl<'a> ParameterNode<'a> {
+    pub fn name(&self) -> u32 {
+        match self {
+            Self::TypeParam { name, .. } | Self::TermParam { name, .. } => *name,
+        }
+    }
+
+    pub fn body(&self) -> &'a [u8] {
+        match self {
+            Self::TypeParam { body, .. } | Self::TermParam { body, .. } => body,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateNode<'a> {
+    pub type_params: Vec<ParameterNode<'a>>,
+    pub term_params: Vec<ParameterNode<'a>>,
+    pub remainder: &'a [u8],
 }
 
 impl<'a> DefinitionNode<'a> {
@@ -294,6 +324,54 @@ impl<'a> RawNode<'a> {
             }),
         }
     }
+
+    pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
+        let mut reader = self.reader();
+        let name = reader.read_nat()?;
+        let body = reader.read_bytes(reader.remaining())?;
+
+        match self.tag {
+            TYPEPARAM_TAG => Ok(ParameterNode::TypeParam { name, body }),
+            PARAM_TAG => Ok(ParameterNode::TermParam { name, body }),
+            _ => Err(AstError::UnexpectedTag {
+                expected: TYPEPARAM_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            }),
+        }
+    }
+
+    pub fn decode_template(&self) -> Result<TemplateNode<'a>, AstError> {
+        if self.tag != TEMPLATE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TEMPLATE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let mut type_params = Vec::new();
+        let mut term_params = Vec::new();
+
+        while !reader.is_at_end() && matches!(reader.peek_u8()?, TYPEPARAM_TAG | PARAM_TAG) {
+            let parameter = match RawTree::decode(&mut reader)? {
+                RawTree::LengthNode(raw) => raw.decode_parameter()?,
+                _ => unreachable!("parameter tags are category-five tags"),
+            };
+            match parameter {
+                ParameterNode::TypeParam { .. } => type_params.push(parameter),
+                ParameterNode::TermParam { .. } => term_params.push(parameter),
+            }
+        }
+
+        let remainder = reader.read_bytes(reader.remaining())?;
+        Ok(TemplateNode {
+            type_params,
+            term_params,
+            remainder,
+        })
+    }
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
@@ -334,7 +412,7 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         AstError, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory, PACKAGE_TAG,
-        RawNodes, TERMREFPKG_TAG, TYPEDEF_TAG, VALDEF_TAG,
+        PARAM_TAG, RawNodes, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -461,5 +539,34 @@ mod tests {
                 tail,
             }) if tail == vec![DefinitionTail::Modifier(17)]
         ));
+    }
+
+    #[test]
+    fn decodes_template_parameter_prefix_and_preserves_the_remainder() {
+        let bytes = [
+            TEMPLATE_TAG,
+            0x8c,
+            TYPEPARAM_TAG,
+            0x83,
+            0x81,
+            2,
+            17,
+            PARAM_TAG,
+            0x82,
+            0x82,
+            2,
+            46,
+            VALDEF_TAG,
+            0x80,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let template = nodes.get(0).unwrap().decode_template().unwrap();
+
+        assert_eq!(template.type_params.len(), 1);
+        assert_eq!(template.term_params.len(), 1);
+        assert_eq!(template.type_params[0].name(), 1);
+        assert_eq!(template.term_params[0].name(), 2);
+        assert_eq!(template.remainder, &[46, VALDEF_TAG, 0x80]);
     }
 }
