@@ -2371,6 +2371,106 @@ impl<'a> LambdaTptNode<'a> {
     }
 }
 
+impl<'a> BindNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(BIND_TAG, writer, |payload| {
+            payload.write_nat(self.name);
+            self.type_tree.encode(payload)?;
+            self.pattern.encode(payload)
+        })
+    }
+}
+
+impl<'a> AlternativeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(ALTERNATIVE_TAG, writer, |payload| {
+            encode_trees(&self.alternatives, payload)
+        })
+    }
+}
+
+impl<'a> UnapplyNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(UNAPPLY_TAG, writer, |payload| {
+            self.function.encode(payload)?;
+            for implicit_arg in &self.implicit_args {
+                implicit_arg.encode(payload)?;
+            }
+            self.type_tree.encode(payload)?;
+            encode_trees(&self.patterns, payload)
+        })
+    }
+}
+
+impl<'a> QuotePatternNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(QUOTEPATTERN_TAG, writer, |payload| {
+            self.body.encode(payload)?;
+            self.quotes.encode(payload)?;
+            self.pattern_type.encode(payload)?;
+            encode_trees(&self.bindings, payload)
+        })
+    }
+}
+
+impl<'a> SplicePatternNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(SPLICEPATTERN_TAG, writer, |payload| {
+            self.pattern.encode(payload)?;
+            self.pattern_type.encode(payload)?;
+            encode_trees(&self.arguments, payload)
+        })
+    }
+}
+
+impl<'a> MatchTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(MATCHTYPE_TAG, writer, |payload| {
+            self.bound.encode(payload)?;
+            self.selector.encode(payload)?;
+            encode_trees(&self.cases, payload)
+        })
+    }
+}
+
+impl<'a> MatchTptNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(MATCHTPT_TAG, writer, |payload| {
+            encode_trees(&self.prefix, payload)?;
+            for case in &self.cases {
+                case.encode(payload)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> InReferenceNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, TERMREFIN_TAG | TYPEREFIN_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            payload.write_nat(self.name);
+            self.qualifier.encode(payload)?;
+            self.underlying_type.encode(payload)
+        })
+    }
+}
+
+impl<'a> SelectInNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if self.tag != SELECTIN_TAG {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            payload.write_nat(self.name);
+            self.qualifier.encode(payload)?;
+            self.underlying_type.encode(payload)
+        })
+    }
+}
+
 fn encode_length_node<F>(
     tag: u8,
     writer: &mut Writer,
@@ -4559,6 +4659,55 @@ mod tests {
             ],
             |raw, writer| raw.decode_refined_tpt().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn encodes_structured_pattern_and_contextual_reference_nodes() {
+        assert_structured_round_trip(&[BIND_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
+            raw.decode_bind().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[ALTERNATIVE_TAG, 0x82, 2, 3], |raw, writer| {
+            raw.decode_alternative().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(
+            &[
+                UNAPPLY_TAG,
+                0x89,
+                TERMREFPKG_TAG,
+                0x81,
+                IMPLICITARG_TAG,
+                TERMREFPKG_TAG,
+                0x82,
+                TERMREFPKG_TAG,
+                0x83,
+                TERMREFPKG_TAG,
+                0x84,
+            ],
+            |raw, writer| raw.decode_unapply().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(&[QUOTEPATTERN_TAG, 0x84, 2, 3, 4, 5], |raw, writer| {
+            raw.decode_quote_pattern().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[SPLICEPATTERN_TAG, 0x84, 2, 3, 4, 5], |raw, writer| {
+            raw.decode_splice_pattern().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(
+            &[MATCHTYPE_TAG, 0x86, 2, 3, MATCHCASETYPE_TAG, 0x82, 4, 5],
+            |raw, writer| raw.decode_match_type().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(
+            &[MATCHTPT_TAG, 0x85, 2, CASEDEF_TAG, 0x82, 3, 4],
+            |raw, writer| raw.decode_match_tpt().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(&[TERMREFIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
+            raw.decode_in_reference().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[TYPEREFIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
+            raw.decode_in_reference().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[SELECTIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
+            raw.decode_select_in().unwrap().encode(writer)
+        });
     }
 
     fn assert_structured_round_trip<F>(bytes: &[u8], encode: F)
