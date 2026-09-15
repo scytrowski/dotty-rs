@@ -25,6 +25,9 @@ pub enum ReadError {
     IntegerOverflow {
         offset: usize,
     },
+    InvalidUtf8 {
+        offset: usize,
+    },
 }
 
 impl fmt::Display for ReadError {
@@ -52,6 +55,9 @@ impl fmt::Display for ReadError {
             }
             Self::IntegerOverflow { offset } => {
                 write!(formatter, "base-128 integer overflows at offset {offset}")
+            }
+            Self::InvalidUtf8 { offset } => {
+                write!(formatter, "invalid UTF-8 at offset {offset}")
             }
         }
     }
@@ -156,6 +162,15 @@ impl<'a> Reader<'a> {
 
     pub fn read_long_int(&mut self) -> Result<i64, ReadError> {
         self.read_signed()
+    }
+
+    pub fn read_utf8(&mut self) -> Result<String, ReadError> {
+        let start = self.offset;
+        let length = usize::try_from(self.read_nat()?)
+            .map_err(|_| ReadError::IntegerOverflow { offset: start })?;
+        let bytes = self.read_bytes(length)?;
+
+        String::from_utf8(bytes.to_vec()).map_err(|_| ReadError::InvalidUtf8 { offset: start })
     }
 
     fn read_base128(&mut self) -> Result<(u128, usize), ReadError> {
@@ -269,6 +284,25 @@ mod tests {
         assert_eq!(
             reader.read_nat(),
             Err(ReadError::UnterminatedInteger { offset: 0 })
+        );
+    }
+
+    #[test]
+    fn reads_length_prefixed_utf8() {
+        let mut reader = Reader::new(&[
+            0x8b, b'S', b'c', b'a', b'l', b'a', b' ', b'3', b'.', b'9', b'.', b'0',
+        ]);
+
+        assert_eq!(reader.read_utf8().unwrap(), "Scala 3.9.0");
+    }
+
+    #[test]
+    fn rejects_invalid_utf8() {
+        let mut reader = Reader::new(&[0x82, 0xff, 0xfe]);
+
+        assert_eq!(
+            reader.read_utf8(),
+            Err(ReadError::InvalidUtf8 { offset: 0 })
         );
     }
 }

@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tasty_rs::Header;
+
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
 
@@ -60,6 +62,26 @@ fn all_tasty_fixtures_are_readable_and_have_the_tasty_magic_header() {
             bytes[..TASTY_MAGIC.len()],
             TASTY_MAGIC,
             "fixture {} has an invalid TASTy magic header",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn all_tasty_fixtures_have_the_scala_3_9_header() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let header = Header::parse(&bytes)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+        assert_eq!(header.major_version, 28, "fixture {}", path.display());
+        assert_eq!(header.minor_version, 9, "fixture {}", path.display());
+        assert_eq!(header.experimental_version, 0, "fixture {}", path.display());
+        assert_eq!(
+            header.tooling_version,
+            "Scala 3.9.0",
+            "fixture {}",
             path.display()
         );
     }
