@@ -55,8 +55,11 @@ pub const ASSIGN_TAG: u8 = 139;
 pub const BLOCK_TAG: u8 = 140;
 pub const IF_TAG: u8 = 141;
 pub const LAMBDA_TAG: u8 = 142;
+pub const MATCH_TAG: u8 = 143;
 pub const RETURN_TAG: u8 = 144;
 pub const WHILE_TAG: u8 = 145;
+pub const TRY_TAG: u8 = 146;
+pub const INLINED_TAG: u8 = 147;
 pub const SELECTOUTER_TAG: u8 = 148;
 pub const REPEATED_TAG: u8 = 149;
 pub const TEMPLATE_TAG: u8 = 156;
@@ -79,6 +82,8 @@ pub const NAMEDARG_TAG: u8 = 119;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
 pub const SPLITCLAUSE_TAG: u8 = 46;
 pub const INLINE_TAG: u8 = 17;
+pub const IMPLICIT_TAG: u8 = 13;
+pub const SUBMATCH_TAG: u8 = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -354,6 +359,27 @@ pub struct RefinedTptNode<'a> {
 pub struct LambdaTptNode<'a> {
     pub type_params: Vec<ParameterNode<'a>>,
     pub body: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlinedNode<'a> {
+    pub expression: RawTree<'a>,
+    pub call_site: Option<RawTree<'a>>,
+    pub definitions: RawNodes<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchNode<'a> {
+    pub modifiers: Vec<u8>,
+    pub scrutinee: RawTree<'a>,
+    pub cases: Vec<CaseDefNode<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryNode<'a> {
+    pub expression: RawTree<'a>,
+    pub cases: Vec<CaseDefNode<'a>>,
+    pub finalizer: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1023,6 +1049,96 @@ impl<'a> RawNode<'a> {
         }
 
         Ok(LambdaTptNode { type_params, body })
+    }
+
+    pub fn decode_inlined(&self) -> Result<InlinedNode<'a>, AstError> {
+        if self.tag != INLINED_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: INLINED_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let expression = RawTree::decode(&mut reader)?;
+        let call_site =
+            if reader.is_at_end() || matches!(reader.peek_u8()?, VALDEF_TAG | DEFDEF_TAG) {
+                None
+            } else {
+                Some(RawTree::decode(&mut reader)?)
+            };
+        let definitions = RawNodes::decode(&mut reader)?;
+
+        Ok(InlinedNode {
+            expression,
+            call_site,
+            definitions,
+        })
+    }
+
+    pub fn decode_match(&self) -> Result<MatchNode<'a>, AstError> {
+        if self.tag != MATCH_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: MATCH_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let mut modifiers = Vec::new();
+        if !reader.is_at_end() {
+            match reader.peek_u8()? {
+                IMPLICIT_TAG | INLINE_TAG | SUBMATCH_TAG => modifiers.push(reader.read_u8()?),
+                _ => {}
+            }
+        }
+        let scrutinee = RawTree::decode(&mut reader)?;
+        let cases = read_case_defs(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(MatchNode {
+            modifiers,
+            scrutinee,
+            cases,
+        })
+    }
+
+    pub fn decode_try(&self) -> Result<TryNode<'a>, AstError> {
+        if self.tag != TRY_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TRY_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let expression = RawTree::decode(&mut reader)?;
+        let cases = read_case_defs(&mut reader)?;
+        let finalizer = if reader.is_at_end() {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(TryNode {
+            expression,
+            cases,
+            finalizer,
+        })
     }
 
     pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
@@ -1909,6 +2025,18 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
     Ok(tail)
 }
 
+fn read_case_defs<'a>(reader: &mut Reader<'a>) -> Result<Vec<CaseDefNode<'a>>, AstError> {
+    let mut cases = Vec::new();
+    while !reader.is_at_end() && reader.peek_u8()? == CASEDEF_TAG {
+        let tree = RawTree::decode(reader)?;
+        let RawTree::LengthNode(raw) = tree else {
+            unreachable!("case definition tags are category-five tags");
+        };
+        cases.push(raw.decode_case_def()?);
+    }
+    Ok(cases)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1916,18 +2044,18 @@ mod tests {
         APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BIND_TAG, BLOCK_TAG,
         BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG,
-        EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG,
-        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG,
-        MATCHCASETYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG,
-        PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
-        PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, RECTYPE_TAG, REFINEDTPT_TAG,
-        REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
-        SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG,
-        SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
-        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
-        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG,
-        WHILE_TAG,
+        EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG,
+        IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG, ImportExportKind,
+        ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
+        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
+        POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG,
+        RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
+        SELFDEF_TAG, SINGLETONTPT_TAG, SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG,
+        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
+        TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -3343,6 +3471,83 @@ mod tests {
             ParameterNode::TypeParam { name: 5, .. }
         ));
         assert!(matches!(lambda.body, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn decodes_an_inlined_expression_with_an_optional_call_site_and_definitions() {
+        let bytes = [
+            INLINED_TAG,
+            0x89,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            VALDEF_TAG,
+            0x83,
+            0x85,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let inlined = nodes.get(0).unwrap().decode_inlined().unwrap();
+
+        assert!(matches!(inlined.expression, RawTree::Leaf(_)));
+        assert!(matches!(inlined.call_site, Some(RawTree::Leaf(_))));
+        assert_eq!(inlined.definitions.len(), 1);
+        assert_eq!(inlined.definitions.get(0).unwrap().tag, VALDEF_TAG);
+    }
+
+    #[test]
+    fn decodes_match_with_a_modifier_and_case_definitions() {
+        for modifier in [IMPLICIT_TAG, INLINE_TAG, SUBMATCH_TAG] {
+            let bytes = [
+                MATCH_TAG,
+                0x89,
+                modifier,
+                TERMREFPKG_TAG,
+                0x81,
+                CASEDEF_TAG,
+                0x84,
+                TERMREFPKG_TAG,
+                0x82,
+                TERMREFPKG_TAG,
+                0x83,
+            ];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let matched = nodes.get(0).unwrap().decode_match().unwrap();
+
+            assert_eq!(matched.modifiers, vec![modifier]);
+            assert!(matches!(matched.scrutinee, RawTree::Leaf(_)));
+            assert_eq!(matched.cases.len(), 1);
+            assert!(matched.cases[0].guard.is_none());
+        }
+    }
+
+    #[test]
+    fn decodes_try_with_case_definitions_and_an_optional_finalizer() {
+        let bytes = [
+            TRY_TAG,
+            0x8a,
+            TERMREFPKG_TAG,
+            0x81,
+            CASEDEF_TAG,
+            0x84,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let tried = nodes.get(0).unwrap().decode_try().unwrap();
+
+        assert!(matches!(tried.expression, RawTree::Leaf(_)));
+        assert_eq!(tried.cases.len(), 1);
+        assert!(matches!(tried.finalizer, Some(RawTree::Leaf(_))));
     }
 
     #[test]
