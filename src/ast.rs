@@ -1,4 +1,5 @@
 use crate::reader::{ReadError, Reader};
+use crate::term::{RawTree, TermError};
 use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
@@ -64,6 +65,25 @@ pub enum DefinitionNode<'a> {
     TypeDef { name: u32, body: &'a [u8] },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionBody<'a> {
+    ValDef {
+        type_tree: RawTree<'a>,
+        rhs: Option<RawTree<'a>>,
+        tail: Vec<DefinitionTail<'a>>,
+    },
+    TypeDef {
+        type_or_template: RawTree<'a>,
+        tail: Vec<DefinitionTail<'a>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionTail<'a> {
+    Modifier(u8),
+    Annotation(RawNode<'a>),
+}
+
 impl<'a> DefinitionNode<'a> {
     pub fn name(&self) -> u32 {
         match self {
@@ -89,6 +109,7 @@ impl<'a> DefinitionNode<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AstError {
     Read(ReadError),
+    Term(TermError),
     InvalidTag {
         tag: u8,
         offset: usize,
@@ -108,6 +129,7 @@ impl fmt::Display for AstError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read(error) => error.fmt(formatter),
+            Self::Term(error) => error.fmt(formatter),
             Self::InvalidTag { tag, offset } => {
                 write!(formatter, "invalid AST tag {tag} at offset {offset}")
             }
@@ -132,6 +154,12 @@ impl std::error::Error for AstError {}
 impl From<ReadError> for AstError {
     fn from(error: ReadError) -> Self {
         Self::Read(error)
+    }
+}
+
+impl From<TermError> for AstError {
+    fn from(error: TermError) -> Self {
+        Self::Term(error)
     }
 }
 
@@ -235,13 +263,78 @@ impl<'a> RawNode<'a> {
             _ => unreachable!("definition tag was checked above"),
         })
     }
+
+    pub fn decode_definition_body(&self) -> Result<DefinitionBody<'a>, AstError> {
+        let mut reader = self.reader();
+        let _name = reader.read_nat()?;
+        let first = RawTree::decode(&mut reader)?;
+
+        match self.tag {
+            VALDEF_TAG => {
+                let rhs = if reader.is_at_end() || is_tail_tag(reader.peek_u8()?) {
+                    None
+                } else {
+                    Some(RawTree::decode(&mut reader)?)
+                };
+                let tail = read_definition_tail(&mut reader)?;
+                Ok(DefinitionBody::ValDef {
+                    type_tree: first,
+                    rhs,
+                    tail,
+                })
+            }
+            TYPEDEF_TAG => Ok(DefinitionBody::TypeDef {
+                type_or_template: first,
+                tail: read_definition_tail(&mut reader)?,
+            }),
+            _ => Err(AstError::UnexpectedTag {
+                expected: VALDEF_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            }),
+        }
+    }
+}
+
+fn is_modifier_tag(tag: u8) -> bool {
+    (6..=49).contains(&tag)
+}
+
+fn is_tail_tag(tag: u8) -> bool {
+    is_modifier_tag(tag) || tag == 173
+}
+
+fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTail<'a>>, AstError> {
+    let mut tail = Vec::new();
+    while !reader.is_at_end() {
+        let offset = reader.position();
+        let tag = reader.read_u8()?;
+        if is_modifier_tag(tag) {
+            tail.push(DefinitionTail::Modifier(tag));
+        } else if tag == 173 {
+            let length = reader.read_nat()? as usize;
+            let payload = reader.read_bytes(length)?;
+            tail.push(DefinitionTail::Annotation(RawNode {
+                tag,
+                offset,
+                payload,
+            }));
+        } else {
+            return Err(AstError::UnexpectedTag {
+                expected: 6,
+                actual: tag,
+                offset,
+            });
+        }
+    }
+    Ok(tail)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AstError, DefinitionNode, NodeCategory, PACKAGE_TAG, RawNodes, TERMREFPKG_TAG, TYPEDEF_TAG,
-        VALDEF_TAG,
+        AstError, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory, PACKAGE_TAG,
+        RawNodes, TERMREFPKG_TAG, TYPEDEF_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -336,5 +429,37 @@ mod tests {
             nodes.get(0).unwrap().decode_definition(),
             Ok(DefinitionNode::TypeDef { name: 1, body: b"" })
         );
+    }
+
+    #[test]
+    fn decodes_a_valdef_body_with_a_type_rhs_and_modifier() {
+        let bytes = [VALDEF_TAG, 0x86, 0x81, 64, 0x82, 70, 0x82, 17];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let body = nodes.get(0).unwrap().decode_definition_body().unwrap();
+
+        assert!(matches!(
+            body,
+            DefinitionBody::ValDef {
+                type_tree: _,
+                rhs: Some(_),
+                ref tail,
+            } if tail == &[DefinitionTail::Modifier(17)]
+        ));
+    }
+
+    #[test]
+    fn decodes_a_typedef_body_using_the_same_first_tree_rule() {
+        let bytes = [TYPEDEF_TAG, 0x83, 0x81, 2, 17];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert!(matches!(
+            nodes.get(0).unwrap().decode_definition_body(),
+            Ok(DefinitionBody::TypeDef {
+                type_or_template: _,
+                tail,
+            }) if tail == vec![DefinitionTail::Modifier(17)]
+        ));
     }
 }

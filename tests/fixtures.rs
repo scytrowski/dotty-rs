@@ -197,6 +197,12 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                     "fixture {} has an unresolved definition name",
                     path.display()
                 );
+                stat.decode_definition_body().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to parse definition body in {}: {error}",
+                        path.display()
+                    )
+                });
             }
         }
     }

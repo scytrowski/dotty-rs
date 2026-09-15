@@ -116,6 +116,18 @@ impl<'a> Reader<'a> {
         Ok(byte)
     }
 
+    pub fn peek_u8(&self) -> Result<u8, ReadError> {
+        if self.is_at_end() {
+            return Err(ReadError::UnexpectedEof {
+                offset: self.offset,
+                needed: 1,
+                remaining: 0,
+            });
+        }
+
+        Ok(self.bytes[self.offset])
+    }
+
     pub fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], ReadError> {
         let end = self
             .offset
