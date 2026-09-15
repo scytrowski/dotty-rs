@@ -668,6 +668,32 @@ mod tests {
     }
 
     #[test]
+    fn visits_visible_tree_nodes_and_stops_at_a_length_boundary() {
+        let mut reader = Reader::new(&[90, 110, 0x82, 128, 0x80]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        let mut visited = Vec::new();
+        tree.visit_nodes(&mut |node| visited.push(node));
+
+        assert_eq!(
+            visited,
+            vec![
+                super::AstTreeNode { tag: 90, offset: 0 },
+                super::AstTreeNode {
+                    tag: 110,
+                    offset: 1
+                },
+                super::AstTreeNode {
+                    tag: 128,
+                    offset: 3
+                },
+            ]
+        );
+        assert_eq!(tree.nodes(), visited);
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
     fn decodes_every_category_three_and_four_tag_as_a_raw_tree() {
         for tag in 90..=104 {
             let bytes = [tag, 64, 0x81];
@@ -881,5 +907,18 @@ mod tests {
 
         RawTree::decode_with_max_depth(&mut reader, 3).unwrap();
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn applies_the_base_offset_to_recursion_limit_errors() {
+        let mut reader = Reader::new(&[90, 2]);
+
+        assert_eq!(
+            RawTree::decode_with_max_depth_and_base_offset(&mut reader, 1, 40),
+            Err(TermError::RecursionLimit {
+                offset: 41,
+                limit: 1,
+            })
+        );
     }
 }

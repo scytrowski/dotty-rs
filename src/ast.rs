@@ -5752,6 +5752,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_truncated_or_extended_annotation_payload() {
+        let truncated = RawNode {
+            tag: ANNOTATION_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+        assert!(truncated.decode_annotation().is_err());
+
+        let extended = RawNode {
+            tag: ANNOTATION_TAG,
+            offset: 0,
+            payload: &[2, 3, 4],
+        };
+        assert_eq!(
+            extended.decode_annotation(),
+            Err(AstError::UnsupportedCategory {
+                tag: ANNOTATION_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
     fn preserves_an_unknown_category_five_node_through_structured_dispatch() {
         let node = RawNode {
             tag: 135,
