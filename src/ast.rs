@@ -22,7 +22,9 @@ pub const IF_TAG: u8 = 141;
 pub const LAMBDA_TAG: u8 = 142;
 pub const RETURN_TAG: u8 = 144;
 pub const WHILE_TAG: u8 = 145;
+pub const REPEATED_TAG: u8 = 149;
 pub const TEMPLATE_TAG: u8 = 156;
+pub const SUPER_TAG: u8 = 157;
 pub const IMPORT_TAG: u8 = 132;
 pub const EXPORT_TAG: u8 = 177;
 pub const IMPORTED_TAG: u8 = 75;
@@ -162,6 +164,18 @@ pub struct IfNode<'a> {
 pub struct LambdaNode<'a> {
     pub method: RawTree<'a>,
     pub target_type: Option<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuperNode<'a> {
+    pub this_term: RawTree<'a>,
+    pub mixin_type: Option<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatedNode<'a> {
+    pub element_type: RawTree<'a>,
+    pub elements: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,6 +693,57 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_super(&self) -> Result<SuperNode<'a>, AstError> {
+        if self.tag != SUPER_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: SUPER_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let this_term = RawTree::decode(&mut reader)?;
+        let mixin_type = if reader.is_at_end() {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(SuperNode {
+            this_term,
+            mixin_type,
+        })
+    }
+
+    pub fn decode_repeated(&self) -> Result<RepeatedNode<'a>, AstError> {
+        if self.tag != REPEATED_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: REPEATED_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let element_type = RawTree::decode(&mut reader)?;
+        let mut elements = Vec::new();
+        while !reader.is_at_end() {
+            elements.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(RepeatedNode {
+            element_type,
+            elements,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1012,10 +1077,10 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG, IF_TAG,
         IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
-        NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG,
-        RawNode, RawNodes, RawTree, SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG,
-        THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
-        TypedNode, VALDEF_TAG, WHILE_TAG,
+        NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG,
+        RETURN_TAG, RawNode, RawNodes, RawTree, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1676,6 +1741,61 @@ mod tests {
         };
 
         assert!(node.decode_lambda().is_err());
+    }
+
+    #[test]
+    fn decodes_super_without_a_mixin_type() {
+        let bytes = [SUPER_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_super().unwrap();
+
+        assert!(matches!(node.this_term, RawTree::Leaf(_)));
+        assert!(node.mixin_type.is_none());
+    }
+
+    #[test]
+    fn decodes_super_with_a_mixin_type() {
+        let bytes = [SUPER_TAG, 0x82, 2, 3];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_super().unwrap();
+
+        assert!(matches!(node.this_term, RawTree::Leaf(_)));
+        assert!(matches!(node.mixin_type, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn rejects_super_with_more_than_one_mixin_type() {
+        let node = RawNode {
+            tag: SUPER_TAG,
+            offset: 0,
+            payload: &[2, 3, 4],
+        };
+
+        assert!(node.decode_super().is_err());
+    }
+
+    #[test]
+    fn decodes_repeated_without_elements() {
+        let bytes = [REPEATED_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_repeated().unwrap();
+
+        assert!(matches!(node.element_type, RawTree::Leaf(_)));
+        assert!(node.elements.is_empty());
+    }
+
+    #[test]
+    fn decodes_repeated_with_elements() {
+        let bytes = [REPEATED_TAG, 0x83, 2, 3, 4];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_repeated().unwrap();
+
+        assert!(matches!(node.element_type, RawTree::Leaf(_)));
+        assert_eq!(node.elements.len(), 2);
     }
 
     #[test]
