@@ -457,6 +457,8 @@ name-table references contained in supported structured payloads. At file
 level, `TastyFile::name_references()` returns the same references together
 with the owning top-level AST address, which lets callers resolve them through
 the file's `NameTable`.
+`TastyFile::validate_name_references()` applies this check eagerly, and the
+general `TastyFile::validate()` path includes it.
 
 `BIND` is context-dependent: in a pattern it carries a pattern tree, while in
 a type it carries zero or more modifiers. `BindNode` exposes these alternatives

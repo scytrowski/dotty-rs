@@ -170,10 +170,25 @@ impl<'a> TastyFile<'a> {
     /// parts they need. This method provides an explicit eager-validation
     /// boundary for applications that need the complete file checked.
     pub fn validate(&self) -> Result<(), TastyFileError> {
+        self.validate_name_references()?;
         self.validate_ast_reference_targets()?;
         self.attributes()?;
         self.comments()?;
         self.positions()?;
+        Ok(())
+    }
+
+    /// Validate that every name-table reference used by a supported AST
+    /// payload resolves to an entry in this file's name table.
+    pub fn validate_name_references(&self) -> Result<(), TastyFileError> {
+        for reference in self.name_references()? {
+            if self.name(reference.reference).is_none() {
+                return Err(TastyFileError::InvalidNameReference {
+                    context: "AST name reference",
+                    reference: reference.reference,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -471,8 +486,11 @@ mod tests {
 
     #[test]
     fn validates_a_complete_file_from_parts() {
-        let names =
-            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let names = crate::NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("value".to_owned()),
+        ])
+        .unwrap();
         let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
             0,
             &[crate::VALDEF_TAG, 0x82, 0x82, 3],
@@ -749,6 +767,43 @@ mod tests {
                 context: "AST reference",
                 address: 127,
                 asts_length: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_file_ast_name_reference_outside_the_name_table() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[crate::APPLY_TAG, 0x82, crate::TERMREFPKG_TAG, 0x83],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.validate_name_references(),
+            Err(TastyFileError::InvalidNameReference {
+                context: "AST name reference",
+                reference: 3,
+            })
+        );
+        assert_eq!(
+            file.validate(),
+            Err(TastyFileError::InvalidNameReference {
+                context: "AST name reference",
+                reference: 3,
             })
         );
     }
