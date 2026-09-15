@@ -230,6 +230,16 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                 )
                             });
                         }
+                        for nested in structure.stats.iter() {
+                            if nested.tag == tasty_rs::DEFDEF_TAG {
+                                nested.decode_defdef_body().unwrap_or_else(|error| {
+                                    panic!(
+                                        "failed to parse defdef body in {}: {error}",
+                                        path.display()
+                                    )
+                                });
+                            }
+                        }
                     }
                 }
             }

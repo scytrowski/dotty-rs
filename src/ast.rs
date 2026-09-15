@@ -13,6 +13,7 @@ pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
 pub const EXPORT_TAG: u8 = 177;
 pub const SELFDEF_TAG: u8 = 118;
+pub const EMPTYCLAUSE_TAG: u8 = 45;
 pub const SPLITCLAUSE_TAG: u8 = 46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,15 @@ pub enum DefinitionBody<'a> {
         type_or_template: RawTree<'a>,
         tail: Vec<DefinitionTail<'a>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefDefBody<'a> {
+    pub parameters: Vec<ParameterNode<'a>>,
+    pub clauses: Vec<u8>,
+    pub return_type: RawTree<'a>,
+    pub rhs: Option<RawTree<'a>>,
+    pub tail: Vec<DefinitionTail<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +362,51 @@ impl<'a> RawNode<'a> {
         }
     }
 
+    pub fn decode_defdef_body(&self) -> Result<DefDefBody<'a>, AstError> {
+        if self.tag != DEFDEF_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: DEFDEF_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let _name = reader.read_nat()?;
+        let mut parameters = Vec::new();
+        let mut clauses = Vec::new();
+
+        while !reader.is_at_end() {
+            match reader.peek_u8()? {
+                TYPEPARAM_TAG | PARAM_TAG => {
+                    let parameter = match RawTree::decode(&mut reader)? {
+                        RawTree::LengthNode(raw) => raw.decode_parameter()?,
+                        _ => unreachable!("parameter tags are category-five tags"),
+                    };
+                    parameters.push(parameter);
+                }
+                EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG => clauses.push(reader.read_u8()?),
+                _ => break,
+            }
+        }
+
+        let return_type = RawTree::decode(&mut reader)?;
+        let rhs = if reader.is_at_end() || is_tail_tag(reader.peek_u8()?) {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        let tail = read_definition_tail(&mut reader)?;
+
+        Ok(DefDefBody {
+            parameters,
+            clauses,
+            return_type,
+            rhs,
+            tail,
+        })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -506,9 +561,9 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        AstError, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory, PACKAGE_TAG,
-        PARAM_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG,
-        TYPEPARAM_TAG, VALDEF_TAG,
+        AstError, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
+        NodeCategory, PACKAGE_TAG, PARAM_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG,
+        TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -699,5 +754,22 @@ mod tests {
 
         assert!(matches!(body.type_tree, RawTree::Leaf(_)));
         assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
+    }
+
+    #[test]
+    fn decodes_a_defdef_parameters_clauses_return_type_and_tail() {
+        let bytes = [
+            DEFDEF_TAG, 0x89, 0x81, PARAM_TAG, 0x83, 0x82, 2, 17, 45, 2, 17,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let body = nodes.get(0).unwrap().decode_defdef_body().unwrap();
+
+        assert_eq!(body.parameters.len(), 1);
+        assert_eq!(body.clauses, vec![45]);
+        assert!(matches!(body.return_type, RawTree::Leaf(_)));
+        assert!(body.rhs.is_none());
+        assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
+        assert!(matches!(body, DefDefBody { .. }));
     }
 }
