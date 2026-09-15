@@ -16,6 +16,26 @@ pub struct TastyFile<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedTastyFile {
+    bytes: Vec<u8>,
+    ast_addresses: Vec<u32>,
+}
+
+impl EncodedTastyFile {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn ast_addresses(&self) -> &[u32] {
+        &self.ast_addresses
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TastyFileError {
     Header(HeaderError),
     Names(NameTableError),
@@ -121,6 +141,31 @@ impl<'a> TastyFile<'a> {
         Ok(writer.into_inner())
     }
 
+    pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
+        let mut writer = Writer::new();
+        self.header.encode(&mut writer)?;
+        self.names.encode(&mut writer)?;
+        let mut ast_addresses = Vec::new();
+
+        for section in self.sections.iter() {
+            writer.write_nat(section.name);
+            if section.standard_kind(&self.names) == Some(StandardSection::Asts) {
+                let mut reader = section.reader();
+                let asts = RawNodes::decode(&mut reader)?;
+                let encoded_asts = asts.encode_with_addresses()?;
+                ast_addresses = encoded_asts.addresses().to_vec();
+                writer.write_length_prefixed_bytes(encoded_asts.as_slice())?;
+            } else {
+                writer.write_length_prefixed_bytes(section.payload)?;
+            }
+        }
+
+        Ok(EncodedTastyFile {
+            bytes: writer.into_inner(),
+            ast_addresses,
+        })
+    }
+
     pub fn header(&self) -> &Header {
         &self.header
     }
@@ -186,9 +231,25 @@ impl<'a> TastyFile<'a> {
     }
 
     pub fn positions(&self) -> Result<Option<PositionSection>, TastyFileError> {
-        self.section(StandardSection::Positions)
+        let positions = self
+            .section(StandardSection::Positions)
             .map(|section| section.decode_positions().map_err(TastyFileError::Sections))
-            .transpose()
+            .transpose()?;
+
+        if let Some(positions) = &positions {
+            for entry in &positions.entries {
+                if let crate::PositionEntry::Source(reference) = entry {
+                    if self.name(*reference).is_none() {
+                        return Err(TastyFileError::InvalidNameReference {
+                            context: "SOURCE position",
+                            reference: *reference,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(positions)
     }
 }
 
@@ -290,6 +351,35 @@ mod tests {
         assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
+    }
+
+    #[test]
+    fn rejects_a_position_source_reference_outside_the_name_table() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("Positions".to_owned())])
+                .unwrap();
+        let sections =
+            crate::SectionTable::from_sections(vec![crate::Section::new(0, &[0x80, 0x84, 0x82])]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.positions(),
+            Err(TastyFileError::InvalidNameReference {
+                context: "SOURCE position",
+                reference: 2,
+            })
+        );
     }
 
     #[test]
