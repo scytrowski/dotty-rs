@@ -10,6 +10,10 @@ pub const TYPEDEF_TAG: u8 = 131;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
 pub const TEMPLATE_TAG: u8 = 156;
+pub const IMPORT_TAG: u8 = 132;
+pub const EXPORT_TAG: u8 = 177;
+pub const SELFDEF_TAG: u8 = 118;
+pub const SPLITCLAUSE_TAG: u8 = 46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -112,6 +116,14 @@ pub struct TemplateNode<'a> {
     pub type_params: Vec<ParameterNode<'a>>,
     pub term_params: Vec<ParameterNode<'a>>,
     pub remainder: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateStructure<'a> {
+    pub parents: Vec<RawTree<'a>>,
+    pub self_def: Option<RawTree<'a>>,
+    pub split_clause: bool,
+    pub stats: RawNodes<'a>,
 }
 
 impl<'a> DefinitionNode<'a> {
@@ -372,6 +384,72 @@ impl<'a> RawNode<'a> {
             remainder,
         })
     }
+
+    pub fn decode_template_structure(&self) -> Result<TemplateStructure<'a>, AstError> {
+        let template = self.decode_template()?;
+        let mut reader = Reader::new(template.remainder);
+        let mut parents = Vec::new();
+        let mut self_def = None;
+        let mut split_clause = false;
+        let mut stats = Vec::new();
+        let mut in_stats = false;
+
+        while !reader.is_at_end() {
+            let tag = reader.peek_u8()?;
+            if !in_stats && tag == SPLITCLAUSE_TAG {
+                reader.read_u8()?;
+                split_clause = true;
+                in_stats = true;
+                continue;
+            }
+
+            if !in_stats && tag == SELFDEF_TAG {
+                self_def = Some(RawTree::decode(&mut reader)?);
+                continue;
+            }
+
+            if !in_stats && is_template_stat_tag(tag) {
+                in_stats = true;
+            }
+
+            if in_stats {
+                let offset = reader.position();
+                match RawTree::decode(&mut reader)? {
+                    RawTree::LengthNode(raw) => stats.push(raw),
+                    _ => {
+                        return Err(AstError::UnexpectedTag {
+                            expected: PACKAGE_TAG,
+                            actual: tag,
+                            offset,
+                        });
+                    }
+                }
+            } else {
+                parents.push(RawTree::decode(&mut reader)?);
+            }
+        }
+
+        Ok(TemplateStructure {
+            parents,
+            self_def,
+            split_clause,
+            stats: RawNodes { nodes: stats },
+        })
+    }
+}
+
+fn is_template_stat_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        PACKAGE_TAG
+            | VALDEF_TAG
+            | DEFDEF_TAG
+            | TYPEDEF_TAG
+            | IMPORT_TAG
+            | TYPEPARAM_TAG
+            | PARAM_TAG
+            | EXPORT_TAG
+    )
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
@@ -412,7 +490,8 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         AstError, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory, PACKAGE_TAG,
-        PARAM_TAG, RawNodes, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+        PARAM_TAG, RawNodes, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+        VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -568,5 +647,28 @@ mod tests {
         assert_eq!(template.type_params[0].name(), 1);
         assert_eq!(template.term_params[0].name(), 2);
         assert_eq!(template.remainder, &[46, VALDEF_TAG, 0x80]);
+    }
+
+    #[test]
+    fn decodes_template_parents_self_and_stats() {
+        let bytes = [
+            TEMPLATE_TAG,
+            0x87,
+            136,
+            0x80,
+            SELFDEF_TAG,
+            0x81,
+            2,
+            VALDEF_TAG,
+            0x80,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let structure = nodes.get(0).unwrap().decode_template_structure().unwrap();
+
+        assert_eq!(structure.parents.len(), 1);
+        assert!(structure.self_def.is_some());
+        assert!(!structure.split_clause);
+        assert_eq!(structure.stats.len(), 1);
     }
 }
