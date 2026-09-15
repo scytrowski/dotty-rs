@@ -3569,11 +3569,11 @@ mod tests {
         RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
         RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
         SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG,
-        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
-        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG,
-        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
-        TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode,
-        UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, TEMPLATE_TAG, TERMREF_TAG,
+        TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG,
+        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
+        TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::TermEncodeError;
@@ -5749,6 +5749,102 @@ mod tests {
                 if matches!(annotation.tycon, RawTree::Leaf(ref term) if term.tag == 2)
                     && matches!(annotation.full_annotation, RawTree::Leaf(ref term) if term.tag == 3)
         ));
+    }
+
+    #[test]
+    fn dispatches_every_supported_category_five_tag_to_the_expected_variant() {
+        macro_rules! assert_variant {
+            ($tag:expr, $payload:expr, $pattern:pat) => {{
+                let node = RawNode {
+                    tag: $tag,
+                    offset: 0,
+                    payload: $payload,
+                };
+                let structured = node
+                    .decode_structured()
+                    .unwrap_or_else(|error| panic!("tag {} failed to dispatch: {error}", $tag));
+                assert!(
+                    matches!(structured, $pattern),
+                    "tag {} dispatched to an unexpected variant",
+                    $tag
+                );
+            }};
+        }
+
+        assert_variant!(
+            PACKAGE_TAG,
+            &[TERMREFPKG_TAG, 0x81, VALDEF_TAG, 0x80],
+            StructuredNode::Package(_)
+        );
+        assert_variant!(VALDEF_TAG, &[0x81, 2], StructuredNode::ValDef(_));
+        assert_variant!(DEFDEF_TAG, &[0x81, 2], StructuredNode::DefDef(_));
+        assert_variant!(TYPEDEF_TAG, &[0x81, 2], StructuredNode::TypeDef(_));
+        assert_variant!(IMPORT_TAG, &[2], StructuredNode::ImportExport(_));
+        assert_variant!(EXPORT_TAG, &[2], StructuredNode::ImportExport(_));
+        assert_variant!(TYPEPARAM_TAG, &[0x81, 2], StructuredNode::Parameter(_));
+        assert_variant!(PARAM_TAG, &[0x81, 2], StructuredNode::Parameter(_));
+        assert_variant!(APPLY_TAG, &[2], StructuredNode::Apply(_));
+        assert_variant!(TYPEAPPLY_TAG, &[2], StructuredNode::TypeApply(_));
+        assert_variant!(TYPED_TAG, &[2, 3], StructuredNode::Typed(_));
+        assert_variant!(ASSIGN_TAG, &[2, 3], StructuredNode::Assign(_));
+        assert_variant!(BLOCK_TAG, &[2], StructuredNode::Block(_));
+        assert_variant!(IF_TAG, &[2, 3, 4], StructuredNode::If(_));
+        assert_variant!(LAMBDA_TAG, &[2], StructuredNode::Lambda(_));
+        assert_variant!(MATCH_TAG, &[2], StructuredNode::Match(_));
+        assert_variant!(RETURN_TAG, &[0x81], StructuredNode::Return(_));
+        assert_variant!(WHILE_TAG, &[2, 3], StructuredNode::While(_));
+        assert_variant!(TRY_TAG, &[2], StructuredNode::Try(_));
+        assert_variant!(INLINED_TAG, &[2], StructuredNode::Inlined(_));
+        assert_variant!(
+            SELECTOUTER_TAG,
+            &[0x81, 2, 3],
+            StructuredNode::SelectOuter(_)
+        );
+        assert_variant!(REPEATED_TAG, &[2], StructuredNode::Repeated(_));
+        assert_variant!(BIND_TAG, &[0x81, 2, 3], StructuredNode::Bind(_));
+        assert_variant!(ALTERNATIVE_TAG, &[], StructuredNode::Alternative(_));
+        assert_variant!(UNAPPLY_TAG, &[2, 2], StructuredNode::Unapply(_));
+        assert_variant!(ANNOTATEDTYPE_TAG, &[2, 3], StructuredNode::Annotated(_));
+        assert_variant!(ANNOTATEDTPT_TAG, &[2, 3], StructuredNode::Annotated(_));
+        assert_variant!(ANNOTATION_TAG, &[2, 3], StructuredNode::Annotation(_));
+        assert_variant!(CASEDEF_TAG, &[2, 3], StructuredNode::CaseDef(_));
+        assert_variant!(TEMPLATE_TAG, &[], StructuredNode::Template(_));
+        assert_variant!(SUPER_TAG, &[2], StructuredNode::Super(_));
+        assert_variant!(SUPERTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
+        assert_variant!(
+            REFINEDTYPE_TAG,
+            &[0x81, 2, 3],
+            StructuredNode::RefinedType(_)
+        );
+        assert_variant!(REFINEDTPT_TAG, &[2], StructuredNode::RefinedTpt(_));
+        assert_variant!(APPLIEDTYPE_TAG, &[2], StructuredNode::AppliedType(_));
+        assert_variant!(APPLIEDTPT_TAG, &[2], StructuredNode::AppliedType(_));
+        assert_variant!(TYPEBOUNDS_TAG, &[2], StructuredNode::TypeBounds(_));
+        assert_variant!(TYPEBOUNDSTPT_TAG, &[2], StructuredNode::TypeBounds(_));
+        assert_variant!(ANDTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
+        assert_variant!(ORTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
+        assert_variant!(POLYTYPE_TAG, &[2], StructuredNode::PolyType(_));
+        assert_variant!(TYPELAMBDATYPE_TAG, &[2], StructuredNode::PolyType(_));
+        assert_variant!(LAMBDATPT_TAG, &[2], StructuredNode::LambdaTpt(_));
+        assert_variant!(PARAMTYPE_TAG, &[0x81, 0x82], StructuredNode::ParamType(_));
+        assert_variant!(METHODTYPE_TAG, &[2], StructuredNode::MethodType(_));
+        assert_variant!(APPLYSIGPOLY_TAG, &[2, 3], StructuredNode::ApplySigPoly(_));
+        assert_variant!(QUOTE_TAG, &[2, 3], StructuredNode::Quote(_));
+        assert_variant!(SPLICE_TAG, &[2, 3], StructuredNode::Quote(_));
+        assert_variant!(
+            QUOTEPATTERN_TAG,
+            &[2, 3, 4],
+            StructuredNode::QuotePattern(_)
+        );
+        assert_variant!(SPLICEPATTERN_TAG, &[2, 3], StructuredNode::SplicePattern(_));
+        assert_variant!(MATCHTYPE_TAG, &[2, 3], StructuredNode::MatchType(_));
+        assert_variant!(MATCHTPT_TAG, &[2, 3], StructuredNode::MatchTpt(_));
+        assert_variant!(TERMREFIN_TAG, &[0x81, 2, 3], StructuredNode::InReference(_));
+        assert_variant!(TYPEREFIN_TAG, &[0x81, 2, 3], StructuredNode::InReference(_));
+        assert_variant!(SELECTIN_TAG, &[0x81, 2, 3], StructuredNode::SelectIn(_));
+        assert_variant!(MATCHCASETYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
+        assert_variant!(FLEXIBLETYPE_TAG, &[2], StructuredNode::FlexibleType(_));
+        assert_variant!(135, &[], StructuredNode::Raw(_));
     }
 
     #[test]
