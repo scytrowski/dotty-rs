@@ -1065,6 +1065,23 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_valdef_body_without_rhs_or_definition_tail() {
+        let bytes = [VALDEF_TAG, 0x82, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let body = nodes.get(0).unwrap().decode_definition_body().unwrap();
+
+        assert!(matches!(
+            body,
+            DefinitionBody::ValDef {
+                rhs: None,
+                ref tail,
+                ..
+            } if tail.is_empty()
+        ));
+    }
+
+    #[test]
     fn reports_a_truncated_definition_body() {
         let node = RawNode {
             tag: VALDEF_TAG,
@@ -1170,6 +1187,21 @@ mod tests {
     }
 
     #[test]
+    fn decodes_an_empty_template_structure() {
+        let bytes = [TEMPLATE_TAG, 0x80];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let structure = nodes.get(0).unwrap().decode_template_structure().unwrap();
+
+        assert!(structure.type_params.is_empty());
+        assert!(structure.term_params.is_empty());
+        assert!(structure.parents.is_empty());
+        assert!(structure.self_def.is_none());
+        assert!(!structure.split_clause);
+        assert!(structure.stats.is_empty());
+    }
+
+    #[test]
     fn decodes_template_parents_self_and_stats() {
         let bytes = [
             TEMPLATE_TAG,
@@ -1224,6 +1256,23 @@ mod tests {
 
         assert!(matches!(body.type_tree, RawTree::Leaf(_)));
         assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
+    }
+
+    #[test]
+    fn decodes_a_parameter_body_without_a_definition_tail() {
+        let bytes = [PARAM_TAG, 0x82, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let body = nodes
+            .get(0)
+            .unwrap()
+            .decode_parameter()
+            .unwrap()
+            .decode_body()
+            .unwrap();
+
+        assert!(matches!(body.type_tree, RawTree::Leaf(_)));
+        assert!(body.tail.is_empty());
     }
 
     #[test]
@@ -1343,6 +1392,18 @@ mod tests {
     }
 
     #[test]
+    fn decodes_import_and_export_without_selectors() {
+        for tag in [IMPORT_TAG, EXPORT_TAG] {
+            let bytes = [tag, 0x81, 2];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let node = nodes.get(0).unwrap().decode_import_export().unwrap();
+
+            assert!(node.selectors.is_empty());
+        }
+    }
+
+    #[test]
     fn rejects_an_import_selector_with_an_unknown_tag() {
         let node = RawNode {
             tag: IMPORT_TAG,
@@ -1372,6 +1433,23 @@ mod tests {
     }
 
     #[test]
+    fn decodes_apply_without_arguments() {
+        let bytes = [APPLY_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert!(
+            nodes
+                .get(0)
+                .unwrap()
+                .decode_apply()
+                .unwrap()
+                .arguments
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn decodes_block_expression_and_stats() {
         let bytes = [BLOCK_TAG, 0x83, 2, VALDEF_TAG, 0x80];
         let mut reader = Reader::new(&bytes);
@@ -1381,6 +1459,23 @@ mod tests {
         assert!(matches!(block.expression, RawTree::Leaf(_)));
         assert_eq!(block.stats.len(), 1);
         assert!(matches!(block.stats[0], RawTree::LengthNode(_)));
+    }
+
+    #[test]
+    fn decodes_block_without_stats() {
+        let bytes = [BLOCK_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert!(
+            nodes
+                .get(0)
+                .unwrap()
+                .decode_block()
+                .unwrap()
+                .stats
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1402,6 +1497,23 @@ mod tests {
         assert!(matches!(type_apply.function, RawTree::Leaf(_)));
         assert_eq!(type_apply.type_arguments.len(), 2);
         assert!(matches!(type_apply, TypeApplyNode { .. }));
+    }
+
+    #[test]
+    fn decodes_type_apply_without_type_arguments() {
+        let bytes = [TYPEAPPLY_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert!(
+            nodes
+                .get(0)
+                .unwrap()
+                .decode_type_apply()
+                .unwrap()
+                .type_arguments
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1464,6 +1576,17 @@ mod tests {
 
         assert_eq!(return_node.target, 5);
         assert!(matches!(return_node.expression, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn decodes_return_without_an_expression() {
+        let bytes = [RETURN_TAG, 0x81, 0x85];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let return_node = nodes.get(0).unwrap().decode_return().unwrap();
+
+        assert_eq!(return_node.target, 5);
+        assert!(return_node.expression.is_none());
     }
 
     #[test]
