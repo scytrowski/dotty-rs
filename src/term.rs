@@ -1,6 +1,7 @@
 use crate::ast::{
     RECTHIS_TAG, RawNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
 };
+use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
@@ -149,6 +150,13 @@ impl SimpleTerm {
         Ok(Self { tag, offset, value })
     }
 
+    pub fn name_ref(&self) -> Option<NameRef> {
+        match self.value {
+            TermValue::NameRef(reference) => Some(reference),
+            _ => None,
+        }
+    }
+
     pub fn ast_ref_kind(&self) -> Option<AstRefKind> {
         if !matches!(self.value, TermValue::AstRef(_)) {
             return None;
@@ -256,6 +264,32 @@ impl<'a> RawTree<'a> {
                 }
             }
             Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_ast_refs(visitor),
+            Self::LengthNode(_) => {}
+        }
+    }
+
+    /// Returns all name-table references visible in this raw tree.
+    ///
+    /// Category-3 and category-4 wrappers are traversed in source order.
+    /// Category-5 length-delimited nodes remain opaque because their payload
+    /// grammar is tag-specific; structured AST decoders can inspect those
+    /// payloads when needed.
+    pub fn name_refs(&self) -> Vec<NameRef> {
+        let mut references = Vec::new();
+        self.visit_name_refs(&mut |reference| references.push(reference));
+        references
+    }
+
+    /// Visits all name-table references visible in this raw tree in source
+    /// order without allocating a result vector.
+    pub fn visit_name_refs(&self, visitor: &mut impl FnMut(NameRef)) {
+        match self {
+            Self::Leaf(term) => {
+                if let Some(reference) = term.name_ref() {
+                    visitor(reference);
+                }
+            }
+            Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_name_refs(visitor),
             Self::LengthNode(_) => {}
         }
     }
@@ -548,6 +582,24 @@ mod tests {
                 address: 5,
             })
         );
+    }
+
+    #[test]
+    fn exposes_name_references_from_raw_tree_leaves_and_wrappers() {
+        let mut reader = Reader::new(&[64, 0x85, 90, 64, 0x86, 110, 0x87, 64, 0x88, 128, 0x80]);
+        let first = RawTree::decode(&mut reader).unwrap();
+        let second = RawTree::decode(&mut reader).unwrap();
+        let third = RawTree::decode(&mut reader).unwrap();
+        let opaque = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(first.name_refs(), vec![5]);
+        assert_eq!(second.name_refs(), vec![6]);
+        assert_eq!(third.name_refs(), vec![8]);
+        assert!(opaque.name_refs().is_empty());
+
+        let mut visited = Vec::new();
+        third.visit_name_refs(&mut |reference| visited.push(reference));
+        assert_eq!(visited, vec![8]);
     }
 
     #[test]
