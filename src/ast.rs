@@ -1,5 +1,5 @@
 use crate::reader::{ReadError, Reader};
-use crate::term::{RawTree, TermError, is_known_category5_tag};
+use crate::term::{RawTree, TermEncodeError, TermError, is_known_category5_tag};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -2009,6 +2009,14 @@ impl<'a> RawNode<'a> {
 }
 
 impl<'a> RawTree<'a> {
+    pub fn encode_ast_child(&self, tag: u8, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(tag, 90..=104) {
+            return Err(TermEncodeError::InvalidValue { tag });
+        }
+        writer.write_u8(tag);
+        self.encode(writer)
+    }
+
     pub fn decode_ast_child(&self, expected: u8) -> Result<AstChildNode<'a>, AstError> {
         match self {
             RawTree::Ast { tag, child, .. } if *tag == expected => Ok(AstChildNode {
@@ -2200,6 +2208,64 @@ impl<'a> RawTree<'a> {
     }
 }
 
+impl<'a> AstChildNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        self.child.encode_ast_child(self.tag, writer)
+    }
+}
+
+impl<'a> NamedArgNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        writer.write_u8(NAMEDARG_TAG);
+        writer.write_nat(self.name);
+        self.argument.encode(writer)
+    }
+}
+
+impl<'a> IdentNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, IDENT_TAG | IDENTTPT_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        writer.write_u8(self.tag);
+        writer.write_nat(self.name);
+        self.type_tree.encode(writer)
+    }
+}
+
+impl<'a> SelectNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, SELECT_TAG | SELECTTPT_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        writer.write_u8(self.tag);
+        writer.write_nat(self.name);
+        self.qualifier.encode(writer)
+    }
+}
+
+impl<'a> ReferenceNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(
+            self.tag,
+            TERMREFSYMBOL_TAG | TERMREF_TAG | TYPEREFSYMBOL_TAG | TYPEREF_TAG
+        ) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        writer.write_u8(self.tag);
+        writer.write_nat(self.reference);
+        self.qualifier.encode(writer)
+    }
+}
+
+impl<'a> SelfDefNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        writer.write_u8(SELFDEF_TAG);
+        writer.write_nat(self.name);
+        self.type_tree.encode(writer)
+    }
+}
+
 fn is_template_stat_tag(tag: u8) -> bool {
     matches!(
         tag,
@@ -2291,6 +2357,7 @@ mod tests {
         UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
+    use crate::writer::Writer;
 
     #[test]
     fn classifies_tags_by_the_tasty_categories() {
@@ -3955,6 +4022,26 @@ mod tests {
         };
 
         assert!(node.decode_match_tpt().is_err());
+    }
+
+    #[test]
+    fn encodes_structured_category_three_and_four_nodes() {
+        let category_three = [THIS_TAG, TERMREFPKG_TAG, 0x81];
+        let mut reader = Reader::new(&category_three);
+        let node = RawTree::decode(&mut reader).unwrap().decode_this().unwrap();
+        let mut writer = Writer::new();
+        node.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), category_three);
+
+        let category_four = [SELECT_TAG, 0x85, TERMREFPKG_TAG, 0x81];
+        let mut reader = Reader::new(&category_four);
+        let node = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_select()
+            .unwrap();
+        let mut writer = Writer::new();
+        node.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), category_four);
     }
 
     #[test]
