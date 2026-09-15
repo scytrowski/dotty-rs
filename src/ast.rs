@@ -3,6 +3,10 @@ use crate::term::{RawTree, TermError};
 use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
+pub const THIS_TAG: u8 = 90;
+pub const NEW_TAG: u8 = 95;
+pub const THROW_TAG: u8 = 96;
+pub const ELIDED_TAG: u8 = 104;
 pub const PACKAGE_TAG: u8 = 128;
 pub const VALDEF_TAG: u8 = 129;
 pub const DEFDEF_TAG: u8 = 130;
@@ -171,6 +175,12 @@ pub struct ReturnNode<'a> {
 pub struct WhileNode<'a> {
     pub condition: RawTree<'a>,
     pub body: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstChildNode<'a> {
+    pub tag: u8,
+    pub child: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,6 +811,39 @@ impl<'a> RawNode<'a> {
 }
 
 impl<'a> RawTree<'a> {
+    pub fn decode_ast_child(&self, expected: u8) -> Result<AstChildNode<'a>, AstError> {
+        match self {
+            RawTree::Ast { tag, child, .. } if *tag == expected => Ok(AstChildNode {
+                tag: *tag,
+                child: (**child).clone(),
+            }),
+            tree => {
+                let (actual, offset) = raw_tree_tag_offset(tree);
+                Err(AstError::UnexpectedTag {
+                    expected,
+                    actual,
+                    offset,
+                })
+            }
+        }
+    }
+
+    pub fn decode_this(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(THIS_TAG)
+    }
+
+    pub fn decode_new(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(NEW_TAG)
+    }
+
+    pub fn decode_throw(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(THROW_TAG)
+    }
+
+    pub fn decode_elided(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(ELIDED_TAG)
+    }
+
     pub fn decode_self_def(&self) -> Result<SelfDefNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -883,11 +926,12 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLY_TAG, ASSIGN_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody,
-        DefinitionBody, DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG,
-        ImportExportKind, ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG,
-        RETURN_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
-        TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
+        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
+        IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector, NEW_TAG, NodeCategory,
+        PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RETURN_TAG, RawNodes, RawTree, SELFDEF_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1250,5 +1294,40 @@ mod tests {
 
         assert!(matches!(while_node.condition, RawTree::Leaf(_)));
         assert!(matches!(while_node.body, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn decodes_category_three_ast_children() {
+        let mut reader = Reader::new(&[
+            THIS_TAG,
+            TERMREFPKG_TAG,
+            0x81,
+            NEW_TAG,
+            TERMREFPKG_TAG,
+            0x82,
+            THROW_TAG,
+            TERMREFPKG_TAG,
+            0x83,
+            ELIDED_TAG,
+            TERMREFPKG_TAG,
+            0x84,
+        ]);
+
+        let this = RawTree::decode(&mut reader).unwrap().decode_this().unwrap();
+        let new = RawTree::decode(&mut reader).unwrap().decode_new().unwrap();
+        let throw = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_throw()
+            .unwrap();
+        let elided = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_elided()
+            .unwrap();
+
+        assert_eq!(this.tag, THIS_TAG);
+        assert_eq!(new.tag, NEW_TAG);
+        assert!(matches!(throw.child, RawTree::Leaf(_)));
+        assert!(matches!(elided.child, RawTree::Leaf(_)));
+        assert!(matches!(this, AstChildNode { .. }));
     }
 }

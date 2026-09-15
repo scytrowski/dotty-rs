@@ -287,6 +287,22 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                             });
                         }
                         for parent in &structure.parents {
+                            if let tasty_rs::RawTree::Ast { tag, .. } = parent {
+                                if matches!(
+                                    *tag,
+                                    tasty_rs::THIS_TAG
+                                        | tasty_rs::NEW_TAG
+                                        | tasty_rs::THROW_TAG
+                                        | tasty_rs::ELIDED_TAG
+                                ) {
+                                    parent.decode_ast_child(*tag).unwrap_or_else(|error| {
+                                        panic!(
+                                            "failed to parse category-three tree in {}: {error}",
+                                            path.display()
+                                        )
+                                    });
+                                }
+                            }
                             if let tasty_rs::RawTree::LengthNode(raw) = parent {
                                 match raw.tag {
                                     tasty_rs::APPLY_TAG => {
