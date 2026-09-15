@@ -500,6 +500,27 @@ fn all_tasty_fixture_top_level_definitions_decode_structurally() {
 }
 
 #[test]
+fn all_tasty_fixture_top_level_nodes_expose_structured_ast_references() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for node in file.asts().unwrap().iter() {
+            node.ast_refs().unwrap_or_else(|error| {
+                panic!(
+                    "failed to collect AST references from tag {} at offset {} in {}: {error}",
+                    node.tag,
+                    node.offset,
+                    path.display()
+                )
+            });
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

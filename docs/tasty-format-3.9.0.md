@@ -395,6 +395,11 @@ variant for unknown category-5 tags.
 At file level, `TastyFile::structured_asts()` applies this dispatch to every
 top-level node while retaining the original borrowed payloads.
 
+`RawNode::ast_refs()` and `RawNode::visit_ast_refs()` walk the child trees of
+all currently supported structured category-5 nodes, including nested package
+and template statements. Unknown category-5 nodes remain opaque and produce no
+references from this convenience API.
+
 `RawNodes::address_index()` and `TastyFile::ast_at()` currently index
 top-level AST nodes. Nested-node address indexing is intentionally a separate
 step because nested payloads need absolute AST-section offsets.
