@@ -376,6 +376,11 @@ pub struct AstChildNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassConstNode<'a> {
+    pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedArgNode<'a> {
     pub name: u32,
     pub argument: RawTree<'a>,
@@ -3675,6 +3680,12 @@ impl<'a> RawTree<'a> {
         self.decode_ast_child(CLASSCONST_TAG)
     }
 
+    pub fn decode_class_constant(&self) -> Result<ClassConstNode<'a>, AstError> {
+        Ok(ClassConstNode {
+            type_tree: self.decode_class_const()?.child,
+        })
+    }
+
     pub fn decode_by_name_type(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(BYNAMETYPE_TAG)
     }
@@ -3840,6 +3851,12 @@ impl<'a> RawTree<'a> {
 impl<'a> AstChildNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         self.child.encode_ast_child(self.tag, writer)
+    }
+}
+
+impl<'a> ClassConstNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        self.type_tree.encode_ast_child(CLASSCONST_TAG, writer)
     }
 }
 
@@ -6557,6 +6574,27 @@ mod tests {
     decodes_category_three_child!(decodes_elided_node, ELIDED_TAG, decode_elided);
     decodes_category_three_child!(decodes_qual_this_node, QUALTHIS_TAG, decode_qual_this);
     decodes_category_three_child!(decodes_class_const_node, CLASSCONST_TAG, decode_class_const);
+
+    #[test]
+    fn decodes_and_encodes_a_typed_class_constant() {
+        let bytes = [CLASSCONST_TAG, TERMREFPKG_TAG, 0x81];
+        let mut reader = Reader::new(&bytes);
+        let node = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_class_constant()
+            .unwrap();
+
+        assert!(matches!(
+            &node.type_tree,
+            RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG && term.value == crate::term::TermValue::NameRef(1)
+        ));
+
+        let mut writer = Writer::new();
+        node.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
+        assert!(reader.is_at_end());
+    }
+
     decodes_category_three_child!(
         decodes_by_name_type_node,
         BYNAMETYPE_TAG,

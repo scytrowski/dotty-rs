@@ -487,6 +487,11 @@ It returns a typed `ConstantValue`, validates the ranges of `BYTEconst` and
 zeroes survive a decode/encode cycle. `ConstantValue::encode()` writes the
 canonical tag and payload for each supported constant.
 
+`CLASSconst` is represented separately as `ClassConstNode { type_tree }` via
+`RawTree::decode_class_constant()`. The older generic
+`RawTree::decode_class_const()` API remains available for callers that need
+the category-3 wrapper itself.
+
 ## 7. AST tag categories
 
 A tag alone is not enough to determine the payload without knowing its category.
