@@ -376,6 +376,8 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        file.validate()
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
 
         assert_eq!(
             file.header().major_version,

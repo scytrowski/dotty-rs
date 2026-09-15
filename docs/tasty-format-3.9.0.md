@@ -693,6 +693,12 @@ Unknown sections can be skipped. Unknown category-5 nodes are preserved as raw
 payloads because they carry a length. Unknown category-1–4 nodes are harder to
 skip because they have no generic length.
 
+The Rust file model keeps section decoding lazy: `parse_scala_3_9` validates the
+container header and section boundaries, while `TastyFile::validate()` eagerly
+decodes the ASTs and all supported standard sections. Applications that want
+the eager behavior at construction time can use
+`parse_and_validate_scala_3_9`.
+
 ## 15. Implementation plan
 
 ### Stage 1: container

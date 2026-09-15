@@ -146,6 +146,26 @@ impl<'a> TastyFile<'a> {
         Ok(file)
     }
 
+    /// Parse a Scala 3.9.0 file and eagerly validate all supported sections.
+    pub fn parse_and_validate_scala_3_9(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
+        let file = Self::parse_scala_3_9(bytes)?;
+        file.validate()?;
+        Ok(file)
+    }
+
+    /// Validate the ASTs and every supported standard section in this file.
+    ///
+    /// Parsing keeps section payloads lazy so callers can inspect only the
+    /// parts they need. This method provides an explicit eager-validation
+    /// boundary for applications that need the complete file checked.
+    pub fn validate(&self) -> Result<(), TastyFileError> {
+        self.asts()?;
+        self.attributes()?;
+        self.comments()?;
+        self.positions()?;
+        Ok(())
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
@@ -319,7 +339,7 @@ mod tests {
     #[test]
     fn decodes_a_complete_scala_3_9_fixture_as_one_file_model() {
         let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
-        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let file = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
 
         assert_eq!(file.header().tooling_version, "Scala 3.9.0");
         assert!(!file.names().is_empty());
@@ -328,6 +348,30 @@ mod tests {
         assert!(file.attributes().unwrap().is_some());
         assert!(file.comments().unwrap().is_some());
         assert!(file.positions().unwrap().is_some());
+    }
+
+    #[test]
+    fn validates_a_complete_file_from_parts() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[crate::VALDEF_TAG, 0x80],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(file.validate(), Ok(()));
     }
 
     #[test]
