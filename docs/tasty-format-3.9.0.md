@@ -423,6 +423,10 @@ It recognizes typed constants, category-3 AST children, `CLASSconst`, the
 category-4 identifier/select/reference/self-definition/named-argument forms,
 and known category-5 payloads through `StructuredTree`.
 
+`StructuredTree::encode()` re-encodes each of those semantic tree variants.
+Category-1/2 constants use their canonical tags, while leaves, wrappers, and
+bounded nodes retain the tags represented by their typed payloads.
+
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
 `encode_self()`, so structural decoding no longer loses the definition name.

@@ -237,6 +237,28 @@ pub enum StructuredTree<'a> {
     Length(StructuredNode<'a>),
 }
 
+impl<'a> StructuredTree<'a> {
+    /// Encodes a semantically decoded tree back to its TASTy representation.
+    ///
+    /// The leaf and wrapper variants retain the wire tag in their typed
+    /// payloads. Constants use their canonical TASTy tag, while bounded
+    /// category-five trees delegate to [`StructuredNode::encode`].
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        match self {
+            Self::Constant(value) => value.encode(writer),
+            Self::Leaf(term) => term.encode(writer),
+            Self::AstChild(node) => node.encode(writer),
+            Self::ClassConstant(node) => node.encode(writer),
+            Self::Ident(node) => node.encode(writer),
+            Self::Select(node) => node.encode(writer),
+            Self::Reference(node) => node.encode(writer),
+            Self::SelfDef(node) => node.encode(writer),
+            Self::NamedArg(node) => node.encode(writer),
+            Self::Length(node) => node.encode(writer),
+        }
+    }
+}
+
 impl<'a> StructuredNode<'a> {
     /// Encodes a typed category-5 node back to its TASTy representation.
     ///
@@ -4956,6 +4978,63 @@ mod tests {
             decode_structured_tree(&[APPLY_TAG, 0x81, 2]),
             StructuredTree::Length(StructuredNode::Apply(_))
         ));
+    }
+
+    #[test]
+    fn encodes_a_typed_constant_structured_tree() {
+        assert_structured_tree_round_trip(&[70, 0xaa]);
+    }
+
+    #[test]
+    fn encodes_a_non_constant_leaf_structured_tree() {
+        assert_structured_tree_round_trip(&[TERMREFPKG_TAG, 0x85]);
+    }
+
+    #[test]
+    fn encodes_a_category_three_structured_tree() {
+        assert_structured_tree_round_trip(&[THIS_TAG, TERMREFPKG_TAG, 0x81]);
+    }
+
+    #[test]
+    fn encodes_a_class_constant_structured_tree() {
+        assert_structured_tree_round_trip(&[CLASSCONST_TAG, TERMREFPKG_TAG, 0x81]);
+    }
+
+    #[test]
+    fn encodes_an_identifier_structured_tree() {
+        assert_structured_tree_round_trip(&[IDENT_TAG, 0x81, 2]);
+    }
+
+    #[test]
+    fn encodes_a_select_structured_tree() {
+        assert_structured_tree_round_trip(&[SELECT_TAG, 0x81, 2]);
+    }
+
+    #[test]
+    fn encodes_a_reference_structured_tree() {
+        assert_structured_tree_round_trip(&[TERMREF_TAG, 0x81, 2]);
+    }
+
+    #[test]
+    fn encodes_a_self_definition_structured_tree() {
+        assert_structured_tree_round_trip(&[SELFDEF_TAG, 0x81, 2]);
+    }
+
+    #[test]
+    fn encodes_a_named_argument_structured_tree() {
+        assert_structured_tree_round_trip(&[NAMEDARG_TAG, 0x81, 2]);
+    }
+
+    #[test]
+    fn encodes_a_bounded_structured_tree() {
+        assert_structured_tree_round_trip(&[APPLY_TAG, 0x83, 2, 3, 4]);
+    }
+
+    fn assert_structured_tree_round_trip(bytes: &[u8]) {
+        let structured = decode_structured_tree(bytes);
+        let mut writer = Writer::new();
+        structured.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
     }
 
     #[test]
