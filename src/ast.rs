@@ -2008,6 +2008,91 @@ impl<'a> RawNode<'a> {
     }
 }
 
+impl<'a> PackageNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(PACKAGE_TAG, writer, |payload| {
+            payload.write_u8(TERMREFPKG_TAG);
+            payload.write_nat(self.path_name);
+            self.stats.encode(payload).map_err(TermEncodeError::from)
+        })
+    }
+}
+
+impl<'a> ImportExportNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        let tag = match self.kind {
+            ImportExportKind::Import => IMPORT_TAG,
+            ImportExportKind::Export => EXPORT_TAG,
+        };
+        encode_length_node(tag, writer, |payload| {
+            self.expr.encode(payload)?;
+            for selector in &self.selectors {
+                match selector {
+                    ImportSelector::Imported { name } => {
+                        payload.write_u8(IMPORTED_TAG);
+                        payload.write_nat(*name);
+                    }
+                    ImportSelector::Renamed { name } => {
+                        payload.write_u8(RENAMED_TAG);
+                        payload.write_nat(*name);
+                    }
+                    ImportSelector::Bounded { type_tree } => {
+                        type_tree.encode_ast_child(BOUNDED_TAG, payload)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> DefinitionNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        let tag = match self {
+            Self::ValDef { .. } => VALDEF_TAG,
+            Self::DefDef { .. } => DEFDEF_TAG,
+            Self::TypeDef { .. } => TYPEDEF_TAG,
+        };
+        encode_length_node(tag, writer, |payload| {
+            payload.write_nat(self.name());
+            payload.write_bytes(self.body());
+            Ok(())
+        })
+    }
+}
+
+impl<'a> TemplateNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(TEMPLATE_TAG, writer, |payload| {
+            for parameter in &self.type_params {
+                parameter.encode(payload)?;
+            }
+            for parameter in &self.term_params {
+                parameter.encode(payload)?;
+            }
+            payload.write_bytes(self.remainder);
+            Ok(())
+        })
+    }
+}
+
+impl<'a> DefinitionTail<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        match self {
+            Self::Modifier(tag) => {
+                if !is_modifier_tag(*tag) {
+                    return Err(TermEncodeError::InvalidValue { tag: *tag });
+                }
+                writer.write_u8(*tag);
+            }
+            Self::Annotation(annotation) => {
+                annotation.encode(writer).map_err(TermEncodeError::from)?
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<'a> ApplyNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(APPLY_TAG, writer, |payload| {
@@ -4707,6 +4792,37 @@ mod tests {
         });
         assert_structured_round_trip(&[SELECTIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_select_in().unwrap().encode(writer)
+        });
+    }
+
+    #[test]
+    fn encodes_structured_top_level_nodes() {
+        assert_structured_round_trip(
+            &[PACKAGE_TAG, 0x84, TERMREFPKG_TAG, 0x85, VALDEF_TAG, 0x80],
+            |raw, writer| raw.decode_package().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(
+            &[
+                IMPORT_TAG,
+                0x89,
+                TERMREFPKG_TAG,
+                0x81,
+                IMPORTED_TAG,
+                0x82,
+                RENAMED_TAG,
+                0x83,
+                BOUNDED_TAG,
+                TERMREFPKG_TAG,
+                0x84,
+            ],
+            |raw, writer| raw.decode_import_export().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(
+            &[VALDEF_TAG, 0x83, 0x85, TERMREFPKG_TAG, 0x81],
+            |raw, writer| raw.decode_definition().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(&[TEMPLATE_TAG, 0x80], |raw, writer| {
+            raw.decode_template().unwrap().encode(writer)
         });
     }
 
