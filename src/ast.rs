@@ -138,6 +138,30 @@ pub struct RawNodes<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedAstNodes {
+    bytes: Vec<u8>,
+    addresses: Vec<u32>,
+}
+
+impl EncodedAstNodes {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn addresses(&self) -> &[u32] {
+        &self.addresses
+    }
+
+    pub fn address(&self, index: usize) -> Option<u32> {
+        self.addresses.get(index).copied()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageNode<'a> {
     pub path_name: u32,
     pub stats: RawNodes<'a>,
@@ -693,6 +717,25 @@ impl<'a> RawNodes<'a> {
             node.encode(writer)?;
         }
         Ok(())
+    }
+
+    pub fn encode_with_addresses(&self) -> Result<EncodedAstNodes, WriteError> {
+        let mut writer = Writer::new();
+        let mut addresses = Vec::with_capacity(self.nodes.len());
+
+        for node in &self.nodes {
+            addresses.push(u32::try_from(writer.position()).map_err(|_| {
+                WriteError::NatOverflow {
+                    value: writer.position() as u64,
+                }
+            })?);
+            node.encode(&mut writer)?;
+        }
+
+        Ok(EncodedAstNodes {
+            bytes: writer.into_inner(),
+            addresses,
+        })
     }
 }
 
@@ -5081,5 +5124,18 @@ mod tests {
         assert_eq!(bounded.tag, BOUNDED_TAG);
         assert_eq!(explicit_tpt.tag, EXPLICITTPT_TAG);
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn allocates_addresses_for_top_level_ast_nodes_while_encoding() {
+        let bytes = [VALDEF_TAG, 0x82, b'a', b'b', DEFDEF_TAG, 0x81, b'c'];
+        let mut reader = Reader::new(&bytes);
+        let nodes = super::RawNodes::decode(&mut reader).unwrap();
+        let encoded = nodes.encode_with_addresses().unwrap();
+
+        assert_eq!(encoded.as_slice(), bytes);
+        assert_eq!(encoded.addresses(), &[0, 4]);
+        assert_eq!(encoded.address(1), Some(4));
+        assert_eq!(encoded.address(2), None);
     }
 }

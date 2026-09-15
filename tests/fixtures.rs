@@ -390,6 +390,23 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
             "fixture {}",
             path.display()
         );
+        let ast_section = file.section(StandardSection::Asts).unwrap();
+        let asts = file.asts().unwrap();
+        let encoded_asts = asts.encode_with_addresses().unwrap_or_else(|error| {
+            panic!(
+                "failed to encode AST addresses in {}: {error}",
+                path.display()
+            )
+        });
+        assert_eq!(
+            encoded_asts.as_slice(),
+            ast_section.payload,
+            "fixture {}",
+            path.display()
+        );
+        for (node, address) in asts.iter().zip(encoded_asts.addresses()) {
+            assert_eq!(*address as usize, node.offset, "fixture {}", path.display());
+        }
         file.attributes().unwrap_or_else(|error| {
             panic!("failed to decode attributes in {}: {error}", path.display())
         });
