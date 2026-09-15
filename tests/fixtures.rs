@@ -538,6 +538,40 @@ fn all_tasty_fixture_top_level_nodes_expose_structured_ast_references() {
 }
 
 #[test]
+fn all_tasty_fixture_name_references_resolve_in_the_name_table() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for reference in file.name_references().unwrap_or_else(|error| {
+            panic!(
+                "failed to collect name references from {}: {error}",
+                path.display()
+            )
+        }) {
+            assert!(
+                file.name(reference.reference).is_some(),
+                "fixture {} has an unresolved name reference {}",
+                path.display(),
+                reference.reference
+            );
+            assert!(
+                file.ast_at(reference.owner_address)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to resolve AST owner in {}: {error}", path.display())
+                    })
+                    .is_some(),
+                "fixture {} has a name reference with a missing owner {}",
+                path.display(),
+                reference.owner_address
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixture_ast_references_resolve_in_the_global_ast_index() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

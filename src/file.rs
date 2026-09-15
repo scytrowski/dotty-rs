@@ -1,4 +1,6 @@
-use crate::ast::{AstAddressIndex, AstError, AstReference, RawNodes, StructuredNode};
+use crate::ast::{
+    AstAddressIndex, AstError, AstReference, NameReference, RawNodes, StructuredNode,
+};
 use crate::header::{Header, HeaderError};
 use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
@@ -284,6 +286,22 @@ impl<'a> TastyFile<'a> {
         for node in self.asts()?.iter() {
             for reference in node.ast_refs()? {
                 references.push(AstReference {
+                    owner_address: node.offset as u32,
+                    reference,
+                });
+            }
+        }
+        Ok(references)
+    }
+
+    /// Collects name-table references from every top-level AST node in wire
+    /// order. The owner address identifies the top-level node containing the
+    /// reference.
+    pub fn name_references(&self) -> Result<Vec<NameReference>, TastyFileError> {
+        let mut references = Vec::new();
+        for node in self.asts()?.iter() {
+            for reference in node.name_refs()? {
+                references.push(NameReference {
                     owner_address: node.offset as u32,
                     reference,
                 });

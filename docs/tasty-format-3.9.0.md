@@ -452,6 +452,12 @@ context-dependent category-5 payloads remain indexed as opaque boundaries.
 collected reference to resolve to a visible node start.
 The eager `TastyFile::validate()` path uses the stricter target validation.
 
+`RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
+name-table references contained in supported structured payloads. At file
+level, `TastyFile::name_references()` returns the same references together
+with the owning top-level AST address, which lets callers resolve them through
+the file's `NameTable`.
+
 `BIND` is context-dependent: in a pattern it carries a pattern tree, while in
 a type it carries zero or more modifiers. `BindNode` exposes these alternatives
 as `BindBody::Pattern` and `BindBody::Type`; bytes after an undecidable pattern
