@@ -77,6 +77,99 @@ impl StandardSection {
     }
 }
 
+impl Attribute {
+    pub fn encode_all(attributes: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
+        let mut previous = None;
+        for attribute in attributes {
+            let tag = attribute.tag();
+            if previous.is_some_and(|previous| tag <= previous) {
+                return Err(WriteError::AttributeOrder {
+                    previous: previous.unwrap(),
+                    current: tag,
+                });
+            }
+            previous = Some(tag);
+            writer.write_u8(tag);
+            if let Self::SourceFile(reference) = attribute {
+                writer.write_nat(*reference);
+            }
+        }
+        Ok(())
+    }
+
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Scala2StandardLibrary => SCALA2STANDARDLIBRARY_ATTR,
+            Self::ExplicitNulls => EXPLICITNULLS_ATTR,
+            Self::CaptureChecked => CAPTURECHECKED_ATTR,
+            Self::WithPureFuns => WITHPUREFUNS_ATTR,
+            Self::Java => JAVA_ATTR,
+            Self::Outline => OUTLINE_ATTR,
+            Self::SourceFile(_) => SOURCEFILE_ATTR,
+        }
+    }
+}
+
+impl Comment {
+    pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
+        for comment in comments {
+            writer.write_utf8(&comment.text)?;
+            writer.write_long_int(comment.coordinates);
+        }
+        Ok(())
+    }
+}
+
+impl PositionSection {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        writer.write_nat(u32::try_from(self.line_sizes.len()).map_err(|_| {
+            WriteError::LengthOverflow {
+                length: self.line_sizes.len(),
+            }
+        })?);
+        for line_size in &self.line_sizes {
+            writer.write_nat(*line_size);
+        }
+
+        for entry in &self.entries {
+            match entry {
+                PositionEntry::Source(reference) => {
+                    writer.write_nat(4);
+                    writer.write_nat(*reference);
+                }
+                PositionEntry::Association {
+                    address_delta,
+                    start_delta,
+                    end_delta,
+                    point_delta,
+                } => {
+                    let flags = u8::from(start_delta.is_some()) << 2
+                        | u8::from(end_delta.is_some()) << 1
+                        | u8::from(point_delta.is_some());
+                    let header = u64::from(*address_delta) * 8 + u64::from(flags);
+                    if header > u64::from(u32::MAX) {
+                        return Err(WriteError::NatOverflow { value: header });
+                    }
+                    if header == 4 {
+                        return Err(WriteError::PositionHeaderCollision {
+                            address_delta: *address_delta,
+                            flags,
+                        });
+                    }
+                    writer.write_nat(header as u32);
+                    for delta in [start_delta, end_delta, point_delta].into_iter().flatten() {
+                        writer.write_int(
+                            i32::try_from(*delta)
+                                .map_err(|_| WriteError::IntOverflow { value: *delta })?,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionError {
     Read(ReadError),
@@ -309,6 +402,159 @@ mod tests {
         Attribute, Comment, PositionEntry, PositionSection, Section, SectionError, SectionTable,
     };
     use crate::reader::{ReadError, Reader};
+    use crate::writer::{WriteError, Writer};
+
+    #[test]
+    fn encodes_all_attributes_in_wire_order() {
+        let attributes = vec![
+            Attribute::Scala2StandardLibrary,
+            Attribute::ExplicitNulls,
+            Attribute::CaptureChecked,
+            Attribute::WithPureFuns,
+            Attribute::Java,
+            Attribute::Outline,
+            Attribute::SourceFile(5),
+        ];
+        let mut writer = Writer::new();
+        Attribute::encode_all(&attributes, &mut writer).unwrap();
+
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: writer.as_slice().len(),
+            payload: writer.as_slice(),
+        };
+        assert_eq!(section.decode_attributes().unwrap(), attributes);
+    }
+
+    #[test]
+    fn rejects_unordered_attributes_when_encoding() {
+        let mut writer = Writer::new();
+        assert_eq!(
+            Attribute::encode_all(
+                &[Attribute::ExplicitNulls, Attribute::Scala2StandardLibrary],
+                &mut writer
+            ),
+            Err(WriteError::AttributeOrder {
+                previous: 2,
+                current: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn encodes_comments_with_unicode_and_signed_coordinates() {
+        let comments = vec![
+            Comment {
+                text: "zażółć".to_owned(),
+                coordinates: -129,
+            },
+            Comment {
+                text: "ok".to_owned(),
+                coordinates: 16_384,
+            },
+        ];
+        let mut writer = Writer::new();
+        Comment::encode_all(&comments, &mut writer).unwrap();
+
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: writer.as_slice().len(),
+            payload: writer.as_slice(),
+        };
+        assert_eq!(section.decode_comments().unwrap(), comments);
+    }
+
+    #[test]
+    fn encodes_position_lines_associations_and_sources() {
+        let positions = PositionSection {
+            line_sizes: vec![10, 20],
+            entries: vec![
+                PositionEntry::Association {
+                    address_delta: 1,
+                    start_delta: Some(-2),
+                    end_delta: Some(2),
+                    point_delta: Some(4),
+                },
+                PositionEntry::Source(5),
+            ],
+        };
+        let mut writer = Writer::new();
+        positions.encode(&mut writer).unwrap();
+
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: writer.as_slice().len(),
+            payload: writer.as_slice(),
+        };
+        assert_eq!(section.decode_positions().unwrap(), positions);
+    }
+
+    #[test]
+    fn rejects_position_deltas_outside_tasty_int() {
+        let positions = PositionSection {
+            line_sizes: Vec::new(),
+            entries: vec![PositionEntry::Association {
+                address_delta: 1,
+                start_delta: Some(i64::from(i32::MAX) + 1),
+                end_delta: None,
+                point_delta: None,
+            }],
+        };
+        let mut writer = Writer::new();
+
+        assert_eq!(
+            positions.encode(&mut writer),
+            Err(WriteError::IntOverflow {
+                value: i64::from(i32::MAX) + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_position_headers_that_are_not_representable() {
+        let positions = PositionSection {
+            line_sizes: Vec::new(),
+            entries: vec![PositionEntry::Association {
+                address_delta: u32::MAX,
+                start_delta: None,
+                end_delta: None,
+                point_delta: None,
+            }],
+        };
+        let mut writer = Writer::new();
+
+        assert_eq!(
+            positions.encode(&mut writer),
+            Err(WriteError::NatOverflow {
+                value: u64::from(u32::MAX) * 8,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_the_reserved_source_position_header_for_associations() {
+        let positions = PositionSection {
+            line_sizes: Vec::new(),
+            entries: vec![PositionEntry::Association {
+                address_delta: 0,
+                start_delta: Some(1),
+                end_delta: None,
+                point_delta: None,
+            }],
+        };
+        let mut writer = Writer::new();
+
+        assert_eq!(
+            positions.encode(&mut writer),
+            Err(WriteError::PositionHeaderCollision {
+                address_delta: 0,
+                flags: 4,
+            })
+        );
+    }
 
     #[test]
     fn decodes_length_delimited_sections() {

@@ -3,6 +3,10 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
     LengthOverflow { length: usize },
+    NatOverflow { value: u64 },
+    IntOverflow { value: i64 },
+    AttributeOrder { previous: u8, current: u8 },
+    PositionHeaderCollision { address_delta: u32, flags: u8 },
 }
 
 impl fmt::Display for WriteError {
@@ -11,6 +15,23 @@ impl fmt::Display for WriteError {
             Self::LengthOverflow { length } => {
                 write!(formatter, "length {length} does not fit in a TASTy Nat")
             }
+            Self::NatOverflow { value } => {
+                write!(formatter, "value {value} does not fit in a TASTy Nat")
+            }
+            Self::IntOverflow { value } => {
+                write!(formatter, "value {value} does not fit in a TASTy Int")
+            }
+            Self::AttributeOrder { previous, current } => write!(
+                formatter,
+                "attribute tag {current} follows tag {previous}; attributes must be strictly ordered"
+            ),
+            Self::PositionHeaderCollision {
+                address_delta,
+                flags,
+            } => write!(
+                formatter,
+                "position association ({address_delta}, flags {flags}) collides with the SOURCE entry header"
+            ),
         }
     }
 }
