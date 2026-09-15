@@ -136,6 +136,10 @@ impl SimpleTerm {
     }
 
     pub fn ast_ref_kind(&self) -> Option<AstRefKind> {
+        if !matches!(self.value, TermValue::AstRef(_)) {
+            return None;
+        }
+
         match self.tag {
             60 => Some(AstRefKind::SharedTerm),
             61 => Some(AstRefKind::SharedType),
@@ -373,6 +377,17 @@ mod tests {
     fn returns_no_ast_reference_kind_for_non_reference_terms() {
         let mut reader = Reader::new(&[70, 0x81]);
         let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(term.ast_ref_kind(), None);
+    }
+
+    #[test]
+    fn returns_no_ast_reference_kind_for_an_inconsistent_raw_term() {
+        let term = SimpleTerm {
+            tag: 60,
+            offset: 0,
+            value: TermValue::Int(1),
+        };
 
         assert_eq!(term.ast_ref_kind(), None);
     }
