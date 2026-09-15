@@ -229,19 +229,44 @@ impl<'a> RawTree<'a> {
         Self::decode_with_max_depth(reader, DEFAULT_MAX_TREE_DEPTH)
     }
 
+    /// Decode a tree while reporting offsets relative to an enclosing byte
+    /// buffer.
+    ///
+    /// This is the offset-aware counterpart of [`RawTree::decode`]. It is
+    /// useful when a bounded reader covers a nested AST payload but AST
+    /// references must still be compared with addresses in the complete
+    /// `ASTs` section.
+    pub fn decode_with_base_offset(
+        reader: &mut Reader<'a>,
+        base_offset: usize,
+    ) -> Result<Self, TermError> {
+        Self::decode_with_max_depth_and_base_offset(reader, DEFAULT_MAX_TREE_DEPTH, base_offset)
+    }
+
     pub fn decode_with_max_depth(
         reader: &mut Reader<'a>,
         max_depth: usize,
     ) -> Result<Self, TermError> {
-        Self::decode_at_depth(reader, 0, max_depth)
+        Self::decode_with_max_depth_and_base_offset(reader, max_depth, 0)
+    }
+
+    /// Decode a tree with both a recursion limit and an enclosing-buffer base
+    /// offset.
+    pub fn decode_with_max_depth_and_base_offset(
+        reader: &mut Reader<'a>,
+        max_depth: usize,
+        base_offset: usize,
+    ) -> Result<Self, TermError> {
+        Self::decode_at_depth(reader, 0, max_depth, base_offset)
     }
 
     fn decode_at_depth(
         reader: &mut Reader<'a>,
         depth: usize,
         max_depth: usize,
+        base_offset: usize,
     ) -> Result<Self, TermError> {
-        let offset = reader.position();
+        let offset = base_offset.saturating_add(reader.position());
         if depth >= max_depth {
             return Err(TermError::RecursionLimit {
                 offset,
@@ -267,7 +292,12 @@ impl<'a> RawTree<'a> {
                 Ok(Self::Ast {
                     tag,
                     offset,
-                    child: Box::new(Self::decode_at_depth(reader, depth + 1, max_depth)?),
+                    child: Box::new(Self::decode_at_depth(
+                        reader,
+                        depth + 1,
+                        max_depth,
+                        base_offset,
+                    )?),
                 })
             }
             4 => {
@@ -279,7 +309,12 @@ impl<'a> RawTree<'a> {
                     tag,
                     offset,
                     value,
-                    child: Box::new(Self::decode_at_depth(reader, depth + 1, max_depth)?),
+                    child: Box::new(Self::decode_at_depth(
+                        reader,
+                        depth + 1,
+                        max_depth,
+                        base_offset,
+                    )?),
                 })
             }
             5 => {
@@ -538,6 +573,38 @@ mod tests {
                 ..
             }
         ));
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn reports_tree_offsets_relative_to_an_enclosing_ast_section() {
+        let mut reader = Reader::new(&[90, 110, 0x82, 60, 0x85]);
+        let tree = super::RawTree::decode_with_base_offset(&mut reader, 100).unwrap();
+
+        let super::RawTree::Ast {
+            offset: outer_offset,
+            child: outer_child,
+            ..
+        } = &tree
+        else {
+            panic!("expected a category-three wrapper")
+        };
+        assert_eq!(*outer_offset, 100);
+
+        let super::RawTree::NatAst {
+            offset: nat_offset,
+            child: nat_child,
+            ..
+        } = outer_child.as_ref()
+        else {
+            panic!("expected a category-four wrapper")
+        };
+        assert_eq!(*nat_offset, 101);
+
+        let super::RawTree::Leaf(term) = nat_child.as_ref() else {
+            panic!("expected a leaf")
+        };
+        assert_eq!(term.offset, 103);
         assert!(reader.is_at_end());
     }
 

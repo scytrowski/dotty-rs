@@ -394,6 +394,12 @@ order. Category-5 payloads remain opaque at this generic term layer because
 their child layout is tag-specific; structured AST decoders are the next layer
 for traversing those payloads.
 
+When a caller already knows the absolute start of a bounded payload,
+`RawTree::decode_with_base_offset()` and
+`RawTree::decode_with_max_depth_and_base_offset()` preserve that base in every
+decoded tree offset. This is the low-level primitive used by the future global
+nested-node index.
+
 Length-delimited nodes can be routed through `RawNode::decode_structured()`;
 it returns a `StructuredNode` variant for supported node grammars and a `Raw`
 variant for unknown category-5 tags.
