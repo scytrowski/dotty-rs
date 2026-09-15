@@ -5,6 +5,15 @@ use std::fmt;
 
 pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AstRefKind {
+    SharedTerm,
+    SharedType,
+    TermRefDirect,
+    TypeRefDirect,
+    RecursiveThis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     Unit,
@@ -126,6 +135,17 @@ impl SimpleTerm {
         Ok(Self { tag, offset, value })
     }
 
+    pub fn ast_ref_kind(&self) -> Option<AstRefKind> {
+        match self.tag {
+            60 => Some(AstRefKind::SharedTerm),
+            61 => Some(AstRefKind::SharedType),
+            62 => Some(AstRefKind::TermRefDirect),
+            63 => Some(AstRefKind::TypeRefDirect),
+            66 => Some(AstRefKind::RecursiveThis),
+            _ => None,
+        }
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
@@ -242,7 +262,7 @@ impl<'a> RawTree<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
+    use super::{AstRefKind, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
 
@@ -326,6 +346,35 @@ mod tests {
             assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, expected);
             assert!(reader.is_at_end());
         }
+    }
+
+    #[test]
+    fn classifies_ast_reference_kinds_from_the_scala_3_9_tag_matrix() {
+        let cases = [
+            (60, AstRefKind::SharedTerm),
+            (61, AstRefKind::SharedType),
+            (62, AstRefKind::TermRefDirect),
+            (63, AstRefKind::TypeRefDirect),
+            (66, AstRefKind::RecursiveThis),
+        ];
+
+        for (tag, expected_kind) in cases {
+            let bytes = [tag, 0x81];
+            let mut reader = Reader::new(&bytes);
+            let term = SimpleTerm::decode(&mut reader).unwrap();
+
+            assert_eq!(term.value, TermValue::AstRef(1));
+            assert_eq!(term.ast_ref_kind(), Some(expected_kind));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn returns_no_ast_reference_kind_for_non_reference_terms() {
+        let mut reader = Reader::new(&[70, 0x81]);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(term.ast_ref_kind(), None);
     }
 
     #[test]
