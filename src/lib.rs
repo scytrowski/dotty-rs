@@ -9,8 +9,9 @@ pub use ast::{
     AstError, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
     EMPTYCLAUSE_TAG, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportExportNode,
     ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterBody,
-    ParameterNode, RENAMED_TAG, RawNode, RawNodes, SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG,
-    TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, TemplateStructure, VALDEF_TAG,
+    ParameterNode, RENAMED_TAG, RawNode, RawNodes, SELFDEF_TAG, SPLITCLAUSE_TAG, SelfDefNode,
+    TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, TemplateStructure,
+    VALDEF_TAG,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};

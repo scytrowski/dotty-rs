@@ -119,6 +119,12 @@ pub struct ImportExportNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfDefNode<'a> {
+    pub name: u32,
+    pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionTail<'a> {
     Modifier(u8),
     Annotation(RawNode<'a>),
@@ -593,6 +599,30 @@ impl<'a> RawNode<'a> {
     }
 }
 
+impl<'a> RawTree<'a> {
+    pub fn decode_self_def(&self) -> Result<SelfDefNode<'a>, AstError> {
+        match self {
+            RawTree::NatAst {
+                tag: SELFDEF_TAG,
+                value: name,
+                child,
+                ..
+            } => Ok(SelfDefNode {
+                name: *name,
+                type_tree: (**child).clone(),
+            }),
+            tree => {
+                let (actual, offset) = raw_tree_tag_offset(tree);
+                Err(AstError::UnexpectedTag {
+                    expected: SELFDEF_TAG,
+                    actual,
+                    offset,
+                })
+            }
+        }
+    }
+}
+
 fn is_template_stat_tag(tag: u8) -> bool {
     matches!(
         tag,
@@ -605,6 +635,14 @@ fn is_template_stat_tag(tag: u8) -> bool {
             | PARAM_TAG
             | EXPORT_TAG
     )
+}
+
+fn raw_tree_tag_offset(tree: &RawTree<'_>) -> (u8, usize) {
+    match tree {
+        RawTree::Leaf(term) => (term.tag, term.offset),
+        RawTree::Ast { tag, offset, .. } | RawTree::NatAst { tag, offset, .. } => (*tag, *offset),
+        RawTree::LengthNode(RawNode { tag, offset, .. }) => (*tag, *offset),
+    }
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
@@ -823,9 +861,31 @@ mod tests {
         let structure = nodes.get(0).unwrap().decode_template_structure().unwrap();
 
         assert_eq!(structure.parents.len(), 1);
-        assert!(structure.self_def.is_some());
+        let self_def = structure
+            .self_def
+            .as_ref()
+            .unwrap()
+            .decode_self_def()
+            .unwrap();
+        assert_eq!(self_def.name, 1);
+        assert!(matches!(self_def.type_tree, RawTree::Leaf(_)));
         assert!(!structure.split_clause);
         assert_eq!(structure.stats.len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_tree_that_is_not_a_self_definition() {
+        let mut reader = Reader::new(&[TERMREFPKG_TAG, 0x81]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            tree.decode_self_def(),
+            Err(AstError::UnexpectedTag {
+                expected: SELFDEF_TAG,
+                actual: TERMREFPKG_TAG,
+                offset: 0,
+            })
+        );
     }
 
     #[test]

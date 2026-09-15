@@ -238,6 +238,14 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                 )
                             });
                         }
+                        if let Some(self_def) = structure.self_def.as_ref() {
+                            self_def.decode_self_def().unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to parse self definition in {}: {error}",
+                                    path.display()
+                                )
+                            });
+                        }
                         for nested in structure.stats.iter() {
                             if matches!(nested.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
                                 nested.decode_import_export().unwrap_or_else(|error| {
