@@ -1,8 +1,10 @@
+pub mod ast;
 pub mod header;
 pub mod name_table;
 pub mod reader;
 pub mod section;
 
+pub use ast::{AstError, NodeCategory, RawNode, RawNodes};
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tasty_rs::{Header, NameTable, Reader, SectionTable, StandardSection};
+use tasty_rs::{Header, NameTable, RawNodes, Reader, SectionTable, StandardSection};
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -147,6 +147,25 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                 .iter()
                 .any(|section| section.standard_kind(&names) == Some(StandardSection::Asts)),
             "fixture {} has no ASTs section",
+            path.display()
+        );
+
+        let asts = sections
+            .iter()
+            .find(|section| section.standard_kind(&names) == Some(StandardSection::Asts))
+            .expect("ASTs section was checked above");
+        let mut ast_reader = asts.reader();
+        let nodes = RawNodes::decode(&mut ast_reader)
+            .unwrap_or_else(|error| panic!("failed to parse ASTs in {}: {error}", path.display()));
+
+        assert!(
+            !nodes.is_empty(),
+            "fixture {} has no top-level AST nodes",
+            path.display()
+        );
+        assert!(
+            ast_reader.is_at_end(),
+            "fixture {} has unread AST bytes",
             path.display()
         );
     }
