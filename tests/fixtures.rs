@@ -286,6 +286,29 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                 )
                             });
                         }
+                        for parent in &structure.parents {
+                            if let tasty_rs::RawTree::LengthNode(raw) = parent {
+                                match raw.tag {
+                                    tasty_rs::APPLY_TAG => {
+                                        raw.decode_apply().unwrap_or_else(|error| {
+                                            panic!(
+                                                "failed to parse apply in {}: {error}",
+                                                path.display()
+                                            )
+                                        });
+                                    }
+                                    tasty_rs::BLOCK_TAG => {
+                                        raw.decode_block().unwrap_or_else(|error| {
+                                            panic!(
+                                                "failed to parse block in {}: {error}",
+                                                path.display()
+                                            )
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         for nested in structure.stats.iter() {
                             if matches!(nested.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
                                 nested.decode_import_export().unwrap_or_else(|error| {

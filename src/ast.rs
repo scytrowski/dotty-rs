@@ -9,6 +9,8 @@ pub const DEFDEF_TAG: u8 = 130;
 pub const TYPEDEF_TAG: u8 = 131;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
+pub const APPLY_TAG: u8 = 136;
+pub const BLOCK_TAG: u8 = 140;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
 pub const EXPORT_TAG: u8 = 177;
@@ -122,6 +124,18 @@ pub struct ImportExportNode<'a> {
 pub struct SelfDefNode<'a> {
     pub name: u32,
     pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyNode<'a> {
+    pub function: RawTree<'a>,
+    pub arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockNode<'a> {
+    pub expression: RawTree<'a>,
+    pub stats: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +510,47 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
+        if self.tag != APPLY_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: APPLY_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let function = RawTree::decode(&mut reader)?;
+        let mut arguments = Vec::new();
+        while !reader.is_at_end() {
+            arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(ApplyNode {
+            function,
+            arguments,
+        })
+    }
+
+    pub fn decode_block(&self) -> Result<BlockNode<'a>, AstError> {
+        if self.tag != BLOCK_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: BLOCK_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let expression = RawTree::decode(&mut reader)?;
+        let mut stats = Vec::new();
+        while !reader.is_at_end() {
+            stats.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(BlockNode { expression, stats })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -682,10 +737,10 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        AstError, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
-        DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector,
-        NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RawNodes, RawTree, SELFDEF_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+        APPLY_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody,
+        DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind,
+        ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RawNodes, RawTree,
+        SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -959,5 +1014,28 @@ mod tests {
 
         assert_eq!(export.kind, ImportExportKind::Export);
         assert_eq!(export.selectors, vec![ImportSelector::Imported { name: 5 }]);
+    }
+
+    #[test]
+    fn decodes_apply_function_and_arguments() {
+        let bytes = [APPLY_TAG, 0x85, TERMREFPKG_TAG, 0x81, 70, 0x82, 4];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let apply = nodes.get(0).unwrap().decode_apply().unwrap();
+
+        assert!(matches!(apply.function, RawTree::Leaf(_)));
+        assert_eq!(apply.arguments.len(), 2);
+    }
+
+    #[test]
+    fn decodes_block_expression_and_stats() {
+        let bytes = [BLOCK_TAG, 0x83, 2, VALDEF_TAG, 0x80];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let block = nodes.get(0).unwrap().decode_block().unwrap();
+
+        assert!(matches!(block.expression, RawTree::Leaf(_)));
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(block.stats[0], RawTree::LengthNode(_)));
     }
 }
