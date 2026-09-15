@@ -14,12 +14,13 @@ pub use ast::{
     ImportExportKind, ImportExportNode, ImportSelector, LAMBDA_TAG, LambdaNode, MATCHCASETYPE_TAG,
     METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NamedArgNode, NodeCategory, ORTYPE_TAG, PACKAGE_TAG,
     PARAMTYPE_TAG, POLYTYPE_TAG, PackageNode, ParamTypeNode, ParameterBody, ParameterNode,
-    PolyTypeNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RepeatedNode,
-    ReturnNode, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG,
-    SelectOuterNode, SelfDefNode, SuperNode, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
-    TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
-    TYPEPARAM_TAG, TemplateNode, TemplateStructure, TypeApplyNode, TypeBoundsNode, TypedNode,
-    VALDEF_TAG, WHILE_TAG, WhileNode,
+    PolyTypeNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, ReferenceNode,
+    RepeatedNode, ReturnNode, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
+    SUPERTYPE_TAG, SelectOuterNode, SelfDefNode, SuperNode, TEMPLATE_TAG, TERMREF_TAG,
+    TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+    TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
+    TYPEREFSYMBOL_TAG, TemplateNode, TemplateStructure, TypeApplyNode, TypeBoundsNode, TypedNode,
+    VALDEF_TAG, WhileNode,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};

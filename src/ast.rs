@@ -48,6 +48,10 @@ pub const RENAMED_TAG: u8 = 76;
 pub const BOUNDED_TAG: u8 = 102;
 pub const IDENT_TAG: u8 = 110;
 pub const IDENTTPT_TAG: u8 = 111;
+pub const TERMREFSYMBOL_TAG: u8 = 114;
+pub const TERMREF_TAG: u8 = 115;
+pub const TYPEREFSYMBOL_TAG: u8 = 116;
+pub const TYPEREF_TAG: u8 = 117;
 pub const SELFDEF_TAG: u8 = 118;
 pub const NAMEDARG_TAG: u8 = 119;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
@@ -251,6 +255,13 @@ pub struct IdentNode<'a> {
     pub tag: u8,
     pub name: u32,
     pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceNode<'a> {
+    pub tag: u8,
+    pub reference: u32,
+    pub qualifier: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1424,6 +1435,29 @@ impl<'a> RawTree<'a> {
             }
         }
     }
+
+    pub fn decode_reference(&self) -> Result<ReferenceNode<'a>, AstError> {
+        match self {
+            RawTree::NatAst {
+                tag: tag @ (TERMREFSYMBOL_TAG | TERMREF_TAG | TYPEREFSYMBOL_TAG | TYPEREF_TAG),
+                value: reference,
+                child,
+                ..
+            } => Ok(ReferenceNode {
+                tag: *tag,
+                reference: *reference,
+                qualifier: (**child).clone(),
+            }),
+            tree => {
+                let (actual, offset) = raw_tree_tag_offset(tree);
+                Err(AstError::UnexpectedTag {
+                    expected: TERMREFSYMBOL_TAG,
+                    actual,
+                    offset,
+                })
+            }
+        }
+    }
 }
 
 fn is_template_stat_tag(tag: u8) -> bool {
@@ -1493,9 +1527,10 @@ mod tests {
         NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
         POLYTYPE_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
         RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG,
-        TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
+        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode,
+        TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1876,6 +1911,48 @@ mod tests {
                 offset: 0,
             })
         );
+    }
+
+    #[test]
+    fn decodes_all_category_four_reference_nodes() {
+        for tag in [
+            TERMREFSYMBOL_TAG,
+            TERMREF_TAG,
+            TYPEREFSYMBOL_TAG,
+            TYPEREF_TAG,
+        ] {
+            let bytes = [tag, 0x85, TERMREFPKG_TAG, 0x81];
+            let mut reader = Reader::new(&bytes);
+            let tree = RawTree::decode(&mut reader).unwrap();
+            let node = tree.decode_reference().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert_eq!(node.reference, 5);
+            assert!(matches!(node.qualifier, RawTree::Leaf(_)));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn rejects_a_tree_with_the_wrong_reference_tag() {
+        let mut reader = Reader::new(&[IDENT_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            tree.decode_reference(),
+            Err(AstError::UnexpectedTag {
+                expected: TERMREFSYMBOL_TAG,
+                actual: IDENT_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_reference_without_a_qualifier() {
+        let mut reader = Reader::new(&[TERMREF_TAG, 0x85]);
+
+        assert!(RawTree::decode(&mut reader).is_err());
     }
 
     #[test]
