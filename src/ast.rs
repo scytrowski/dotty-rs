@@ -48,6 +48,9 @@ pub const LAMBDATPT_TAG: u8 = 171;
 pub const TERMREFIN_TAG: u8 = 174;
 pub const TYPEREFIN_TAG: u8 = 175;
 pub const SELECTIN_TAG: u8 = 176;
+pub const QUOTE_TAG: u8 = 178;
+pub const SPLICE_TAG: u8 = 179;
+pub const APPLYSIGPOLY_TAG: u8 = 181;
 pub const APPLY_TAG: u8 = 136;
 pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
@@ -380,6 +383,20 @@ pub struct TryNode<'a> {
     pub expression: RawTree<'a>,
     pub cases: Vec<CaseDefNode<'a>>,
     pub finalizer: Option<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteNode<'a> {
+    pub tag: u8,
+    pub expression: RawTree<'a>,
+    pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplySigPolyNode<'a> {
+    pub function: RawTree<'a>,
+    pub type_tree: RawTree<'a>,
+    pub arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1138,6 +1155,64 @@ impl<'a> RawNode<'a> {
             expression,
             cases,
             finalizer,
+        })
+    }
+
+    pub fn decode_quote(&self) -> Result<QuoteNode<'a>, AstError> {
+        self.decode_quote_like(QUOTE_TAG)
+    }
+
+    pub fn decode_splice(&self) -> Result<QuoteNode<'a>, AstError> {
+        self.decode_quote_like(SPLICE_TAG)
+    }
+
+    fn decode_quote_like(&self, expected: u8) -> Result<QuoteNode<'a>, AstError> {
+        if self.tag != expected {
+            return Err(AstError::UnexpectedTag {
+                expected,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let expression = RawTree::decode(&mut reader)?;
+        let type_tree = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(QuoteNode {
+            tag: self.tag,
+            expression,
+            type_tree,
+        })
+    }
+
+    pub fn decode_apply_sigpoly(&self) -> Result<ApplySigPolyNode<'a>, AstError> {
+        if self.tag != APPLYSIGPOLY_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: APPLYSIGPOLY_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let function = RawTree::decode(&mut reader)?;
+        let type_tree = RawTree::decode(&mut reader)?;
+        let mut arguments = Vec::new();
+        while !reader.is_at_end() {
+            arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(ApplySigPolyNode {
+            function,
+            type_tree,
+            arguments,
         })
     }
 
@@ -2041,21 +2116,22 @@ fn read_case_defs<'a>(reader: &mut Reader<'a>) -> Result<Vec<CaseDefNode<'a>>, A
 mod tests {
     use super::{
         ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG,
-        APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BIND_TAG, BLOCK_TAG,
-        BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG, DEFDEF_TAG,
-        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG,
-        EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG,
-        IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG, ImportExportKind,
-        ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
-        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
-        POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG,
-        RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
-        RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
-        SELFDEF_TAG, SINGLETONTPT_TAG, SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG,
-        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
-        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
-        TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BIND_TAG,
+        BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG,
+        DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
+        EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
+        IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG,
+        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
+        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
+        QUALTHIS_TAG, QUOTE_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG,
+        REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG,
+        SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLITCLAUSE_TAG,
+        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
+        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG,
+        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
+        TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode,
+        UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -3548,6 +3624,48 @@ mod tests {
         assert!(matches!(tried.expression, RawTree::Leaf(_)));
         assert_eq!(tried.cases.len(), 1);
         assert!(matches!(tried.finalizer, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn decodes_quote_and_splice_with_expression_and_type() {
+        for tag in [QUOTE_TAG, SPLICE_TAG] {
+            let bytes = [tag, 0x84, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let raw = nodes.get(0).unwrap();
+            let quoted = if tag == QUOTE_TAG {
+                raw.decode_quote().unwrap()
+            } else {
+                raw.decode_splice().unwrap()
+            };
+
+            assert_eq!(quoted.tag, tag);
+            assert!(matches!(quoted.expression, RawTree::Leaf(_)));
+            assert!(matches!(quoted.type_tree, RawTree::Leaf(_)));
+        }
+    }
+
+    #[test]
+    fn decodes_apply_sigpoly_with_type_and_arguments() {
+        let bytes = [
+            APPLYSIGPOLY_TAG,
+            0x88,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let apply = nodes.get(0).unwrap().decode_apply_sigpoly().unwrap();
+
+        assert!(matches!(apply.function, RawTree::Leaf(_)));
+        assert!(matches!(apply.type_tree, RawTree::Leaf(_)));
+        assert_eq!(apply.arguments.len(), 2);
     }
 
     #[test]
