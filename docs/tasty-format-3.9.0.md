@@ -450,6 +450,9 @@ heuristic decoder remains available for ordinary payloads, while
 `decode_method_type_with_type_name_count(count)` lets typed callers decode the
 suffix unambiguously when a `TypeName` starts with a modifier-valued byte.
 
+`HOLE` is a valid special category-5 node. Its typed representation contains
+the hole index, its type tree, and the remaining ordered argument trees.
+
 ### 6.6. Constants
 
 ```text

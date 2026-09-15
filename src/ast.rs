@@ -38,6 +38,7 @@ pub const MATCHCASETYPE_TAG: u8 = 192;
 pub const POLYTYPE_TAG: u8 = 169;
 pub const TYPELAMBDATYPE_TAG: u8 = 170;
 pub const METHODTYPE_TAG: u8 = 180;
+pub const HOLE_TAG: u8 = 255;
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
 pub const ANNOTATEDTPT_TAG: u8 = 154;
 pub const ANNOTATION_TAG: u8 = 173;
@@ -208,6 +209,7 @@ pub enum StructuredNode<'a> {
     SplicePattern(SplicePatternNode<'a>),
     MatchType(MatchTypeNode<'a>),
     MatchTpt(MatchTptNode<'a>),
+    Hole(HoleNode<'a>),
     InReference(InReferenceNode<'a>),
     SelectIn(SelectInNode<'a>),
     Raw(RawNode<'a>),
@@ -522,6 +524,13 @@ pub struct SplicePatternNode<'a> {
     /// The format does not encode a count separating type arguments from
     /// term arguments. Keep the complete ordered tail until typed decoding
     /// context is available to classify it.
+    pub arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoleNode<'a> {
+    pub index: u32,
+    pub type_tree: RawTree<'a>,
     pub arguments: Vec<RawTree<'a>>,
 }
 
@@ -1385,6 +1394,10 @@ fn collect_structured_nodes<'a>(
             tree!(&match_tpt.selector);
             case_defs!(&match_tpt.cases);
         }
+        StructuredNode::Hole(hole) => {
+            tree!(&hole.type_tree);
+            trees!(&hole.arguments);
+        }
         StructuredNode::InReference(reference) => {
             tree!(&reference.qualifier);
             tree!(&reference.underlying_type);
@@ -1463,6 +1476,7 @@ impl<'a> RawNode<'a> {
             SPLICEPATTERN_TAG => StructuredNode::SplicePattern(self.decode_splice_pattern()?),
             MATCHTYPE_TAG => StructuredNode::MatchType(self.decode_match_type()?),
             MATCHTPT_TAG => StructuredNode::MatchTpt(self.decode_match_tpt()?),
+            HOLE_TAG => StructuredNode::Hole(self.decode_hole()?),
             TERMREFIN_TAG | TYPEREFIN_TAG => {
                 StructuredNode::InReference(self.decode_in_reference()?)
             }
@@ -1817,6 +1831,30 @@ impl<'a> RawNode<'a> {
             type_tree,
             body,
             remainder,
+        })
+    }
+
+    pub fn decode_hole(&self) -> Result<HoleNode<'a>, AstError> {
+        if self.tag != HOLE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: HOLE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let index = reader.read_nat()?;
+        let type_tree = RawTree::decode(&mut reader)?;
+        let mut arguments = Vec::new();
+        while !reader.is_at_end() {
+            arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(HoleNode {
+            index,
+            type_tree,
+            arguments,
         })
     }
 
@@ -3474,6 +3512,16 @@ impl<'a> BindNode<'a> {
     }
 }
 
+impl<'a> HoleNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(HOLE_TAG, writer, |payload| {
+            payload.write_nat(self.index);
+            self.type_tree.encode(payload)?;
+            encode_trees(&self.arguments, payload)
+        })
+    }
+}
+
 impl<'a> AlternativeNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(ALTERNATIVE_TAG, writer, |payload| {
@@ -4158,6 +4206,10 @@ fn collect_structured_ast_refs(
             collect_tree_ast_refs(&match_tpt.selector, visitor);
             collect_case_defs_ast_refs(&match_tpt.cases, visitor);
         }
+        StructuredNode::Hole(hole) => {
+            collect_tree_ast_refs(&hole.type_tree, visitor);
+            collect_trees_ast_refs(&hole.arguments, visitor);
+        }
         StructuredNode::InReference(reference) => {
             collect_tree_ast_refs(&reference.qualifier, visitor);
             collect_tree_ast_refs(&reference.underlying_type, visitor);
@@ -4224,18 +4276,18 @@ mod tests {
         APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstChildNode,
         AstError, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
         CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
-        ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
-        IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG,
-        ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG,
-        MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
-        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
-        PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG,
-        RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
-        RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
-        SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG,
-        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, TEMPLATE_TAG, TERMREF_TAG,
-        TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG,
-        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
+        ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG,
+        IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
+        INLINED_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG,
+        MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG,
+        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
+        PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG,
+        QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG,
+        RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG,
+        SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
+        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, TEMPLATE_TAG,
+        TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
+        TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
         TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
         TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
@@ -5892,6 +5944,29 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_hole_with_index_type_and_arguments() {
+        let bytes = [HOLE_TAG, 0x84, 0x85, 2, 3, 4];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let hole = nodes.get(0).unwrap().decode_hole().unwrap();
+
+        assert_eq!(hole.index, 5);
+        assert!(matches!(hole.type_tree, RawTree::Leaf(_)));
+        assert_eq!(hole.arguments.len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_hole_without_a_type_tree() {
+        let node = RawNode {
+            tag: HOLE_TAG,
+            offset: 0,
+            payload: &[0x85],
+        };
+
+        assert!(node.decode_hole().is_err());
+    }
+
+    #[test]
     fn decodes_match_type_with_raw_case_type_trees() {
         let bytes = [
             MATCHTYPE_TAG,
@@ -6180,6 +6255,9 @@ mod tests {
         });
         assert_structured_round_trip(&[SPLICEPATTERN_TAG, 0x84, 2, 3, 4, 5], |raw, writer| {
             raw.decode_splice_pattern().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[HOLE_TAG, 0x84, 0x85, 2, 3, 4], |raw, writer| {
+            raw.decode_hole().unwrap().encode(writer)
         });
         assert_structured_round_trip(
             &[MATCHTYPE_TAG, 0x86, 2, 3, MATCHCASETYPE_TAG, 0x82, 4, 5],
@@ -6601,6 +6679,7 @@ mod tests {
             StructuredNode::QuotePattern(_)
         );
         assert_variant!(SPLICEPATTERN_TAG, &[2, 3], StructuredNode::SplicePattern(_));
+        assert_variant!(HOLE_TAG, &[0x81, 2], StructuredNode::Hole(_));
         assert_variant!(MATCHTYPE_TAG, &[2, 3], StructuredNode::MatchType(_));
         assert_variant!(MATCHTPT_TAG, &[2, 3], StructuredNode::MatchTpt(_));
         assert_variant!(TERMREFIN_TAG, &[0x81, 2, 3], StructuredNode::InReference(_));
