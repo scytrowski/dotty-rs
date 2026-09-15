@@ -188,6 +188,14 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
         );
 
         for stat in package.stats.iter() {
+            if matches!(stat.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
+                stat.decode_import_export().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to parse import/export in {}: {error}",
+                        path.display()
+                    )
+                });
+            }
             if matches!(stat.tag, 129..=131) {
                 let definition = stat.decode_definition().unwrap_or_else(|error| {
                     panic!("failed to parse definition in {}: {error}", path.display())
@@ -231,6 +239,14 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                             });
                         }
                         for nested in structure.stats.iter() {
+                            if matches!(nested.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
+                                nested.decode_import_export().unwrap_or_else(|error| {
+                                    panic!(
+                                        "failed to parse nested import/export in {}: {error}",
+                                        path.display()
+                                    )
+                                });
+                            }
                             if nested.tag == tasty_rs::DEFDEF_TAG {
                                 nested.decode_defdef_body().unwrap_or_else(|error| {
                                     panic!(

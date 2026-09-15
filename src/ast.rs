@@ -12,6 +12,9 @@ pub const PARAM_TAG: u8 = 134;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
 pub const EXPORT_TAG: u8 = 177;
+pub const IMPORTED_TAG: u8 = 75;
+pub const RENAMED_TAG: u8 = 76;
+pub const BOUNDED_TAG: u8 = 102;
 pub const SELFDEF_TAG: u8 = 118;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
 pub const SPLITCLAUSE_TAG: u8 = 46;
@@ -93,6 +96,26 @@ pub struct DefDefBody<'a> {
     pub return_type: RawTree<'a>,
     pub rhs: Option<RawTree<'a>>,
     pub tail: Vec<DefinitionTail<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportExportKind {
+    Import,
+    Export,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportSelector<'a> {
+    Imported { name: u32 },
+    Renamed { name: u32 },
+    Bounded { type_tree: RawTree<'a> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportExportNode<'a> {
+    pub kind: ImportExportKind,
+    pub expr: RawTree<'a>,
+    pub selectors: Vec<ImportSelector<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,6 +430,66 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_import_export(&self) -> Result<ImportExportNode<'a>, AstError> {
+        let kind = match self.tag {
+            IMPORT_TAG => ImportExportKind::Import,
+            EXPORT_TAG => ImportExportKind::Export,
+            _ => {
+                return Err(AstError::UnexpectedTag {
+                    expected: IMPORT_TAG,
+                    actual: self.tag,
+                    offset: self.offset,
+                });
+            }
+        };
+
+        let mut reader = self.reader();
+        let expr = RawTree::decode(&mut reader)?;
+        let mut selectors = Vec::new();
+
+        while !reader.is_at_end() {
+            let offset = reader.position();
+            match reader.peek_u8()? {
+                IMPORTED_TAG => {
+                    reader.read_u8()?;
+                    selectors.push(ImportSelector::Imported {
+                        name: reader.read_nat()?,
+                    });
+                }
+                RENAMED_TAG => {
+                    reader.read_u8()?;
+                    selectors.push(ImportSelector::Renamed {
+                        name: reader.read_nat()?,
+                    });
+                }
+                BOUNDED_TAG => {
+                    let tree = RawTree::decode(&mut reader)?;
+                    let RawTree::Ast { child, .. } = tree else {
+                        return Err(AstError::UnexpectedTag {
+                            expected: BOUNDED_TAG,
+                            actual: BOUNDED_TAG,
+                            offset,
+                        });
+                    };
+                    selectors.push(ImportSelector::Bounded { type_tree: *child });
+                }
+                actual => {
+                    return Err(AstError::UnexpectedTag {
+                        expected: IMPORTED_TAG,
+                        actual,
+                        offset,
+                    });
+                }
+            }
+        }
+
+        Ok(ImportExportNode {
+            kind,
+            expr,
+            selectors,
+        })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -561,9 +644,10 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        AstError, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
-        NodeCategory, PACKAGE_TAG, PARAM_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG,
-        TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+        AstError, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
+        DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector,
+        NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RawNodes, RawTree, SELFDEF_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -771,5 +855,49 @@ mod tests {
         assert!(body.rhs.is_none());
         assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
         assert!(matches!(body, DefDefBody { .. }));
+    }
+
+    #[test]
+    fn decodes_import_selectors_and_bounded_types() {
+        let bytes = [
+            IMPORT_TAG,
+            0x89,
+            TERMREFPKG_TAG,
+            0x81,
+            IMPORTED_TAG,
+            0x85,
+            RENAMED_TAG,
+            0x86,
+            BOUNDED_TAG,
+            TERMREFPKG_TAG,
+            0x87,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let import = nodes.get(0).unwrap().decode_import_export().unwrap();
+
+        assert_eq!(import.kind, ImportExportKind::Import);
+        assert!(matches!(import.expr, RawTree::Leaf(_)));
+        assert!(matches!(
+            import.selectors.as_slice(),
+            [
+                ImportSelector::Imported { name: 5 },
+                ImportSelector::Renamed { name: 6 },
+                ImportSelector::Bounded {
+                    type_tree: RawTree::Leaf(_)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn decodes_export_nodes_with_the_same_selector_grammar() {
+        let bytes = [EXPORT_TAG, 0x84, TERMREFPKG_TAG, 0x81, IMPORTED_TAG, 0x85];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let export = nodes.get(0).unwrap().decode_import_export().unwrap();
+
+        assert_eq!(export.kind, ImportExportKind::Export);
+        assert_eq!(export.selectors, vec![ImportSelector::Imported { name: 5 }]);
     }
 }
