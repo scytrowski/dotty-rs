@@ -44,7 +44,9 @@ pub use section::{
     PositionEntry, PositionSection, SCALA2STANDARDLIBRARY_ATTR, SOURCEFILE_ATTR, Section,
     SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
-pub use term::{RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
+pub use term::{
+    DEFAULT_MAX_TREE_DEPTH, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue,
+};
 pub use writer::{WriteError, Writer};
 
 pub fn add(left: u64, right: u64) -> u64 {

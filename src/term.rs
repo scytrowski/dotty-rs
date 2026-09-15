@@ -3,6 +3,8 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     Unit,
@@ -44,6 +46,7 @@ pub enum TermError {
     Read(ReadError),
     InvalidTag { tag: u8, offset: usize },
     UnsupportedCategory { tag: u8, offset: usize },
+    RecursionLimit { offset: usize, limit: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,10 @@ impl fmt::Display for TermError {
             Self::UnsupportedCategory { tag, offset } => write!(
                 formatter,
                 "term tag {tag} at offset {offset} is not a category-2 leaf"
+            ),
+            Self::RecursionLimit { offset, limit } => write!(
+                formatter,
+                "term tree at offset {offset} exceeds the maximum depth of {limit}"
             ),
         }
     }
@@ -139,7 +146,28 @@ impl SimpleTerm {
 
 impl<'a> RawTree<'a> {
     pub fn decode(reader: &mut Reader<'a>) -> Result<Self, TermError> {
+        Self::decode_with_max_depth(reader, DEFAULT_MAX_TREE_DEPTH)
+    }
+
+    pub fn decode_with_max_depth(
+        reader: &mut Reader<'a>,
+        max_depth: usize,
+    ) -> Result<Self, TermError> {
+        Self::decode_at_depth(reader, 0, max_depth)
+    }
+
+    fn decode_at_depth(
+        reader: &mut Reader<'a>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<Self, TermError> {
         let offset = reader.position();
+        if depth >= max_depth {
+            return Err(TermError::RecursionLimit {
+                offset,
+                limit: max_depth,
+            });
+        }
         let tag = reader.read_u8()?;
         let category = match tag {
             1..=59 => 1,
@@ -159,7 +187,7 @@ impl<'a> RawTree<'a> {
                 Ok(Self::Ast {
                     tag,
                     offset,
-                    child: Box::new(Self::decode(reader)?),
+                    child: Box::new(Self::decode_at_depth(reader, depth + 1, max_depth)?),
                 })
             }
             4 => {
@@ -171,7 +199,7 @@ impl<'a> RawTree<'a> {
                     tag,
                     offset,
                     value,
-                    child: Box::new(Self::decode(reader)?),
+                    child: Box::new(Self::decode_at_depth(reader, depth + 1, max_depth)?),
                 })
             }
             5 => {
@@ -532,5 +560,28 @@ mod tests {
             );
             assert!(writer.as_slice().is_empty());
         }
+    }
+
+    #[test]
+    fn rejects_a_tree_that_exceeds_the_configured_recursion_limit() {
+        let bytes = [90, 90, 2];
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            RawTree::decode_with_max_depth(&mut reader, 2),
+            Err(TermError::RecursionLimit {
+                offset: 2,
+                limit: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_a_tree_within_the_configured_recursion_limit() {
+        let bytes = [90, 90, 2];
+        let mut reader = Reader::new(&bytes);
+
+        RawTree::decode_with_max_depth(&mut reader, 3).unwrap();
+        assert!(reader.is_at_end());
     }
 }

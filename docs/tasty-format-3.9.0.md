@@ -686,7 +686,9 @@ The decoder should validate:
 6. `ASTRef` ranges;
 7. tag legality in the current context;
 8. that no payload bytes remain after a node parser finishes;
-9. maximum recursion depth or an equivalent protection limit;
+9. maximum recursion depth or an equivalent protection limit. The Rust raw-tree
+   decoder uses `DEFAULT_MAX_TREE_DEPTH` by default and exposes
+   `decode_with_max_depth` for callers that need a different bound;
 10. the absence of infinite loops in base-128 numbers and boundary-terminated lists.
 
 Unknown sections can be skipped. Unknown category-5 nodes are preserved as raw
