@@ -168,5 +168,23 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             "fixture {} has unread AST bytes",
             path.display()
         );
+
+        let package = nodes
+            .get(0)
+            .expect("ASTs section has a first node")
+            .decode_package()
+            .unwrap_or_else(|error| {
+                panic!("failed to parse package in {}: {error}", path.display())
+            });
+        assert!(
+            names.get(package.path_name).is_some(),
+            "fixture {} has an unresolved package path name",
+            path.display()
+        );
+        assert!(
+            !package.stats.is_empty(),
+            "fixture {} has no package stats",
+            path.display()
+        );
     }
 }

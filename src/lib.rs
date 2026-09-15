@@ -4,7 +4,9 @@ pub mod name_table;
 pub mod reader;
 pub mod section;
 
-pub use ast::{AstError, NodeCategory, RawNode, RawNodes};
+pub use ast::{
+    AstError, NodeCategory, PACKAGE_TAG, PackageNode, RawNode, RawNodes, TERMREFPKG_TAG,
+};
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};

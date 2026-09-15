@@ -1,6 +1,9 @@
 use crate::reader::{ReadError, Reader};
 use std::fmt;
 
+pub const TERMREFPKG_TAG: u8 = 64;
+pub const PACKAGE_TAG: u8 = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
     Category1,
@@ -46,10 +49,27 @@ pub struct RawNodes<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageNode<'a> {
+    pub path_name: u32,
+    pub stats: RawNodes<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AstError {
     Read(ReadError),
-    InvalidTag { tag: u8, offset: usize },
-    UnsupportedCategory { tag: u8, offset: usize },
+    InvalidTag {
+        tag: u8,
+        offset: usize,
+    },
+    UnsupportedCategory {
+        tag: u8,
+        offset: usize,
+    },
+    UnexpectedTag {
+        expected: u8,
+        actual: u8,
+        offset: usize,
+    },
 }
 
 impl fmt::Display for AstError {
@@ -62,6 +82,14 @@ impl fmt::Display for AstError {
             Self::UnsupportedCategory { tag, offset } => write!(
                 formatter,
                 "cannot determine a raw AST node boundary for category of tag {tag} at offset {offset}"
+            ),
+            Self::UnexpectedTag {
+                expected,
+                actual,
+                offset,
+            } => write!(
+                formatter,
+                "expected AST tag {expected} at offset {offset}, found {actual}"
             ),
         }
     }
@@ -128,9 +156,36 @@ impl<'a> RawNodes<'a> {
     }
 }
 
+impl<'a> RawNode<'a> {
+    pub fn decode_package(&self) -> Result<PackageNode<'a>, AstError> {
+        let mut reader = self.reader();
+        if self.tag != PACKAGE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: PACKAGE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let path_offset = reader.position();
+        let path_tag = reader.read_u8()?;
+        if path_tag != TERMREFPKG_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TERMREFPKG_TAG,
+                actual: path_tag,
+                offset: self.offset + path_offset,
+            });
+        }
+        let path_name = reader.read_nat()?;
+        let stats = RawNodes::decode(&mut reader)?;
+
+        Ok(PackageNode { path_name, stats })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AstError, NodeCategory, RawNodes};
+    use super::{AstError, NodeCategory, PACKAGE_TAG, RawNodes, TERMREFPKG_TAG};
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -183,5 +238,17 @@ mod tests {
                 remaining: 1,
             }))
         );
+    }
+
+    #[test]
+    fn decodes_a_package_path_and_its_raw_stats() {
+        let bytes = [PACKAGE_TAG, 0x84, TERMREFPKG_TAG, 0x85, 0x81, 0x80];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let package = nodes.get(0).unwrap().decode_package().unwrap();
+
+        assert_eq!(package.path_name, 5);
+        assert_eq!(package.stats.len(), 1);
+        assert_eq!(package.stats.get(0).unwrap().tag, 129);
     }
 }
