@@ -674,6 +674,11 @@ All position headers and deltas are serialized as `Int`; line counts and line
 sizes remain `Nat` values. The implementation must preserve this distinction
 together with the section boundary.
 
+`EncodedSection::attributes()`, `EncodedSection::comments()`, and
+`EncodedSection::positions()` own typed section payloads and expose a borrowed
+`Section` view for assembling a `SectionTable`. `EncodedSection::raw()` covers
+unknown or application-specific sections without requiring a guessed grammar.
+
 ## 10. Comments
 
 The `Comments` section contains entries of the form:

@@ -16,6 +16,18 @@ pub struct SectionTable<'a> {
     sections: Vec<Section<'a>>,
 }
 
+/// Owns an encoded section payload while it is being assembled into a file.
+///
+/// [`EncodedSection::section`] provides a borrowed [`Section`] view that can
+/// be passed to [`SectionTable::from_sections`]. Keeping the owner alive also
+/// keeps that view valid, which makes typed section encoding convenient for
+/// programmatically built files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedSection {
+    name: NameRef,
+    payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardSection {
     Asts,
@@ -368,6 +380,54 @@ impl<'a> Section<'a> {
     }
 }
 
+impl EncodedSection {
+    /// Create an encoded section from an already serialized payload.
+    pub fn raw(name: NameRef, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            name,
+            payload: payload.into(),
+        }
+    }
+
+    /// Encode an `Attributes` section payload and retain ownership of it.
+    pub fn attributes(name: NameRef, attributes: &[Attribute]) -> Result<Self, WriteError> {
+        let mut writer = Writer::new();
+        Attribute::encode_all(attributes, &mut writer)?;
+        Ok(Self::raw(name, writer.into_inner()))
+    }
+
+    /// Encode a `Comments` section payload and retain ownership of it.
+    pub fn comments(name: NameRef, comments: &[Comment]) -> Result<Self, WriteError> {
+        let mut writer = Writer::new();
+        Comment::encode_all(comments, &mut writer)?;
+        Ok(Self::raw(name, writer.into_inner()))
+    }
+
+    /// Encode a `Positions` section payload and retain ownership of it.
+    pub fn positions(name: NameRef, positions: &PositionSection) -> Result<Self, WriteError> {
+        let mut writer = Writer::new();
+        positions.encode(&mut writer)?;
+        Ok(Self::raw(name, writer.into_inner()))
+    }
+
+    pub fn name(&self) -> NameRef {
+        self.name
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Borrow this owned payload as a regular section.
+    pub fn section(&self) -> Section<'_> {
+        Section::new(self.name, &self.payload)
+    }
+
+    pub fn into_parts(self) -> (NameRef, Vec<u8>) {
+        (self.name, self.payload)
+    }
+}
+
 impl<'a> SectionTable<'a> {
     pub fn from_sections(sections: Vec<Section<'a>>) -> Self {
         Self { sections }
@@ -450,7 +510,8 @@ impl<'a> SectionTable<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Attribute, Comment, PositionEntry, PositionSection, Section, SectionError, SectionTable,
+        Attribute, Comment, EncodedSection, PositionEntry, PositionSection, Section, SectionError,
+        SectionTable,
     };
     use crate::reader::{ReadError, Reader};
     use crate::writer::{WriteError, Writer};
@@ -476,6 +537,18 @@ mod tests {
             payload: writer.as_slice(),
         };
         assert_eq!(section.decode_attributes().unwrap(), attributes);
+    }
+
+    #[test]
+    fn builds_an_owned_attributes_section() {
+        let encoded = EncodedSection::attributes(3, &[Attribute::ExplicitNulls]).unwrap();
+
+        assert_eq!(encoded.name(), 3);
+        assert_eq!(encoded.payload(), &[2]);
+        assert_eq!(
+            encoded.section().decode_attributes().unwrap(),
+            vec![Attribute::ExplicitNulls]
+        );
     }
 
     #[test]
@@ -517,6 +590,43 @@ mod tests {
             payload: writer.as_slice(),
         };
         assert_eq!(section.decode_comments().unwrap(), comments);
+    }
+
+    #[test]
+    fn builds_an_owned_comments_section() {
+        let comments = [Comment {
+            address: 4,
+            text: "comment".to_owned(),
+            coordinates: -1,
+        }];
+        let encoded = EncodedSection::comments(2, &comments).unwrap();
+
+        assert_eq!(encoded.name(), 2);
+        assert_eq!(encoded.section().decode_comments().unwrap(), comments);
+    }
+
+    #[test]
+    fn builds_an_owned_positions_section() {
+        let positions = PositionSection {
+            line_sizes: vec![12, 8],
+            entries: vec![PositionEntry::Association {
+                address_delta: 1,
+                start_delta: Some(2),
+                end_delta: None,
+                point_delta: Some(-1),
+            }],
+        };
+        let encoded = EncodedSection::positions(1, &positions).unwrap();
+
+        assert_eq!(encoded.name(), 1);
+        assert_eq!(encoded.section().decode_positions().unwrap(), positions);
+    }
+
+    #[test]
+    fn builds_an_owned_raw_section() {
+        let encoded = EncodedSection::raw(9, vec![1, 2, 3]);
+
+        assert_eq!(encoded.into_parts(), (9, vec![1, 2, 3]));
     }
 
     #[test]
