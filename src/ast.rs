@@ -2093,6 +2093,89 @@ impl<'a> DefinitionTail<'a> {
     }
 }
 
+impl<'a> DefinitionBody<'a> {
+    pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        let tag = match self {
+            Self::ValDef { .. } => VALDEF_TAG,
+            Self::TypeDef { .. } => TYPEDEF_TAG,
+        };
+        encode_length_node(tag, writer, |payload| {
+            payload.write_nat(name);
+            match self {
+                Self::ValDef {
+                    type_tree,
+                    rhs,
+                    tail,
+                } => {
+                    type_tree.encode(payload)?;
+                    if let Some(rhs) = rhs {
+                        rhs.encode(payload)?;
+                    }
+                    for entry in tail {
+                        entry.encode(payload)?;
+                    }
+                }
+                Self::TypeDef {
+                    type_or_template,
+                    tail,
+                } => {
+                    type_or_template.encode(payload)?;
+                    for entry in tail {
+                        entry.encode(payload)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> DefDefBody<'a> {
+    pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(DEFDEF_TAG, writer, |payload| {
+            payload.write_nat(name);
+            for parameter in &self.parameters {
+                parameter.encode(payload)?;
+            }
+            for clause in &self.clauses {
+                if !matches!(*clause, EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG) {
+                    return Err(TermEncodeError::InvalidValue { tag: *clause });
+                }
+                payload.write_u8(*clause);
+            }
+            self.return_type.encode(payload)?;
+            if let Some(rhs) = &self.rhs {
+                rhs.encode(payload)?;
+            }
+            for entry in &self.tail {
+                entry.encode(payload)?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> TemplateStructure<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(TEMPLATE_TAG, writer, |payload| {
+            for parameter in &self.type_params {
+                parameter.encode(payload)?;
+            }
+            for parameter in &self.term_params {
+                parameter.encode(payload)?;
+            }
+            encode_trees(&self.parents, payload)?;
+            if let Some(self_def) = &self.self_def {
+                self_def.encode(payload)?;
+            }
+            if self.split_clause {
+                payload.write_u8(SPLITCLAUSE_TAG);
+            }
+            self.stats.encode(payload).map_err(TermEncodeError::from)
+        })
+    }
+}
+
 impl<'a> ApplyNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(APPLY_TAG, writer, |payload| {
@@ -4824,6 +4907,35 @@ mod tests {
         assert_structured_round_trip(&[TEMPLATE_TAG, 0x80], |raw, writer| {
             raw.decode_template().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn encodes_definition_bodies_and_template_structure() {
+        assert_structured_round_trip(&[VALDEF_TAG, 0x84, 0x85, 2, 3, 17], |raw, writer| {
+            raw.decode_definition_body().unwrap().encode(5, writer)
+        });
+        assert_structured_round_trip(&[DEFDEF_TAG, 0x84, 0x85, 2, 3, 17], |raw, writer| {
+            raw.decode_defdef_body().unwrap().encode(5, writer)
+        });
+        assert_structured_round_trip(
+            &[TYPEDEF_TAG, 0x84, 0x85, TEMPLATE_TAG, 0x80, 17],
+            |raw, writer| raw.decode_definition_body().unwrap().encode(5, writer),
+        );
+
+        assert_structured_round_trip(
+            &[
+                TEMPLATE_TAG,
+                0x87,
+                2,
+                SELFDEF_TAG,
+                0x85,
+                3,
+                SPLITCLAUSE_TAG,
+                VALDEF_TAG,
+                0x80,
+            ],
+            |raw, writer| raw.decode_template_structure().unwrap().encode(writer),
+        );
     }
 
     fn assert_structured_round_trip<F>(bytes: &[u8], encode: F)
