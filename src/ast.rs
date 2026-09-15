@@ -11,6 +11,8 @@ pub const PACKAGE_TAG: u8 = 128;
 pub const VALDEF_TAG: u8 = 129;
 pub const DEFDEF_TAG: u8 = 130;
 pub const TYPEDEF_TAG: u8 = 131;
+pub const ANDTYPE_TAG: u8 = 165;
+pub const ORTYPE_TAG: u8 = 167;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
 pub const APPLY_TAG: u8 = 136;
@@ -236,6 +238,13 @@ pub struct IdentNode<'a> {
     pub tag: u8,
     pub name: u32,
     pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryTypeNode<'a> {
+    pub tag: u8,
+    pub left: RawTree<'a>,
+    pub right: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -795,6 +804,40 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_and_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
+        self.decode_binary_type(ANDTYPE_TAG)
+    }
+
+    pub fn decode_or_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
+        self.decode_binary_type(ORTYPE_TAG)
+    }
+
+    fn decode_binary_type(&self, expected: u8) -> Result<BinaryTypeNode<'a>, AstError> {
+        if self.tag != expected {
+            return Err(AstError::UnexpectedTag {
+                expected,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let left = RawTree::decode(&mut reader)?;
+        let right = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(BinaryTypeNode {
+            tag: self.tag,
+            left,
+            right,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1170,14 +1213,14 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
-        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
-        IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind,
-        ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG,
-        ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
-        SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG,
-        THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
-        TypedNode, VALDEF_TAG, WHILE_TAG,
+        ANDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG,
+        DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
+        EXPORT_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
+        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1972,6 +2015,46 @@ mod tests {
         };
 
         assert!(node.decode_select_outer().is_err());
+    }
+
+    #[test]
+    fn decodes_and_and_or_types_with_the_shared_structure() {
+        for tag in [ANDTYPE_TAG, ORTYPE_TAG] {
+            let bytes = [tag, 0x82, 2, 5];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let node = if tag == ANDTYPE_TAG {
+                nodes.get(0).unwrap().decode_and_type().unwrap()
+            } else {
+                nodes.get(0).unwrap().decode_or_type().unwrap()
+            };
+
+            assert_eq!(node.tag, tag);
+            assert!(matches!(node.left, RawTree::Leaf(_)));
+            assert!(matches!(node.right, RawTree::Leaf(_)));
+        }
+    }
+
+    #[test]
+    fn rejects_a_binary_type_with_a_missing_operand() {
+        let node = RawNode {
+            tag: ANDTYPE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert!(node.decode_and_type().is_err());
+    }
+
+    #[test]
+    fn rejects_a_binary_type_with_an_extra_tree() {
+        let node = RawNode {
+            tag: ORTYPE_TAG,
+            offset: 0,
+            payload: &[2, 5, 3],
+        };
+
+        assert!(node.decode_or_type().is_err());
     }
 
     #[test]
