@@ -15,6 +15,7 @@ pub const ANDTYPE_TAG: u8 = 165;
 pub const ORTYPE_TAG: u8 = 167;
 pub const APPLIEDTYPE_TAG: u8 = 161;
 pub const APPLIEDTPT_TAG: u8 = 162;
+pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
 pub const APPLY_TAG: u8 = 136;
@@ -254,6 +255,11 @@ pub struct AppliedTypeNode<'a> {
     pub tag: u8,
     pub tycon: RawTree<'a>,
     pub arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlexibleTypeNode<'a> {
+    pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,6 +876,27 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_flexible_type(&self) -> Result<FlexibleTypeNode<'a>, AstError> {
+        if self.tag != FLEXIBLETYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: FLEXIBLETYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let underlying_type = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(FlexibleTypeNode { underlying_type })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1247,11 +1274,11 @@ mod tests {
     use super::{
         ANDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode,
         AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
-        DefinitionTail, ELIDED_TAG, EXPORT_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG,
-        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG,
-        NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG,
-        REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG,
-        SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
+        DefinitionTail, ELIDED_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
+        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
+        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode,
+        RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG,
+        SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
         TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
         WHILE_TAG,
     };
@@ -2117,6 +2144,27 @@ mod tests {
         };
 
         assert!(node.decode_applied_type().is_err());
+    }
+
+    #[test]
+    fn decodes_a_flexible_type_with_one_underlying_tree() {
+        let bytes = [FLEXIBLETYPE_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_flexible_type().unwrap();
+
+        assert!(matches!(node.underlying_type, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn rejects_a_flexible_type_with_an_extra_tree() {
+        let node = RawNode {
+            tag: FLEXIBLETYPE_TAG,
+            offset: 0,
+            payload: &[2, 3],
+        };
+
+        assert!(node.decode_flexible_type().is_err());
     }
 
     #[test]
