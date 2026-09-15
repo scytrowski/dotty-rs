@@ -139,6 +139,30 @@ impl<'a> Reader<'a> {
         Ok(bytes)
     }
 
+    pub fn read_sub_reader(&mut self, length: usize) -> Result<Reader<'a>, ReadError> {
+        let start = self.offset;
+        let end = start.checked_add(length).ok_or(ReadError::UnexpectedEof {
+            offset: start,
+            needed: length,
+            remaining: self.remaining(),
+        })?;
+
+        if end > self.limit {
+            return Err(ReadError::UnexpectedEof {
+                offset: start,
+                needed: length,
+                remaining: self.remaining(),
+            });
+        }
+
+        self.offset = end;
+        Ok(Reader {
+            bytes: self.bytes,
+            offset: start,
+            limit: end,
+        })
+    }
+
     pub fn read_nat(&mut self) -> Result<u32, ReadError> {
         let (value, _) = self.read_base128()?;
         u32::try_from(value).map_err(|_| ReadError::IntegerOverflow {

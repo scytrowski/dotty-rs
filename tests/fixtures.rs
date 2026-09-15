@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tasty_rs::Header;
+use tasty_rs::{Header, NameTable, Reader};
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -82,6 +82,31 @@ fn all_tasty_fixtures_have_the_scala_3_9_header() {
             header.tooling_version,
             "Scala 3.9.0",
             "fixture {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn all_tasty_fixtures_have_a_valid_name_table() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let mut reader = Reader::new(&bytes);
+        Header::decode(&mut reader).unwrap_or_else(|error| {
+            panic!("failed to parse header in {}: {error}", path.display())
+        });
+        let names = NameTable::decode(&mut reader)
+            .unwrap_or_else(|error| panic!("failed to parse names in {}: {error}", path.display()));
+
+        assert!(
+            !names.is_empty(),
+            "fixture {} has an empty name table",
+            path.display()
+        );
+        assert!(
+            reader.position() < bytes.len(),
+            "fixture {} has no bytes after its name table",
             path.display()
         );
     }
