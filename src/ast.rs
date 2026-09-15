@@ -3389,10 +3389,11 @@ impl<'a> ParameterNode<'a> {
             Self::TypeParam { name, .. } => (TYPEPARAM_TAG, *name),
             Self::TermParam { name, .. } => (PARAM_TAG, *name),
         };
-        writer.write_u8(tag);
-        writer.write_nat(name);
-        writer.write_length_prefixed_bytes(self.body())?;
-        Ok(())
+        encode_length_node(tag, writer, |payload| {
+            payload.write_nat(name);
+            payload.write_bytes(self.body());
+            Ok(())
+        })
     }
 }
 
@@ -6160,6 +6161,10 @@ mod tests {
         assert_structured_round_trip(&[TEMPLATE_TAG, 0x80], |raw, writer| {
             raw.decode_template().unwrap().encode(writer)
         });
+        assert_structured_round_trip(
+            &[TEMPLATE_TAG, 0x85, TYPEPARAM_TAG, 0x83, 0x81, 2, 17],
+            |raw, writer| raw.decode_template().unwrap().encode(writer),
+        );
     }
 
     #[test]
