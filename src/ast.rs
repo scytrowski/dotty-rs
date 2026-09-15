@@ -17,6 +17,8 @@ pub const APPLIEDTYPE_TAG: u8 = 161;
 pub const APPLIEDTPT_TAG: u8 = 162;
 pub const TYPEBOUNDS_TAG: u8 = 163;
 pub const TYPEBOUNDSTPT_TAG: u8 = 164;
+pub const SUPERTYPE_TAG: u8 = 158;
+pub const MATCHCASETYPE_TAG: u8 = 192;
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
 pub const ANNOTATEDTPT_TAG: u8 = 154;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
@@ -846,6 +848,14 @@ impl<'a> RawNode<'a> {
         self.decode_binary_type(ORTYPE_TAG)
     }
 
+    pub fn decode_super_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
+        self.decode_binary_type(SUPERTYPE_TAG)
+    }
+
+    pub fn decode_matchcase_type(&self) -> Result<BinaryTypeNode<'a>, AstError> {
+        self.decode_binary_type(MATCHCASETYPE_TAG)
+    }
+
     fn decode_binary_type(&self, expected: u8) -> Result<BinaryTypeNode<'a>, AstError> {
         if self.tag != expected {
             return Err(AstError::UnexpectedTag {
@@ -1358,12 +1368,12 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
         FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
-        ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
-        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
-        RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode,
-        VALDEF_TAG, WHILE_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, NAMEDARG_TAG, NEW_TAG,
+        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG,
+        RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG,
+        SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG,
+        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
+        TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2162,14 +2172,16 @@ mod tests {
 
     #[test]
     fn decodes_and_and_or_types_with_the_shared_structure() {
-        for tag in [ANDTYPE_TAG, ORTYPE_TAG] {
+        for tag in [ANDTYPE_TAG, ORTYPE_TAG, SUPERTYPE_TAG, MATCHCASETYPE_TAG] {
             let bytes = [tag, 0x82, 2, 5];
             let mut reader = Reader::new(&bytes);
             let nodes = RawNodes::decode(&mut reader).unwrap();
-            let node = if tag == ANDTYPE_TAG {
-                nodes.get(0).unwrap().decode_and_type().unwrap()
-            } else {
-                nodes.get(0).unwrap().decode_or_type().unwrap()
+            let node = match tag {
+                ANDTYPE_TAG => nodes.get(0).unwrap().decode_and_type().unwrap(),
+                ORTYPE_TAG => nodes.get(0).unwrap().decode_or_type().unwrap(),
+                SUPERTYPE_TAG => nodes.get(0).unwrap().decode_super_type().unwrap(),
+                MATCHCASETYPE_TAG => nodes.get(0).unwrap().decode_matchcase_type().unwrap(),
+                _ => unreachable!("all binary type tags are covered above"),
             };
 
             assert_eq!(node.tag, tag);
