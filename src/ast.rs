@@ -14,6 +14,8 @@ pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
 pub const ASSIGN_TAG: u8 = 139;
 pub const BLOCK_TAG: u8 = 140;
+pub const RETURN_TAG: u8 = 144;
+pub const WHILE_TAG: u8 = 145;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
 pub const EXPORT_TAG: u8 = 177;
@@ -157,6 +159,18 @@ pub struct TypedNode<'a> {
 pub struct AssignNode<'a> {
     pub left: RawTree<'a>,
     pub right: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnNode<'a> {
+    pub target: u32,
+    pub expression: Option<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileNode<'a> {
+    pub condition: RawTree<'a>,
+    pub body: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,6 +655,48 @@ impl<'a> RawNode<'a> {
         Ok(AssignNode { left, right })
     }
 
+    pub fn decode_return(&self) -> Result<ReturnNode<'a>, AstError> {
+        if self.tag != RETURN_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: RETURN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let target = reader.read_nat()?;
+        let expression = if reader.is_at_end() {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+
+        Ok(ReturnNode { target, expression })
+    }
+
+    pub fn decode_while(&self) -> Result<WhileNode<'a>, AstError> {
+        if self.tag != WHILE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: WHILE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let condition = RawTree::decode(&mut reader)?;
+        let body = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(WhileNode { condition, body })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -830,8 +886,8 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody,
         DefinitionBody, DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG,
         ImportExportKind, ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG,
-        RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPED_TAG,
-        TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
+        RETURN_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
+        TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1172,5 +1228,27 @@ mod tests {
 
         assert!(matches!(assign.left, RawTree::Leaf(_)));
         assert!(matches!(assign.right, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn decodes_return_target_with_optional_expression() {
+        let bytes = [RETURN_TAG, 0x83, 0x85, TERMREFPKG_TAG, 0x81];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let return_node = nodes.get(0).unwrap().decode_return().unwrap();
+
+        assert_eq!(return_node.target, 5);
+        assert!(matches!(return_node.expression, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn decodes_while_condition_and_body() {
+        let bytes = [WHILE_TAG, 0x83, 3, TERMREFPKG_TAG, 0x81];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let while_node = nodes.get(0).unwrap().decode_while().unwrap();
+
+        assert!(matches!(while_node.condition, RawTree::Leaf(_)));
+        assert!(matches!(while_node.body, RawTree::Leaf(_)));
     }
 }
