@@ -411,6 +411,12 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
             "fixture {}",
             path.display()
         );
+        assert_eq!(
+            file.structured_asts().unwrap().len(),
+            file.asts().unwrap().len(),
+            "fixture {}",
+            path.display()
+        );
         let ast_section = file.section(StandardSection::Asts).unwrap();
         let asts = file.asts().unwrap();
         let encoded_asts = asts.encode_with_addresses().unwrap_or_else(|error| {

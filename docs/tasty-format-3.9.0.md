@@ -388,6 +388,9 @@ Length-delimited nodes can be routed through `RawNode::decode_structured()`;
 it returns a `StructuredNode` variant for supported node grammars and a `Raw`
 variant for unknown category-5 tags.
 
+At file level, `TastyFile::structured_asts()` applies this dispatch to every
+top-level node while retaining the original borrowed payloads.
+
 ### 6.6. Constants
 
 ```text

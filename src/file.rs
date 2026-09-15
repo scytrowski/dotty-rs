@@ -1,4 +1,4 @@
-use crate::ast::{AstError, RawNodes};
+use crate::ast::{AstError, RawNodes, StructuredNode};
 use crate::header::{Header, HeaderError};
 use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
@@ -231,6 +231,14 @@ impl<'a> TastyFile<'a> {
         Ok(nodes)
     }
 
+    pub fn structured_asts(&self) -> Result<Vec<StructuredNode<'a>>, TastyFileError> {
+        Ok(self
+            .asts()?
+            .iter()
+            .map(|node| node.decode_structured())
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
         let attributes = self
             .section(StandardSection::Attributes)
@@ -334,6 +342,7 @@ impl<'a> TastyFile<'a> {
 #[cfg(test)]
 mod tests {
     use super::{TastyFile, TastyFileError};
+    use crate::ast::StructuredNode;
     use crate::section::StandardSection;
 
     #[test]
@@ -348,6 +357,16 @@ mod tests {
         assert!(file.attributes().unwrap().is_some());
         assert!(file.comments().unwrap().is_some());
         assert!(file.positions().unwrap().is_some());
+    }
+
+    #[test]
+    fn decodes_fixture_asts_through_the_structured_file_api() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+        let nodes = file.structured_asts().unwrap();
+
+        assert!(!nodes.is_empty());
+        assert!(matches!(nodes.first(), Some(StructuredNode::Package(_))));
     }
 
     #[test]
