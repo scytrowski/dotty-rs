@@ -5,6 +5,7 @@ pub mod name_table;
 pub mod reader;
 pub mod section;
 pub mod term;
+pub mod writer;
 
 pub use ast::{
     ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG,
@@ -44,6 +45,7 @@ pub use section::{
     SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{RawTree, SimpleTerm, TermError, TermValue};
+pub use writer::{WriteError, Writer};
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
