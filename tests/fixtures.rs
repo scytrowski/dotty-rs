@@ -186,5 +186,18 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             "fixture {} has no package stats",
             path.display()
         );
+
+        for stat in package.stats.iter() {
+            if matches!(stat.tag, 129..=131) {
+                let definition = stat.decode_definition().unwrap_or_else(|error| {
+                    panic!("failed to parse definition in {}: {error}", path.display())
+                });
+                assert!(
+                    names.get(definition.name()).is_some(),
+                    "fixture {} has an unresolved definition name",
+                    path.display()
+                );
+            }
+        }
     }
 }

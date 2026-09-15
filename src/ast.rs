@@ -3,6 +3,9 @@ use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
 pub const PACKAGE_TAG: u8 = 128;
+pub const VALDEF_TAG: u8 = 129;
+pub const DEFDEF_TAG: u8 = 130;
+pub const TYPEDEF_TAG: u8 = 131;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -52,6 +55,35 @@ pub struct RawNodes<'a> {
 pub struct PackageNode<'a> {
     pub path_name: u32,
     pub stats: RawNodes<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionNode<'a> {
+    ValDef { name: u32, body: &'a [u8] },
+    DefDef { name: u32, body: &'a [u8] },
+    TypeDef { name: u32, body: &'a [u8] },
+}
+
+impl<'a> DefinitionNode<'a> {
+    pub fn name(&self) -> u32 {
+        match self {
+            Self::ValDef { name, .. } | Self::DefDef { name, .. } | Self::TypeDef { name, .. } => {
+                *name
+            }
+        }
+    }
+
+    pub fn body(&self) -> &'a [u8] {
+        match self {
+            Self::ValDef { body, .. } | Self::DefDef { body, .. } | Self::TypeDef { body, .. } => {
+                body
+            }
+        }
+    }
+
+    pub fn body_reader(&self) -> Reader<'a> {
+        Reader::new(self.body())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,11 +213,36 @@ impl<'a> RawNode<'a> {
 
         Ok(PackageNode { path_name, stats })
     }
+
+    pub fn decode_definition(&self) -> Result<DefinitionNode<'a>, AstError> {
+        let mut reader = self.reader();
+        let name = match self.tag {
+            VALDEF_TAG | DEFDEF_TAG | TYPEDEF_TAG => reader.read_nat()?,
+            _ => {
+                return Err(AstError::UnexpectedTag {
+                    expected: VALDEF_TAG,
+                    actual: self.tag,
+                    offset: self.offset,
+                });
+            }
+        };
+        let body = reader.read_bytes(reader.remaining())?;
+
+        Ok(match self.tag {
+            VALDEF_TAG => DefinitionNode::ValDef { name, body },
+            DEFDEF_TAG => DefinitionNode::DefDef { name, body },
+            TYPEDEF_TAG => DefinitionNode::TypeDef { name, body },
+            _ => unreachable!("definition tag was checked above"),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AstError, NodeCategory, PACKAGE_TAG, RawNodes, TERMREFPKG_TAG};
+    use super::{
+        AstError, DefinitionNode, NodeCategory, PACKAGE_TAG, RawNodes, TERMREFPKG_TAG, TYPEDEF_TAG,
+        VALDEF_TAG,
+    };
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -250,5 +307,34 @@ mod tests {
         assert_eq!(package.path_name, 5);
         assert_eq!(package.stats.len(), 1);
         assert_eq!(package.stats.get(0).unwrap().tag, 129);
+    }
+
+    #[test]
+    fn decodes_a_definition_name_and_preserves_its_remaining_body() {
+        let bytes = [VALDEF_TAG, 0x83, 0x81, b'a', b'b'];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let definition = nodes.get(0).unwrap().decode_definition().unwrap();
+
+        assert_eq!(
+            definition,
+            DefinitionNode::ValDef {
+                name: 1,
+                body: b"ab"
+            }
+        );
+        assert_eq!(definition.body_reader().remaining(), 2);
+    }
+
+    #[test]
+    fn decodes_a_typedef_using_the_same_name_header() {
+        let bytes = [TYPEDEF_TAG, 0x81, 0x81];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            nodes.get(0).unwrap().decode_definition(),
+            Ok(DefinitionNode::TypeDef { name: 1, body: b"" })
+        );
     }
 }
