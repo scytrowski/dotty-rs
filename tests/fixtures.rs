@@ -464,6 +464,25 @@ fn all_tasty_fixture_top_level_definitions_decode_structurally() {
                     path.display()
                 )
             });
+
+            if matches!(
+                node.tag,
+                PACKAGE_TAG | VALDEF_TAG | DEFDEF_TAG | TYPEDEF_TAG | IMPORT_TAG | EXPORT_TAG
+            ) {
+                let structured = node.decode_structured().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to dispatch top-level tag {} in {}: {error}",
+                        node.tag,
+                        path.display()
+                    )
+                });
+                assert!(
+                    !matches!(structured, tasty_rs::StructuredNode::Raw(_)),
+                    "known top-level tag {} was not dispatched structurally in {}",
+                    node.tag,
+                    path.display()
+                );
+            }
         }
     }
 }

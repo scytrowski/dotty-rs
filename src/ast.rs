@@ -148,6 +148,56 @@ pub struct EncodedAstNodes {
     addresses: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuredNode<'a> {
+    Package(PackageNode<'a>),
+    ValDef(DefinitionBody<'a>),
+    DefDef(DefDefBody<'a>),
+    TypeDef(DefinitionBody<'a>),
+    ImportExport(ImportExportNode<'a>),
+    Parameter(ParameterNode<'a>),
+    Apply(ApplyNode<'a>),
+    TypeApply(TypeApplyNode<'a>),
+    Typed(TypedNode<'a>),
+    Assign(AssignNode<'a>),
+    Block(BlockNode<'a>),
+    If(IfNode<'a>),
+    Lambda(LambdaNode<'a>),
+    Match(MatchNode<'a>),
+    Return(ReturnNode<'a>),
+    While(WhileNode<'a>),
+    Try(TryNode<'a>),
+    Inlined(InlinedNode<'a>),
+    SelectOuter(SelectOuterNode<'a>),
+    Repeated(RepeatedNode<'a>),
+    Bind(BindNode<'a>),
+    Alternative(AlternativeNode<'a>),
+    Unapply(UnapplyNode<'a>),
+    Annotated(AnnotatedNode<'a>),
+    CaseDef(CaseDefNode<'a>),
+    Template(TemplateStructure<'a>),
+    Super(SuperNode<'a>),
+    BinaryType(BinaryTypeNode<'a>),
+    RefinedType(RefinedTypeNode<'a>),
+    RefinedTpt(RefinedTptNode<'a>),
+    AppliedType(AppliedTypeNode<'a>),
+    TypeBounds(TypeBoundsNode<'a>),
+    FlexibleType(FlexibleTypeNode<'a>),
+    LambdaTpt(LambdaTptNode<'a>),
+    PolyType(PolyTypeNode<'a>),
+    ParamType(ParamTypeNode),
+    MethodType(MethodTypeNode<'a>),
+    ApplySigPoly(ApplySigPolyNode<'a>),
+    Quote(QuoteNode<'a>),
+    QuotePattern(QuotePatternNode<'a>),
+    SplicePattern(SplicePatternNode<'a>),
+    MatchType(MatchTypeNode<'a>),
+    MatchTpt(MatchTptNode<'a>),
+    InReference(InReferenceNode<'a>),
+    SelectIn(SelectInNode<'a>),
+    Raw(RawNode<'a>),
+}
+
 impl EncodedAstNodes {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
@@ -741,6 +791,77 @@ impl<'a> RawNodes<'a> {
 }
 
 impl<'a> RawNode<'a> {
+    pub fn decode_structured(&self) -> Result<StructuredNode<'a>, AstError> {
+        Ok(match self.tag {
+            PACKAGE_TAG => StructuredNode::Package(self.decode_package()?),
+            VALDEF_TAG => StructuredNode::ValDef(self.decode_definition_body()?),
+            DEFDEF_TAG => StructuredNode::DefDef(self.decode_defdef_body()?),
+            TYPEDEF_TAG => StructuredNode::TypeDef(self.decode_definition_body()?),
+            IMPORT_TAG | EXPORT_TAG => StructuredNode::ImportExport(self.decode_import_export()?),
+            TYPEPARAM_TAG | PARAM_TAG => StructuredNode::Parameter(self.decode_parameter()?),
+            APPLY_TAG => StructuredNode::Apply(self.decode_apply()?),
+            TYPEAPPLY_TAG => StructuredNode::TypeApply(self.decode_type_apply()?),
+            TYPED_TAG => StructuredNode::Typed(self.decode_typed()?),
+            ASSIGN_TAG => StructuredNode::Assign(self.decode_assign()?),
+            BLOCK_TAG => StructuredNode::Block(self.decode_block()?),
+            IF_TAG => StructuredNode::If(self.decode_if()?),
+            LAMBDA_TAG => StructuredNode::Lambda(self.decode_lambda()?),
+            MATCH_TAG => StructuredNode::Match(self.decode_match()?),
+            RETURN_TAG => StructuredNode::Return(self.decode_return()?),
+            WHILE_TAG => StructuredNode::While(self.decode_while()?),
+            TRY_TAG => StructuredNode::Try(self.decode_try()?),
+            INLINED_TAG => StructuredNode::Inlined(self.decode_inlined()?),
+            SELECTOUTER_TAG => StructuredNode::SelectOuter(self.decode_select_outer()?),
+            REPEATED_TAG => StructuredNode::Repeated(self.decode_repeated()?),
+            BIND_TAG => StructuredNode::Bind(self.decode_bind()?),
+            ALTERNATIVE_TAG => StructuredNode::Alternative(self.decode_alternative()?),
+            UNAPPLY_TAG => StructuredNode::Unapply(self.decode_unapply()?),
+            ANNOTATEDTYPE_TAG | ANNOTATEDTPT_TAG => {
+                StructuredNode::Annotated(self.decode_annotated()?)
+            }
+            CASEDEF_TAG => StructuredNode::CaseDef(self.decode_case_def()?),
+            TEMPLATE_TAG => StructuredNode::Template(self.decode_template_structure()?),
+            SUPER_TAG => StructuredNode::Super(self.decode_super()?),
+            SUPERTYPE_TAG | ANDTYPE_TAG | ORTYPE_TAG | MATCHCASETYPE_TAG => {
+                StructuredNode::BinaryType(match self.tag {
+                    SUPERTYPE_TAG => self.decode_super_type()?,
+                    ANDTYPE_TAG => self.decode_and_type()?,
+                    ORTYPE_TAG => self.decode_or_type()?,
+                    MATCHCASETYPE_TAG => self.decode_matchcase_type()?,
+                    _ => unreachable!(),
+                })
+            }
+            REFINEDTYPE_TAG => StructuredNode::RefinedType(self.decode_refined_type()?),
+            REFINEDTPT_TAG => StructuredNode::RefinedTpt(self.decode_refined_tpt()?),
+            APPLIEDTYPE_TAG | APPLIEDTPT_TAG => {
+                StructuredNode::AppliedType(self.decode_applied_type()?)
+            }
+            TYPEBOUNDS_TAG | TYPEBOUNDSTPT_TAG => {
+                StructuredNode::TypeBounds(self.decode_type_bounds()?)
+            }
+            FLEXIBLETYPE_TAG => StructuredNode::FlexibleType(self.decode_flexible_type()?),
+            LAMBDATPT_TAG => StructuredNode::LambdaTpt(self.decode_lambda_tpt()?),
+            POLYTYPE_TAG | TYPELAMBDATYPE_TAG => StructuredNode::PolyType(self.decode_poly_type()?),
+            PARAMTYPE_TAG => StructuredNode::ParamType(self.decode_param_type()?),
+            METHODTYPE_TAG => StructuredNode::MethodType(self.decode_method_type()?),
+            APPLYSIGPOLY_TAG => StructuredNode::ApplySigPoly(self.decode_apply_sigpoly()?),
+            QUOTE_TAG | SPLICE_TAG => StructuredNode::Quote(match self.tag {
+                QUOTE_TAG => self.decode_quote()?,
+                SPLICE_TAG => self.decode_splice()?,
+                _ => unreachable!(),
+            }),
+            QUOTEPATTERN_TAG => StructuredNode::QuotePattern(self.decode_quote_pattern()?),
+            SPLICEPATTERN_TAG => StructuredNode::SplicePattern(self.decode_splice_pattern()?),
+            MATCHTYPE_TAG => StructuredNode::MatchType(self.decode_match_type()?),
+            MATCHTPT_TAG => StructuredNode::MatchTpt(self.decode_match_tpt()?),
+            TERMREFIN_TAG | TYPEREFIN_TAG => {
+                StructuredNode::InReference(self.decode_in_reference()?)
+            }
+            SELECTIN_TAG => StructuredNode::SelectIn(self.decode_select_in()?),
+            _ => StructuredNode::Raw(self.clone()),
+        })
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         if NodeCategory::from_tag(self.tag) != Some(NodeCategory::Category5) {
             return Err(WriteError::InvalidTag { tag: self.tag });
@@ -5154,5 +5275,48 @@ mod tests {
             Err(WriteError::InvalidTag { tag: 127 })
         );
         assert!(writer.as_slice().is_empty());
+    }
+
+    #[test]
+    fn dispatches_a_package_node_to_its_structured_variant() {
+        let node = RawNode {
+            tag: PACKAGE_TAG,
+            offset: 0,
+            payload: &[TERMREFPKG_TAG, 0x81, VALDEF_TAG, 0x80],
+        };
+
+        assert!(matches!(
+            node.decode_structured().unwrap(),
+            super::StructuredNode::Package(package)
+                if package.path_name == 1 && package.stats.len() == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_flexible_type_node_to_its_structured_variant() {
+        let node = RawNode {
+            tag: FLEXIBLETYPE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert!(matches!(
+            node.decode_structured().unwrap(),
+            super::StructuredNode::FlexibleType(_)
+        ));
+    }
+
+    #[test]
+    fn preserves_an_unknown_category_five_node_through_structured_dispatch() {
+        let node = RawNode {
+            tag: 135,
+            offset: 4,
+            payload: b"future",
+        };
+
+        assert_eq!(
+            node.decode_structured().unwrap(),
+            super::StructuredNode::Raw(node)
+        );
     }
 }

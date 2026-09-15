@@ -384,6 +384,10 @@ The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `TERMREFdirect`, `TYPEREFdirect`, and `RECthis` without changing the raw
 representation.
 
+Length-delimited nodes can be routed through `RawNode::decode_structured()`;
+it returns a `StructuredNode` variant for supported node grammars and a `Raw`
+variant for unknown category-5 tags.
+
 ### 6.6. Constants
 
 ```text
