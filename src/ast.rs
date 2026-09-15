@@ -2212,6 +2212,165 @@ impl<'a> ApplySigPolyNode<'a> {
     }
 }
 
+impl<'a> BinaryTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(
+            self.tag,
+            ANDTYPE_TAG | ORTYPE_TAG | SUPERTYPE_TAG | MATCHCASETYPE_TAG
+        ) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            self.left.encode(payload)?;
+            self.right.encode(payload)
+        })
+    }
+}
+
+impl<'a> AppliedTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, APPLIEDTYPE_TAG | APPLIEDTPT_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            self.tycon.encode(payload)?;
+            encode_trees(&self.arguments, payload)
+        })
+    }
+}
+
+impl<'a> FlexibleTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(FLEXIBLETYPE_TAG, writer, |payload| {
+            self.underlying_type.encode(payload)
+        })
+    }
+}
+
+impl<'a> TypeBoundsNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, TYPEBOUNDS_TAG | TYPEBOUNDSTPT_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            self.low_or_alias.encode(payload)?;
+            if let Some(high) = &self.high {
+                high.encode(payload)?;
+            }
+            for variance in &self.variances {
+                if !matches!(*variance, 28 | 29) {
+                    return Err(TermEncodeError::InvalidValue { tag: *variance });
+                }
+                payload.write_u8(*variance);
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> AnnotatedNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, ANNOTATEDTYPE_TAG | ANNOTATEDTPT_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            self.underlying.encode(payload)?;
+            self.annotation.encode(payload)
+        })
+    }
+}
+
+impl ParamTypeNode {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(PARAMTYPE_TAG, writer, |payload| {
+            payload.write_nat(self.binder);
+            payload.write_nat(self.parameter_number);
+            Ok(())
+        })
+    }
+}
+
+impl<'a> PolyTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if !matches!(self.tag, POLYTYPE_TAG | TYPELAMBDATYPE_TAG) {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            self.result_type.encode(payload)?;
+            for type_name in &self.type_names {
+                payload.write_nat(type_name.type_or_bounds);
+                payload.write_nat(type_name.name);
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> MethodTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(METHODTYPE_TAG, writer, |payload| {
+            self.result_type.encode(payload)?;
+            for type_name in &self.type_names {
+                payload.write_nat(type_name.type_or_bounds);
+                payload.write_nat(type_name.name);
+            }
+            for modifier in &self.modifiers {
+                if !is_modifier_tag(*modifier) {
+                    return Err(TermEncodeError::InvalidValue { tag: *modifier });
+                }
+                payload.write_u8(*modifier);
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a> RefinedTypeNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        if self.tag != REFINEDTYPE_TAG {
+            return Err(TermEncodeError::InvalidValue { tag: self.tag });
+        }
+        encode_length_node(self.tag, writer, |payload| {
+            payload.write_nat(self.name);
+            self.parent.encode(payload)?;
+            self.refinement.encode(payload)
+        })
+    }
+}
+
+impl<'a> RefinedTptNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(REFINEDTPT_TAG, writer, |payload| {
+            self.qualifier.encode(payload)?;
+            self.stats.encode(payload).map_err(TermEncodeError::from)
+        })
+    }
+}
+
+impl<'a> ParameterNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        let (tag, name) = match self {
+            Self::TypeParam { name, .. } => (TYPEPARAM_TAG, *name),
+            Self::TermParam { name, .. } => (PARAM_TAG, *name),
+        };
+        writer.write_u8(tag);
+        writer.write_nat(name);
+        writer.write_length_prefixed_bytes(self.body())?;
+        Ok(())
+    }
+}
+
+impl<'a> LambdaTptNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(LAMBDATPT_TAG, writer, |payload| {
+            for parameter in &self.type_params {
+                parameter.encode(payload)?;
+            }
+            self.body.encode(payload)
+        })
+    }
+}
+
 fn encode_length_node<F>(
     tag: u8,
     writer: &mut Writer,
@@ -4349,6 +4508,57 @@ mod tests {
         assert_structured_round_trip(&[APPLYSIGPOLY_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_apply_sigpoly().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn encodes_structured_type_nodes() {
+        assert_structured_round_trip(&[ANDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
+            raw.decode_and_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[APPLIEDTYPE_TAG, 0x83, 2, 3, 4], |raw, writer| {
+            raw.decode_applied_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[FLEXIBLETYPE_TAG, 0x81, 2], |raw, writer| {
+            raw.decode_flexible_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[TYPEBOUNDS_TAG, 0x83, 2, 3, 28], |raw, writer| {
+            raw.decode_type_bounds().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[ANNOTATEDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
+            raw.decode_annotated().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[PARAMTYPE_TAG, 0x82, 0x85, 0x83], |raw, writer| {
+            raw.decode_param_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[POLYTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
+            raw.decode_poly_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[METHODTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
+            raw.decode_method_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(
+            &[
+                REFINEDTYPE_TAG,
+                0x85,
+                0x85,
+                TERMREFPKG_TAG,
+                0x81,
+                TERMREFPKG_TAG,
+                0x82,
+            ],
+            |raw, writer| raw.decode_refined_type().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(
+            &[
+                REFINEDTPT_TAG,
+                0x84,
+                TERMREFPKG_TAG,
+                0x81,
+                PACKAGE_TAG,
+                0x80,
+            ],
+            |raw, writer| raw.decode_refined_tpt().unwrap().encode(writer),
+        );
     }
 
     fn assert_structured_round_trip<F>(bytes: &[u8], encode: F)
