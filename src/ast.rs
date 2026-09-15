@@ -40,6 +40,7 @@ pub const TYPELAMBDATYPE_TAG: u8 = 170;
 pub const METHODTYPE_TAG: u8 = 180;
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
 pub const ANNOTATEDTPT_TAG: u8 = 154;
+pub const ANNOTATION_TAG: u8 = 173;
 pub const PARAMTYPE_TAG: u8 = 172;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
@@ -186,6 +187,7 @@ pub enum StructuredNode<'a> {
     Alternative(AlternativeNode<'a>),
     Unapply(UnapplyNode<'a>),
     Annotated(AnnotatedNode<'a>),
+    Annotation(AnnotationNode<'a>),
     CaseDef(CaseDefNode<'a>),
     Template(TemplateStructure<'a>),
     Super(SuperNode<'a>),
@@ -564,6 +566,12 @@ pub struct AnnotatedNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationNode<'a> {
+    pub tycon: RawTree<'a>,
+    pub full_annotation: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamTypeNode {
     pub binder: u32,
     pub parameter_number: u32,
@@ -857,6 +865,7 @@ impl<'a> RawNode<'a> {
             ANNOTATEDTYPE_TAG | ANNOTATEDTPT_TAG => {
                 StructuredNode::Annotated(self.decode_annotated()?)
             }
+            ANNOTATION_TAG => StructuredNode::Annotation(self.decode_annotation()?),
             CASEDEF_TAG => StructuredNode::CaseDef(self.decode_case_def()?),
             TEMPLATE_TAG => StructuredNode::Template(self.decode_template_structure()?),
             SUPER_TAG => StructuredNode::Super(self.decode_super()?),
@@ -1929,6 +1938,31 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_annotation(&self) -> Result<AnnotationNode<'a>, AstError> {
+        if self.tag != ANNOTATION_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: ANNOTATION_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let tycon = RawTree::decode(&mut reader)?;
+        let full_annotation = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(AnnotationNode {
+            tycon,
+            full_annotation,
+        })
+    }
+
     pub fn decode_param_type(&self) -> Result<ParamTypeNode, AstError> {
         if self.tag != PARAMTYPE_TAG {
             return Err(AstError::UnexpectedTag {
@@ -2674,6 +2708,15 @@ impl<'a> AnnotatedNode<'a> {
     }
 }
 
+impl<'a> AnnotationNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        encode_length_node(ANNOTATION_TAG, writer, |payload| {
+            self.tycon.encode(payload)?;
+            self.full_annotation.encode(payload)
+        })
+    }
+}
+
 impl ParamTypeNode {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PARAMTYPE_TAG, writer, |payload| {
@@ -3370,6 +3413,10 @@ fn collect_structured_ast_refs(
             collect_tree_ast_refs(&annotated.underlying, visitor);
             collect_tree_ast_refs(&annotated.annotation, visitor);
         }
+        StructuredNode::Annotation(annotation) => {
+            collect_tree_ast_refs(&annotation.tycon, visitor);
+            collect_tree_ast_refs(&annotation.full_annotation, visitor);
+        }
         StructuredNode::CaseDef(case_def) => collect_case_def_ast_refs(case_def, visitor),
         StructuredNode::Template(template) => {
             collect_parameters_ast_refs(&template.type_params, visitor)?;
@@ -3509,11 +3556,11 @@ fn read_case_defs<'a>(reader: &mut Reader<'a>) -> Result<Vec<CaseDefNode<'a>>, A
 #[cfg(test)]
 mod tests {
     use super::{
-        ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG,
-        APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BIND_TAG,
-        BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG,
-        DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
-        EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
+        ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, ANNOTATION_TAG,
+        APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstChildNode,
+        AstError, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
+        CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
+        ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
         IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG,
         ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG,
         MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
@@ -5311,6 +5358,9 @@ mod tests {
         assert_structured_round_trip(&[ANNOTATEDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_annotated().unwrap().encode(writer)
         });
+        assert_structured_round_trip(&[ANNOTATION_TAG, 0x82, 2, 3], |raw, writer| {
+            raw.decode_annotation().unwrap().encode(writer)
+        });
         assert_structured_round_trip(&[PARAMTYPE_TAG, 0x82, 0x85, 0x83], |raw, writer| {
             raw.decode_param_type().unwrap().encode(writer)
         });
@@ -5683,6 +5733,22 @@ mod tests {
         node.visit_ast_refs(&mut |reference| visited.push(reference))
             .unwrap();
         assert_eq!(visited, node.ast_refs().unwrap());
+    }
+
+    #[test]
+    fn dispatches_and_decodes_an_annotation_node() {
+        let node = RawNode {
+            tag: ANNOTATION_TAG,
+            offset: 0,
+            payload: &[2, 3],
+        };
+
+        assert!(matches!(
+            node.decode_structured().unwrap(),
+            super::StructuredNode::Annotation(annotation)
+                if matches!(annotation.tycon, RawTree::Leaf(ref term) if term.tag == 2)
+                    && matches!(annotation.full_annotation, RawTree::Leaf(ref term) if term.tag == 3)
+        ));
     }
 
     #[test]

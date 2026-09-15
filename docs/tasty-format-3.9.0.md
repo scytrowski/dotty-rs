@@ -370,6 +370,12 @@ Type = Path
      | TYPELAMBDAtype Length Type TypeName*
 ```
 
+Annotation payloads use the following length-delimited grammar:
+
+```text
+Annotation = ANNOTATION Length Type Term
+```
+
 `ASTRef` is a byte position in the AST payload:
 
 ```text
@@ -397,8 +403,8 @@ top-level node while retaining the original borrowed payloads.
 
 `RawNode::ast_refs()` and `RawNode::visit_ast_refs()` walk the child trees of
 all currently supported structured category-5 nodes, including nested package
-and template statements. Unknown category-5 nodes remain opaque and produce no
-references from this convenience API.
+and template statements, as well as `ANNOTATION` payloads. Unknown category-5
+nodes remain opaque and produce no references from this convenience API.
 
 At file level, `TastyFile::ast_references()` returns the collected edges with
 the owning top-level AST address and the typed target `AstRef`. A target may
