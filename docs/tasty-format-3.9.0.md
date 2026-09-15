@@ -436,6 +436,10 @@ a type it carries zero or more modifiers. `BindNode` exposes these alternatives
 as `BindBody::Pattern` and `BindBody::Type`; bytes after an undecidable pattern
 body are preserved in `BindNode::remainder` for lossless re-encoding.
 
+`MATCHtpt` has an optional bound followed by a required selector. The decoder
+normalizes the one-tree form to `bound = None` and the two-tree form to
+`bound = Some(...)`, while retaining all case definitions in wire order.
+
 ### 6.6. Constants
 
 ```text

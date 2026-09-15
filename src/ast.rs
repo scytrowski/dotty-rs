@@ -534,10 +534,10 @@ pub struct MatchTypeNode<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchTptNode<'a> {
-    /// The grammar has an optional bound followed by a selector, but does
-    /// not encode a presence bit. Preserve the leading trees in order until
-    /// typed context can distinguish the one-tree and two-tree forms.
-    pub prefix: Vec<RawTree<'a>>,
+    /// The optional lower bound is omitted when the type-test has only a
+    /// selector tree.
+    pub bound: Option<RawTree<'a>>,
+    pub selector: RawTree<'a>,
     pub cases: Vec<CaseDefNode<'a>>,
 }
 
@@ -1366,7 +1366,10 @@ fn collect_structured_nodes<'a>(
             trees!(&match_type.cases);
         }
         StructuredNode::MatchTpt(match_tpt) => {
-            trees!(&match_tpt.prefix);
+            if let Some(bound) = &match_tpt.bound {
+                tree!(bound);
+            }
+            tree!(&match_tpt.selector);
             case_defs!(&match_tpt.cases);
         }
         StructuredNode::InReference(reference) => {
@@ -2160,12 +2163,20 @@ impl<'a> RawNode<'a> {
         while !reader.is_at_end() && reader.peek_u8()? != CASEDEF_TAG {
             prefix.push(RawTree::decode(&mut reader)?);
         }
-        if prefix.is_empty() {
-            return Err(AstError::Term(TermError::UnsupportedCategory {
-                tag: self.tag,
-                offset: self.offset,
-            }));
-        }
+        let (bound, selector) = match prefix.len() {
+            1 => (None, prefix.pop().expect("prefix length was checked")),
+            2 => {
+                let selector = prefix.pop().expect("prefix length was checked");
+                let bound = prefix.pop().expect("prefix length was checked");
+                (Some(bound), selector)
+            }
+            _ => {
+                return Err(AstError::UnsupportedCategory {
+                    tag: self.tag,
+                    offset: self.offset,
+                });
+            }
+        };
         let cases = read_case_defs(&mut reader)?;
         if !reader.is_at_end() {
             return Err(AstError::UnsupportedCategory {
@@ -2174,7 +2185,11 @@ impl<'a> RawNode<'a> {
             });
         }
 
-        Ok(MatchTptNode { prefix, cases })
+        Ok(MatchTptNode {
+            bound,
+            selector,
+            cases,
+        })
     }
 
     pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
@@ -3453,7 +3468,10 @@ impl<'a> MatchTypeNode<'a> {
 impl<'a> MatchTptNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(MATCHTPT_TAG, writer, |payload| {
-            encode_trees(&self.prefix, payload)?;
+            if let Some(bound) = &self.bound {
+                bound.encode(payload)?;
+            }
+            self.selector.encode(payload)?;
             for case in &self.cases {
                 case.encode(payload)?;
             }
@@ -4073,7 +4091,10 @@ fn collect_structured_ast_refs(
             collect_trees_ast_refs(&match_type.cases, visitor);
         }
         StructuredNode::MatchTpt(match_tpt) => {
-            collect_trees_ast_refs(&match_tpt.prefix, visitor);
+            if let Some(bound) = &match_tpt.bound {
+                collect_tree_ast_refs(bound, visitor);
+            }
+            collect_tree_ast_refs(&match_tpt.selector, visitor);
             collect_case_defs_ast_refs(&match_tpt.cases, visitor);
         }
         StructuredNode::InReference(reference) => {
@@ -5813,8 +5834,8 @@ mod tests {
     }
 
     #[test]
-    fn decodes_match_tpt_with_one_or_two_leading_trees() {
-        for (payload, expected_prefix_len) in [
+    fn decodes_match_tpt_with_optional_bound() {
+        for (payload, has_bound) in [
             (
                 vec![
                     TERMREFPKG_TAG,
@@ -5826,7 +5847,7 @@ mod tests {
                     TERMREFPKG_TAG,
                     0x83,
                 ],
-                1,
+                false,
             ),
             (
                 vec![
@@ -5841,7 +5862,7 @@ mod tests {
                     TERMREFPKG_TAG,
                     0x84,
                 ],
-                2,
+                true,
             ),
         ] {
             let mut bytes = vec![MATCHTPT_TAG, 0x80 | payload.len() as u8];
@@ -5850,7 +5871,8 @@ mod tests {
             let nodes = RawNodes::decode(&mut reader).unwrap();
             let matched = nodes.get(0).unwrap().decode_match_tpt().unwrap();
 
-            assert_eq!(matched.prefix.len(), expected_prefix_len);
+            assert_eq!(matched.bound.is_some(), has_bound);
+            assert!(matches!(matched.selector, RawTree::Leaf(_)));
             assert_eq!(matched.cases.len(), 1);
             assert!(matched.cases[0].guard.is_none());
         }
@@ -5865,6 +5887,23 @@ mod tests {
         };
 
         assert!(node.decode_match_tpt().is_err());
+    }
+
+    #[test]
+    fn rejects_match_tpt_with_more_than_one_optional_bound() {
+        let node = RawNode {
+            tag: MATCHTPT_TAG,
+            offset: 0,
+            payload: &[2, 3, 4, CASEDEF_TAG, 0x80],
+        };
+
+        assert_eq!(
+            node.decode_match_tpt(),
+            Err(AstError::UnsupportedCategory {
+                tag: MATCHTPT_TAG,
+                offset: 0,
+            })
+        );
     }
 
     #[test]
@@ -6057,6 +6096,10 @@ mod tests {
         );
         assert_structured_round_trip(
             &[MATCHTPT_TAG, 0x85, 2, CASEDEF_TAG, 0x82, 3, 4],
+            |raw, writer| raw.decode_match_tpt().unwrap().encode(writer),
+        );
+        assert_structured_round_trip(
+            &[MATCHTPT_TAG, 0x86, 2, 3, CASEDEF_TAG, 0x82, 4, 5],
             |raw, writer| raw.decode_match_tpt().unwrap().encode(writer),
         );
         assert_structured_round_trip(&[TERMREFIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
