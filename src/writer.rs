@@ -6,7 +6,7 @@ pub enum WriteError {
     NatOverflow { value: u64 },
     IntOverflow { value: i64 },
     AttributeOrder { previous: u8, current: u8 },
-    PositionHeaderCollision { address_delta: u32, flags: u8 },
+    PositionHeaderCollision { address_delta: i64, flags: u8 },
 }
 
 impl fmt::Display for WriteError {

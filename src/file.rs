@@ -249,6 +249,7 @@ mod tests {
         let mut comments = crate::Writer::new();
         crate::Comment::encode_all(
             &[crate::Comment {
+                address: 12,
                 text: "example".to_owned(),
                 coordinates: 0,
             }],

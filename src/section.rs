@@ -45,6 +45,7 @@ pub enum Attribute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
+    pub address: u32,
     pub text: String,
     pub coordinates: i64,
 }
@@ -52,7 +53,7 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PositionEntry {
     Association {
-        address_delta: u32,
+        address_delta: i64,
         start_delta: Option<i64>,
         end_delta: Option<i64>,
         point_delta: Option<i64>,
@@ -113,6 +114,7 @@ impl Attribute {
 impl Comment {
     pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         for comment in comments {
+            writer.write_nat(comment.address);
             writer.write_utf8(&comment.text)?;
             writer.write_long_int(comment.coordinates);
         }
@@ -134,8 +136,12 @@ impl PositionSection {
         for entry in &self.entries {
             match entry {
                 PositionEntry::Source(reference) => {
-                    writer.write_nat(4);
-                    writer.write_nat(*reference);
+                    writer.write_int(4);
+                    writer.write_int(i32::try_from(*reference).map_err(|_| {
+                        WriteError::IntOverflow {
+                            value: i64::from(*reference),
+                        }
+                    })?);
                 }
                 PositionEntry::Association {
                     address_delta,
@@ -146,17 +152,22 @@ impl PositionSection {
                     let flags = u8::from(start_delta.is_some()) << 2
                         | u8::from(end_delta.is_some()) << 1
                         | u8::from(point_delta.is_some());
-                    let header = u64::from(*address_delta) * 8 + u64::from(flags);
-                    if header > u64::from(u32::MAX) {
-                        return Err(WriteError::NatOverflow { value: header });
-                    }
+                    let header = address_delta
+                        .checked_mul(8)
+                        .and_then(|value| value.checked_add(i64::from(flags)))
+                        .ok_or(WriteError::IntOverflow {
+                            value: *address_delta,
+                        })?;
                     if header == 4 {
                         return Err(WriteError::PositionHeaderCollision {
                             address_delta: *address_delta,
                             flags,
                         });
                     }
-                    writer.write_nat(header as u32);
+                    writer.write_int(
+                        i32::try_from(header)
+                            .map_err(|_| WriteError::IntOverflow { value: header })?,
+                    );
                     for delta in [start_delta, end_delta, point_delta].into_iter().flatten() {
                         writer.write_int(
                             i32::try_from(*delta)
@@ -187,6 +198,9 @@ pub enum SectionError {
         current: u8,
         offset: usize,
     },
+    NegativePositionSource {
+        value: i32,
+    },
 }
 
 impl fmt::Display for SectionError {
@@ -212,6 +226,12 @@ impl fmt::Display for SectionError {
                 formatter,
                 "attribute tag {current} at offset {offset} follows tag {previous}"
             ),
+            Self::NegativePositionSource { value } => {
+                write!(
+                    formatter,
+                    "negative source name reference {value} in a TASTy position entry"
+                )
+            }
         }
     }
 }
@@ -277,6 +297,7 @@ impl<'a> Section<'a> {
 
         while !reader.is_at_end() {
             comments.push(Comment {
+                address: reader.read_nat()?,
                 text: reader.read_utf8()?,
                 coordinates: reader.read_long_int()?,
             });
@@ -295,14 +316,18 @@ impl<'a> Section<'a> {
 
         let mut entries = Vec::new();
         while !reader.is_at_end() {
-            let header = reader.read_nat()?;
+            let header = reader.read_int()?;
             if header == 4 {
-                entries.push(PositionEntry::Source(reader.read_nat()?));
+                let reference = reader.read_int()?;
+                if reference < 0 {
+                    return Err(SectionError::NegativePositionSource { value: reference });
+                }
+                entries.push(PositionEntry::Source(reference as u32));
                 continue;
             }
 
             entries.push(PositionEntry::Association {
-                address_delta: header >> 3,
+                address_delta: i64::from(header >> 3),
                 start_delta: if header & 0b100 != 0 {
                     Some(reader.read_int()? as i64)
                 } else {
@@ -472,10 +497,12 @@ mod tests {
     fn encodes_comments_with_unicode_and_signed_coordinates() {
         let comments = vec![
             Comment {
+                address: 12,
                 text: "zażółć".to_owned(),
                 coordinates: -129,
             },
             Comment {
+                address: 24,
                 text: "ok".to_owned(),
                 coordinates: 16_384,
             },
@@ -544,7 +571,7 @@ mod tests {
         let positions = PositionSection {
             line_sizes: Vec::new(),
             entries: vec![PositionEntry::Association {
-                address_delta: u32::MAX,
+                address_delta: i64::from(u32::MAX),
                 start_delta: None,
                 end_delta: None,
                 point_delta: None,
@@ -554,8 +581,8 @@ mod tests {
 
         assert_eq!(
             positions.encode(&mut writer),
-            Err(WriteError::NatOverflow {
-                value: u64::from(u32::MAX) * 8,
+            Err(WriteError::IntOverflow {
+                value: i64::from(u32::MAX) * 8,
             })
         );
     }
@@ -698,12 +725,13 @@ mod tests {
             name: 0,
             offset: 0,
             length: 0,
-            payload: &[0x82, b'h', b'i', 0x83],
+            payload: &[0x81, 0x82, b'h', b'i', 0x83],
         };
 
         assert_eq!(
             section.decode_comments().unwrap(),
             vec![Comment {
+                address: 1,
                 text: "hi".to_owned(),
                 coordinates: 3,
             }]
@@ -716,13 +744,13 @@ mod tests {
             name: 0,
             offset: 0,
             length: 0,
-            payload: &[0x81, b'x'],
+            payload: &[0x81, 0x81, b'x'],
         };
 
         assert_eq!(
             section.decode_comments(),
             Err(SectionError::Read(ReadError::UnexpectedEof {
-                offset: 2,
+                offset: 3,
                 needed: 1,
                 remaining: 0,
             }))

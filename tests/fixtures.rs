@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tasty_rs::{Header, NameTable, RawNodes, Reader, SectionTable, StandardSection, TastyFile};
+use tasty_rs::{
+    Attribute, Comment, Header, NameTable, RawNodes, Reader, SectionTable, StandardSection,
+    TastyFile, Writer,
+};
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -416,5 +419,61 @@ fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
             "fixture {} changed during round-trip",
             path.display()
         );
+    }
+}
+
+#[test]
+fn all_tasty_fixture_standard_sections_round_trip_through_structured_encoders() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for kind in [
+            StandardSection::Attributes,
+            StandardSection::Comments,
+            StandardSection::Positions,
+        ] {
+            let Some(section) = file.section(kind) else {
+                continue;
+            };
+            let mut writer = Writer::new();
+            match kind {
+                StandardSection::Attributes => {
+                    let attributes = section.decode_attributes().unwrap_or_else(|error| {
+                        panic!("failed to decode attributes in {}: {error}", path.display())
+                    });
+                    Attribute::encode_all(&attributes, &mut writer).unwrap_or_else(|error| {
+                        panic!("failed to encode attributes in {}: {error}", path.display())
+                    });
+                }
+                StandardSection::Comments => {
+                    let comments = section.decode_comments().unwrap_or_else(|error| {
+                        panic!("failed to decode comments in {}: {error}", path.display())
+                    });
+                    Comment::encode_all(&comments, &mut writer).unwrap_or_else(|error| {
+                        panic!("failed to encode comments in {}: {error}", path.display())
+                    });
+                }
+                StandardSection::Positions => {
+                    let positions = section.decode_positions().unwrap_or_else(|error| {
+                        panic!("failed to decode positions in {}: {error}", path.display())
+                    });
+                    positions.encode(&mut writer).unwrap_or_else(|error| {
+                        panic!("failed to encode positions in {}: {error}", path.display())
+                    });
+                }
+                StandardSection::Asts => unreachable!("ASTs are tested by the raw round-trip"),
+            }
+
+            assert_eq!(
+                writer.as_slice(),
+                section.payload,
+                "{} section changed during structured round-trip for {}",
+                kind.as_str(),
+                path.display()
+            );
+        }
     }
 }

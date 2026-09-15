@@ -525,7 +525,10 @@ Delta      = Int
 
 `LinesSizes` contains the number of lines followed by the size of each line excluding the trailing `\n`.
 
-`Header` encodes the following values in one `Nat`:
+Each position entry starts with one signed `Int` header. The `SOURCE` entry is
+encoded as the reserved header value `SOURCE = 4`, followed by the source
+name reference encoded as an `Int`. Association headers encode the following
+values:
 
 ```text
 addrDelta << 3
@@ -536,17 +539,21 @@ hasPoint
 
 The flags indicate whether the corresponding deltas are present. Positive and negative deltas are differences relative to the previously recorded position. Nodes with the same position as their parent may be omitted.
 
-The source states that elements of the positions section are serialized as `Int`; the implementation must preserve this rule together with the section boundary.
+All position headers and deltas are serialized as `Int`; line counts and line
+sizes remain `Nat` values. The implementation must preserve this distinction
+together with the section boundary.
 
 ## 10. Comments
 
 The `Comments` section contains entries of the form:
 
 ```text
-Comment = Utf8 LongInt
+Comment = ASTRef Utf8 LongInt
 ```
 
-The first element is the raw comment text encoded as UTF-8. The second element contains the comment coordinates.
+The first element is the address of the AST node to which the comment is
+attached. The comment text is encoded as UTF-8, and the final element contains
+the comment coordinates.
 
 ## 11. Attributes
 
