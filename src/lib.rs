@@ -37,7 +37,7 @@ pub use header::{
     Header, HeaderError, SCALA_3_9_EXPERIMENTAL_VERSION, SCALA_3_9_MAJOR_VERSION,
     SCALA_3_9_MINOR_VERSION, TASTY_MAGIC,
 };
-pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
+pub use name_table::{NameRef, NameTable, NameTableBuilder, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
 pub use section::{
     Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, JAVA_ATTR, OUTLINE_ATTR,

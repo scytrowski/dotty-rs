@@ -63,6 +63,11 @@ pub struct NameTable {
     entries: Vec<RawName>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NameTableBuilder {
+    entries: Vec<RawName>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameTableError {
     Read(ReadError),
@@ -74,6 +79,9 @@ pub enum NameTableError {
     TrailingPayload {
         tag: u8,
         remaining: usize,
+    },
+    EntryOverflow {
+        entry_count: usize,
     },
 }
 
@@ -93,6 +101,10 @@ impl fmt::Display for NameTableError {
                 formatter,
                 "name tag {tag} has {remaining} unconsumed payload bytes"
             ),
+            Self::EntryOverflow { entry_count } => write!(
+                formatter,
+                "cannot assign a 1-based NameRef after {entry_count} name entries"
+            ),
         }
     }
 }
@@ -106,6 +118,10 @@ impl From<ReadError> for NameTableError {
 }
 
 impl NameTable {
+    pub fn builder() -> NameTableBuilder {
+        NameTableBuilder::new()
+    }
+
     pub fn from_entries(entries: Vec<RawName>) -> Result<Self, NameTableError> {
         let table = Self { entries };
         table.validate_references()?;
@@ -251,6 +267,40 @@ impl NameTable {
         }
 
         Ok(())
+    }
+}
+
+impl NameTableBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn intern(&mut self, entry: RawName) -> Result<NameRef, NameTableError> {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|candidate| candidate == &entry)
+        {
+            return NameRef::try_from(index + 1).map_err(|_| NameTableError::EntryOverflow {
+                entry_count: self.entries.len(),
+            });
+        }
+
+        let reference = NameRef::try_from(self.entries.len() + 1).map_err(|_| {
+            NameTableError::EntryOverflow {
+                entry_count: self.entries.len(),
+            }
+        })?;
+        self.entries.push(entry);
+        Ok(reference)
+    }
+
+    pub fn finish(self) -> Result<NameTable, NameTableError> {
+        NameTable::from_entries(self.entries)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -522,6 +572,44 @@ mod tests {
                 prefix: 1,
                 selector: 2,
             }]),
+            Err(NameTableError::InvalidReference {
+                reference: 2,
+                entry_index: 0,
+                entry_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn builder_interns_duplicates_and_preserves_first_seen_order() {
+        let mut builder = NameTable::builder();
+        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
+        assert_eq!(builder.intern(RawName::Utf8("member".to_owned())), Ok(2));
+        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
+        assert_eq!(builder.len(), 2);
+
+        let names = builder.finish().unwrap();
+        assert_eq!(
+            names.entries(),
+            &[
+                RawName::Utf8("owner".to_owned()),
+                RawName::Utf8("member".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_validates_references_when_finished() {
+        let mut builder = NameTable::builder();
+        builder
+            .intern(RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            })
+            .unwrap();
+
+        assert_eq!(
+            builder.finish(),
             Err(NameTableError::InvalidReference {
                 reference: 2,
                 entry_index: 0,

@@ -385,6 +385,25 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
         );
         assert!(file.names().len() > 0, "fixture {}", path.display());
         assert!(file.sections().len() > 0, "fixture {}", path.display());
+        let mut name_builder = NameTable::builder();
+        for entry in file.names().entries() {
+            name_builder.intern(entry.clone()).unwrap_or_else(|error| {
+                panic!("failed to intern names in {}: {error}", path.display())
+            });
+        }
+        let rebuilt_names = name_builder
+            .finish()
+            .unwrap_or_else(|error| panic!("failed to build names in {}: {error}", path.display()));
+        let mut original_names_bytes = Writer::new();
+        file.names().encode(&mut original_names_bytes).unwrap();
+        let mut rebuilt_names_bytes = Writer::new();
+        rebuilt_names.encode(&mut rebuilt_names_bytes).unwrap();
+        assert_eq!(
+            rebuilt_names_bytes.as_slice(),
+            original_names_bytes.as_slice(),
+            "fixture {}",
+            path.display()
+        );
         assert!(
             !file.asts().unwrap().is_empty(),
             "fixture {}",
