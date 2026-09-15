@@ -22,6 +22,7 @@ pub const IF_TAG: u8 = 141;
 pub const LAMBDA_TAG: u8 = 142;
 pub const RETURN_TAG: u8 = 144;
 pub const WHILE_TAG: u8 = 145;
+pub const SELECTOUTER_TAG: u8 = 148;
 pub const REPEATED_TAG: u8 = 149;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const SUPER_TAG: u8 = 157;
@@ -176,6 +177,13 @@ pub struct SuperNode<'a> {
 pub struct RepeatedNode<'a> {
     pub element_type: RawTree<'a>,
     pub elements: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectOuterNode<'a> {
+    pub levels: u32,
+    pub qualifier: RawTree<'a>,
+    pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -744,6 +752,33 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_select_outer(&self) -> Result<SelectOuterNode<'a>, AstError> {
+        if self.tag != SELECTOUTER_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: SELECTOUTER_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let levels = reader.read_nat()?;
+        let qualifier = RawTree::decode(&mut reader)?;
+        let underlying_type = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(SelectOuterNode {
+            levels,
+            qualifier,
+            underlying_type,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1078,9 +1113,9 @@ mod tests {
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG, IF_TAG,
         IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
         NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG,
-        RETURN_TAG, RawNode, RawNodes, RawTree, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG,
+        SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1796,6 +1831,29 @@ mod tests {
 
         assert!(matches!(node.element_type, RawTree::Leaf(_)));
         assert_eq!(node.elements.len(), 2);
+    }
+
+    #[test]
+    fn decodes_select_outer_levels_and_trees() {
+        let bytes = [SELECTOUTER_TAG, 0x83, 0x85, 2, 3];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_select_outer().unwrap();
+
+        assert_eq!(node.levels, 5);
+        assert!(matches!(node.qualifier, RawTree::Leaf(_)));
+        assert!(matches!(node.underlying_type, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn rejects_select_outer_with_an_extra_tree() {
+        let node = RawNode {
+            tag: SELECTOUTER_TAG,
+            offset: 0,
+            payload: &[0, 2, 3, 4],
+        };
+
+        assert!(node.decode_select_outer().is_err());
     }
 
     #[test]

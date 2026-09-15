@@ -11,10 +11,10 @@ pub use ast::{
     EMPTYCLAUSE_TAG, EXPORT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, IfNode,
     ImportExportKind, ImportExportNode, ImportSelector, LAMBDA_TAG, LambdaNode, NEW_TAG,
     NodeCategory, PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterBody, ParameterNode, RENAMED_TAG,
-    REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RepeatedNode, ReturnNode, SELFDEF_TAG,
-    SPLITCLAUSE_TAG, SUPER_TAG, SelfDefNode, SuperNode, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG,
-    THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode,
-    TemplateStructure, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG, WhileNode,
+    REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RepeatedNode, ReturnNode, SELECTOUTER_TAG,
+    SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SelectOuterNode, SelfDefNode, SuperNode, TEMPLATE_TAG,
+    TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+    TemplateNode, TemplateStructure, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG, WhileNode,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
