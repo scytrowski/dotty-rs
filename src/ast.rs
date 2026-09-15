@@ -1,5 +1,6 @@
 use crate::reader::{ReadError, Reader};
 use crate::term::{RawTree, TermError, is_known_category5_tag};
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
@@ -686,9 +687,21 @@ impl<'a> RawNodes<'a> {
     pub fn entries(&self) -> &[RawNode<'a>] {
         &self.nodes
     }
+
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        for node in &self.nodes {
+            node.encode(writer)?;
+        }
+        Ok(())
+    }
 }
 
 impl<'a> RawNode<'a> {
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        writer.write_u8(self.tag);
+        writer.write_length_prefixed_bytes(self.payload)
+    }
+
     pub fn decode_package(&self) -> Result<PackageNode<'a>, AstError> {
         let mut reader = self.reader();
         if self.tag != PACKAGE_TAG {

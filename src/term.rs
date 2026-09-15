@@ -1,5 +1,6 @@
 use crate::ast::RawNode;
 use crate::reader::{ReadError, Reader};
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 pub(crate) fn is_known_category5_tag(tag: u8) -> bool {
@@ -52,6 +53,29 @@ pub enum TermError {
     UnsupportedCategory { tag: u8, offset: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TermEncodeError {
+    Write(WriteError),
+    InvalidValue { tag: u8 },
+}
+
+impl fmt::Display for TermEncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Write(error) => error.fmt(formatter),
+            Self::InvalidValue { tag } => write!(formatter, "invalid value for term tag {tag}"),
+        }
+    }
+}
+
+impl std::error::Error for TermEncodeError {}
+
+impl From<WriteError> for TermEncodeError {
+    fn from(error: WriteError) -> Self {
+        Self::Write(error)
+    }
+}
+
 impl fmt::Display for TermError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -98,6 +122,23 @@ impl SimpleTerm {
         };
 
         Ok(Self { tag, offset, value })
+    }
+
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        writer.write_u8(self.tag);
+        match (&self.value, self.tag) {
+            (TermValue::Unit, 2)
+            | (TermValue::Boolean(false), 3)
+            | (TermValue::Boolean(true), 4)
+            | (TermValue::Null, 5) => {}
+            (TermValue::AstRef(value), 60..=63 | 66)
+            | (TermValue::NameRef(value), 64..=65 | 74..=76)
+            | (TermValue::Nat(value), 69) => writer.write_nat(*value),
+            (TermValue::Int(value), 67 | 68 | 70 | 72) => writer.write_int(*value),
+            (TermValue::LongInt(value), 71 | 73) => writer.write_long_int(*value),
+            _ => return Err(TermEncodeError::InvalidValue { tag: self.tag }),
+        }
+        Ok(())
     }
 }
 
@@ -153,12 +194,31 @@ impl<'a> RawTree<'a> {
             _ => unreachable!("all AST tags are covered above"),
         }
     }
+
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        match self {
+            Self::Leaf(term) => term.encode(writer),
+            Self::Ast { tag, child, .. } => {
+                writer.write_u8(*tag);
+                child.encode(writer)
+            }
+            Self::NatAst {
+                tag, value, child, ..
+            } => {
+                writer.write_u8(*tag);
+                writer.write_nat(*value);
+                child.encode(writer)
+            }
+            Self::LengthNode(node) => node.encode(writer).map_err(TermEncodeError::from),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SimpleTerm, TermError, TermValue};
+    use super::{RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
     use crate::reader::{ReadError, Reader};
+    use crate::writer::Writer;
 
     #[test]
     fn decodes_category_two_reference_and_literal_terms() {
@@ -360,5 +420,81 @@ mod tests {
                 Err(TermError::InvalidTag { tag, offset: 0 })
             );
         }
+    }
+
+    #[test]
+    fn encodes_every_supported_term_value_that_reader_can_decode() {
+        let terms = [
+            SimpleTerm {
+                tag: 2,
+                offset: 0,
+                value: TermValue::Unit,
+            },
+            SimpleTerm {
+                tag: 3,
+                offset: 0,
+                value: TermValue::Boolean(false),
+            },
+            SimpleTerm {
+                tag: 4,
+                offset: 0,
+                value: TermValue::Boolean(true),
+            },
+            SimpleTerm {
+                tag: 5,
+                offset: 0,
+                value: TermValue::Null,
+            },
+            SimpleTerm {
+                tag: 64,
+                offset: 0,
+                value: TermValue::NameRef(5),
+            },
+            SimpleTerm {
+                tag: 70,
+                offset: 0,
+                value: TermValue::Int(-5),
+            },
+            SimpleTerm {
+                tag: 73,
+                offset: 0,
+                value: TermValue::LongInt(5),
+            },
+        ];
+
+        for term in terms {
+            let mut writer = Writer::new();
+            term.encode(&mut writer).unwrap();
+            let mut reader = Reader::new(writer.as_slice());
+
+            assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, term.value);
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn rejects_a_simple_term_with_a_mismatched_tag_and_value() {
+        let term = SimpleTerm {
+            tag: 2,
+            offset: 0,
+            value: TermValue::Null,
+        };
+        let mut writer = Writer::new();
+
+        assert_eq!(
+            term.encode(&mut writer),
+            Err(TermEncodeError::InvalidValue { tag: 2 })
+        );
+    }
+
+    #[test]
+    fn round_trips_nested_raw_trees() {
+        let mut reader = Reader::new(&[112, 0x85, 64, 0x86]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+        let mut writer = Writer::new();
+
+        tree.encode(&mut writer).unwrap();
+
+        assert_eq!(writer.as_slice(), &[112, 0x85, 64, 0x86]);
     }
 }
