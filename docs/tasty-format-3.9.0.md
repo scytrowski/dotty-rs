@@ -689,7 +689,9 @@ The decoder should validate:
 9. maximum recursion depth or an equivalent protection limit;
 10. the absence of infinite loops in base-128 numbers and boundary-terminated lists.
 
-Unknown sections can be skipped. Unknown category-5 nodes can potentially be preserved as raw payloads because they carry a length. Unknown category-1–4 nodes are harder to skip because they have no generic length.
+Unknown sections can be skipped. Unknown category-5 nodes are preserved as raw
+payloads because they carry a length. Unknown category-1–4 nodes are harder to
+skip because they have no generic length.
 
 ## 15. Implementation plan
 

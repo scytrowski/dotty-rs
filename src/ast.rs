@@ -1,5 +1,5 @@
 use crate::reader::{ReadError, Reader};
-use crate::term::{RawTree, TermEncodeError, TermError, is_known_category5_tag};
+use crate::term::{RawTree, TermEncodeError, TermError};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -676,10 +676,6 @@ impl<'a> RawNodes<'a> {
             if category != NodeCategory::Category5 {
                 return Err(AstError::UnsupportedCategory { tag, offset });
             }
-            if !is_known_category5_tag(tag) {
-                return Err(AstError::InvalidTag { tag, offset });
-            }
-
             let length = reader.read_nat()? as usize;
             let payload = reader.read_bytes(length)?;
             nodes.push(RawNode {
@@ -3095,16 +3091,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_unassigned_category_five_top_level_tag() {
+    fn preserves_an_unassigned_category_five_top_level_tag() {
         let mut reader = Reader::new(&[135, 0x80]);
 
-        assert_eq!(
-            RawNodes::decode(&mut reader),
-            Err(AstError::InvalidTag {
-                tag: 135,
-                offset: 0
-            })
-        );
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        assert_eq!(nodes.get(0).unwrap().tag, 135);
+        assert!(nodes.get(0).unwrap().payload.is_empty());
+        assert!(reader.is_at_end());
     }
 
     #[test]
