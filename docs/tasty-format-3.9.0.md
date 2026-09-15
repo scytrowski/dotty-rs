@@ -579,6 +579,11 @@ Attributes:
 - have no additional payload in range `1..32`;
 - have a `Utf8Ref` payload in range `129..160`.
 
+The Scala 3.9.0 compiler emits the `SOURCEFILEattr` `Utf8Ref` as a zero-based
+name-table index in the fixtures used by this project, despite the grammar's
+one-based `Utf8Ref` description. A decoder should preserve the raw value and
+apply the zero-based interpretation when reading compiler-emitted files.
+
 ## 12. `numRefs` and tree structure calculation
 
 The format defines a helper function `numRefs(tag)`. It indicates how many references occur at the beginning of an entry, or — for a negative value — how many initial elements are not references.

@@ -23,6 +23,25 @@ pub enum StandardSection {
     Attributes,
 }
 
+pub const SCALA2STANDARDLIBRARY_ATTR: u8 = 1;
+pub const EXPLICITNULLS_ATTR: u8 = 2;
+pub const CAPTURECHECKED_ATTR: u8 = 3;
+pub const WITHPUREFUNS_ATTR: u8 = 4;
+pub const JAVA_ATTR: u8 = 5;
+pub const OUTLINE_ATTR: u8 = 6;
+pub const SOURCEFILE_ATTR: u8 = 129;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attribute {
+    Scala2StandardLibrary,
+    ExplicitNulls,
+    CaptureChecked,
+    WithPureFuns,
+    Java,
+    Outline,
+    SourceFile(NameRef),
+}
+
 impl StandardSection {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -42,6 +61,15 @@ pub enum SectionError {
         name_count: usize,
         offset: usize,
     },
+    InvalidAttributeTag {
+        tag: u8,
+        offset: usize,
+    },
+    AttributesNotOrdered {
+        previous: u8,
+        current: u8,
+        offset: usize,
+    },
 }
 
 impl fmt::Display for SectionError {
@@ -55,6 +83,17 @@ impl fmt::Display for SectionError {
             } => write!(
                 formatter,
                 "invalid section name reference {reference} at offset {offset}; name table contains {name_count} entries"
+            ),
+            Self::InvalidAttributeTag { tag, offset } => {
+                write!(formatter, "invalid attribute tag {tag} at offset {offset}")
+            }
+            Self::AttributesNotOrdered {
+                previous,
+                current,
+                offset,
+            } => write!(
+                formatter,
+                "attribute tag {current} at offset {offset} follows tag {previous}"
             ),
         }
     }
@@ -71,6 +110,39 @@ impl From<ReadError> for SectionError {
 impl<'a> Section<'a> {
     pub fn reader(&self) -> Reader<'a> {
         Reader::new(self.payload)
+    }
+
+    pub fn decode_attributes(&self) -> Result<Vec<Attribute>, SectionError> {
+        let mut reader = self.reader();
+        let mut attributes = Vec::new();
+        let mut previous = None;
+
+        while !reader.is_at_end() {
+            let offset = reader.position();
+            let tag = reader.read_u8()?;
+            if previous.is_some_and(|previous| tag <= previous) {
+                return Err(SectionError::AttributesNotOrdered {
+                    previous: previous.unwrap(),
+                    current: tag,
+                    offset,
+                });
+            }
+            previous = Some(tag);
+
+            let attribute = match tag {
+                SCALA2STANDARDLIBRARY_ATTR => Attribute::Scala2StandardLibrary,
+                EXPLICITNULLS_ATTR => Attribute::ExplicitNulls,
+                CAPTURECHECKED_ATTR => Attribute::CaptureChecked,
+                WITHPUREFUNS_ATTR => Attribute::WithPureFuns,
+                JAVA_ATTR => Attribute::Java,
+                OUTLINE_ATTR => Attribute::Outline,
+                SOURCEFILE_ATTR => Attribute::SourceFile(reader.read_nat()?),
+                _ => return Err(SectionError::InvalidAttributeTag { tag, offset }),
+            };
+            attributes.push(attribute);
+        }
+
+        Ok(attributes)
     }
 
     pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
@@ -145,7 +217,7 @@ impl<'a> SectionTable<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SectionError, SectionTable};
+    use super::{Attribute, Section, SectionError, SectionTable};
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -188,6 +260,59 @@ mod tests {
                 needed: 3,
                 remaining: 1,
             }))
+        );
+    }
+
+    #[test]
+    fn decodes_ordered_attributes_and_source_file_reference() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[1, 6, 129, 0x85],
+        };
+
+        assert_eq!(
+            section.decode_attributes().unwrap(),
+            vec![
+                Attribute::Scala2StandardLibrary,
+                Attribute::Outline,
+                Attribute::SourceFile(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_or_out_of_order_attributes() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[2, 1],
+        };
+
+        assert_eq!(
+            section.decode_attributes(),
+            Err(SectionError::AttributesNotOrdered {
+                previous: 2,
+                current: 1,
+                offset: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_attribute_tags() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[7],
+        };
+
+        assert_eq!(
+            section.decode_attributes(),
+            Err(SectionError::InvalidAttributeTag { tag: 7, offset: 0 })
         );
     }
 }

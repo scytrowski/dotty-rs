@@ -150,6 +150,28 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             path.display()
         );
 
+        if let Some(attributes) = sections
+            .iter()
+            .find(|section| section.standard_kind(&names) == Some(StandardSection::Attributes))
+        {
+            for attribute in attributes.decode_attributes().unwrap_or_else(|error| {
+                panic!("failed to parse attributes in {}: {error}", path.display())
+            }) {
+                if let tasty_rs::Attribute::SourceFile(name) = attribute {
+                    assert!(
+                        matches!(
+                            names.entries().get(name as usize),
+                            Some(tasty_rs::RawName::Utf8(_))
+                        ),
+                        "fixture {} has a non-UTF-8 SOURCEFILE reference {}: {:?}",
+                        path.display(),
+                        name,
+                        names.entries().get(name as usize)
+                    );
+                }
+            }
+        }
+
         let asts = sections
             .iter()
             .find(|section| section.standard_kind(&names) == Some(StandardSection::Asts))
