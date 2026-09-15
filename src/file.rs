@@ -47,6 +47,11 @@ pub enum TastyFileError {
         context: &'static str,
         reference: NameRef,
     },
+    InvalidAstAddress {
+        context: &'static str,
+        address: i64,
+        asts_length: usize,
+    },
 }
 
 impl fmt::Display for TastyFileError {
@@ -63,6 +68,14 @@ impl fmt::Display for TastyFileError {
             Self::InvalidNameReference { context, reference } => write!(
                 formatter,
                 "{context} contains invalid name reference {reference}"
+            ),
+            Self::InvalidAstAddress {
+                context,
+                address,
+                asts_length,
+            } => write!(
+                formatter,
+                "{context} contains AST address {address}, outside the ASTs payload of {asts_length} bytes"
             ),
         }
     }
@@ -225,9 +238,18 @@ impl<'a> TastyFile<'a> {
     }
 
     pub fn comments(&self) -> Result<Option<Vec<Comment>>, TastyFileError> {
-        self.section(StandardSection::Comments)
+        let comments = self
+            .section(StandardSection::Comments)
             .map(|section| section.decode_comments().map_err(TastyFileError::Sections))
-            .transpose()
+            .transpose()?;
+
+        if let Some(comments) = &comments {
+            for comment in comments {
+                self.validate_ast_address("comment", i64::from(comment.address))?;
+            }
+        }
+
+        Ok(comments)
     }
 
     pub fn positions(&self) -> Result<Option<PositionSection>, TastyFileError> {
@@ -237,19 +259,55 @@ impl<'a> TastyFile<'a> {
             .transpose()?;
 
         if let Some(positions) = &positions {
+            let mut address = 0i64;
             for entry in &positions.entries {
-                if let crate::PositionEntry::Source(reference) = entry {
-                    if self.name(*reference).is_none() {
-                        return Err(TastyFileError::InvalidNameReference {
-                            context: "SOURCE position",
-                            reference: *reference,
-                        });
+                match entry {
+                    crate::PositionEntry::Source(reference) => {
+                        if self.name(*reference).is_none() {
+                            return Err(TastyFileError::InvalidNameReference {
+                                context: "SOURCE position",
+                                reference: *reference,
+                            });
+                        }
+                    }
+                    crate::PositionEntry::Association { address_delta, .. } => {
+                        address = address.checked_add(*address_delta).ok_or(
+                            TastyFileError::InvalidAstAddress {
+                                context: "position association",
+                                address: *address_delta,
+                                asts_length: self.asts_length(),
+                            },
+                        )?;
+                        self.validate_ast_address("position association", address)?;
                     }
                 }
             }
         }
 
         Ok(positions)
+    }
+
+    fn asts_length(&self) -> usize {
+        self.section(StandardSection::Asts)
+            .map(|section| section.payload.len())
+            .unwrap_or(0)
+    }
+
+    fn validate_ast_address(
+        &self,
+        context: &'static str,
+        address: i64,
+    ) -> Result<(), TastyFileError> {
+        if address < 0
+            || u64::try_from(address).map_or(true, |value| value >= self.asts_length() as u64)
+        {
+            return Err(TastyFileError::InvalidAstAddress {
+                context,
+                address,
+                asts_length: self.asts_length(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -310,7 +368,7 @@ mod tests {
         let mut comments = crate::Writer::new();
         crate::Comment::encode_all(
             &[crate::Comment {
-                address: 12,
+                address: 0,
                 text: "example".to_owned(),
                 coordinates: 0,
             }],
@@ -326,7 +384,7 @@ mod tests {
         .unwrap();
 
         let sections = crate::SectionTable::from_sections(vec![
-            crate::Section::new(0, &[]),
+            crate::Section::new(0, &[crate::VALDEF_TAG, 0x80]),
             crate::Section::new(1, attributes.as_slice()),
             crate::Section::new(2, comments.as_slice()),
             crate::Section::new(3, positions.as_slice()),
@@ -347,7 +405,7 @@ mod tests {
         let bytes = file.encode().unwrap();
         let reparsed = TastyFile::parse_scala_3_9(&bytes).unwrap();
         assert_eq!(reparsed.header().uuid, [7; 16]);
-        assert!(reparsed.asts().unwrap().is_empty());
+        assert_eq!(reparsed.asts().unwrap().len(), 1);
         assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
@@ -378,6 +436,40 @@ mod tests {
             Err(TastyFileError::InvalidNameReference {
                 context: "SOURCE position",
                 reference: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_comment_address_outside_the_asts_payload() {
+        let names = crate::NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("Comments".to_owned()),
+        ])
+        .unwrap();
+        let sections = crate::SectionTable::from_sections(vec![
+            crate::Section::new(0, &[crate::VALDEF_TAG, 0x80]),
+            crate::Section::new(1, &[0x85, 0x80, 0x80]),
+        ]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.comments(),
+            Err(TastyFileError::InvalidAstAddress {
+                context: "comment",
+                address: 5,
+                asts_length: 2,
             })
         );
     }
