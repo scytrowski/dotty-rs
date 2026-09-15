@@ -5,6 +5,7 @@ use crate::reader::Reader;
 use crate::section::{
     Attribute, Comment, PositionSection, Section, SectionError, SectionTable, StandardSection,
 };
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub enum TastyFileError {
     Names(NameTableError),
     Sections(SectionError),
     Asts(AstError),
+    Write(WriteError),
     MissingSection(StandardSection),
     InvalidNameReference {
         context: &'static str,
@@ -34,6 +36,7 @@ impl fmt::Display for TastyFileError {
             Self::Names(error) => write!(formatter, "invalid TASTy name table: {error}"),
             Self::Sections(error) => write!(formatter, "invalid TASTy section table: {error}"),
             Self::Asts(error) => write!(formatter, "invalid TASTy ASTs section: {error}"),
+            Self::Write(error) => write!(formatter, "failed to encode TASTy file: {error}"),
             Self::MissingSection(section) => {
                 write!(formatter, "TASTy file has no {} section", section.as_str())
             }
@@ -71,6 +74,12 @@ impl From<AstError> for TastyFileError {
     }
 }
 
+impl From<WriteError> for TastyFileError {
+    fn from(error: WriteError) -> Self {
+        Self::Write(error)
+    }
+}
+
 impl<'a> TastyFile<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
         let mut reader = Reader::new(bytes);
@@ -89,6 +98,14 @@ impl<'a> TastyFile<'a> {
         let file = Self::parse(bytes)?;
         file.header.validate_scala_3_9()?;
         Ok(file)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
+        let mut writer = Writer::new();
+        self.header.encode(&mut writer)?;
+        self.names.encode(&mut writer)?;
+        self.sections.encode(&mut writer)?;
+        Ok(writer.into_inner())
     }
 
     pub fn header(&self) -> &Header {

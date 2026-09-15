@@ -1,4 +1,5 @@
 use crate::reader::{ReadError, Reader};
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 pub const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -87,6 +88,16 @@ impl Header {
             tooling_version,
             uuid,
         })
+    }
+
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        writer.write_bytes(&TASTY_MAGIC);
+        writer.write_nat(self.major_version);
+        writer.write_nat(self.minor_version);
+        writer.write_nat(self.experimental_version);
+        writer.write_utf8(&self.tooling_version)?;
+        writer.write_bytes(&self.uuid);
+        Ok(())
     }
 
     pub fn is_scala_3_9(&self) -> bool {

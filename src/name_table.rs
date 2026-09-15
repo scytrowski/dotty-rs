@@ -1,4 +1,5 @@
 use crate::reader::{ReadError, Reader};
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 pub type NameRef = u32;
@@ -159,6 +160,14 @@ impl NameTable {
         &self.entries
     }
 
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        let mut table = Writer::new();
+        for entry in &self.entries {
+            encode_name(entry, &mut table)?;
+        }
+        writer.write_length_prefixed_bytes(table.as_slice())
+    }
+
     fn decode_composite(tag: u8, reader: &mut Reader<'_>) -> Result<RawName, NameTableError> {
         let name = match tag {
             2 => RawName::Qualified {
@@ -237,6 +246,158 @@ impl NameTable {
 
         Ok(())
     }
+}
+
+fn encode_name(name: &RawName, writer: &mut Writer) -> Result<(), WriteError> {
+    match name {
+        RawName::Utf8(value) => {
+            writer.write_u8(1);
+            writer.write_utf8(value)?;
+        }
+        RawName::Qualified { prefix, selector } => {
+            encode_composite(
+                2,
+                |payload| {
+                    payload.write_nat(*prefix);
+                    payload.write_nat(*selector);
+                    Ok(())
+                },
+                writer,
+            )?;
+        }
+        RawName::Expanded { prefix, selector } => {
+            encode_composite(
+                3,
+                |payload| {
+                    payload.write_nat(*prefix);
+                    payload.write_nat(*selector);
+                    Ok(())
+                },
+                writer,
+            )?;
+        }
+        RawName::ExpandPrefix { prefix, selector } => {
+            encode_composite(
+                4,
+                |payload| {
+                    payload.write_nat(*prefix);
+                    payload.write_nat(*selector);
+                    Ok(())
+                },
+                writer,
+            )?;
+        }
+        RawName::Unique {
+            separator,
+            uniqid,
+            underlying,
+        } => {
+            encode_composite(
+                10,
+                |payload| {
+                    payload.write_nat(*separator);
+                    payload.write_nat(*uniqid);
+                    if let Some(underlying) = underlying {
+                        payload.write_nat(*underlying);
+                    }
+                    Ok(())
+                },
+                writer,
+            )?;
+        }
+        RawName::DefaultGetter { underlying, index } => {
+            encode_composite(
+                11,
+                |payload| {
+                    payload.write_nat(*underlying);
+                    payload.write_nat(*index);
+                    Ok(())
+                },
+                writer,
+            )?;
+        }
+        RawName::SuperAccessor { underlying } => encode_composite(
+            20,
+            |payload| {
+                payload.write_nat(*underlying);
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::InlineAccessor { underlying } => encode_composite(
+            21,
+            |payload| {
+                payload.write_nat(*underlying);
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::BodyRetainer { underlying } => encode_composite(
+            22,
+            |payload| {
+                payload.write_nat(*underlying);
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::ObjectClass { underlying } => encode_composite(
+            23,
+            |payload| {
+                payload.write_nat(*underlying);
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::Signed {
+            original,
+            result_signature,
+            parameter_signatures,
+        } => encode_composite(
+            63,
+            |payload| {
+                payload.write_nat(*original);
+                payload.write_nat(*result_signature);
+                for signature in parameter_signatures {
+                    payload.write_int(*signature);
+                }
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::TargetSigned {
+            original,
+            target,
+            result_signature,
+            parameter_signatures,
+        } => encode_composite(
+            62,
+            |payload| {
+                payload.write_nat(*original);
+                payload.write_nat(*target);
+                payload.write_nat(*result_signature);
+                for signature in parameter_signatures {
+                    payload.write_int(*signature);
+                }
+                Ok(())
+            },
+            writer,
+        )?,
+        RawName::Unknown { tag, payload } => {
+            writer.write_u8(*tag);
+            writer.write_length_prefixed_bytes(payload)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_composite<F>(tag: u8, encode_payload: F, writer: &mut Writer) -> Result<(), WriteError>
+where
+    F: FnOnce(&mut Writer) -> Result<(), WriteError>,
+{
+    let mut payload = Writer::new();
+    encode_payload(&mut payload)?;
+    writer.write_u8(tag);
+    writer.write_length_prefixed_bytes(payload.as_slice())
 }
 
 impl RawName {

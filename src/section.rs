@@ -1,5 +1,6 @@
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
+use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +292,14 @@ impl<'a> SectionTable<'a> {
 
     pub fn entries(&self) -> &[Section<'a>] {
         &self.sections
+    }
+
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        for section in &self.sections {
+            writer.write_nat(section.name);
+            writer.write_length_prefixed_bytes(section.payload)?;
+        }
+        Ok(())
     }
 }
 
