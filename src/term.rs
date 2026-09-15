@@ -441,8 +441,8 @@ mod tests {
     use crate::writer::Writer;
 
     #[test]
-    fn decodes_category_two_reference_and_literal_terms() {
-        let mut reader = Reader::new(&[64, 0x85, 70, 0x82, 73, 0x81]);
+    fn decodes_a_name_reference_term() {
+        let mut reader = Reader::new(&[64, 0x85]);
 
         assert_eq!(
             SimpleTerm::decode(&mut reader).unwrap(),
@@ -452,45 +452,51 @@ mod tests {
                 value: TermValue::NameRef(5),
             }
         );
+    }
+
+    #[test]
+    fn decodes_an_int_term() {
+        let mut reader = Reader::new(&[70, 0x82]);
+
         assert_eq!(
             SimpleTerm::decode(&mut reader).unwrap(),
             SimpleTerm {
                 tag: 70,
-                offset: 2,
+                offset: 0,
                 value: TermValue::Int(2),
-            }
-        );
-        assert_eq!(
-            SimpleTerm::decode(&mut reader).unwrap(),
-            SimpleTerm {
-                tag: 73,
-                offset: 4,
-                value: TermValue::LongInt(1),
             }
         );
     }
 
     #[test]
-    fn decodes_category_one_constant_terms() {
-        let mut reader = Reader::new(&[2, 3, 4, 5]);
+    fn decodes_a_long_int_term() {
+        let mut reader = Reader::new(&[73, 0x81]);
 
         assert_eq!(
-            SimpleTerm::decode(&mut reader).unwrap().value,
-            TermValue::Unit
-        );
-        assert_eq!(
-            SimpleTerm::decode(&mut reader).unwrap().value,
-            TermValue::Boolean(false)
-        );
-        assert_eq!(
-            SimpleTerm::decode(&mut reader).unwrap().value,
-            TermValue::Boolean(true)
-        );
-        assert_eq!(
-            SimpleTerm::decode(&mut reader).unwrap().value,
-            TermValue::Null
+            SimpleTerm::decode(&mut reader).unwrap(),
+            SimpleTerm {
+                tag: 73,
+                offset: 0,
+                value: TermValue::LongInt(1),
+            }
         );
     }
+
+    macro_rules! decodes_constant_term {
+        ($name:ident, $tag:expr, $value:expr) => {
+            #[test]
+            fn $name() {
+                let mut reader = Reader::new(&[$tag]);
+                assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, $value);
+                assert!(reader.is_at_end());
+            }
+        };
+    }
+
+    decodes_constant_term!(decodes_unit_term, 2, TermValue::Unit);
+    decodes_constant_term!(decodes_false_boolean_term, 3, TermValue::Boolean(false));
+    decodes_constant_term!(decodes_true_boolean_term, 4, TermValue::Boolean(true));
+    decodes_constant_term!(decodes_null_term, 5, TermValue::Null);
 
     #[test]
     fn decodes_every_supported_category_two_tag() {
@@ -825,55 +831,77 @@ mod tests {
         }
     }
 
-    #[test]
-    fn encodes_every_supported_term_value_that_reader_can_decode() {
-        let terms = [
-            SimpleTerm {
-                tag: 2,
-                offset: 0,
-                value: TermValue::Unit,
-            },
-            SimpleTerm {
-                tag: 3,
-                offset: 0,
-                value: TermValue::Boolean(false),
-            },
-            SimpleTerm {
-                tag: 4,
-                offset: 0,
-                value: TermValue::Boolean(true),
-            },
-            SimpleTerm {
-                tag: 5,
-                offset: 0,
-                value: TermValue::Null,
-            },
-            SimpleTerm {
-                tag: 64,
-                offset: 0,
-                value: TermValue::NameRef(5),
-            },
-            SimpleTerm {
-                tag: 70,
-                offset: 0,
-                value: TermValue::Int(-5),
-            },
-            SimpleTerm {
-                tag: 73,
-                offset: 0,
-                value: TermValue::LongInt(5),
-            },
-        ];
+    macro_rules! round_trips_term_value {
+        ($name:ident, $term:expr) => {
+            #[test]
+            fn $name() {
+                let term = $term;
+                let mut writer = Writer::new();
+                term.encode(&mut writer).unwrap();
+                let mut reader = Reader::new(writer.as_slice());
 
-        for term in terms {
-            let mut writer = Writer::new();
-            term.encode(&mut writer).unwrap();
-            let mut reader = Reader::new(writer.as_slice());
-
-            assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, term.value);
-            assert!(reader.is_at_end());
-        }
+                assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, term.value);
+                assert!(reader.is_at_end());
+            }
+        };
     }
+
+    round_trips_term_value!(
+        round_trips_unit_encoding,
+        SimpleTerm {
+            tag: 2,
+            offset: 0,
+            value: TermValue::Unit,
+        }
+    );
+    round_trips_term_value!(
+        round_trips_false_boolean_encoding,
+        SimpleTerm {
+            tag: 3,
+            offset: 0,
+            value: TermValue::Boolean(false),
+        }
+    );
+    round_trips_term_value!(
+        round_trips_true_boolean_encoding,
+        SimpleTerm {
+            tag: 4,
+            offset: 0,
+            value: TermValue::Boolean(true),
+        }
+    );
+    round_trips_term_value!(
+        round_trips_null_encoding,
+        SimpleTerm {
+            tag: 5,
+            offset: 0,
+            value: TermValue::Null,
+        }
+    );
+    round_trips_term_value!(
+        round_trips_name_reference_encoding,
+        SimpleTerm {
+            tag: 64,
+            offset: 0,
+            value: TermValue::NameRef(5),
+        }
+    );
+    round_trips_term_value!(
+        round_trips_int_encoding,
+        SimpleTerm {
+            tag: 70,
+            offset: 0,
+            value: TermValue::Int(-5),
+        }
+    );
+    round_trips_term_value!(
+        round_trips_long_int_encoding,
+        SimpleTerm {
+            tag: 73,
+            offset: 0,
+            value: TermValue::LongInt(5),
+        }
+    );
 
     #[test]
     fn rejects_a_simple_term_with_a_mismatched_tag_and_value() {

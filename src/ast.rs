@@ -4273,8 +4273,8 @@ fn read_case_defs<'a>(reader: &mut Reader<'a>) -> Result<Vec<CaseDefNode<'a>>, A
 mod tests {
     use super::{
         ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, ANNOTATION_TAG,
-        APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstChildNode,
-        AstError, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
+        APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstError,
+        BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
         CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
         ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG,
         IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
@@ -6088,28 +6088,56 @@ mod tests {
     }
 
     #[test]
-    fn encodes_structured_expression_nodes() {
+    fn round_trips_apply_encoding() {
         assert_structured_round_trip(&[APPLY_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_apply().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_type_apply_encoding() {
         assert_structured_round_trip(&[TYPEAPPLY_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_type_apply().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_typed_encoding() {
         assert_structured_round_trip(&[TYPED_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_typed().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_assign_encoding() {
         assert_structured_round_trip(&[ASSIGN_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_assign().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_block_encoding() {
         assert_structured_round_trip(&[BLOCK_TAG, 0x83, 2, VALDEF_TAG, 0x80], |raw, writer| {
             raw.decode_block().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_if_encoding() {
         assert_structured_round_trip(&[IF_TAG, 0x84, INLINE_TAG, 2, 3, 4], |raw, writer| {
             raw.decode_if().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_lambda_encoding() {
         assert_structured_round_trip(&[LAMBDA_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_lambda().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_match_encoding() {
         assert_structured_round_trip(
             &[
                 MATCH_TAG,
@@ -6125,12 +6153,24 @@ mod tests {
             ],
             |raw, writer| raw.decode_match().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_return_encoding() {
         assert_structured_round_trip(&[RETURN_TAG, 0x82, 0x85, 2], |raw, writer| {
             raw.decode_return().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_while_encoding() {
         assert_structured_round_trip(&[WHILE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_while().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_try_encoding() {
         assert_structured_round_trip(
             &[
                 TRY_TAG,
@@ -6146,61 +6186,125 @@ mod tests {
             ],
             |raw, writer| raw.decode_try().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_inlined_encoding() {
         assert_structured_round_trip(
             &[INLINED_TAG, 0x84, 2, 3, VALDEF_TAG, 0x80],
             |raw, writer| raw.decode_inlined().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_select_outer_encoding() {
         assert_structured_round_trip(&[SELECTOUTER_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_select_outer().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_repeated_encoding() {
         assert_structured_round_trip(&[REPEATED_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_repeated().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_super_encoding() {
         assert_structured_round_trip(&[SUPER_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_super().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_quote_encoding() {
         assert_structured_round_trip(&[QUOTE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_quote().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_apply_sigpoly_encoding() {
         assert_structured_round_trip(&[APPLYSIGPOLY_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_apply_sigpoly().unwrap().encode(writer)
         });
     }
 
     #[test]
-    fn encodes_structured_type_nodes() {
+    fn round_trips_and_type_encoding() {
         assert_structured_round_trip(&[ANDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_and_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_applied_type_encoding() {
         assert_structured_round_trip(&[APPLIEDTYPE_TAG, 0x83, 2, 3, 4], |raw, writer| {
             raw.decode_applied_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_flexible_type_encoding() {
         assert_structured_round_trip(&[FLEXIBLETYPE_TAG, 0x81, 2], |raw, writer| {
             raw.decode_flexible_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_type_bounds_encoding() {
         assert_structured_round_trip(&[TYPEBOUNDS_TAG, 0x83, 2, 3, 28], |raw, writer| {
             raw.decode_type_bounds().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_annotated_type_encoding() {
         assert_structured_round_trip(&[ANNOTATEDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_annotated().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_annotation_encoding() {
         assert_structured_round_trip(&[ANNOTATION_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_annotation().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_param_type_encoding() {
         assert_structured_round_trip(&[PARAMTYPE_TAG, 0x82, 0x85, 0x83], |raw, writer| {
             raw.decode_param_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_poly_type_encoding() {
         assert_structured_round_trip(&[POLYTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
             raw.decode_poly_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_method_type_encoding() {
         assert_structured_round_trip(&[METHODTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
             raw.decode_method_type().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_contextual_method_type_encoding() {
         assert_structured_round_trip(&[METHODTYPE_TAG, 0x84, 2, 0x91, 0x85, 37], |raw, writer| {
             raw.decode_method_type_with_type_name_count(1)
                 .unwrap()
                 .encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_refined_type_encoding() {
         assert_structured_round_trip(
             &[
                 REFINEDTYPE_TAG,
@@ -6213,6 +6317,10 @@ mod tests {
             ],
             |raw, writer| raw.decode_refined_type().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_refined_type_tree_encoding() {
         assert_structured_round_trip(
             &[
                 REFINEDTPT_TAG,
@@ -6227,13 +6335,21 @@ mod tests {
     }
 
     #[test]
-    fn encodes_structured_pattern_and_contextual_reference_nodes() {
+    fn round_trips_bind_encoding() {
         assert_structured_round_trip(&[BIND_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_bind().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_alternative_encoding() {
         assert_structured_round_trip(&[ALTERNATIVE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_alternative().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_unapply_encoding() {
         assert_structured_round_trip(
             &[
                 UNAPPLY_TAG,
@@ -6250,44 +6366,84 @@ mod tests {
             ],
             |raw, writer| raw.decode_unapply().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_quote_pattern_encoding() {
         assert_structured_round_trip(&[QUOTEPATTERN_TAG, 0x84, 2, 3, 4, 5], |raw, writer| {
             raw.decode_quote_pattern().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_splice_pattern_encoding() {
         assert_structured_round_trip(&[SPLICEPATTERN_TAG, 0x84, 2, 3, 4, 5], |raw, writer| {
             raw.decode_splice_pattern().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_hole_encoding() {
         assert_structured_round_trip(&[HOLE_TAG, 0x84, 0x85, 2, 3, 4], |raw, writer| {
             raw.decode_hole().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_match_type_encoding() {
         assert_structured_round_trip(
             &[MATCHTYPE_TAG, 0x86, 2, 3, MATCHCASETYPE_TAG, 0x82, 4, 5],
             |raw, writer| raw.decode_match_type().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_match_type_tree_without_bound_encoding() {
         assert_structured_round_trip(
             &[MATCHTPT_TAG, 0x85, 2, CASEDEF_TAG, 0x82, 3, 4],
             |raw, writer| raw.decode_match_tpt().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_match_type_tree_with_bound_encoding() {
         assert_structured_round_trip(
             &[MATCHTPT_TAG, 0x86, 2, 3, CASEDEF_TAG, 0x82, 4, 5],
             |raw, writer| raw.decode_match_tpt().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_term_refinement_encoding() {
         assert_structured_round_trip(&[TERMREFIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_in_reference().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_type_refinement_encoding() {
         assert_structured_round_trip(&[TYPEREFIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_in_reference().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_select_in_encoding() {
         assert_structured_round_trip(&[SELECTIN_TAG, 0x83, 0x85, 2, 3], |raw, writer| {
             raw.decode_select_in().unwrap().encode(writer)
         });
     }
 
     #[test]
-    fn encodes_structured_top_level_nodes() {
+    fn round_trips_package_encoding() {
         assert_structured_round_trip(
             &[PACKAGE_TAG, 0x84, TERMREFPKG_TAG, 0x85, VALDEF_TAG, 0x80],
             |raw, writer| raw.decode_package().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_import_encoding() {
         assert_structured_round_trip(
             &[
                 IMPORT_TAG,
@@ -6304,13 +6460,25 @@ mod tests {
             ],
             |raw, writer| raw.decode_import_export().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_definition_header_encoding() {
         assert_structured_round_trip(
             &[VALDEF_TAG, 0x83, 0x85, TERMREFPKG_TAG, 0x81],
             |raw, writer| raw.decode_definition().unwrap().encode(writer),
         );
+    }
+
+    #[test]
+    fn round_trips_empty_template_encoding() {
         assert_structured_round_trip(&[TEMPLATE_TAG, 0x80], |raw, writer| {
             raw.decode_template().unwrap().encode(writer)
         });
+    }
+
+    #[test]
+    fn round_trips_template_with_parameters_encoding() {
         assert_structured_round_trip(
             &[TEMPLATE_TAG, 0x85, TYPEPARAM_TAG, 0x83, 0x81, 2, 17],
             |raw, writer| raw.decode_template().unwrap().encode(writer),
@@ -6318,18 +6486,29 @@ mod tests {
     }
 
     #[test]
-    fn encodes_definition_bodies_and_template_structure() {
+    fn round_trips_valdef_body_encoding() {
         assert_structured_round_trip(&[VALDEF_TAG, 0x84, 0x85, 2, 3, 17], |raw, writer| {
             raw.decode_definition_body().unwrap().encode(5, writer)
         });
+    }
+
+    #[test]
+    fn round_trips_defdef_body_encoding() {
         assert_structured_round_trip(&[DEFDEF_TAG, 0x84, 0x85, 2, 3, 17], |raw, writer| {
             raw.decode_defdef_body().unwrap().encode(5, writer)
         });
+    }
+
+    #[test]
+    fn round_trips_typedef_body_encoding() {
         assert_structured_round_trip(
             &[TYPEDEF_TAG, 0x84, 0x85, TEMPLATE_TAG, 0x80, 17],
             |raw, writer| raw.decode_definition_body().unwrap().encode(5, writer),
         );
+    }
 
+    #[test]
+    fn round_trips_template_structure_encoding() {
         assert_structured_round_trip(
             &[
                 TEMPLATE_TAG,
@@ -6359,137 +6538,58 @@ mod tests {
         assert_eq!(writer.as_slice(), bytes);
     }
 
-    #[test]
-    fn decodes_category_three_ast_children() {
-        let mut reader = Reader::new(&[
-            THIS_TAG,
-            TERMREFPKG_TAG,
-            0x81,
-            NEW_TAG,
-            TERMREFPKG_TAG,
-            0x82,
-            THROW_TAG,
-            TERMREFPKG_TAG,
-            0x83,
-            ELIDED_TAG,
-            TERMREFPKG_TAG,
-            0x84,
-        ]);
+    macro_rules! decodes_category_three_child {
+        ($name:ident, $tag:expr, $decoder:ident) => {
+            #[test]
+            fn $name() {
+                let mut reader = Reader::new(&[$tag, TERMREFPKG_TAG, 0x81]);
+                let node = RawTree::decode(&mut reader).unwrap().$decoder().unwrap();
 
-        let this = RawTree::decode(&mut reader).unwrap().decode_this().unwrap();
-        let new = RawTree::decode(&mut reader).unwrap().decode_new().unwrap();
-        let throw = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_throw()
-            .unwrap();
-        let elided = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_elided()
-            .unwrap();
-
-        assert_eq!(this.tag, THIS_TAG);
-        assert_eq!(new.tag, NEW_TAG);
-        assert!(matches!(throw.child, RawTree::Leaf(_)));
-        assert!(matches!(elided.child, RawTree::Leaf(_)));
-        assert!(matches!(this, AstChildNode { .. }));
+                assert_eq!(node.tag, $tag);
+                assert!(reader.is_at_end());
+            }
+        };
     }
 
-    #[test]
-    fn decodes_the_remaining_category_three_ast_children() {
-        let mut reader = Reader::new(&[
-            QUALTHIS_TAG,
-            TERMREFPKG_TAG,
-            0x81,
-            CLASSCONST_TAG,
-            TERMREFPKG_TAG,
-            0x82,
-            BYNAMETYPE_TAG,
-            TERMREFPKG_TAG,
-            0x83,
-            BYNAMETPT_TAG,
-            TERMREFPKG_TAG,
-            0x84,
-            IMPLICITARG_TAG,
-            TERMREFPKG_TAG,
-            0x85,
-            PRIVATEQUALIFIED_TAG,
-            TERMREFPKG_TAG,
-            0x86,
-            PROTECTEDQUALIFIED_TAG,
-            TERMREFPKG_TAG,
-            0x87,
-            RECTYPE_TAG,
-            TERMREFPKG_TAG,
-            0x88,
-            SINGLETONTPT_TAG,
-            TERMREFPKG_TAG,
-            0x89,
-            BOUNDED_TAG,
-            TERMREFPKG_TAG,
-            0x8a,
-            EXPLICITTPT_TAG,
-            TERMREFPKG_TAG,
-            0x8b,
-        ]);
-
-        let qual_this = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_qual_this()
-            .unwrap();
-        let class_const = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_class_const()
-            .unwrap();
-        let by_name_type = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_by_name_type()
-            .unwrap();
-        let by_name_tpt = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_by_name_tpt()
-            .unwrap();
-        let implicit_arg = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_implicit_arg()
-            .unwrap();
-        let private_qualified = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_private_qualified()
-            .unwrap();
-        let protected_qualified = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_protected_qualified()
-            .unwrap();
-        let rec_type = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_rec_type()
-            .unwrap();
-        let singleton_tpt = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_singleton_tpt()
-            .unwrap();
-        let bounded = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_bounded()
-            .unwrap();
-        let explicit_tpt = RawTree::decode(&mut reader)
-            .unwrap()
-            .decode_explicit_tpt()
-            .unwrap();
-
-        assert_eq!(qual_this.tag, QUALTHIS_TAG);
-        assert_eq!(class_const.tag, CLASSCONST_TAG);
-        assert_eq!(by_name_type.tag, BYNAMETYPE_TAG);
-        assert_eq!(by_name_tpt.tag, BYNAMETPT_TAG);
-        assert_eq!(implicit_arg.tag, IMPLICITARG_TAG);
-        assert_eq!(private_qualified.tag, PRIVATEQUALIFIED_TAG);
-        assert_eq!(protected_qualified.tag, PROTECTEDQUALIFIED_TAG);
-        assert_eq!(rec_type.tag, RECTYPE_TAG);
-        assert_eq!(singleton_tpt.tag, SINGLETONTPT_TAG);
-        assert_eq!(bounded.tag, BOUNDED_TAG);
-        assert_eq!(explicit_tpt.tag, EXPLICITTPT_TAG);
-        assert!(reader.is_at_end());
-    }
+    decodes_category_three_child!(decodes_this_node, THIS_TAG, decode_this);
+    decodes_category_three_child!(decodes_new_node, NEW_TAG, decode_new);
+    decodes_category_three_child!(decodes_throw_node, THROW_TAG, decode_throw);
+    decodes_category_three_child!(decodes_elided_node, ELIDED_TAG, decode_elided);
+    decodes_category_three_child!(decodes_qual_this_node, QUALTHIS_TAG, decode_qual_this);
+    decodes_category_three_child!(decodes_class_const_node, CLASSCONST_TAG, decode_class_const);
+    decodes_category_three_child!(
+        decodes_by_name_type_node,
+        BYNAMETYPE_TAG,
+        decode_by_name_type
+    );
+    decodes_category_three_child!(decodes_by_name_tpt_node, BYNAMETPT_TAG, decode_by_name_tpt);
+    decodes_category_three_child!(
+        decodes_implicit_arg_node,
+        IMPLICITARG_TAG,
+        decode_implicit_arg
+    );
+    decodes_category_three_child!(
+        decodes_private_qualified_node,
+        PRIVATEQUALIFIED_TAG,
+        decode_private_qualified
+    );
+    decodes_category_three_child!(
+        decodes_protected_qualified_node,
+        PROTECTEDQUALIFIED_TAG,
+        decode_protected_qualified
+    );
+    decodes_category_three_child!(decodes_rec_type_node, RECTYPE_TAG, decode_rec_type);
+    decodes_category_three_child!(
+        decodes_singleton_tpt_node,
+        SINGLETONTPT_TAG,
+        decode_singleton_tpt
+    );
+    decodes_category_three_child!(decodes_bounded_node, BOUNDED_TAG, decode_bounded);
+    decodes_category_three_child!(
+        decodes_explicit_tpt_node,
+        EXPLICITTPT_TAG,
+        decode_explicit_tpt
+    );
 
     #[test]
     fn allocates_addresses_for_top_level_ast_nodes_while_encoding() {
@@ -6593,10 +6693,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn dispatches_every_supported_category_five_tag_to_the_expected_variant() {
-        macro_rules! assert_variant {
-            ($tag:expr, $payload:expr, $pattern:pat) => {{
+    macro_rules! dispatches_to_structured_variant {
+        ($name:ident, $tag:expr, $payload:expr, $pattern:pat) => {
+            #[test]
+            fn $name() {
                 let node = RawNode {
                     tag: $tag,
                     offset: 0,
@@ -6610,85 +6710,334 @@ mod tests {
                     "tag {} dispatched to an unexpected variant",
                     $tag
                 );
-            }};
-        }
-
-        assert_variant!(
-            PACKAGE_TAG,
-            &[TERMREFPKG_TAG, 0x81, VALDEF_TAG, 0x80],
-            StructuredNode::Package(_)
-        );
-        assert_variant!(VALDEF_TAG, &[0x81, 2], StructuredNode::ValDef(_));
-        assert_variant!(DEFDEF_TAG, &[0x81, 2], StructuredNode::DefDef(_));
-        assert_variant!(TYPEDEF_TAG, &[0x81, 2], StructuredNode::TypeDef(_));
-        assert_variant!(IMPORT_TAG, &[2], StructuredNode::ImportExport(_));
-        assert_variant!(EXPORT_TAG, &[2], StructuredNode::ImportExport(_));
-        assert_variant!(TYPEPARAM_TAG, &[0x81, 2], StructuredNode::Parameter(_));
-        assert_variant!(PARAM_TAG, &[0x81, 2], StructuredNode::Parameter(_));
-        assert_variant!(APPLY_TAG, &[2], StructuredNode::Apply(_));
-        assert_variant!(TYPEAPPLY_TAG, &[2], StructuredNode::TypeApply(_));
-        assert_variant!(TYPED_TAG, &[2, 3], StructuredNode::Typed(_));
-        assert_variant!(ASSIGN_TAG, &[2, 3], StructuredNode::Assign(_));
-        assert_variant!(BLOCK_TAG, &[2], StructuredNode::Block(_));
-        assert_variant!(IF_TAG, &[2, 3, 4], StructuredNode::If(_));
-        assert_variant!(LAMBDA_TAG, &[2], StructuredNode::Lambda(_));
-        assert_variant!(MATCH_TAG, &[2], StructuredNode::Match(_));
-        assert_variant!(RETURN_TAG, &[0x81], StructuredNode::Return(_));
-        assert_variant!(WHILE_TAG, &[2, 3], StructuredNode::While(_));
-        assert_variant!(TRY_TAG, &[2], StructuredNode::Try(_));
-        assert_variant!(INLINED_TAG, &[2], StructuredNode::Inlined(_));
-        assert_variant!(
-            SELECTOUTER_TAG,
-            &[0x81, 2, 3],
-            StructuredNode::SelectOuter(_)
-        );
-        assert_variant!(REPEATED_TAG, &[2], StructuredNode::Repeated(_));
-        assert_variant!(BIND_TAG, &[0x81, 2, 3], StructuredNode::Bind(_));
-        assert_variant!(ALTERNATIVE_TAG, &[], StructuredNode::Alternative(_));
-        assert_variant!(UNAPPLY_TAG, &[2, 2], StructuredNode::Unapply(_));
-        assert_variant!(ANNOTATEDTYPE_TAG, &[2, 3], StructuredNode::Annotated(_));
-        assert_variant!(ANNOTATEDTPT_TAG, &[2, 3], StructuredNode::Annotated(_));
-        assert_variant!(ANNOTATION_TAG, &[2, 3], StructuredNode::Annotation(_));
-        assert_variant!(CASEDEF_TAG, &[2, 3], StructuredNode::CaseDef(_));
-        assert_variant!(TEMPLATE_TAG, &[], StructuredNode::Template(_));
-        assert_variant!(SUPER_TAG, &[2], StructuredNode::Super(_));
-        assert_variant!(SUPERTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
-        assert_variant!(
-            REFINEDTYPE_TAG,
-            &[0x81, 2, 3],
-            StructuredNode::RefinedType(_)
-        );
-        assert_variant!(REFINEDTPT_TAG, &[2], StructuredNode::RefinedTpt(_));
-        assert_variant!(APPLIEDTYPE_TAG, &[2], StructuredNode::AppliedType(_));
-        assert_variant!(APPLIEDTPT_TAG, &[2], StructuredNode::AppliedType(_));
-        assert_variant!(TYPEBOUNDS_TAG, &[2], StructuredNode::TypeBounds(_));
-        assert_variant!(TYPEBOUNDSTPT_TAG, &[2], StructuredNode::TypeBounds(_));
-        assert_variant!(ANDTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
-        assert_variant!(ORTYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
-        assert_variant!(POLYTYPE_TAG, &[2], StructuredNode::PolyType(_));
-        assert_variant!(TYPELAMBDATYPE_TAG, &[2], StructuredNode::PolyType(_));
-        assert_variant!(LAMBDATPT_TAG, &[2], StructuredNode::LambdaTpt(_));
-        assert_variant!(PARAMTYPE_TAG, &[0x81, 0x82], StructuredNode::ParamType(_));
-        assert_variant!(METHODTYPE_TAG, &[2], StructuredNode::MethodType(_));
-        assert_variant!(APPLYSIGPOLY_TAG, &[2, 3], StructuredNode::ApplySigPoly(_));
-        assert_variant!(QUOTE_TAG, &[2, 3], StructuredNode::Quote(_));
-        assert_variant!(SPLICE_TAG, &[2, 3], StructuredNode::Quote(_));
-        assert_variant!(
-            QUOTEPATTERN_TAG,
-            &[2, 3, 4],
-            StructuredNode::QuotePattern(_)
-        );
-        assert_variant!(SPLICEPATTERN_TAG, &[2, 3], StructuredNode::SplicePattern(_));
-        assert_variant!(HOLE_TAG, &[0x81, 2], StructuredNode::Hole(_));
-        assert_variant!(MATCHTYPE_TAG, &[2, 3], StructuredNode::MatchType(_));
-        assert_variant!(MATCHTPT_TAG, &[2, 3], StructuredNode::MatchTpt(_));
-        assert_variant!(TERMREFIN_TAG, &[0x81, 2, 3], StructuredNode::InReference(_));
-        assert_variant!(TYPEREFIN_TAG, &[0x81, 2, 3], StructuredNode::InReference(_));
-        assert_variant!(SELECTIN_TAG, &[0x81, 2, 3], StructuredNode::SelectIn(_));
-        assert_variant!(MATCHCASETYPE_TAG, &[2, 3], StructuredNode::BinaryType(_));
-        assert_variant!(FLEXIBLETYPE_TAG, &[2], StructuredNode::FlexibleType(_));
-        assert_variant!(135, &[], StructuredNode::Raw(_));
+            }
+        };
     }
+
+    dispatches_to_structured_variant!(
+        dispatches_package,
+        PACKAGE_TAG,
+        &[TERMREFPKG_TAG, 0x81, VALDEF_TAG, 0x80],
+        StructuredNode::Package(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_valdef,
+        VALDEF_TAG,
+        &[0x81, 2],
+        StructuredNode::ValDef(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_defdef,
+        DEFDEF_TAG,
+        &[0x81, 2],
+        StructuredNode::DefDef(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_typedef,
+        TYPEDEF_TAG,
+        &[0x81, 2],
+        StructuredNode::TypeDef(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_import,
+        IMPORT_TAG,
+        &[2],
+        StructuredNode::ImportExport(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_export,
+        EXPORT_TAG,
+        &[2],
+        StructuredNode::ImportExport(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_typeparam,
+        TYPEPARAM_TAG,
+        &[0x81, 2],
+        StructuredNode::Parameter(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_param,
+        PARAM_TAG,
+        &[0x81, 2],
+        StructuredNode::Parameter(_)
+    );
+    dispatches_to_structured_variant!(dispatches_apply, APPLY_TAG, &[2], StructuredNode::Apply(_));
+    dispatches_to_structured_variant!(
+        dispatches_type_apply,
+        TYPEAPPLY_TAG,
+        &[2],
+        StructuredNode::TypeApply(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_typed,
+        TYPED_TAG,
+        &[2, 3],
+        StructuredNode::Typed(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_assign,
+        ASSIGN_TAG,
+        &[2, 3],
+        StructuredNode::Assign(_)
+    );
+    dispatches_to_structured_variant!(dispatches_block, BLOCK_TAG, &[2], StructuredNode::Block(_));
+    dispatches_to_structured_variant!(dispatches_if, IF_TAG, &[2, 3, 4], StructuredNode::If(_));
+    dispatches_to_structured_variant!(
+        dispatches_lambda,
+        LAMBDA_TAG,
+        &[2],
+        StructuredNode::Lambda(_)
+    );
+    dispatches_to_structured_variant!(dispatches_match, MATCH_TAG, &[2], StructuredNode::Match(_));
+    dispatches_to_structured_variant!(
+        dispatches_return,
+        RETURN_TAG,
+        &[0x81],
+        StructuredNode::Return(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_while,
+        WHILE_TAG,
+        &[2, 3],
+        StructuredNode::While(_)
+    );
+    dispatches_to_structured_variant!(dispatches_try, TRY_TAG, &[2], StructuredNode::Try(_));
+    dispatches_to_structured_variant!(
+        dispatches_inlined,
+        INLINED_TAG,
+        &[2],
+        StructuredNode::Inlined(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_select_outer,
+        SELECTOUTER_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::SelectOuter(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_repeated,
+        REPEATED_TAG,
+        &[2],
+        StructuredNode::Repeated(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_bind,
+        BIND_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::Bind(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_alternative,
+        ALTERNATIVE_TAG,
+        &[],
+        StructuredNode::Alternative(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_unapply,
+        UNAPPLY_TAG,
+        &[2, 2],
+        StructuredNode::Unapply(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_annotated_type,
+        ANNOTATEDTYPE_TAG,
+        &[2, 3],
+        StructuredNode::Annotated(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_annotated_tpt,
+        ANNOTATEDTPT_TAG,
+        &[2, 3],
+        StructuredNode::Annotated(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_annotation,
+        ANNOTATION_TAG,
+        &[2, 3],
+        StructuredNode::Annotation(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_case_def,
+        CASEDEF_TAG,
+        &[2, 3],
+        StructuredNode::CaseDef(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_template,
+        TEMPLATE_TAG,
+        &[],
+        StructuredNode::Template(_)
+    );
+    dispatches_to_structured_variant!(dispatches_super, SUPER_TAG, &[2], StructuredNode::Super(_));
+    dispatches_to_structured_variant!(
+        dispatches_super_type,
+        SUPERTYPE_TAG,
+        &[2, 3],
+        StructuredNode::BinaryType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_refined_type,
+        REFINEDTYPE_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::RefinedType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_refined_tpt,
+        REFINEDTPT_TAG,
+        &[2],
+        StructuredNode::RefinedTpt(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_applied_type,
+        APPLIEDTYPE_TAG,
+        &[2],
+        StructuredNode::AppliedType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_applied_tpt,
+        APPLIEDTPT_TAG,
+        &[2],
+        StructuredNode::AppliedType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_type_bounds,
+        TYPEBOUNDS_TAG,
+        &[2],
+        StructuredNode::TypeBounds(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_type_bounds_tpt,
+        TYPEBOUNDSTPT_TAG,
+        &[2],
+        StructuredNode::TypeBounds(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_and_type,
+        ANDTYPE_TAG,
+        &[2, 3],
+        StructuredNode::BinaryType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_or_type,
+        ORTYPE_TAG,
+        &[2, 3],
+        StructuredNode::BinaryType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_poly_type,
+        POLYTYPE_TAG,
+        &[2],
+        StructuredNode::PolyType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_type_lambda_type,
+        TYPELAMBDATYPE_TAG,
+        &[2],
+        StructuredNode::PolyType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_lambda_tpt,
+        LAMBDATPT_TAG,
+        &[2],
+        StructuredNode::LambdaTpt(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_param_type,
+        PARAMTYPE_TAG,
+        &[0x81, 0x82],
+        StructuredNode::ParamType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_method_type,
+        METHODTYPE_TAG,
+        &[2],
+        StructuredNode::MethodType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_apply_sigpoly,
+        APPLYSIGPOLY_TAG,
+        &[2, 3],
+        StructuredNode::ApplySigPoly(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_quote,
+        QUOTE_TAG,
+        &[2, 3],
+        StructuredNode::Quote(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_splice,
+        SPLICE_TAG,
+        &[2, 3],
+        StructuredNode::Quote(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_quote_pattern,
+        QUOTEPATTERN_TAG,
+        &[2, 3, 4],
+        StructuredNode::QuotePattern(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_splice_pattern,
+        SPLICEPATTERN_TAG,
+        &[2, 3],
+        StructuredNode::SplicePattern(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_hole,
+        HOLE_TAG,
+        &[0x81, 2],
+        StructuredNode::Hole(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_match_type,
+        MATCHTYPE_TAG,
+        &[2, 3],
+        StructuredNode::MatchType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_match_tpt,
+        MATCHTPT_TAG,
+        &[2, 3],
+        StructuredNode::MatchTpt(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_term_refinement,
+        TERMREFIN_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::InReference(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_type_refinement,
+        TYPEREFIN_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::InReference(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_select_in,
+        SELECTIN_TAG,
+        &[0x81, 2, 3],
+        StructuredNode::SelectIn(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_match_case_type,
+        MATCHCASETYPE_TAG,
+        &[2, 3],
+        StructuredNode::BinaryType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_flexible_type,
+        FLEXIBLETYPE_TAG,
+        &[2],
+        StructuredNode::FlexibleType(_)
+    );
+    dispatches_to_structured_variant!(
+        dispatches_unknown_category_five,
+        135,
+        &[],
+        StructuredNode::Raw(_)
+    );
 
     #[test]
     fn rejects_a_truncated_or_extended_annotation_payload() {
