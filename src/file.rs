@@ -168,8 +168,7 @@ impl<'a> TastyFile<'a> {
     /// parts they need. This method provides an explicit eager-validation
     /// boundary for applications that need the complete file checked.
     pub fn validate(&self) -> Result<(), TastyFileError> {
-        self.asts()?;
-        self.validate_ast_references()?;
+        self.validate_ast_reference_targets()?;
         self.attributes()?;
         self.comments()?;
         self.positions()?;
@@ -296,8 +295,9 @@ impl<'a> TastyFile<'a> {
     /// Validate that every collected AST reference points inside the ASTs
     /// section payload.
     ///
-    /// This checks the address range only. A reference may target a nested AST
-    /// node, so exact node-start validation belongs to a future global index.
+    /// This checks the address range only. Use
+    /// [`TastyFile::validate_ast_reference_targets`] when references must also
+    /// resolve to visible node starts.
     pub fn validate_ast_references(&self) -> Result<(), TastyFileError> {
         for reference in self.ast_references()? {
             self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
@@ -758,6 +758,13 @@ mod tests {
 
         assert_eq!(
             file.validate_ast_reference_targets(),
+            Err(TastyFileError::InvalidAstNodeAddress {
+                context: "AST reference",
+                address: 1,
+            })
+        );
+        assert_eq!(
+            file.validate(),
             Err(TastyFileError::InvalidAstNodeAddress {
                 context: "AST reference",
                 address: 1,

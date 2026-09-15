@@ -430,6 +430,7 @@ context-dependent category-5 payloads remain indexed as opaque boundaries.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
+The eager `TastyFile::validate()` path uses the stricter target validation.
 
 `BIND` is context-dependent: in a pattern it carries a pattern tree, while in
 a type it carries zero or more modifiers. `BindNode` exposes these alternatives
