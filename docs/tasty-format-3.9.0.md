@@ -728,9 +728,9 @@ skip because they have no generic length.
 
 The Rust file model keeps section decoding lazy: `parse_scala_3_9` validates the
 container header and section boundaries, while `TastyFile::validate()` eagerly
-decodes the ASTs and all supported standard sections. Applications that want
-the eager behavior at construction time can use
-`parse_and_validate_scala_3_9`.
+decodes the ASTs, checks the byte range of their AST references, and decodes
+all supported standard sections. Applications that want the eager behavior at
+construction time can use `parse_and_validate_scala_3_9`.
 
 ## 15. Implementation plan
 

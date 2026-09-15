@@ -160,6 +160,7 @@ impl<'a> TastyFile<'a> {
     /// boundary for applications that need the complete file checked.
     pub fn validate(&self) -> Result<(), TastyFileError> {
         self.asts()?;
+        self.validate_ast_references()?;
         self.attributes()?;
         self.comments()?;
         self.positions()?;
@@ -259,6 +260,18 @@ impl<'a> TastyFile<'a> {
             }
         }
         Ok(references)
+    }
+
+    /// Validate that every collected AST reference points inside the ASTs
+    /// section payload.
+    ///
+    /// This checks the address range only. A reference may target a nested AST
+    /// node, so exact node-start validation belongs to a future global index.
+    pub fn validate_ast_references(&self) -> Result<(), TastyFileError> {
+        for reference in self.ast_references()? {
+            self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
+        }
+        Ok(())
     }
 
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
@@ -397,7 +410,7 @@ mod tests {
             crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
         let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
             0,
-            &[crate::VALDEF_TAG, 0x80],
+            &[crate::VALDEF_TAG, 0x82, 0x82, 3],
         )]);
         let file = TastyFile::from_parts(
             crate::Header {
@@ -641,6 +654,37 @@ mod tests {
                     },
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_a_file_ast_reference_outside_the_asts_payload() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[crate::APPLY_TAG, 0x82, crate::TERMREFDIRECT_TAG, 0xff],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.validate_ast_references(),
+            Err(TastyFileError::InvalidAstAddress {
+                context: "AST reference",
+                address: 127,
+                asts_length: 4,
+            })
         );
     }
 }
