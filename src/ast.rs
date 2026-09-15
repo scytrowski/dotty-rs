@@ -884,6 +884,29 @@ impl From<TermError> for AstError {
 }
 
 impl<'a> RawNodes<'a> {
+    /// Construct a top-level AST node list for encoding.
+    ///
+    /// Top-level entries in the `ASTs` section are length-delimited category-5
+    /// nodes. Their `offset` fields are retained for inspection, but encoding
+    /// computes fresh addresses from the emitted byte stream.
+    pub fn from_entries(nodes: Vec<RawNode<'a>>) -> Result<Self, AstError> {
+        for node in &nodes {
+            let Some(category) = NodeCategory::from_tag(node.tag) else {
+                return Err(AstError::InvalidTag {
+                    tag: node.tag,
+                    offset: node.offset,
+                });
+            };
+            if category != NodeCategory::Category5 {
+                return Err(AstError::UnsupportedCategory {
+                    tag: node.tag,
+                    offset: node.offset,
+                });
+            }
+        }
+        Ok(Self { nodes })
+    }
+
     /// Decode the length-delimited top-level nodes in an `ASTs` section.
     ///
     /// Category-5 tags carry their own byte length and can therefore be
@@ -4891,6 +4914,49 @@ mod tests {
         assert_eq!(nodes.get(1).unwrap().tag, 0x81);
         assert!(nodes.get(1).unwrap().payload.is_empty());
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn constructs_raw_nodes_for_programmatic_encoding() {
+        let nodes = RawNodes::from_entries(vec![RawNode {
+            tag: VALDEF_TAG,
+            offset: 99,
+            payload: &[1, 2],
+        }])
+        .unwrap();
+        let mut writer = Writer::new();
+
+        nodes.encode(&mut writer).unwrap();
+
+        assert_eq!(writer.as_slice(), &[VALDEF_TAG, 0x82, 1, 2]);
+        assert_eq!(nodes.encode_with_addresses().unwrap().addresses(), &[0]);
+    }
+
+    #[test]
+    fn rejects_non_category_five_entries_when_constructing_raw_nodes() {
+        assert_eq!(
+            RawNodes::from_entries(vec![RawNode {
+                tag: SELECT_TAG,
+                offset: 7,
+                payload: &[],
+            }]),
+            Err(AstError::UnsupportedCategory {
+                tag: SELECT_TAG,
+                offset: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_tag_when_constructing_raw_nodes() {
+        assert_eq!(
+            RawNodes::from_entries(vec![RawNode {
+                tag: 0,
+                offset: 3,
+                payload: &[],
+            }]),
+            Err(AstError::InvalidTag { tag: 0, offset: 3 })
+        );
     }
 
     #[test]

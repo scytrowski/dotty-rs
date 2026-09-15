@@ -447,6 +447,9 @@ lookup for category-5 nodes.
 category-5 nodes. The file-level global index preserves absolute AST-section
 offsets while traversing supported structured payloads. Unknown or
 context-dependent category-5 payloads remain indexed as opaque boundaries.
+`RawNodes::from_entries()` constructs a validated top-level node list for
+programmatic encoding; `encode_with_addresses()` then assigns fresh offsets
+from the emitted stream.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
