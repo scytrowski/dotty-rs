@@ -22,6 +22,12 @@ pub struct AstRef {
     pub address: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstTreeNode {
+    pub tag: u8,
+    pub offset: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     Unit,
@@ -188,6 +194,42 @@ impl SimpleTerm {
 }
 
 impl<'a> RawTree<'a> {
+    /// Returns the nodes visible in this raw tree in wire order.
+    ///
+    /// The returned metadata includes category-3 and category-4 wrappers,
+    /// category-1/2 leaves, and category-5 boundary nodes. The contents of a
+    /// category-5 payload are not traversed by this generic term operation.
+    pub fn nodes(&self) -> Vec<AstTreeNode> {
+        let mut nodes = Vec::new();
+        self.visit_nodes(&mut |node| nodes.push(node));
+        nodes
+    }
+
+    /// Visits the nodes visible in this raw tree in wire order without
+    /// allocating a result vector.
+    pub fn visit_nodes(&self, visitor: &mut impl FnMut(AstTreeNode)) {
+        match self {
+            Self::Leaf(term) => visitor(AstTreeNode {
+                tag: term.tag,
+                offset: term.offset,
+            }),
+            Self::Ast { tag, offset, child }
+            | Self::NatAst {
+                tag, offset, child, ..
+            } => {
+                visitor(AstTreeNode {
+                    tag: *tag,
+                    offset: *offset,
+                });
+                child.visit_nodes(visitor);
+            }
+            Self::LengthNode(node) => visitor(AstTreeNode {
+                tag: node.tag,
+                offset: node.offset,
+            }),
+        }
+    }
+
     /// Returns all AST references visible in this raw tree.
     ///
     /// Category-3 and category-4 wrappers are traversed in source order. A
@@ -605,6 +647,23 @@ mod tests {
             panic!("expected a leaf")
         };
         assert_eq!(term.offset, 103);
+        assert_eq!(
+            tree.nodes(),
+            vec![
+                super::AstTreeNode {
+                    tag: 90,
+                    offset: 100,
+                },
+                super::AstTreeNode {
+                    tag: 110,
+                    offset: 101,
+                },
+                super::AstTreeNode {
+                    tag: 60,
+                    offset: 103,
+                },
+            ]
+        );
         assert!(reader.is_at_end());
     }
 
