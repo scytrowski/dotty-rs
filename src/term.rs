@@ -188,6 +188,36 @@ impl SimpleTerm {
 }
 
 impl<'a> RawTree<'a> {
+    /// Returns all AST references visible in this raw tree.
+    ///
+    /// Category-3 and category-4 wrappers are traversed in source order. A
+    /// category-5 length-delimited node is an opaque boundary here because
+    /// its payload has a tag-specific grammar; callers can inspect that node
+    /// with the corresponding AST decoder when they need to continue deeper.
+    pub fn ast_refs(&self) -> Vec<AstRef> {
+        let mut references = Vec::new();
+        self.visit_ast_refs(&mut |reference| references.push(reference));
+        references
+    }
+
+    /// Visits all AST references visible in this raw tree in source order.
+    ///
+    /// This non-allocating form is useful for consumers that want to build an
+    /// index or stream references directly. Category-5 payloads remain
+    /// opaque; their tag-specific child trees are exposed by the structured
+    /// AST decoders instead.
+    pub fn visit_ast_refs(&self, visitor: &mut impl FnMut(AstRef)) {
+        match self {
+            Self::Leaf(term) => {
+                if let Some(reference) = term.ast_ref() {
+                    visitor(reference);
+                }
+            }
+            Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_ast_refs(visitor),
+            Self::LengthNode(_) => {}
+        }
+    }
+
     pub fn ast_ref(&self) -> Option<AstRef> {
         match self {
             Self::Leaf(term) => term.ast_ref(),
@@ -441,6 +471,33 @@ mod tests {
                 address: 5,
             })
         );
+    }
+
+    #[test]
+    fn collects_references_through_ast_wrappers_in_source_order() {
+        let mut reader = Reader::new(&[90, 110, 0x81, 60, 0x85]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            tree.ast_refs(),
+            vec![AstRef {
+                kind: AstRefKind::SharedTerm,
+                address: 5,
+            }]
+        );
+
+        let mut visited = Vec::new();
+        tree.visit_ast_refs(&mut |reference| visited.push(reference));
+        assert_eq!(visited, tree.ast_refs());
+    }
+
+    #[test]
+    fn treats_length_delimited_nodes_as_opaque_reference_boundaries() {
+        let mut reader = Reader::new(&[128, 0x82, 60, 0x85]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert!(tree.ast_refs().is_empty());
+        assert!(reader.is_at_end());
     }
 
     #[test]

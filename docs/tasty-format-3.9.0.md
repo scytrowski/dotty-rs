@@ -382,7 +382,11 @@ The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
 `RawTree::ast_ref()`. This distinguishes `SHAREDterm`, `SHAREDtype`,
 `TERMREFdirect`, `TYPEREFdirect`, and `RECthis` without changing the raw
-representation.
+representation. `RawTree::ast_refs()` and `RawTree::visit_ast_refs()` collect
+or visit references through category-3 and category-4 wrappers in source
+order. Category-5 payloads remain opaque at this generic term layer because
+their child layout is tag-specific; structured AST decoders are the next layer
+for traversing those payloads.
 
 Length-delimited nodes can be routed through `RawNode::decode_structured()`;
 it returns a `StructuredNode` variant for supported node grammars and a `Raw`
