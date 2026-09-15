@@ -17,6 +17,8 @@ pub const APPLIEDTYPE_TAG: u8 = 161;
 pub const APPLIEDTPT_TAG: u8 = 162;
 pub const TYPEBOUNDS_TAG: u8 = 163;
 pub const TYPEBOUNDSTPT_TAG: u8 = 164;
+pub const ANNOTATEDTYPE_TAG: u8 = 153;
+pub const ANNOTATEDTPT_TAG: u8 = 154;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
@@ -270,6 +272,13 @@ pub struct TypeBoundsNode<'a> {
     pub low_or_alias: RawTree<'a>,
     pub high: Option<RawTree<'a>>,
     pub variances: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotatedNode<'a> {
+    pub tag: u8,
+    pub underlying: RawTree<'a>,
+    pub annotation: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -944,6 +953,32 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_annotated(&self) -> Result<AnnotatedNode<'a>, AstError> {
+        if self.tag != ANNOTATEDTYPE_TAG && self.tag != ANNOTATEDTPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: ANNOTATEDTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let underlying = RawTree::decode(&mut reader)?;
+        let annotation = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(AnnotatedNode {
+            tag: self.tag,
+            underlying,
+            annotation,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1319,15 +1354,16 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        ANDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode,
-        AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
-        DefinitionTail, ELIDED_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
-        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
-        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode,
-        RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG,
-        SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
-        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
-        TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG,
+        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
+        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
+        FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
+        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode,
+        VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2243,6 +2279,31 @@ mod tests {
         };
 
         assert!(node.decode_type_bounds().is_err());
+    }
+
+    #[test]
+    fn decodes_annotated_types_with_the_shared_structure() {
+        for tag in [ANNOTATEDTYPE_TAG, ANNOTATEDTPT_TAG] {
+            let bytes = [tag, 0x82, 2, 5];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let node = nodes.get(0).unwrap().decode_annotated().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert!(matches!(node.underlying, RawTree::Leaf(_)));
+            assert!(matches!(node.annotation, RawTree::Leaf(_)));
+        }
+    }
+
+    #[test]
+    fn rejects_an_annotated_type_with_a_missing_annotation() {
+        let node = RawNode {
+            tag: ANNOTATEDTYPE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert!(node.decode_annotated().is_err());
     }
 
     #[test]
