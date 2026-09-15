@@ -16,6 +16,12 @@ pub enum AstRefKind {
     RecursiveThis,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstRef {
+    pub kind: AstRefKind,
+    pub address: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     Unit,
@@ -152,6 +158,17 @@ impl SimpleTerm {
         }
     }
 
+    pub fn ast_ref(&self) -> Option<AstRef> {
+        let TermValue::AstRef(address) = &self.value else {
+            return None;
+        };
+
+        Some(AstRef {
+            kind: self.ast_ref_kind()?,
+            address: *address,
+        })
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
@@ -171,6 +188,13 @@ impl SimpleTerm {
 }
 
 impl<'a> RawTree<'a> {
+    pub fn ast_ref(&self) -> Option<AstRef> {
+        match self {
+            Self::Leaf(term) => term.ast_ref(),
+            Self::Ast { .. } | Self::NatAst { .. } | Self::LengthNode(_) => None,
+        }
+    }
+
     pub fn decode(reader: &mut Reader<'a>) -> Result<Self, TermError> {
         Self::decode_with_max_depth(reader, DEFAULT_MAX_TREE_DEPTH)
     }
@@ -268,7 +292,7 @@ impl<'a> RawTree<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AstRefKind, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
+    use super::{AstRef, AstRefKind, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
     use crate::ast::{
         RECTHIS_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
     };
@@ -374,6 +398,13 @@ mod tests {
 
             assert_eq!(term.value, TermValue::AstRef(1));
             assert_eq!(term.ast_ref_kind(), Some(expected_kind));
+            assert_eq!(
+                term.ast_ref(),
+                Some(AstRef {
+                    kind: expected_kind,
+                    address: 1,
+                })
+            );
             assert!(reader.is_at_end());
         }
     }
@@ -395,6 +426,21 @@ mod tests {
         };
 
         assert_eq!(term.ast_ref_kind(), None);
+        assert_eq!(term.ast_ref(), None);
+    }
+
+    #[test]
+    fn exposes_ast_references_from_raw_tree_leaves() {
+        let mut reader = Reader::new(&[60, 0x85]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            tree.ast_ref(),
+            Some(AstRef {
+                kind: AstRefKind::SharedTerm,
+                address: 5,
+            })
+        );
     }
 
     #[test]

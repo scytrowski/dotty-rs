@@ -379,7 +379,8 @@ ASTRef = Nat
 `TERMREFdirect` and `TYPEREFdirect` point to a local symbol, normally its definition node. `SHAREDterm` and `SHAREDtype` refer to previously serialized trees.
 
 The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
-`SimpleTerm::ast_ref_kind()` to distinguish `SHAREDterm`, `SHAREDtype`,
+`AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
+`RawTree::ast_ref()`. This distinguishes `SHAREDterm`, `SHAREDtype`,
 `TERMREFdirect`, `TYPEREFdirect`, and `RECthis` without changing the raw
 representation.
 

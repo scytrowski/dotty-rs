@@ -46,7 +46,8 @@ pub use section::{
     SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{
-    AstRefKind, DEFAULT_MAX_TREE_DEPTH, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue,
+    AstRef, AstRefKind, DEFAULT_MAX_TREE_DEPTH, RawTree, SimpleTerm, TermEncodeError, TermError,
+    TermValue,
 };
 pub use writer::{WriteError, Writer};
 
