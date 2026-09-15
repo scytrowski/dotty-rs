@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tasty_rs::{Header, NameTable, RawNodes, Reader, SectionTable, StandardSection};
+use tasty_rs::{Header, NameTable, RawNodes, Reader, SectionTable, StandardSection, TastyFile};
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -363,5 +363,38 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn all_tasty_fixtures_decode_through_the_complete_file_model() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        assert_eq!(
+            file.header().major_version,
+            28,
+            "fixture {}",
+            path.display()
+        );
+        assert!(file.names().len() > 0, "fixture {}", path.display());
+        assert!(file.sections().len() > 0, "fixture {}", path.display());
+        assert!(
+            !file.asts().unwrap().is_empty(),
+            "fixture {}",
+            path.display()
+        );
+        file.attributes().unwrap_or_else(|error| {
+            panic!("failed to decode attributes in {}: {error}", path.display())
+        });
+        file.comments().unwrap_or_else(|error| {
+            panic!("failed to decode comments in {}: {error}", path.display())
+        });
+        file.positions().unwrap_or_else(|error| {
+            panic!("failed to decode positions in {}: {error}", path.display())
+        });
     }
 }

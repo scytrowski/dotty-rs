@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod file;
 pub mod header;
 pub mod name_table;
 pub mod reader;
@@ -30,6 +31,7 @@ pub use ast::{
     TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TemplateNode, TemplateStructure, TypeApplyNode,
     TypeBoundsNode, TypedNode, UNAPPLY_TAG, UnapplyNode, VALDEF_TAG, WhileNode,
 };
+pub use file::{TastyFile, TastyFileError};
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
