@@ -116,12 +116,20 @@ impl<'a> RawTree<'a> {
 
         match category {
             1 | 2 => Ok(Self::Leaf(SimpleTerm::decode_tagged(reader, tag, offset)?)),
-            3 => Ok(Self::Ast {
-                tag,
-                offset,
-                child: Box::new(Self::decode(reader)?),
-            }),
+            3 => {
+                if !(90..=104).contains(&tag) {
+                    return Err(TermError::InvalidTag { tag, offset });
+                }
+                Ok(Self::Ast {
+                    tag,
+                    offset,
+                    child: Box::new(Self::decode(reader)?),
+                })
+            }
             4 => {
+                if !(110..=119).contains(&tag) {
+                    return Err(TermError::InvalidTag { tag, offset });
+                }
                 let value = reader.read_nat()?;
                 Ok(Self::NatAst {
                     tag,
@@ -277,7 +285,7 @@ mod tests {
 
     #[test]
     fn decodes_every_category_three_and_four_tag_as_a_raw_tree() {
-        for tag in 90..=109 {
+        for tag in 90..=104 {
             let bytes = [tag, 64, 0x81];
             let mut reader = Reader::new(&bytes);
             let tree = super::RawTree::decode(&mut reader).unwrap();
@@ -285,12 +293,31 @@ mod tests {
             assert!(reader.is_at_end());
         }
 
-        for tag in 110..=127 {
+        for tag in 110..=119 {
             let bytes = [tag, 0x81, 64, 0x81];
             let mut reader = Reader::new(&bytes);
             let tree = super::RawTree::decode(&mut reader).unwrap();
             assert!(matches!(tree, super::RawTree::NatAst { tag: actual, .. } if actual == tag));
             assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn rejects_unassigned_category_three_and_four_tags() {
+        for tag in [
+            105, 106, 107, 108, 109, 120, 121, 122, 123, 124, 125, 126, 127,
+        ] {
+            let bytes = if tag < 110 {
+                vec![tag, 64, 0x81]
+            } else {
+                vec![tag, 0x81, 64, 0x81]
+            };
+            let mut reader = Reader::new(&bytes);
+
+            assert_eq!(
+                super::RawTree::decode(&mut reader),
+                Err(TermError::InvalidTag { tag, offset: 0 })
+            );
         }
     }
 
