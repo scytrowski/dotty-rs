@@ -440,6 +440,11 @@ body are preserved in `BindNode::remainder` for lossless re-encoding.
 normalizes the one-tree form to `bound = None` and the two-tree form to
 `bound = Some(...)`, while retaining all case definitions in wire order.
 
+`SPLICEPATTERN` stores its type and term arguments as one ordered tail without
+an encoded split point. `SplicePatternNode::split_arguments(type_argument_count)`
+lets a typed caller apply that context without changing the lossless raw model;
+an out-of-range count returns `None`.
+
 ### 6.6. Constants
 
 ```text

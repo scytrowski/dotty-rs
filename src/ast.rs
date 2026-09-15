@@ -525,6 +525,19 @@ pub struct SplicePatternNode<'a> {
     pub arguments: Vec<RawTree<'a>>,
 }
 
+impl<'a> SplicePatternNode<'a> {
+    /// Splits the ordered argument tail once typed context supplies the
+    /// number of type arguments. The wire format does not encode that count.
+    pub fn split_arguments(
+        &self,
+        type_argument_count: usize,
+    ) -> Option<(&[RawTree<'a>], &[RawTree<'a>])> {
+        self.arguments
+            .get(type_argument_count..)
+            .map(|term_arguments| (&self.arguments[..type_argument_count], term_arguments))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchTypeNode<'a> {
     pub bound: RawTree<'a>,
@@ -5803,6 +5816,11 @@ mod tests {
         assert!(matches!(splice.pattern, RawTree::Leaf(_)));
         assert!(matches!(splice.pattern_type, RawTree::Leaf(_)));
         assert_eq!(splice.arguments.len(), 3);
+
+        let (type_arguments, term_arguments) = splice.split_arguments(1).unwrap();
+        assert_eq!(type_arguments.len(), 1);
+        assert_eq!(term_arguments.len(), 2);
+        assert!(splice.split_arguments(4).is_none());
     }
 
     #[test]
