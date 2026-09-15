@@ -38,6 +38,10 @@ pub const PARAMTYPE_TAG: u8 = 172;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
+pub const BIND_TAG: u8 = 150;
+pub const ALTERNATIVE_TAG: u8 = 151;
+pub const UNAPPLY_TAG: u8 = 152;
+pub const CASEDEF_TAG: u8 = 155;
 pub const TERMREFIN_TAG: u8 = 174;
 pub const TYPEREFIN_TAG: u8 = 175;
 pub const SELECTIN_TAG: u8 = 176;
@@ -300,6 +304,33 @@ pub struct SelectInNode<'a> {
     pub name: u32,
     pub qualifier: RawTree<'a>,
     pub underlying_type: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseDefNode<'a> {
+    pub pattern: RawTree<'a>,
+    pub body: RawTree<'a>,
+    pub guard: Option<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindNode<'a> {
+    pub name: u32,
+    pub type_tree: RawTree<'a>,
+    pub pattern: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlternativeNode<'a> {
+    pub alternatives: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnapplyNode<'a> {
+    pub function: RawTree<'a>,
+    pub implicit_args: Vec<AstChildNode<'a>>,
+    pub type_tree: RawTree<'a>,
+    pub patterns: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,6 +821,111 @@ impl<'a> RawNode<'a> {
             name,
             qualifier,
             underlying_type,
+        })
+    }
+
+    pub fn decode_case_def(&self) -> Result<CaseDefNode<'a>, AstError> {
+        if self.tag != CASEDEF_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: CASEDEF_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let pattern = RawTree::decode(&mut reader)?;
+        let body = RawTree::decode(&mut reader)?;
+        let guard = if reader.is_at_end() {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(CaseDefNode {
+            pattern,
+            body,
+            guard,
+        })
+    }
+
+    pub fn decode_bind(&self) -> Result<BindNode<'a>, AstError> {
+        if self.tag != BIND_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: BIND_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let name = reader.read_nat()?;
+        let type_tree = RawTree::decode(&mut reader)?;
+        let pattern = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(BindNode {
+            name,
+            type_tree,
+            pattern,
+        })
+    }
+
+    pub fn decode_alternative(&self) -> Result<AlternativeNode<'a>, AstError> {
+        if self.tag != ALTERNATIVE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: ALTERNATIVE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let mut alternatives = Vec::new();
+        while !reader.is_at_end() {
+            alternatives.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(AlternativeNode { alternatives })
+    }
+
+    pub fn decode_unapply(&self) -> Result<UnapplyNode<'a>, AstError> {
+        if self.tag != UNAPPLY_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: UNAPPLY_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let function = RawTree::decode(&mut reader)?;
+        let mut implicit_args = Vec::new();
+        while !reader.is_at_end() && reader.peek_u8()? == IMPLICITARG_TAG {
+            implicit_args.push(RawTree::decode(&mut reader)?.decode_implicit_arg()?);
+        }
+        let type_tree = RawTree::decode(&mut reader)?;
+        let mut patterns = Vec::new();
+        while !reader.is_at_end() {
+            patterns.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(UnapplyNode {
+            function,
+            implicit_args,
+            type_tree,
+            patterns,
         })
     }
 
@@ -1680,20 +1816,21 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG,
-        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG,
-        BYNAMETYPE_TAG, CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
-        DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG,
-        IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
-        ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
-        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
-        POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG,
-        RECTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG,
-        SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG,
-        SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
-        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
-        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG,
+        APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BIND_TAG, BLOCK_TAG,
+        BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG, DEFDEF_TAG,
+        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG,
+        EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG,
+        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG,
+        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
+        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
+        QUALTHIS_TAG, RECTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
+        RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG,
+        SINGLETONTPT_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG,
+        TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG,
+        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
+        TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode,
+        UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2959,6 +3096,92 @@ mod tests {
         };
 
         assert!(matches!(node.decode_while(), Err(AstError::Term(_))));
+    }
+
+    #[test]
+    fn decodes_case_definition_with_an_optional_guard() {
+        let bytes = [
+            CASEDEF_TAG,
+            0x86,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let case_def = nodes.get(0).unwrap().decode_case_def().unwrap();
+
+        assert!(matches!(case_def.pattern, RawTree::Leaf(_)));
+        assert!(matches!(case_def.body, RawTree::Leaf(_)));
+        assert!(matches!(case_def.guard, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn decodes_bind_and_alternative_pattern_nodes() {
+        let bytes = [
+            BIND_TAG,
+            0x85,
+            0x85,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            ALTERNATIVE_TAG,
+            0x84,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let bind = nodes.get(0).unwrap().decode_bind().unwrap();
+        let alternative = nodes.get(1).unwrap().decode_alternative().unwrap();
+
+        assert_eq!(bind.name, 5);
+        assert!(matches!(bind.type_tree, RawTree::Leaf(_)));
+        assert!(matches!(bind.pattern, RawTree::Leaf(_)));
+        assert_eq!(alternative.alternatives.len(), 2);
+    }
+
+    #[test]
+    fn decodes_unapply_with_implicit_arguments_type_and_patterns() {
+        let bytes = [
+            UNAPPLY_TAG,
+            0x89,
+            TERMREFPKG_TAG,
+            0x81,
+            IMPLICITARG_TAG,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let unapply = nodes.get(0).unwrap().decode_unapply().unwrap();
+
+        assert!(matches!(unapply.function, RawTree::Leaf(_)));
+        assert_eq!(unapply.implicit_args.len(), 1);
+        assert_eq!(unapply.implicit_args[0].tag, IMPLICITARG_TAG);
+        assert!(matches!(unapply.type_tree, RawTree::Leaf(_)));
+        assert_eq!(unapply.patterns.len(), 1);
+    }
+
+    #[test]
+    fn rejects_an_unapply_without_a_type_tree() {
+        let node = RawNode {
+            tag: UNAPPLY_TAG,
+            offset: 0,
+            payload: &[TERMREFPKG_TAG, 0x81],
+        };
+
+        assert!(node.decode_unapply().is_err());
     }
 
     #[test]

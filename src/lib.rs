@@ -6,12 +6,13 @@ pub mod section;
 pub mod term;
 
 pub use ast::{
-    ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG,
-    ASSIGN_TAG, AnnotatedNode, AppliedTypeNode, ApplyNode, AssignNode, AstChildNode, AstError,
-    BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, BinaryTypeNode, CLASSCONST_TAG,
-    DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
-    EMPTYCLAUSE_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, FlexibleTypeNode, IDENT_TAG,
-    IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, IdentNode, IfNode,
+    ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG,
+    APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AlternativeNode, AnnotatedNode, AppliedTypeNode,
+    ApplyNode, AssignNode, AstChildNode, AstError, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG,
+    BYNAMETYPE_TAG, BinaryTypeNode, BindNode, CASEDEF_TAG, CLASSCONST_TAG, CaseDefNode, DEFDEF_TAG,
+    DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EMPTYCLAUSE_TAG,
+    EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, FlexibleTypeNode, IDENT_TAG, IDENTTPT_TAG,
+    IF_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, IdentNode, IfNode,
     ImportExportKind, ImportExportNode, ImportSelector, InReferenceNode, LAMBDA_TAG, LambdaNode,
     MATCHCASETYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NamedArgNode, NodeCategory,
     ORTYPE_TAG, PACKAGE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
@@ -23,7 +24,7 @@ pub use ast::{
     TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
     TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
     TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TemplateNode, TemplateStructure, TypeApplyNode,
-    TypeBoundsNode, TypedNode, VALDEF_TAG, WhileNode,
+    TypeBoundsNode, TypedNode, UNAPPLY_TAG, UnapplyNode, VALDEF_TAG, WhileNode,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
