@@ -12,7 +12,7 @@ pub use ast::{
     DefinitionTail, ELIDED_TAG, EMPTYCLAUSE_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, FlexibleTypeNode,
     IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, IdentNode, IfNode,
     ImportExportKind, ImportExportNode, ImportSelector, LAMBDA_TAG, LambdaNode, MATCHCASETYPE_TAG,
-    NAMEDARG_TAG, NEW_TAG, NamedArgNode, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
+    METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NamedArgNode, NodeCategory, ORTYPE_TAG, PACKAGE_TAG,
     PARAMTYPE_TAG, POLYTYPE_TAG, PackageNode, ParamTypeNode, ParameterBody, ParameterNode,
     PolyTypeNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RepeatedNode,
     ReturnNode, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG,

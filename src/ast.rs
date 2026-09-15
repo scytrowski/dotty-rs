@@ -21,6 +21,7 @@ pub const SUPERTYPE_TAG: u8 = 158;
 pub const MATCHCASETYPE_TAG: u8 = 192;
 pub const POLYTYPE_TAG: u8 = 169;
 pub const TYPELAMBDATYPE_TAG: u8 = 170;
+pub const METHODTYPE_TAG: u8 = 180;
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
 pub const ANNOTATEDTPT_TAG: u8 = 154;
 pub const PARAMTYPE_TAG: u8 = 172;
@@ -303,6 +304,13 @@ pub struct PolyTypeNode<'a> {
     pub tag: u8,
     pub result_type: RawTree<'a>,
     pub type_names: Vec<TypeName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodTypeNode<'a> {
+    pub result_type: RawTree<'a>,
+    pub type_names: Vec<TypeName>,
+    pub modifiers: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1062,6 +1070,46 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_method_type(&self) -> Result<MethodTypeNode<'a>, AstError> {
+        if self.tag != METHODTYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: METHODTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let result_type = RawTree::decode(&mut reader)?;
+        let mut type_names = Vec::new();
+        while !reader.is_at_end() && !is_modifier_tag(reader.peek_u8()?) {
+            type_names.push(TypeName {
+                type_or_bounds: reader.read_nat()?,
+                name: reader.read_nat()?,
+            });
+        }
+
+        let mut modifiers = Vec::new();
+        while !reader.is_at_end() {
+            let offset = reader.position();
+            let modifier = reader.read_u8()?;
+            if !is_modifier_tag(modifier) {
+                return Err(AstError::UnexpectedTag {
+                    expected: 6,
+                    actual: modifier,
+                    offset: self.offset + offset,
+                });
+            }
+            modifiers.push(modifier);
+        }
+
+        Ok(MethodTypeNode {
+            result_type,
+            type_names,
+            modifiers,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1441,13 +1489,13 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
         FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
-        ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, NAMEDARG_TAG, NEW_TAG,
-        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
-        ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
-        SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG,
-        TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG,
-        TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode,
-        VALDEF_TAG, WHILE_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
+        NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
+        POLYTYPE_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
+        RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG,
+        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG,
+        TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2460,6 +2508,42 @@ mod tests {
         };
 
         assert!(node.decode_poly_type().is_err());
+    }
+
+    #[test]
+    fn decodes_a_method_type_with_type_names_and_modifiers() {
+        let bytes = [METHODTYPE_TAG, 0x87, 2, 0x85, 0x86, 0x87, 0x88, 17, 37];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_method_type().unwrap();
+
+        assert!(matches!(node.result_type, RawTree::Leaf(_)));
+        assert_eq!(node.type_names.len(), 2);
+        assert_eq!(node.modifiers, vec![17, 37]);
+    }
+
+    #[test]
+    fn decodes_a_method_type_without_type_names_or_modifiers() {
+        let node = RawNode {
+            tag: METHODTYPE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        let node = node.decode_method_type().unwrap();
+        assert!(node.type_names.is_empty());
+        assert!(node.modifiers.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_method_type_with_an_invalid_modifier() {
+        let node = RawNode {
+            tag: METHODTYPE_TAG,
+            offset: 0,
+            payload: &[2, 50],
+        };
+
+        assert!(node.decode_method_type().is_err());
     }
 
     #[test]
