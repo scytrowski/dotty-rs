@@ -929,9 +929,10 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
         IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector, NEW_TAG, NodeCategory,
-        PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RETURN_TAG, RawNodes, RawTree, SELFDEF_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG, RawNodes, RawTree,
+        SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
+        TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
+        WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1161,6 +1162,50 @@ mod tests {
         assert!(body.rhs.is_none());
         assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
         assert!(matches!(body, DefDefBody { .. }));
+    }
+
+    #[test]
+    fn decodes_defdef_type_and_term_parameters_rhs_split_and_annotation() {
+        let bytes = [
+            DEFDEF_TAG,
+            0x91,
+            0x81,
+            TYPEPARAM_TAG,
+            0x83,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            PARAM_TAG,
+            0x83,
+            0x84,
+            TERMREFPKG_TAG,
+            0x85,
+            SPLITCLAUSE_TAG,
+            TERMREFPKG_TAG,
+            0x86,
+            2,
+            173,
+            0x80,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let body = nodes.get(0).unwrap().decode_defdef_body().unwrap();
+
+        assert_eq!(body.parameters.len(), 2);
+        assert!(matches!(
+            body.parameters[0],
+            ParameterNode::TypeParam { .. }
+        ));
+        assert!(matches!(
+            body.parameters[1],
+            ParameterNode::TermParam { .. }
+        ));
+        assert_eq!(body.clauses, vec![SPLITCLAUSE_TAG]);
+        assert!(matches!(body.return_type, RawTree::Leaf(_)));
+        assert!(matches!(body.rhs, Some(RawTree::Leaf(_))));
+        assert!(
+            matches!(body.tail.as_slice(), [DefinitionTail::Annotation(annotation)] if annotation.tag == 173)
+        );
     }
 
     #[test]

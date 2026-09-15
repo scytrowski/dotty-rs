@@ -195,6 +195,36 @@ mod tests {
     }
 
     #[test]
+    fn decodes_every_supported_category_two_tag() {
+        let cases = [
+            (60, TermValue::AstRef(1)),
+            (61, TermValue::AstRef(1)),
+            (62, TermValue::AstRef(1)),
+            (63, TermValue::AstRef(1)),
+            (64, TermValue::NameRef(1)),
+            (65, TermValue::NameRef(1)),
+            (66, TermValue::AstRef(1)),
+            (67, TermValue::Int(1)),
+            (68, TermValue::Int(1)),
+            (69, TermValue::Nat(1)),
+            (70, TermValue::Int(1)),
+            (71, TermValue::LongInt(1)),
+            (72, TermValue::Int(1)),
+            (73, TermValue::LongInt(1)),
+            (74, TermValue::NameRef(1)),
+            (75, TermValue::NameRef(1)),
+            (76, TermValue::NameRef(1)),
+        ];
+
+        for (tag, expected) in cases {
+            let bytes = [tag, 0x81];
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(SimpleTerm::decode(&mut reader).unwrap().value, expected);
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
     fn rejects_tags_without_a_category_two_value() {
         let mut reader = Reader::new(&[90]);
 
@@ -236,6 +266,25 @@ mod tests {
     }
 
     #[test]
+    fn decodes_every_category_three_and_four_tag_as_a_raw_tree() {
+        for tag in 90..=109 {
+            let bytes = [tag, 64, 0x81];
+            let mut reader = Reader::new(&bytes);
+            let tree = super::RawTree::decode(&mut reader).unwrap();
+            assert!(matches!(tree, super::RawTree::Ast { tag: actual, .. } if actual == tag));
+            assert!(reader.is_at_end());
+        }
+
+        for tag in 110..=127 {
+            let bytes = [tag, 0x81, 64, 0x81];
+            let mut reader = Reader::new(&bytes);
+            let tree = super::RawTree::decode(&mut reader).unwrap();
+            assert!(matches!(tree, super::RawTree::NatAst { tag: actual, .. } if actual == tag));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
     fn preserves_a_category_five_node_as_a_bounded_raw_node() {
         let mut reader = Reader::new(&[128, 0x82, b'a', b'b']);
         let tree = super::RawTree::decode(&mut reader).unwrap();
@@ -244,5 +293,16 @@ mod tests {
             tree,
             super::RawTree::LengthNode(raw) if raw.tag == 128 && raw.payload == b"ab"
         ));
+    }
+
+    #[test]
+    fn decodes_every_category_five_tag_as_a_bounded_raw_node() {
+        for tag in 128..=255 {
+            let bytes = [tag, 0x80];
+            let mut reader = Reader::new(&bytes);
+            let tree = super::RawTree::decode(&mut reader).unwrap();
+            assert!(matches!(tree, super::RawTree::LengthNode(raw) if raw.tag == tag));
+            assert!(reader.is_at_end());
+        }
     }
 }

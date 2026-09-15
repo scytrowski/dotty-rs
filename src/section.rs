@@ -350,13 +350,17 @@ mod tests {
             name: 0,
             offset: 0,
             length: 0,
-            payload: &[1, 6, 129, 0x85],
+            payload: &[1, 2, 3, 4, 5, 6, 129, 0x85],
         };
 
         assert_eq!(
             section.decode_attributes().unwrap(),
             vec![
                 Attribute::Scala2StandardLibrary,
+                Attribute::ExplicitNulls,
+                Attribute::CaptureChecked,
+                Attribute::WithPureFuns,
+                Attribute::Java,
                 Attribute::Outline,
                 Attribute::SourceFile(5),
             ]
