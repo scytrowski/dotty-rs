@@ -1,5 +1,5 @@
 use crate::reader::{ReadError, Reader};
-use crate::term::{RawTree, TermError};
+use crate::term::{RawTree, TermError, is_known_category5_tag};
 use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
@@ -336,6 +336,9 @@ impl<'a> RawNodes<'a> {
 
             if category != NodeCategory::Category5 {
                 return Err(AstError::UnsupportedCategory { tag, offset });
+            }
+            if !is_known_category5_tag(tag) {
+                return Err(AstError::InvalidTag { tag, offset });
             }
 
             let length = reader.read_nat()? as usize;
@@ -969,6 +972,19 @@ mod tests {
             RawNodes::decode(&mut reader),
             Err(AstError::UnsupportedCategory {
                 tag: 0x3c,
+                offset: 0
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_unassigned_category_five_top_level_tag() {
+        let mut reader = Reader::new(&[135, 0x80]);
+
+        assert_eq!(
+            RawNodes::decode(&mut reader),
+            Err(AstError::InvalidTag {
+                tag: 135,
                 offset: 0
             })
         );

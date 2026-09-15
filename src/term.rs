@@ -2,6 +2,13 @@ use crate::ast::RawNode;
 use crate::reader::{ReadError, Reader};
 use std::fmt;
 
+pub(crate) fn is_known_category5_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        128..=134 | 136..=165 | 167 | 169..=183 | 190..=193 | 255
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     Unit,
@@ -124,6 +131,9 @@ impl<'a> RawTree<'a> {
                 })
             }
             5 => {
+                if !is_known_category5_tag(tag) {
+                    return Err(TermError::InvalidTag { tag, offset });
+                }
                 let length = reader.read_nat()? as usize;
                 let payload = reader.read_bytes(length)?;
                 Ok(Self::LengthNode(RawNode {
@@ -296,13 +306,32 @@ mod tests {
     }
 
     #[test]
-    fn decodes_every_category_five_tag_as_a_bounded_raw_node() {
-        for tag in 128..=255 {
+    fn decodes_every_assigned_category_five_tag_as_a_bounded_raw_node() {
+        let assigned = (128..=134)
+            .chain(136..=165)
+            .chain([167])
+            .chain(169..=183)
+            .chain(190..=193)
+            .chain([255]);
+
+        for tag in assigned {
             let bytes = [tag, 0x80];
             let mut reader = Reader::new(&bytes);
             let tree = super::RawTree::decode(&mut reader).unwrap();
             assert!(matches!(tree, super::RawTree::LengthNode(raw) if raw.tag == tag));
             assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn rejects_unassigned_category_five_tags() {
+        for tag in [135, 166, 168, 184, 185, 186, 187, 188, 189, 194, 254] {
+            let bytes = [tag, 0x80];
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(
+                super::RawTree::decode(&mut reader),
+                Err(TermError::InvalidTag { tag, offset: 0 })
+            );
         }
     }
 }
