@@ -209,11 +209,27 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                 } = body
                 {
                     if template.tag == tasty_rs::TEMPLATE_TAG {
-                        template
-                            .decode_template_structure()
-                            .unwrap_or_else(|error| {
-                                panic!("failed to parse template in {}: {error}", path.display())
+                        let structure =
+                            template
+                                .decode_template_structure()
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "failed to parse template in {}: {error}",
+                                        path.display()
+                                    )
+                                });
+                        for parameter in structure
+                            .type_params
+                            .iter()
+                            .chain(structure.term_params.iter())
+                        {
+                            parameter.decode_body().unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to parse parameter body in {}: {error}",
+                                    path.display()
+                                )
                             });
+                        }
                     }
                 }
             }

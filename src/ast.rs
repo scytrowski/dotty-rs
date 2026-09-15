@@ -97,6 +97,12 @@ pub enum ParameterNode<'a> {
     TermParam { name: u32, body: &'a [u8] },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterBody<'a> {
+    pub type_tree: RawTree<'a>,
+    pub tail: Vec<DefinitionTail<'a>>,
+}
+
 impl<'a> ParameterNode<'a> {
     pub fn name(&self) -> u32 {
         match self {
@@ -109,6 +115,13 @@ impl<'a> ParameterNode<'a> {
             Self::TypeParam { body, .. } | Self::TermParam { body, .. } => body,
         }
     }
+
+    pub fn decode_body(&self) -> Result<ParameterBody<'a>, AstError> {
+        let mut reader = Reader::new(self.body());
+        let type_tree = RawTree::decode(&mut reader)?;
+        let tail = read_definition_tail(&mut reader)?;
+        Ok(ParameterBody { type_tree, tail })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +133,8 @@ pub struct TemplateNode<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateStructure<'a> {
+    pub type_params: Vec<ParameterNode<'a>>,
+    pub term_params: Vec<ParameterNode<'a>>,
     pub parents: Vec<RawTree<'a>>,
     pub self_def: Option<RawTree<'a>>,
     pub split_clause: bool,
@@ -430,6 +445,8 @@ impl<'a> RawNode<'a> {
         }
 
         Ok(TemplateStructure {
+            type_params: template.type_params,
+            term_params: template.term_params,
             parents,
             self_def,
             split_clause,
@@ -490,8 +507,8 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         AstError, DefinitionBody, DefinitionNode, DefinitionTail, NodeCategory, PACKAGE_TAG,
-        PARAM_TAG, RawNodes, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
-        VALDEF_TAG,
+        PARAM_TAG, RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG,
+        TYPEPARAM_TAG, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -670,5 +687,17 @@ mod tests {
         assert!(structure.self_def.is_some());
         assert!(!structure.split_clause);
         assert_eq!(structure.stats.len(), 1);
+    }
+
+    #[test]
+    fn decodes_a_parameter_body_type_and_modifier() {
+        let bytes = [PARAM_TAG, 0x83, 0x81, 2, 17];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let parameter = nodes.get(0).unwrap().decode_parameter().unwrap();
+        let body = parameter.decode_body().unwrap();
+
+        assert!(matches!(body.type_tree, RawTree::Leaf(_)));
+        assert_eq!(body.tail, vec![DefinitionTail::Modifier(17)]);
     }
 }
