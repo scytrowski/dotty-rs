@@ -445,6 +445,11 @@ an encoded split point. `SplicePatternNode::split_arguments(type_argument_count)
 lets a typed caller apply that context without changing the lossless raw model;
 an out-of-range count returns `None`.
 
+`METHODtype` likewise has an undelimited `TypeName* Modifier*` suffix. The
+heuristic decoder remains available for ordinary payloads, while
+`decode_method_type_with_type_name_count(count)` lets typed callers decode the
+suffix unambiguously when a `TypeName` starts with a modifier-valued byte.
+
 ### 6.6. Constants
 
 ```text

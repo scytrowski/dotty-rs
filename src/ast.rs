@@ -2652,6 +2652,53 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    /// Decodes a method type when the surrounding typed context provides the
+    /// number of `TypeName` entries. The wire format does not delimit those
+    /// entries from the trailing modifiers, so this is the unambiguous form
+    /// for type-name values whose first byte happens to be a modifier tag.
+    pub fn decode_method_type_with_type_name_count(
+        &self,
+        type_name_count: usize,
+    ) -> Result<MethodTypeNode<'a>, AstError> {
+        if self.tag != METHODTYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: METHODTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let result_type = RawTree::decode(&mut reader)?;
+        let mut type_names = Vec::with_capacity(type_name_count);
+        for _ in 0..type_name_count {
+            type_names.push(TypeName {
+                type_or_bounds: reader.read_nat()?,
+                name: reader.read_nat()?,
+            });
+        }
+
+        let mut modifiers = Vec::new();
+        while !reader.is_at_end() {
+            let offset = reader.position();
+            let modifier = reader.read_u8()?;
+            if !is_modifier_tag(modifier) {
+                return Err(AstError::UnexpectedTag {
+                    expected: INLINE_TAG,
+                    actual: modifier,
+                    offset: self.offset + offset,
+                });
+            }
+            modifiers.push(modifier);
+        }
+
+        Ok(MethodTypeNode {
+            result_type,
+            type_names,
+            modifiers,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -4190,7 +4237,7 @@ mod tests {
         TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG,
         TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
         TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
-        TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::TermEncodeError;
@@ -5328,6 +5375,26 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_method_type_with_an_ambiguous_type_name_using_context() {
+        let node = RawNode {
+            tag: METHODTYPE_TAG,
+            offset: 0,
+            payload: &[2, 0x91, 0x85, 37],
+        };
+
+        let node = node.decode_method_type_with_type_name_count(1).unwrap();
+
+        assert_eq!(
+            node.type_names,
+            vec![TypeName {
+                type_or_bounds: INLINE_TAG as u32,
+                name: 5,
+            }]
+        );
+        assert_eq!(node.modifiers, vec![37]);
+    }
+
+    #[test]
     fn decodes_a_method_type_without_type_names_or_modifiers() {
         let node = RawNode {
             tag: METHODTYPE_TAG,
@@ -6053,6 +6120,11 @@ mod tests {
         });
         assert_structured_round_trip(&[METHODTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
             raw.decode_method_type().unwrap().encode(writer)
+        });
+        assert_structured_round_trip(&[METHODTYPE_TAG, 0x84, 2, 0x91, 0x85, 37], |raw, writer| {
+            raw.decode_method_type_with_type_name_count(1)
+                .unwrap()
+                .encode(writer)
         });
         assert_structured_round_trip(
             &[
