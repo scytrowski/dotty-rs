@@ -479,6 +479,14 @@ CLASSconst  Type
 
 `FLOATconst` and `DOUBLEconst` carry integer representations of the floating-point bits rather than textual number representations.
 
+The Rust term layer exposes these tags through `SimpleTerm::constant_value()`.
+It returns a typed `ConstantValue`, validates the ranges of `BYTEconst` and
+`SHORTconst`, and rejects `CHARconst` values that do not fit in Scala's
+16-bit `Char` representation.
+`FloatBits` and `DoubleBits` retain the exact wire bits so NaNs and signed
+zeroes survive a decode/encode cycle. `ConstantValue::encode()` writes the
+canonical tag and payload for each supported constant.
+
 ## 7. AST tag categories
 
 A tag alone is not enough to determine the payload without knowing its category.

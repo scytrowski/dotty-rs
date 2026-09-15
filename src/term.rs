@@ -6,6 +6,19 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+pub const UNITCONST_TAG: u8 = 2;
+pub const FALSECONST_TAG: u8 = 3;
+pub const TRUECONST_TAG: u8 = 4;
+pub const NULLCONST_TAG: u8 = 5;
+pub const BYTECONST_TAG: u8 = 67;
+pub const SHORTCONST_TAG: u8 = 68;
+pub const CHARCONST_TAG: u8 = 69;
+pub const INTCONST_TAG: u8 = 70;
+pub const LONGCONST_TAG: u8 = 71;
+pub const FLOATCONST_TAG: u8 = 72;
+pub const DOUBLECONST_TAG: u8 = 73;
+pub const STRINGCONST_TAG: u8 = 74;
+
 pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +54,26 @@ pub enum TermValue {
     LongInt(i64),
 }
 
+/// A semantically decoded TASTy constant.
+///
+/// Floating-point values are kept as their wire bit patterns. This preserves
+/// NaNs, signed zeroes, and other values that would be lost by converting to
+/// Rust's floating-point types during a lossless decode/encode cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstantValue {
+    Unit,
+    Boolean(bool),
+    Null,
+    Byte(i8),
+    Short(i16),
+    Char(u16),
+    Int(i32),
+    Long(i64),
+    FloatBits(u32),
+    DoubleBits(u64),
+    String(NameRef),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleTerm {
     pub tag: u8,
@@ -70,6 +103,7 @@ pub enum TermError {
     Read(ReadError),
     InvalidTag { tag: u8, offset: usize },
     UnsupportedCategory { tag: u8, offset: usize },
+    InvalidConstant { tag: u8, value: i64, offset: usize },
     RecursionLimit { offset: usize, limit: usize },
 }
 
@@ -108,6 +142,10 @@ impl fmt::Display for TermError {
             Self::UnsupportedCategory { tag, offset } => write!(
                 formatter,
                 "term tag {tag} at offset {offset} is not a category-2 leaf"
+            ),
+            Self::InvalidConstant { tag, value, offset } => write!(
+                formatter,
+                "constant tag {tag} at offset {offset} has invalid value {value}"
             ),
             Self::RecursionLimit { offset, limit } => write!(
                 formatter,
@@ -183,6 +221,73 @@ impl SimpleTerm {
         })
     }
 
+    /// Interprets this category-1/2 leaf as a typed TASTy constant.
+    ///
+    /// `Ok(None)` means that the leaf is a name or AST reference rather than
+    /// a constant. Narrow constants are range-checked here, and `CHARconst`
+    /// is rejected when its Nat does not fit in Scala's 16-bit `Char`.
+    pub fn constant_value(&self) -> Result<Option<ConstantValue>, TermError> {
+        let value = match self.tag {
+            UNITCONST_TAG => ConstantValue::Unit,
+            FALSECONST_TAG => ConstantValue::Boolean(false),
+            TRUECONST_TAG => ConstantValue::Boolean(true),
+            NULLCONST_TAG => ConstantValue::Null,
+            BYTECONST_TAG => ConstantValue::Byte(match self.value {
+                TermValue::Int(value) => {
+                    i8::try_from(value).map_err(|_| TermError::InvalidConstant {
+                        tag: self.tag,
+                        value: i64::from(value),
+                        offset: self.offset,
+                    })?
+                }
+                _ => return Ok(None),
+            }),
+            SHORTCONST_TAG => ConstantValue::Short(match self.value {
+                TermValue::Int(value) => {
+                    i16::try_from(value).map_err(|_| TermError::InvalidConstant {
+                        tag: self.tag,
+                        value: i64::from(value),
+                        offset: self.offset,
+                    })?
+                }
+                _ => return Ok(None),
+            }),
+            CHARCONST_TAG => ConstantValue::Char(match self.value {
+                TermValue::Nat(value) => {
+                    u16::try_from(value).map_err(|_| TermError::InvalidConstant {
+                        tag: self.tag,
+                        value: i64::from(value),
+                        offset: self.offset,
+                    })?
+                }
+                _ => return Ok(None),
+            }),
+            INTCONST_TAG => ConstantValue::Int(match self.value {
+                TermValue::Int(value) => value,
+                _ => return Ok(None),
+            }),
+            LONGCONST_TAG => ConstantValue::Long(match self.value {
+                TermValue::LongInt(value) => value,
+                _ => return Ok(None),
+            }),
+            FLOATCONST_TAG => ConstantValue::FloatBits(match self.value {
+                TermValue::Int(value) => u32::from_ne_bytes(value.to_ne_bytes()),
+                _ => return Ok(None),
+            }),
+            DOUBLECONST_TAG => ConstantValue::DoubleBits(match self.value {
+                TermValue::LongInt(value) => u64::from_ne_bytes(value.to_ne_bytes()),
+                _ => return Ok(None),
+            }),
+            STRINGCONST_TAG => ConstantValue::String(match self.value {
+                TermValue::NameRef(value) => value,
+                _ => return Ok(None),
+            }),
+            _ => return Ok(None),
+        };
+
+        Ok(Some(value))
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
@@ -196,6 +301,51 @@ impl SimpleTerm {
             (TermValue::Int(value), 67 | 68 | 70 | 72) => writer.write_int(*value),
             (TermValue::LongInt(value), 71 | 73) => writer.write_long_int(*value),
             _ => return Err(TermEncodeError::InvalidValue { tag: self.tag }),
+        }
+        Ok(())
+    }
+}
+
+impl ConstantValue {
+    /// Encodes this typed constant using its canonical TASTy tag.
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        match self {
+            Self::Unit => writer.write_u8(UNITCONST_TAG),
+            Self::Boolean(false) => writer.write_u8(FALSECONST_TAG),
+            Self::Boolean(true) => writer.write_u8(TRUECONST_TAG),
+            Self::Null => writer.write_u8(NULLCONST_TAG),
+            Self::Byte(value) => {
+                writer.write_u8(BYTECONST_TAG);
+                writer.write_int(i32::from(*value));
+            }
+            Self::Short(value) => {
+                writer.write_u8(SHORTCONST_TAG);
+                writer.write_int(i32::from(*value));
+            }
+            Self::Char(value) => {
+                writer.write_u8(CHARCONST_TAG);
+                writer.write_nat(u32::from(*value));
+            }
+            Self::Int(value) => {
+                writer.write_u8(INTCONST_TAG);
+                writer.write_int(*value);
+            }
+            Self::Long(value) => {
+                writer.write_u8(LONGCONST_TAG);
+                writer.write_long_int(*value);
+            }
+            Self::FloatBits(value) => {
+                writer.write_u8(FLOATCONST_TAG);
+                writer.write_int(i32::from_ne_bytes(value.to_ne_bytes()));
+            }
+            Self::DoubleBits(value) => {
+                writer.write_u8(DOUBLECONST_TAG);
+                writer.write_long_int(i64::from_ne_bytes(value.to_ne_bytes()));
+            }
+            Self::String(reference) => {
+                writer.write_u8(STRINGCONST_TAG);
+                writer.write_nat(*reference);
+            }
         }
         Ok(())
     }
@@ -433,7 +583,10 @@ impl<'a> RawTree<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AstRef, AstRefKind, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
+    use super::{
+        AstRef, AstRefKind, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
+        TermValue,
+    };
     use crate::ast::{
         RECTHIS_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
     };
@@ -497,6 +650,134 @@ mod tests {
     decodes_constant_term!(decodes_false_boolean_term, 3, TermValue::Boolean(false));
     decodes_constant_term!(decodes_true_boolean_term, 4, TermValue::Boolean(true));
     decodes_constant_term!(decodes_null_term, 5, TermValue::Null);
+
+    fn assert_constant_round_trip(value: ConstantValue) {
+        let mut writer = Writer::new();
+        value.encode(&mut writer).unwrap();
+        let bytes = writer.into_inner();
+        let mut reader = Reader::new(&bytes);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(term.constant_value().unwrap(), Some(value));
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_byte_constant() {
+        assert_constant_round_trip(ConstantValue::Byte(-42));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_short_constant() {
+        assert_constant_round_trip(ConstantValue::Short(-1234));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_char_constant() {
+        assert_constant_round_trip(ConstantValue::Char(0x017c));
+    }
+
+    #[test]
+    fn decodes_and_encodes_an_int_constant() {
+        assert_constant_round_trip(ConstantValue::Int(-123456));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_long_constant() {
+        assert_constant_round_trip(ConstantValue::Long(-1_234_567_890_123));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_float_constant_by_bits() {
+        assert_constant_round_trip(ConstantValue::FloatBits(0x7fc0_0001));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_double_constant_by_bits() {
+        assert_constant_round_trip(ConstantValue::DoubleBits(0x7ff8_0000_0000_0001));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_string_constant_reference() {
+        assert_constant_round_trip(ConstantValue::String(42));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_unit_constant() {
+        assert_constant_round_trip(ConstantValue::Unit);
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_false_constant() {
+        assert_constant_round_trip(ConstantValue::Boolean(false));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_true_constant() {
+        assert_constant_round_trip(ConstantValue::Boolean(true));
+    }
+
+    #[test]
+    fn decodes_and_encodes_a_null_constant() {
+        assert_constant_round_trip(ConstantValue::Null);
+    }
+
+    #[test]
+    fn returns_none_for_a_non_constant_leaf() {
+        let mut reader = Reader::new(&[64, 0x81]);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(term.constant_value(), Ok(None));
+    }
+
+    #[test]
+    fn rejects_a_byte_constant_outside_its_range() {
+        let mut reader = Reader::new(&[67, 0x01, 0x80]);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            term.constant_value(),
+            Err(TermError::InvalidConstant {
+                tag: 67,
+                value: 128,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_short_constant_outside_its_range() {
+        let mut reader = Reader::new(&[68, 0x04, 0x00, 0x80]);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert!(matches!(
+            term.constant_value(),
+            Err(TermError::InvalidConstant {
+                tag: 68,
+                value: 65_536,
+                offset: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_char_constant_outside_the_16_bit_range() {
+        let mut writer = Writer::new();
+        writer.write_u8(69);
+        writer.write_nat(0x1_0000);
+        let bytes = writer.into_inner();
+        let mut reader = Reader::new(&bytes);
+        let term = SimpleTerm::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            term.constant_value(),
+            Err(TermError::InvalidConstant {
+                tag: 69,
+                value: 65_536,
+                offset: 0,
+            })
+        );
+    }
 
     #[test]
     fn decodes_every_supported_category_two_tag() {

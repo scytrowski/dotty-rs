@@ -47,8 +47,10 @@ pub use section::{
     SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{
-    AstRef, AstRefKind, AstTreeNode, DEFAULT_MAX_TREE_DEPTH, RawTree, SimpleTerm, TermEncodeError,
-    TermError, TermValue,
+    AstRef, AstRefKind, AstTreeNode, BYTECONST_TAG, CHARCONST_TAG, ConstantValue,
+    DEFAULT_MAX_TREE_DEPTH, DOUBLECONST_TAG, FALSECONST_TAG, FLOATCONST_TAG, INTCONST_TAG,
+    LONGCONST_TAG, NULLCONST_TAG, RawTree, SHORTCONST_TAG, STRINGCONST_TAG, SimpleTerm,
+    TRUECONST_TAG, TermEncodeError, TermError, TermValue, UNITCONST_TAG,
 };
 pub use writer::{WriteError, Writer};
 
