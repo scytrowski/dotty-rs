@@ -237,6 +237,65 @@ pub enum StructuredTree<'a> {
     Length(StructuredNode<'a>),
 }
 
+impl<'a> StructuredNode<'a> {
+    /// Encodes a typed category-5 node back to its TASTy representation.
+    ///
+    /// Definition names are retained by `DefinitionBody` and `DefDefBody`,
+    /// so nodes produced by `RawNode::decode_structured()` can be round-tripped
+    /// without supplying external name metadata.
+    pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        match self {
+            Self::Package(node) => node.encode(writer),
+            Self::ValDef(body) | Self::TypeDef(body) => body.encode_self(writer),
+            Self::DefDef(body) => body.encode_self(writer),
+            Self::ImportExport(node) => node.encode(writer),
+            Self::Parameter(node) => node.encode(writer),
+            Self::Apply(node) => node.encode(writer),
+            Self::TypeApply(node) => node.encode(writer),
+            Self::Typed(node) => node.encode(writer),
+            Self::Assign(node) => node.encode(writer),
+            Self::Block(node) => node.encode(writer),
+            Self::If(node) => node.encode(writer),
+            Self::Lambda(node) => node.encode(writer),
+            Self::Match(node) => node.encode(writer),
+            Self::Return(node) => node.encode(writer),
+            Self::While(node) => node.encode(writer),
+            Self::Try(node) => node.encode(writer),
+            Self::Inlined(node) => node.encode(writer),
+            Self::SelectOuter(node) => node.encode(writer),
+            Self::Repeated(node) => node.encode(writer),
+            Self::Bind(node) => node.encode(writer),
+            Self::Alternative(node) => node.encode(writer),
+            Self::Unapply(node) => node.encode(writer),
+            Self::Annotated(node) => node.encode(writer),
+            Self::Annotation(node) => node.encode(writer),
+            Self::CaseDef(node) => node.encode(writer),
+            Self::Template(node) => node.encode(writer),
+            Self::Super(node) => node.encode(writer),
+            Self::BinaryType(node) => node.encode(writer),
+            Self::RefinedType(node) => node.encode(writer),
+            Self::RefinedTpt(node) => node.encode(writer),
+            Self::AppliedType(node) => node.encode(writer),
+            Self::TypeBounds(node) => node.encode(writer),
+            Self::FlexibleType(node) => node.encode(writer),
+            Self::LambdaTpt(node) => node.encode(writer),
+            Self::PolyType(node) => node.encode(writer),
+            Self::ParamType(node) => node.encode(writer),
+            Self::MethodType(node) => node.encode(writer),
+            Self::ApplySigPoly(node) => node.encode(writer),
+            Self::Quote(node) => node.encode(writer),
+            Self::QuotePattern(node) => node.encode(writer),
+            Self::SplicePattern(node) => node.encode(writer),
+            Self::MatchType(node) => node.encode(writer),
+            Self::MatchTpt(node) => node.encode(writer),
+            Self::Hole(node) => node.encode(writer),
+            Self::InReference(node) => node.encode(writer),
+            Self::SelectIn(node) => node.encode(writer),
+            Self::Raw(node) => node.encode(writer).map_err(TermEncodeError::from),
+        }
+    }
+}
+
 impl EncodedAstNodes {
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
@@ -6986,8 +7045,19 @@ mod tests {
                     .decode_structured()
                     .unwrap_or_else(|error| panic!("tag {} failed to dispatch: {error}", $tag));
                 assert!(
-                    matches!(structured, $pattern),
+                    matches!(structured.clone(), $pattern),
                     "tag {} dispatched to an unexpected variant",
+                    $tag
+                );
+
+                let mut structured_bytes = Writer::new();
+                structured.encode(&mut structured_bytes).unwrap();
+                let mut raw_bytes = Writer::new();
+                node.encode(&mut raw_bytes).unwrap();
+                assert_eq!(
+                    structured_bytes.as_slice(),
+                    raw_bytes.as_slice(),
+                    "tag {} changed during structured round-trip",
                     $tag
                 );
             }
