@@ -3,16 +3,35 @@ use crate::reader::{ReadError, Reader};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Section {
+pub struct Section<'a> {
     pub name: NameRef,
     pub offset: usize,
     pub length: usize,
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SectionTable {
-    sections: Vec<Section>,
+pub struct SectionTable<'a> {
+    sections: Vec<Section<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardSection {
+    Asts,
+    Positions,
+    Comments,
+    Attributes,
+}
+
+impl StandardSection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asts => "ASTs",
+            Self::Positions => "Positions",
+            Self::Comments => "Comments",
+            Self::Attributes => "Attributes",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +68,29 @@ impl From<ReadError> for SectionError {
     }
 }
 
-impl SectionTable {
-    pub fn decode(reader: &mut Reader<'_>, name_count: usize) -> Result<Self, SectionError> {
+impl<'a> Section<'a> {
+    pub fn reader(&self) -> Reader<'a> {
+        Reader::new(self.payload)
+    }
+
+    pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
+        let name = match names.get_zero_based(self.name)? {
+            crate::name_table::RawName::Utf8(name) => name.as_str(),
+            _ => return None,
+        };
+
+        match name {
+            "ASTs" => Some(StandardSection::Asts),
+            "Positions" => Some(StandardSection::Positions),
+            "Comments" => Some(StandardSection::Comments),
+            "Attributes" => Some(StandardSection::Attributes),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> SectionTable<'a> {
+    pub fn decode(reader: &mut Reader<'a>, name_count: usize) -> Result<Self, SectionError> {
         let mut sections = Vec::new();
 
         while !reader.is_at_end() {
@@ -69,7 +109,7 @@ impl SectionTable {
 
             let length = reader.read_nat()? as usize;
             let offset = reader.position();
-            let payload = reader.read_bytes(length)?.to_vec();
+            let payload = reader.read_bytes(length)?;
 
             sections.push(Section {
                 name,
@@ -90,15 +130,15 @@ impl SectionTable {
         self.sections.is_empty()
     }
 
-    pub fn get(&self, index: usize) -> Option<&Section> {
+    pub fn get(&self, index: usize) -> Option<&Section<'a>> {
         self.sections.get(index)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Section> {
+    pub fn iter(&self) -> impl Iterator<Item = &Section<'a>> {
         self.sections.iter()
     }
 
-    pub fn entries(&self) -> &[Section] {
+    pub fn entries(&self) -> &[Section<'a>] {
         &self.sections
     }
 }
@@ -119,7 +159,7 @@ mod tests {
         assert_eq!(sections.get(0).unwrap().name, 0);
         assert_eq!(sections.get(0).unwrap().offset, 2);
         assert_eq!(sections.get(0).unwrap().length, 3);
-        assert_eq!(sections.get(0).unwrap().payload, b"abc");
+        assert_eq!(sections.get(0).unwrap().payload, b"abc".as_slice());
         assert!(reader.is_at_end());
     }
 

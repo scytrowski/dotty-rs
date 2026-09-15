@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tasty_rs::{Header, NameTable, Reader, SectionTable};
+use tasty_rs::{Header, NameTable, Reader, SectionTable, StandardSection};
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
@@ -140,6 +140,13 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
         assert!(
             sections.iter().any(|section| section.length > 0),
             "fixture {} has no non-empty sections",
+            path.display()
+        );
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.standard_kind(&names) == Some(StandardSection::Asts)),
+            "fixture {} has no ASTs section",
             path.display()
         );
     }

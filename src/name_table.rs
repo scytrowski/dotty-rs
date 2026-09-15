@@ -151,6 +151,10 @@ impl NameTable {
             .and_then(|index| self.entries.get(index as usize))
     }
 
+    pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
+        self.entries.get(index as usize)
+    }
+
     pub fn entries(&self) -> &[RawName] {
         &self.entries
     }
