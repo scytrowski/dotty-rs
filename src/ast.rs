@@ -737,6 +737,9 @@ impl<'a> RawNodes<'a> {
 
 impl<'a> RawNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
+        if NodeCategory::from_tag(self.tag) != Some(NodeCategory::Category5) {
+            return Err(WriteError::InvalidTag { tag: self.tag });
+        }
         writer.write_u8(self.tag);
         writer.write_length_prefixed_bytes(self.payload)
     }
@@ -3050,7 +3053,7 @@ mod tests {
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::TermEncodeError;
-    use crate::writer::Writer;
+    use crate::writer::{WriteError, Writer};
 
     #[test]
     fn classifies_tags_by_the_tasty_categories() {
@@ -5130,5 +5133,21 @@ mod tests {
         assert_eq!(encoded.addresses(), &[0, 4]);
         assert_eq!(encoded.address(1), Some(4));
         assert_eq!(encoded.address(2), None);
+    }
+
+    #[test]
+    fn rejects_non_category_five_raw_nodes_when_encoding() {
+        let node = RawNode {
+            tag: 127,
+            offset: 0,
+            payload: &[],
+        };
+        let mut writer = Writer::new();
+
+        assert_eq!(
+            node.encode(&mut writer),
+            Err(WriteError::InvalidTag { tag: 127 })
+        );
+        assert!(writer.as_slice().is_empty());
     }
 }

@@ -49,6 +49,7 @@ pub enum TermError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEncodeError {
     Write(WriteError),
+    InvalidTag { tag: u8 },
     InvalidValue { tag: u8 },
 }
 
@@ -56,6 +57,7 @@ impl fmt::Display for TermEncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Write(error) => error.fmt(formatter),
+            Self::InvalidTag { tag } => write!(formatter, "invalid term tag {tag} for encoding"),
             Self::InvalidValue { tag } => write!(formatter, "invalid value for term tag {tag}"),
         }
     }
@@ -189,12 +191,18 @@ impl<'a> RawTree<'a> {
         match self {
             Self::Leaf(term) => term.encode(writer),
             Self::Ast { tag, child, .. } => {
+                if !(90..=104).contains(tag) {
+                    return Err(TermEncodeError::InvalidTag { tag: *tag });
+                }
                 writer.write_u8(*tag);
                 child.encode(writer)
             }
             Self::NatAst {
                 tag, value, child, ..
             } => {
+                if !(110..=119).contains(tag) {
+                    return Err(TermEncodeError::InvalidTag { tag: *tag });
+                }
                 writer.write_u8(*tag);
                 writer.write_nat(*value);
                 child.encode(writer)
@@ -487,5 +495,42 @@ mod tests {
         tree.encode(&mut writer).unwrap();
 
         assert_eq!(writer.as_slice(), &[112, 0x85, 64, 0x86]);
+    }
+
+    #[test]
+    fn rejects_invalid_category_three_and_four_tags_when_encoding() {
+        let leaf = || {
+            RawTree::Leaf(SimpleTerm {
+                tag: 2,
+                offset: 0,
+                value: TermValue::Unit,
+            })
+        };
+
+        for tree in [
+            RawTree::Ast {
+                tag: 105,
+                offset: 0,
+                child: Box::new(leaf()),
+            },
+            RawTree::NatAst {
+                tag: 120,
+                offset: 0,
+                value: 0,
+                child: Box::new(leaf()),
+            },
+        ] {
+            let mut writer = Writer::new();
+            assert_eq!(
+                tree.encode(&mut writer),
+                Err(TermEncodeError::InvalidTag {
+                    tag: match tree {
+                        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => tag,
+                        _ => unreachable!(),
+                    }
+                })
+            );
+            assert!(writer.as_slice().is_empty());
+        }
     }
 }

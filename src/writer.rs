@@ -5,6 +5,7 @@ pub enum WriteError {
     LengthOverflow { length: usize },
     NatOverflow { value: u64 },
     IntOverflow { value: i64 },
+    InvalidTag { tag: u8 },
     AttributeOrder { previous: u8, current: u8 },
     PositionHeaderCollision { address_delta: i64, flags: u8 },
 }
@@ -21,6 +22,7 @@ impl fmt::Display for WriteError {
             Self::IntOverflow { value } => {
                 write!(formatter, "value {value} does not fit in a TASTy Int")
             }
+            Self::InvalidTag { tag } => write!(formatter, "invalid TASTy tag {tag} for encoding"),
             Self::AttributeOrder { previous, current } => write!(
                 formatter,
                 "attribute tag {current} follows tag {previous}; attributes must be strictly ordered"
