@@ -617,4 +617,59 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn round_trips_every_supported_name_entry_variant() {
+        let names = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::Expanded {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::ExpandPrefix {
+                prefix: 2,
+                selector: 1,
+            },
+            RawName::Unique {
+                separator: 1,
+                uniqid: 7,
+                underlying: Some(2),
+            },
+            RawName::DefaultGetter {
+                underlying: 1,
+                index: 2,
+            },
+            RawName::SuperAccessor { underlying: 1 },
+            RawName::InlineAccessor { underlying: 1 },
+            RawName::ObjectClass { underlying: 1 },
+            RawName::BodyRetainer { underlying: 1 },
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: vec![3, -1],
+            },
+            RawName::TargetSigned {
+                original: 1,
+                target: 2,
+                result_signature: 3,
+                parameter_signatures: vec![4, -2],
+            },
+            RawName::Unknown {
+                tag: 99,
+                payload: vec![1, 2, 3],
+            },
+        ])
+        .unwrap();
+        let mut writer = crate::Writer::new();
+        names.encode(&mut writer).unwrap();
+
+        let mut reader = Reader::new(writer.as_slice());
+        assert_eq!(NameTable::decode(&mut reader).unwrap(), names);
+        assert!(reader.is_at_end());
+    }
 }
