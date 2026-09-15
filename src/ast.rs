@@ -4,8 +4,18 @@ use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
 pub const THIS_TAG: u8 = 90;
+pub const QUALTHIS_TAG: u8 = 91;
+pub const CLASSCONST_TAG: u8 = 92;
+pub const BYNAMETYPE_TAG: u8 = 93;
+pub const BYNAMETPT_TAG: u8 = 94;
 pub const NEW_TAG: u8 = 95;
 pub const THROW_TAG: u8 = 96;
+pub const IMPLICITARG_TAG: u8 = 97;
+pub const PRIVATEQUALIFIED_TAG: u8 = 98;
+pub const PROTECTEDQUALIFIED_TAG: u8 = 99;
+pub const RECTYPE_TAG: u8 = 100;
+pub const SINGLETONTPT_TAG: u8 = 101;
+pub const EXPLICITTPT_TAG: u8 = 103;
 pub const ELIDED_TAG: u8 = 104;
 pub const PACKAGE_TAG: u8 = 128;
 pub const VALDEF_TAG: u8 = 129;
@@ -1441,12 +1451,56 @@ impl<'a> RawTree<'a> {
         self.decode_ast_child(THIS_TAG)
     }
 
+    pub fn decode_qual_this(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(QUALTHIS_TAG)
+    }
+
+    pub fn decode_class_const(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(CLASSCONST_TAG)
+    }
+
+    pub fn decode_by_name_type(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(BYNAMETYPE_TAG)
+    }
+
+    pub fn decode_by_name_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(BYNAMETPT_TAG)
+    }
+
     pub fn decode_new(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(NEW_TAG)
     }
 
     pub fn decode_throw(&self) -> Result<AstChildNode<'a>, AstError> {
         self.decode_ast_child(THROW_TAG)
+    }
+
+    pub fn decode_implicit_arg(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(IMPLICITARG_TAG)
+    }
+
+    pub fn decode_private_qualified(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(PRIVATEQUALIFIED_TAG)
+    }
+
+    pub fn decode_protected_qualified(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(PROTECTEDQUALIFIED_TAG)
+    }
+
+    pub fn decode_rec_type(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(RECTYPE_TAG)
+    }
+
+    pub fn decode_singleton_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(SINGLETONTPT_TAG)
+    }
+
+    pub fn decode_bounded(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(BOUNDED_TAG)
+    }
+
+    pub fn decode_explicit_tpt(&self) -> Result<AstChildNode<'a>, AstError> {
+        self.decode_ast_child(EXPLICITTPT_TAG)
     }
 
     pub fn decode_elided(&self) -> Result<AstChildNode<'a>, AstError> {
@@ -1627,13 +1681,15 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG,
-        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
-        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
-        FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
+        APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG,
+        BYNAMETYPE_TAG, CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
+        DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG,
+        IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
         ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
         NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
-        POLYTYPE_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
-        RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG,
+        POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG,
+        RECTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG,
+        SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG,
         SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
         TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
         TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
@@ -2938,5 +2994,102 @@ mod tests {
         assert!(matches!(throw.child, RawTree::Leaf(_)));
         assert!(matches!(elided.child, RawTree::Leaf(_)));
         assert!(matches!(this, AstChildNode { .. }));
+    }
+
+    #[test]
+    fn decodes_the_remaining_category_three_ast_children() {
+        let mut reader = Reader::new(&[
+            QUALTHIS_TAG,
+            TERMREFPKG_TAG,
+            0x81,
+            CLASSCONST_TAG,
+            TERMREFPKG_TAG,
+            0x82,
+            BYNAMETYPE_TAG,
+            TERMREFPKG_TAG,
+            0x83,
+            BYNAMETPT_TAG,
+            TERMREFPKG_TAG,
+            0x84,
+            IMPLICITARG_TAG,
+            TERMREFPKG_TAG,
+            0x85,
+            PRIVATEQUALIFIED_TAG,
+            TERMREFPKG_TAG,
+            0x86,
+            PROTECTEDQUALIFIED_TAG,
+            TERMREFPKG_TAG,
+            0x87,
+            RECTYPE_TAG,
+            TERMREFPKG_TAG,
+            0x88,
+            SINGLETONTPT_TAG,
+            TERMREFPKG_TAG,
+            0x89,
+            BOUNDED_TAG,
+            TERMREFPKG_TAG,
+            0x8a,
+            EXPLICITTPT_TAG,
+            TERMREFPKG_TAG,
+            0x8b,
+        ]);
+
+        let qual_this = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_qual_this()
+            .unwrap();
+        let class_const = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_class_const()
+            .unwrap();
+        let by_name_type = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_by_name_type()
+            .unwrap();
+        let by_name_tpt = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_by_name_tpt()
+            .unwrap();
+        let implicit_arg = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_implicit_arg()
+            .unwrap();
+        let private_qualified = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_private_qualified()
+            .unwrap();
+        let protected_qualified = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_protected_qualified()
+            .unwrap();
+        let rec_type = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_rec_type()
+            .unwrap();
+        let singleton_tpt = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_singleton_tpt()
+            .unwrap();
+        let bounded = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_bounded()
+            .unwrap();
+        let explicit_tpt = RawTree::decode(&mut reader)
+            .unwrap()
+            .decode_explicit_tpt()
+            .unwrap();
+
+        assert_eq!(qual_this.tag, QUALTHIS_TAG);
+        assert_eq!(class_const.tag, CLASSCONST_TAG);
+        assert_eq!(by_name_type.tag, BYNAMETYPE_TAG);
+        assert_eq!(by_name_tpt.tag, BYNAMETPT_TAG);
+        assert_eq!(implicit_arg.tag, IMPLICITARG_TAG);
+        assert_eq!(private_qualified.tag, PRIVATEQUALIFIED_TAG);
+        assert_eq!(protected_qualified.tag, PROTECTEDQUALIFIED_TAG);
+        assert_eq!(rec_type.tag, RECTYPE_TAG);
+        assert_eq!(singleton_tpt.tag, SINGLETONTPT_TAG);
+        assert_eq!(bounded.tag, BOUNDED_TAG);
+        assert_eq!(explicit_tpt.tag, EXPLICITTPT_TAG);
+        assert!(reader.is_at_end());
     }
 }
