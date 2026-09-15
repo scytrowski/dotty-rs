@@ -172,6 +172,15 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             }
         }
 
+        if let Some(comments) = sections
+            .iter()
+            .find(|section| section.standard_kind(&names) == Some(StandardSection::Comments))
+        {
+            comments.decode_comments().unwrap_or_else(|error| {
+                panic!("failed to parse comments in {}: {error}", path.display())
+            });
+        }
+
         let asts = sections
             .iter()
             .find(|section| section.standard_kind(&names) == Some(StandardSection::Asts))

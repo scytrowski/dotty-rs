@@ -42,6 +42,12 @@ pub enum Attribute {
     SourceFile(NameRef),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub text: String,
+    pub coordinates: i64,
+}
+
 impl StandardSection {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -145,6 +151,20 @@ impl<'a> Section<'a> {
         Ok(attributes)
     }
 
+    pub fn decode_comments(&self) -> Result<Vec<Comment>, SectionError> {
+        let mut reader = self.reader();
+        let mut comments = Vec::new();
+
+        while !reader.is_at_end() {
+            comments.push(Comment {
+                text: reader.read_utf8()?,
+                coordinates: reader.read_long_int()?,
+            });
+        }
+
+        Ok(comments)
+    }
+
     pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
         let name = match names.get_zero_based(self.name)? {
             crate::name_table::RawName::Utf8(name) => name.as_str(),
@@ -217,7 +237,7 @@ impl<'a> SectionTable<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attribute, Section, SectionError, SectionTable};
+    use super::{Attribute, Comment, Section, SectionError, SectionTable};
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -313,6 +333,43 @@ mod tests {
         assert_eq!(
             section.decode_attributes(),
             Err(SectionError::InvalidAttributeTag { tag: 7, offset: 0 })
+        );
+    }
+
+    #[test]
+    fn decodes_comments_with_utf8_text_and_coordinates() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[0x82, b'h', b'i', 0x83],
+        };
+
+        assert_eq!(
+            section.decode_comments().unwrap(),
+            vec![Comment {
+                text: "hi".to_owned(),
+                coordinates: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn reports_truncated_comment_coordinates() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[0x81, b'x'],
+        };
+
+        assert_eq!(
+            section.decode_comments(),
+            Err(SectionError::Read(ReadError::UnexpectedEof {
+                offset: 2,
+                needed: 1,
+                remaining: 0,
+            }))
         );
     }
 }

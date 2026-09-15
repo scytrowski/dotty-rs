@@ -17,7 +17,7 @@ pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
 pub use section::{
-    Attribute, CAPTURECHECKED_ATTR, EXPLICITNULLS_ATTR, JAVA_ATTR, OUTLINE_ATTR,
+    Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, JAVA_ATTR, OUTLINE_ATTR,
     SCALA2STANDARDLIBRARY_ATTR, SOURCEFILE_ATTR, Section, SectionError, SectionTable,
     StandardSection, WITHPUREFUNS_ATTR,
 };
