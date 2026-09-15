@@ -391,6 +391,10 @@ variant for unknown category-5 tags.
 At file level, `TastyFile::structured_asts()` applies this dispatch to every
 top-level node while retaining the original borrowed payloads.
 
+`RawNodes::address_index()` and `TastyFile::ast_at()` currently index
+top-level AST nodes. Nested-node address indexing is intentionally a separate
+step because nested payloads need absolute AST-section offsets.
+
 ### 6.6. Constants
 
 ```text

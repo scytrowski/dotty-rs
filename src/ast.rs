@@ -143,6 +143,11 @@ pub struct RawNodes<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstAddressIndex<'a> {
+    nodes: Vec<RawNode<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedAstNodes {
     bytes: Vec<u8>,
     addresses: Vec<u32>,
@@ -763,6 +768,12 @@ impl<'a> RawNodes<'a> {
         &self.nodes
     }
 
+    pub fn address_index(&self) -> AstAddressIndex<'a> {
+        AstAddressIndex {
+            nodes: self.nodes.clone(),
+        }
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for node in &self.nodes {
             node.encode(writer)?;
@@ -787,6 +798,26 @@ impl<'a> RawNodes<'a> {
             bytes: writer.into_inner(),
             addresses,
         })
+    }
+}
+
+impl<'a> AstAddressIndex<'a> {
+    pub fn get(&self, address: u32) -> Option<&RawNode<'a>> {
+        self.nodes
+            .iter()
+            .find(|node| node.offset == address as usize)
+    }
+
+    pub fn addresses(&self) -> impl Iterator<Item = u32> + '_ {
+        self.nodes.iter().map(|node| node.offset as u32)
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
     }
 }
 
@@ -5318,5 +5349,18 @@ mod tests {
             node.decode_structured().unwrap(),
             super::StructuredNode::Raw(node)
         );
+    }
+
+    #[test]
+    fn indexes_decoded_nodes_by_their_ast_addresses() {
+        let bytes = [VALDEF_TAG, 0x82, b'a', b'b', DEFDEF_TAG, 0x81, b'c'];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes.address_index();
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 4]);
+        assert_eq!(index.get(4).unwrap().tag, DEFDEF_TAG);
+        assert!(index.get(1).is_none());
     }
 }

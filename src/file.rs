@@ -239,6 +239,10 @@ impl<'a> TastyFile<'a> {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn ast_at(&self, address: u32) -> Result<Option<crate::RawNode<'a>>, TastyFileError> {
+        Ok(self.asts()?.address_index().get(address).cloned())
+    }
+
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
         let attributes = self
             .section(StandardSection::Attributes)
@@ -561,5 +565,15 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn looks_up_a_top_level_ast_node_by_address() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let first = file.asts().unwrap().get(0).unwrap().clone();
+
+        assert_eq!(file.ast_at(first.offset as u32).unwrap(), Some(first));
+        assert_eq!(file.ast_at(1).unwrap(), None);
     }
 }

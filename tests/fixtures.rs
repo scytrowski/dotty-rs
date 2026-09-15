@@ -433,6 +433,12 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
         );
         for (node, address) in asts.iter().zip(encoded_asts.addresses()) {
             assert_eq!(*address as usize, node.offset, "fixture {}", path.display());
+            assert_eq!(
+                file.ast_at(*address).unwrap().as_ref().map(|node| node.tag),
+                Some(node.tag),
+                "fixture {}",
+                path.display()
+            );
         }
         file.attributes().unwrap_or_else(|error| {
             panic!("failed to decode attributes in {}: {error}", path.display())
