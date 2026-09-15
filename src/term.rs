@@ -1,5 +1,6 @@
 use crate::ast::{
-    RECTHIS_TAG, RawNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+    IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, RawNode, SELECT_TAG, SELECTTPT_TAG,
+    SELFDEF_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
 };
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
@@ -439,7 +440,23 @@ impl<'a> RawTree<'a> {
                     visitor(reference);
                 }
             }
-            Self::Ast { child, .. } | Self::NatAst { child, .. } => child.visit_name_refs(visitor),
+            Self::Ast { child, .. } => child.visit_name_refs(visitor),
+            Self::NatAst {
+                tag, value, child, ..
+            } => {
+                if matches!(
+                    *tag,
+                    IDENT_TAG
+                        | IDENTTPT_TAG
+                        | SELECT_TAG
+                        | SELECTTPT_TAG
+                        | SELFDEF_TAG
+                        | NAMEDARG_TAG
+                ) {
+                    visitor(*value);
+                }
+                child.visit_name_refs(visitor);
+            }
             Self::LengthNode(_) => {}
         }
     }
@@ -588,7 +605,8 @@ mod tests {
         TermValue,
     };
     use crate::ast::{
-        RECTHIS_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+        IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, SELECT_TAG, SELECTTPT_TAG, SELFDEF_TAG,
+        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
@@ -881,12 +899,68 @@ mod tests {
 
         assert_eq!(first.name_refs(), vec![5]);
         assert_eq!(second.name_refs(), vec![6]);
-        assert_eq!(third.name_refs(), vec![8]);
+        assert_eq!(third.name_refs(), vec![7, 8]);
         assert!(opaque.name_refs().is_empty());
 
         let mut visited = Vec::new();
         third.visit_name_refs(&mut |reference| visited.push(reference));
-        assert_eq!(visited, vec![8]);
+        assert_eq!(visited, vec![7, 8]);
+    }
+
+    #[test]
+    fn exposes_an_identifier_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[IDENT_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn exposes_an_identifier_tpt_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[IDENTTPT_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn exposes_a_select_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[SELECT_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn exposes_a_select_tpt_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[SELECTTPT_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn exposes_a_self_definition_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[SELFDEF_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn exposes_a_named_argument_name_reference_from_a_category_four_tree() {
+        let mut reader = Reader::new(&[NAMEDARG_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(tree.name_refs(), vec![5]);
+    }
+
+    #[test]
+    fn does_not_treat_a_category_four_ast_reference_as_a_name_reference() {
+        let mut reader = Reader::new(&[TERMREF_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert!(tree.name_refs().is_empty());
     }
 
     #[test]

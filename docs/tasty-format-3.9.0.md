@@ -396,7 +396,10 @@ for traversing those payloads.
 
 `SimpleTerm::name_ref()` and `RawTree::name_refs()` provide the analogous
 access to name-table references, including those nested in category-3 and
-category-4 wrappers. Category-5 payloads remain opaque at this generic layer.
+category-4 wrappers. For category-4 trees, the traversal reports the direct
+name field of `IDENT`, `SELECT`, `SELFDEF`, and `NAMEDARG` forms, while AST
+reference fields remain AST references. Category-5 payloads remain opaque at
+this generic layer.
 
 When a caller already knows the absolute start of a bounded payload,
 `RawTree::decode_with_base_offset()` and
