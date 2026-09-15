@@ -21,6 +21,7 @@ pub const SUPERTYPE_TAG: u8 = 158;
 pub const MATCHCASETYPE_TAG: u8 = 192;
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
 pub const ANNOTATEDTPT_TAG: u8 = 154;
+pub const PARAMTYPE_TAG: u8 = 172;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
@@ -281,6 +282,12 @@ pub struct AnnotatedNode<'a> {
     pub tag: u8,
     pub underlying: RawTree<'a>,
     pub annotation: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamTypeNode {
+    pub binder: u32,
+    pub parameter_number: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -989,6 +996,31 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_param_type(&self) -> Result<ParamTypeNode, AstError> {
+        if self.tag != PARAMTYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: PARAMTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let binder = reader.read_nat()?;
+        let parameter_number = reader.read_nat()?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(ParamTypeNode {
+            binder,
+            parameter_number,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1369,11 +1401,11 @@ mod tests {
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
         FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
         ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, NAMEDARG_TAG, NEW_TAG,
-        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG,
-        RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG,
-        SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG,
-        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
-        TypedNode, VALDEF_TAG, WHILE_TAG,
+        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, ParameterNode,
+        RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG,
+        SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG,
+        THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2316,6 +2348,28 @@ mod tests {
         };
 
         assert!(node.decode_annotated().is_err());
+    }
+
+    #[test]
+    fn decodes_param_type_binder_and_parameter_number() {
+        let bytes = [PARAMTYPE_TAG, 0x82, 0x85, 0x83];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_param_type().unwrap();
+
+        assert_eq!(node.binder, 5);
+        assert_eq!(node.parameter_number, 3);
+    }
+
+    #[test]
+    fn rejects_param_type_with_an_extra_value() {
+        let node = RawNode {
+            tag: PARAMTYPE_TAG,
+            offset: 0,
+            payload: &[5, 3, 1],
+        };
+
+        assert!(node.decode_param_type().is_err());
     }
 
     #[test]
