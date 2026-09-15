@@ -127,6 +127,13 @@ pub struct RawNode<'a> {
     pub payload: &'a [u8],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstReference {
+    /// Address of the top-level AST node that owns this reference.
+    pub owner_address: u32,
+    pub reference: AstRef,
+}
+
 impl<'a> RawNode<'a> {
     pub fn category(&self) -> NodeCategory {
         NodeCategory::from_tag(self.tag).expect("RawNode tags are validated during decoding")

@@ -400,6 +400,11 @@ all currently supported structured category-5 nodes, including nested package
 and template statements. Unknown category-5 nodes remain opaque and produce no
 references from this convenience API.
 
+At file level, `TastyFile::ast_references()` returns the collected edges with
+the owning top-level AST address and the typed target `AstRef`. A target may
+refer to a nested node, so resolving it against a global address index remains
+a separate operation.
+
 `RawNodes::address_index()` and `TastyFile::ast_at()` currently index
 top-level AST nodes. Nested-node address indexing is intentionally a separate
 step because nested payloads need absolute AST-section offsets.

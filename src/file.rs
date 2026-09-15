@@ -1,4 +1,4 @@
-use crate::ast::{AstError, RawNodes, StructuredNode};
+use crate::ast::{AstError, AstReference, RawNodes, StructuredNode};
 use crate::header::{Header, HeaderError};
 use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
@@ -241,6 +241,24 @@ impl<'a> TastyFile<'a> {
 
     pub fn ast_at(&self, address: u32) -> Result<Option<crate::RawNode<'a>>, TastyFileError> {
         Ok(self.asts()?.address_index().get(address).cloned())
+    }
+
+    /// Collect AST references from every top-level node in wire order.
+    ///
+    /// The owner address identifies the top-level node containing the
+    /// reference. The target can point to a nested AST node; resolving that
+    /// target is intentionally separate from this collection step.
+    pub fn ast_references(&self) -> Result<Vec<AstReference>, TastyFileError> {
+        let mut references = Vec::new();
+        for node in self.asts()?.iter() {
+            for reference in node.ast_refs()? {
+                references.push(AstReference {
+                    owner_address: node.offset as u32,
+                    reference,
+                });
+            }
+        }
+        Ok(references)
     }
 
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
@@ -575,5 +593,54 @@ mod tests {
 
         assert_eq!(file.ast_at(first.offset as u32).unwrap(), Some(first));
         assert_eq!(file.ast_at(1).unwrap(), None);
+    }
+
+    #[test]
+    fn collects_file_references_with_their_top_level_owner_address() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[
+                crate::APPLY_TAG,
+                0x84,
+                crate::TERMREFDIRECT_TAG,
+                0x85,
+                crate::SHAREDTYPE_TAG,
+                0x83,
+            ],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.ast_references().unwrap(),
+            vec![
+                crate::AstReference {
+                    owner_address: 0,
+                    reference: crate::AstRef {
+                        kind: crate::AstRefKind::TermRefDirect,
+                        address: 5,
+                    },
+                },
+                crate::AstReference {
+                    owner_address: 0,
+                    reference: crate::AstRef {
+                        kind: crate::AstRefKind::SharedType,
+                        address: 3,
+                    },
+                },
+            ]
+        );
     }
 }

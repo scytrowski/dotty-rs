@@ -417,6 +417,23 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
             "fixture {}",
             path.display()
         );
+        for reference in file.ast_references().unwrap_or_else(|error| {
+            panic!(
+                "failed to collect AST references in {}: {error}",
+                path.display()
+            )
+        }) {
+            assert!(
+                file.ast_at(reference.owner_address)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to resolve AST owner in {}: {error}", path.display())
+                    })
+                    .is_some(),
+                "fixture {} has an AST reference with a missing top-level owner {}",
+                path.display(),
+                reference.owner_address
+            );
+        }
         let ast_section = file.section(StandardSection::Asts).unwrap();
         let asts = file.asts().unwrap();
         let encoded_asts = asts.encode_with_addresses().unwrap_or_else(|error| {
