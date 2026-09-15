@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tasty_rs::{
-    Attribute, Comment, Header, NameTable, RawNodes, Reader, SectionTable, StandardSection,
-    TastyFile, Writer,
+    Attribute, Comment, DEFDEF_TAG, EXPORT_TAG, Header, IMPORT_TAG, NameTable, PACKAGE_TAG,
+    RawNodes, Reader, SectionTable, StandardSection, TYPEDEF_TAG, TastyFile, VALDEF_TAG, Writer,
 };
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
@@ -435,6 +435,34 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
         file.positions().unwrap_or_else(|error| {
             panic!("failed to decode positions in {}: {error}", path.display())
         });
+    }
+}
+
+#[test]
+fn all_tasty_fixture_top_level_definitions_decode_structurally() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for node in file.asts().unwrap().iter() {
+            let result = match node.tag {
+                PACKAGE_TAG => node.decode_package().map(|_| ()),
+                VALDEF_TAG | TYPEDEF_TAG => node.decode_definition_body().map(|_| ()),
+                DEFDEF_TAG => node.decode_defdef_body().map(|_| ()),
+                IMPORT_TAG | EXPORT_TAG => node.decode_import_export().map(|_| ()),
+                _ => Ok(()),
+            };
+            result.unwrap_or_else(|error| {
+                panic!(
+                    "failed to structurally decode top-level tag {} at offset {} in {}: {error}",
+                    node.tag,
+                    node.offset,
+                    path.display()
+                )
+            });
+        }
     }
 }
 
