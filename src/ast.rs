@@ -15,6 +15,8 @@ pub const ANDTYPE_TAG: u8 = 165;
 pub const ORTYPE_TAG: u8 = 167;
 pub const APPLIEDTYPE_TAG: u8 = 161;
 pub const APPLIEDTPT_TAG: u8 = 162;
+pub const TYPEBOUNDS_TAG: u8 = 163;
+pub const TYPEBOUNDSTPT_TAG: u8 = 164;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
@@ -260,6 +262,14 @@ pub struct AppliedTypeNode<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlexibleTypeNode<'a> {
     pub underlying_type: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeBoundsNode<'a> {
+    pub tag: u8,
+    pub low_or_alias: RawTree<'a>,
+    pub high: Option<RawTree<'a>>,
+    pub variances: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -897,6 +907,43 @@ impl<'a> RawNode<'a> {
         Ok(FlexibleTypeNode { underlying_type })
     }
 
+    pub fn decode_type_bounds(&self) -> Result<TypeBoundsNode<'a>, AstError> {
+        if self.tag != TYPEBOUNDS_TAG && self.tag != TYPEBOUNDSTPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TYPEBOUNDS_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let low_or_alias = RawTree::decode(&mut reader)?;
+        let high = if reader.is_at_end() || matches!(reader.peek_u8()?, 28 | 29) {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        let mut variances = Vec::new();
+        while !reader.is_at_end() {
+            let variance = reader.read_u8()?;
+            if !matches!(variance, 28 | 29) {
+                return Err(AstError::UnexpectedTag {
+                    expected: 28,
+                    actual: variance,
+                    offset: self.offset + reader.position() - 1,
+                });
+            }
+            variances.push(variance);
+        }
+
+        Ok(TypeBoundsNode {
+            tag: self.tag,
+            low_or_alias,
+            high,
+            variances,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1279,8 +1326,8 @@ mod tests {
         NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode,
         RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG,
         SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
-        TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
-        WHILE_TAG,
+        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+        TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2165,6 +2212,37 @@ mod tests {
         };
 
         assert!(node.decode_flexible_type().is_err());
+    }
+
+    #[test]
+    fn decodes_type_bounds_with_optional_high_type_and_variances() {
+        for (tag, payload, has_high, expected_variances) in [
+            (TYPEBOUNDS_TAG, vec![2], false, vec![]),
+            (TYPEBOUNDSTPT_TAG, vec![2, 28, 29], false, vec![28, 29]),
+            (TYPEBOUNDS_TAG, vec![2, 5, 28], true, vec![28]),
+        ] {
+            let mut bytes = vec![tag, 0x80 | payload.len() as u8];
+            bytes.extend(payload);
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let node = nodes.get(0).unwrap().decode_type_bounds().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert!(matches!(node.low_or_alias, RawTree::Leaf(_)));
+            assert_eq!(node.high.is_some(), has_high);
+            assert_eq!(node.variances, expected_variances);
+        }
+    }
+
+    #[test]
+    fn rejects_type_bounds_with_an_invalid_variance_tag() {
+        let node = RawNode {
+            tag: TYPEBOUNDS_TAG,
+            offset: 0,
+            payload: &[2, 17],
+        };
+
+        assert!(node.decode_type_bounds().is_err());
     }
 
     #[test]

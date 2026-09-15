@@ -15,9 +15,9 @@ pub use ast::{
     NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterBody, ParameterNode,
     RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RepeatedNode, ReturnNode,
     SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SelectOuterNode, SelfDefNode,
-    SuperNode, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG,
-    TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, TemplateStructure, TypeApplyNode, TypedNode,
-    VALDEF_TAG, WHILE_TAG, WhileNode,
+    SuperNode, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+    TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, TemplateStructure,
+    TypeApplyNode, TypeBoundsNode, TypedNode, VALDEF_TAG, WHILE_TAG, WhileNode,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
