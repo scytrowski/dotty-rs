@@ -1,5 +1,5 @@
 use crate::reader::{ReadError, Reader};
-use crate::term::{AstRef, RawTree, TermEncodeError, TermError};
+use crate::term::{AstRef, AstTreeNode, RawTree, TermEncodeError, TermError};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -153,6 +153,7 @@ pub struct RawNodes<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AstAddressIndex<'a> {
     nodes: Vec<RawNode<'a>>,
+    all_nodes: Vec<AstTreeNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -786,7 +787,27 @@ impl<'a> RawNodes<'a> {
     pub fn address_index(&self) -> AstAddressIndex<'a> {
         AstAddressIndex {
             nodes: self.nodes.clone(),
+            all_nodes: self
+                .nodes
+                .iter()
+                .map(|node| AstTreeNode {
+                    tag: node.tag,
+                    offset: node.offset,
+                })
+                .collect(),
         }
+    }
+
+    pub(crate) fn deep_address_index_with_source(
+        &self,
+        source: &[u8],
+    ) -> Result<AstAddressIndex<'a>, AstError> {
+        let mut nodes = Vec::new();
+        let mut all_nodes = Vec::new();
+        collect_raw_nodes_deep(self, source, 0, &mut nodes, &mut all_nodes)?;
+        nodes.sort_unstable_by_key(|node| node.offset);
+        all_nodes.sort_unstable_by_key(|node| node.offset);
+        Ok(AstAddressIndex { nodes, all_nodes })
     }
 
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
@@ -817,10 +838,34 @@ impl<'a> RawNodes<'a> {
 }
 
 impl<'a> AstAddressIndex<'a> {
+    /// Returns the category-five node with this AST address, if present.
     pub fn get(&self, address: u32) -> Option<&RawNode<'a>> {
         self.nodes
             .iter()
             .find(|node| node.offset == address as usize)
+    }
+
+    /// Resolves a reference when its target is a category-five node.
+    pub fn resolve(&self, reference: AstRef) -> Option<&RawNode<'a>> {
+        self.get(reference.address)
+    }
+
+    /// Returns any visible AST node with this address, including category-one
+    /// through category-four tree nodes.
+    pub fn get_node(&self, address: u32) -> Option<AstTreeNode> {
+        self.all_nodes
+            .iter()
+            .find(|node| node.offset == address as usize)
+            .copied()
+    }
+
+    /// Resolves a reference to any visible AST node.
+    pub fn resolve_node(&self, reference: AstRef) -> Option<AstTreeNode> {
+        self.get_node(reference.address)
+    }
+
+    pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
+        self.all_nodes.iter().map(|node| node.offset as u32)
     }
 
     pub fn addresses(&self) -> impl Iterator<Item = u32> + '_ {
@@ -834,6 +879,496 @@ impl<'a> AstAddressIndex<'a> {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+}
+
+fn raw_payload_base(source: &[u8], node: &RawNode<'_>, base: usize) -> usize {
+    let fallback = base
+        .saturating_add(node.offset)
+        .saturating_add(1)
+        .saturating_add(nat_width(node.payload.len()));
+
+    let Some(relative) = subslice_offset(source, node.payload) else {
+        return fallback;
+    };
+    base.saturating_add(relative)
+}
+
+fn nat_width(mut value: usize) -> usize {
+    let mut width = 1;
+    while value >= 128 {
+        value >>= 7;
+        width += 1;
+    }
+    width
+}
+
+fn subslice_offset(source: &[u8], subslice: &[u8]) -> Option<usize> {
+    if subslice.is_empty() || subslice.len() > source.len() {
+        return None;
+    }
+
+    (0..=source.len() - subslice.len())
+        .find(|start| std::ptr::eq(source[*start..].as_ptr(), subslice.as_ptr()))
+}
+
+fn collect_raw_nodes_deep<'a>(
+    nodes: &RawNodes<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    for node in &nodes.nodes {
+        collect_raw_node_deep(node, source, base, output, all_output)?;
+    }
+    Ok(())
+}
+
+fn collect_raw_node_deep<'a>(
+    node: &RawNode<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    let absolute_offset = base.saturating_add(node.offset);
+    let mut located = node.clone();
+    located.offset = absolute_offset;
+    output.push(located);
+    all_output.push(AstTreeNode {
+        tag: node.tag,
+        offset: absolute_offset,
+    });
+
+    let payload_base = raw_payload_base(source, node, base);
+    let Ok(structured) = node.decode_structured() else {
+        return Ok(());
+    };
+    collect_structured_nodes(&structured, node.payload, payload_base, output, all_output)
+}
+
+fn collect_tree_nodes<'a>(
+    tree: &RawTree<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    match tree {
+        RawTree::Leaf(term) => {
+            all_output.push(AstTreeNode {
+                tag: term.tag,
+                offset: base.saturating_add(term.offset),
+            });
+        }
+        RawTree::Ast { tag, offset, child }
+        | RawTree::NatAst {
+            tag, offset, child, ..
+        } => {
+            all_output.push(AstTreeNode {
+                tag: *tag,
+                offset: base.saturating_add(*offset),
+            });
+            collect_tree_nodes(child, source, base, output, all_output)?;
+        }
+        RawTree::LengthNode(node) => {
+            let absolute_offset = base.saturating_add(node.offset);
+            let mut located = node.clone();
+            located.offset = absolute_offset;
+            output.push(located);
+            all_output.push(AstTreeNode {
+                tag: node.tag,
+                offset: absolute_offset,
+            });
+
+            let payload_base = raw_payload_base(source, node, base);
+            let Ok(structured) = node.decode_structured() else {
+                return Ok(());
+            };
+            collect_structured_nodes(&structured, node.payload, payload_base, output, all_output)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_trees_nodes<'a>(
+    trees: &[RawTree<'a>],
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    for tree in trees {
+        collect_tree_nodes(tree, source, base, output, all_output)?;
+    }
+    Ok(())
+}
+
+fn collect_raw_node_list_nodes<'a>(
+    nodes: &RawNodes<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    collect_raw_nodes_deep(nodes, source, base, output, all_output)
+}
+
+fn collect_definition_tail_nodes<'a>(
+    tail: &[DefinitionTail<'a>],
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    for entry in tail {
+        if let DefinitionTail::Annotation(node) = entry {
+            collect_raw_node_deep(node, source, base, output, all_output)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_definition_body_nodes<'a>(
+    body: &DefinitionBody<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    match body {
+        DefinitionBody::ValDef {
+            type_tree,
+            rhs,
+            tail,
+        } => {
+            collect_tree_nodes(type_tree, source, base, output, all_output)?;
+            if let Some(rhs) = rhs {
+                collect_tree_nodes(rhs, source, base, output, all_output)?;
+            }
+            collect_definition_tail_nodes(tail, source, base, output, all_output)?;
+        }
+        DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+        } => {
+            collect_tree_nodes(type_or_template, source, base, output, all_output)?;
+            collect_definition_tail_nodes(tail, source, base, output, all_output)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_parameter_nodes<'a>(
+    parameter: &ParameterNode<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    let body = parameter.decode_body()?;
+    let body_base = subslice_offset(source, parameter.body())
+        .map(|relative| base.saturating_add(relative))
+        .unwrap_or(base);
+    collect_tree_nodes(
+        &body.type_tree,
+        parameter.body(),
+        body_base,
+        output,
+        all_output,
+    )?;
+    collect_definition_tail_nodes(&body.tail, parameter.body(), body_base, output, all_output)
+}
+
+fn collect_parameters_nodes<'a>(
+    parameters: &[ParameterNode<'a>],
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    for parameter in parameters {
+        collect_parameter_nodes(parameter, source, base, output, all_output)?;
+    }
+    Ok(())
+}
+
+fn collect_case_def_nodes<'a>(
+    case_def: &CaseDefNode<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    collect_tree_nodes(&case_def.pattern, source, base, output, all_output)?;
+    collect_tree_nodes(&case_def.body, source, base, output, all_output)?;
+    if let Some(guard) = &case_def.guard {
+        collect_tree_nodes(guard, source, base, output, all_output)?;
+    }
+    Ok(())
+}
+
+fn collect_case_defs_nodes<'a>(
+    case_defs: &[CaseDefNode<'a>],
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    for case_def in case_defs {
+        collect_case_def_nodes(case_def, source, base, output, all_output)?;
+    }
+    Ok(())
+}
+
+fn collect_structured_nodes<'a>(
+    node: &StructuredNode<'a>,
+    source: &[u8],
+    base: usize,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    macro_rules! tree {
+        ($tree:expr) => {
+            collect_tree_nodes($tree, source, base, output, all_output)?
+        };
+    }
+    macro_rules! trees {
+        ($trees:expr) => {
+            collect_trees_nodes($trees, source, base, output, all_output)?
+        };
+    }
+    macro_rules! raw_nodes {
+        ($nodes:expr) => {
+            collect_raw_node_list_nodes($nodes, source, base, output, all_output)?
+        };
+    }
+    macro_rules! definition_body {
+        ($body:expr) => {
+            collect_definition_body_nodes($body, source, base, output, all_output)?
+        };
+    }
+    macro_rules! definition_tail {
+        ($tail:expr) => {
+            collect_definition_tail_nodes($tail, source, base, output, all_output)?
+        };
+    }
+    macro_rules! parameters {
+        ($parameters:expr) => {
+            collect_parameters_nodes($parameters, source, base, output, all_output)?
+        };
+    }
+    macro_rules! case_defs {
+        ($case_defs:expr) => {
+            collect_case_defs_nodes($case_defs, source, base, output, all_output)?
+        };
+    }
+
+    match node {
+        StructuredNode::Package(package) => raw_nodes!(&package.stats),
+        StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => definition_body!(body),
+        StructuredNode::DefDef(body) => {
+            parameters!(&body.parameters);
+            tree!(&body.return_type);
+            if let Some(rhs) = &body.rhs {
+                tree!(rhs);
+            }
+            definition_tail!(&body.tail);
+        }
+        StructuredNode::ImportExport(import_export) => {
+            tree!(&import_export.expr);
+            for selector in &import_export.selectors {
+                if let ImportSelector::Bounded { type_tree } = selector {
+                    tree!(type_tree);
+                }
+            }
+        }
+        StructuredNode::Parameter(parameter) => {
+            collect_parameter_nodes(parameter, source, base, output, all_output)?;
+        }
+        StructuredNode::Apply(apply) => {
+            tree!(&apply.function);
+            trees!(&apply.arguments);
+        }
+        StructuredNode::TypeApply(type_apply) => {
+            tree!(&type_apply.function);
+            trees!(&type_apply.type_arguments);
+        }
+        StructuredNode::Typed(typed) => {
+            tree!(&typed.expression);
+            tree!(&typed.type_tree);
+        }
+        StructuredNode::Assign(assign) => {
+            tree!(&assign.left);
+            tree!(&assign.right);
+        }
+        StructuredNode::Block(block) => {
+            tree!(&block.expression);
+            trees!(&block.stats);
+        }
+        StructuredNode::If(if_node) => {
+            tree!(&if_node.condition);
+            tree!(&if_node.then_branch);
+            tree!(&if_node.else_branch);
+        }
+        StructuredNode::Lambda(lambda) => {
+            tree!(&lambda.method);
+            if let Some(target_type) = &lambda.target_type {
+                tree!(target_type);
+            }
+        }
+        StructuredNode::Match(match_node) => {
+            tree!(&match_node.scrutinee);
+            case_defs!(&match_node.cases);
+        }
+        StructuredNode::Return(return_node) => {
+            if let Some(expression) = &return_node.expression {
+                tree!(expression);
+            }
+        }
+        StructuredNode::While(while_node) => {
+            tree!(&while_node.condition);
+            tree!(&while_node.body);
+        }
+        StructuredNode::Try(try_node) => {
+            tree!(&try_node.expression);
+            case_defs!(&try_node.cases);
+            if let Some(finalizer) = &try_node.finalizer {
+                tree!(finalizer);
+            }
+        }
+        StructuredNode::Inlined(inlined) => {
+            tree!(&inlined.expression);
+            if let Some(call_site) = &inlined.call_site {
+                tree!(call_site);
+            }
+            raw_nodes!(&inlined.definitions);
+        }
+        StructuredNode::SelectOuter(select_outer) => {
+            tree!(&select_outer.qualifier);
+            tree!(&select_outer.underlying_type);
+        }
+        StructuredNode::Repeated(repeated) => {
+            tree!(&repeated.element_type);
+            trees!(&repeated.elements);
+        }
+        StructuredNode::Bind(bind) => {
+            tree!(&bind.type_tree);
+            tree!(&bind.pattern);
+        }
+        StructuredNode::Alternative(alternative) => {
+            trees!(&alternative.alternatives);
+        }
+        StructuredNode::Unapply(unapply) => {
+            tree!(&unapply.function);
+            for implicit_arg in &unapply.implicit_args {
+                tree!(&implicit_arg.child);
+            }
+            tree!(&unapply.type_tree);
+            trees!(&unapply.patterns);
+        }
+        StructuredNode::Annotated(annotated) => {
+            tree!(&annotated.underlying);
+            tree!(&annotated.annotation);
+        }
+        StructuredNode::Annotation(annotation) => {
+            tree!(&annotation.tycon);
+            tree!(&annotation.full_annotation);
+        }
+        StructuredNode::CaseDef(case_def) => {
+            collect_case_def_nodes(case_def, source, base, output, all_output)?;
+        }
+        StructuredNode::Template(template) => {
+            parameters!(&template.type_params);
+            parameters!(&template.term_params);
+            trees!(&template.parents);
+            if let Some(self_def) = &template.self_def {
+                tree!(self_def);
+            }
+            raw_nodes!(&template.stats);
+        }
+        StructuredNode::Super(super_node) => {
+            tree!(&super_node.this_term);
+            if let Some(mixin_type) = &super_node.mixin_type {
+                tree!(mixin_type);
+            }
+        }
+        StructuredNode::BinaryType(binary) => {
+            tree!(&binary.left);
+            tree!(&binary.right);
+        }
+        StructuredNode::RefinedType(refined) => {
+            tree!(&refined.parent);
+            tree!(&refined.refinement);
+        }
+        StructuredNode::RefinedTpt(refined) => {
+            tree!(&refined.qualifier);
+            raw_nodes!(&refined.stats);
+        }
+        StructuredNode::AppliedType(applied) => {
+            tree!(&applied.tycon);
+            trees!(&applied.arguments);
+        }
+        StructuredNode::TypeBounds(bounds) => {
+            tree!(&bounds.low_or_alias);
+            if let Some(high) = &bounds.high {
+                tree!(high);
+            }
+        }
+        StructuredNode::FlexibleType(flexible) => {
+            tree!(&flexible.underlying_type);
+        }
+        StructuredNode::LambdaTpt(lambda) => {
+            parameters!(&lambda.type_params);
+            tree!(&lambda.body);
+        }
+        StructuredNode::PolyType(poly) => {
+            tree!(&poly.result_type);
+        }
+        StructuredNode::ParamType(_) => {}
+        StructuredNode::MethodType(method) => {
+            tree!(&method.result_type);
+        }
+        StructuredNode::ApplySigPoly(apply) => {
+            tree!(&apply.function);
+            tree!(&apply.type_tree);
+            trees!(&apply.arguments);
+        }
+        StructuredNode::Quote(quote) => {
+            tree!(&quote.expression);
+            tree!(&quote.type_tree);
+        }
+        StructuredNode::QuotePattern(pattern) => {
+            tree!(&pattern.body);
+            tree!(&pattern.quotes);
+            tree!(&pattern.pattern_type);
+            trees!(&pattern.bindings);
+        }
+        StructuredNode::SplicePattern(pattern) => {
+            tree!(&pattern.pattern);
+            tree!(&pattern.pattern_type);
+            trees!(&pattern.arguments);
+        }
+        StructuredNode::MatchType(match_type) => {
+            tree!(&match_type.bound);
+            tree!(&match_type.selector);
+            trees!(&match_type.cases);
+        }
+        StructuredNode::MatchTpt(match_tpt) => {
+            trees!(&match_tpt.prefix);
+            case_defs!(&match_tpt.cases);
+        }
+        StructuredNode::InReference(reference) => {
+            tree!(&reference.qualifier);
+            tree!(&reference.underlying_type);
+        }
+        StructuredNode::SelectIn(select_in) => {
+            tree!(&select_in.qualifier);
+            tree!(&select_in.underlying_type);
+        }
+        StructuredNode::Raw(_) => {}
+    }
+    Ok(())
 }
 
 impl<'a> RawNode<'a> {
@@ -2215,7 +2750,8 @@ impl<'a> RawNode<'a> {
 
     pub fn decode_template_structure(&self) -> Result<TemplateStructure<'a>, AstError> {
         let template = self.decode_template()?;
-        let mut reader = Reader::new(template.remainder);
+        let remainder_offset = subslice_offset(self.payload, template.remainder).unwrap_or(0);
+        let mut reader = Reader::with_range(self.payload, remainder_offset, self.payload.len())?;
         let mut parents = Vec::new();
         let mut self_def = None;
         let mut split_clause = false;
@@ -5895,5 +6431,53 @@ mod tests {
         assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 4]);
         assert_eq!(index.get(4).unwrap().tag, DEFDEF_TAG);
         assert!(index.get(1).is_none());
+    }
+
+    #[test]
+    fn indexes_nested_category_five_nodes_with_absolute_ast_addresses() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes.deep_address_index_with_source(&bytes).unwrap();
+
+        assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 2, 5]);
+        assert_eq!(
+            index.node_addresses().collect::<Vec<_>>(),
+            vec![0, 2, 4, 5, 8]
+        );
+        assert_eq!(index.get(0).map(|node| node.tag), Some(APPLY_TAG));
+        assert_eq!(index.get(2).map(|node| node.tag), Some(BLOCK_TAG));
+        assert_eq!(
+            index.get_node(4),
+            Some(crate::AstTreeNode { tag: 2, offset: 4 })
+        );
+        assert_eq!(
+            index
+                .resolve(crate::AstRef {
+                    kind: crate::AstRefKind::TermRefDirect,
+                    address: 5,
+                })
+                .map(|node| node.tag),
+            Some(VALDEF_TAG)
+        );
+        assert_eq!(
+            index
+                .resolve_node(crate::AstRef {
+                    kind: crate::AstRefKind::SharedTerm,
+                    address: 4,
+                })
+                .map(|node| node.tag),
+            Some(2)
+        );
+        assert!(
+            index
+                .resolve(crate::AstRef {
+                    kind: crate::AstRefKind::SharedTerm,
+                    address: 1,
+                })
+                .is_none()
+        );
     }
 }

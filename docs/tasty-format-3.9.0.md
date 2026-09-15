@@ -415,13 +415,21 @@ and template statements, as well as `ANNOTATION` payloads. Unknown category-5
 nodes remain opaque and produce no references from this convenience API.
 
 At file level, `TastyFile::ast_references()` returns the collected edges with
-the owning top-level AST address and the typed target `AstRef`. A target may
-refer to a nested node, so resolving it against a global address index remains
-a separate operation.
+the owning top-level AST address and the typed target `AstRef`.
+`TastyFile::ast_address_index()` indexes every visible AST node, including
+category-1 through category-4 tree nodes and nested category-5 nodes.
+`AstAddressIndex::resolve_node()` and
+`TastyFile::resolve_ast_reference()` resolve a target address to its tag and
+absolute AST-section offset. `AstAddressIndex::get()` remains the payload
+lookup for category-5 nodes.
 
-`RawNodes::address_index()` and `TastyFile::ast_at()` currently index
-top-level AST nodes. Nested-node address indexing is intentionally a separate
-step because nested payloads need absolute AST-section offsets.
+`RawNodes::address_index()` and `TastyFile::ast_at()` index top-level
+category-5 nodes. The file-level global index preserves absolute AST-section
+offsets while traversing supported structured payloads. Unknown or
+context-dependent category-5 payloads remain indexed as opaque boundaries.
+`TastyFile::validate_ast_references()` checks the AST-section range, while
+`TastyFile::validate_ast_reference_targets()` additionally requires every
+collected reference to resolve to a visible node start.
 
 ### 6.6. Constants
 

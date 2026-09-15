@@ -11,6 +11,8 @@ that increment before it is committed.
 - assertions that the entire bounded payload is consumed;
 - integration validation against the Scala 3.9.0 fixtures when the decoder can
   occur in an AST or standard section.
+- nested-node and AST-reference resolution tests whenever traversal crosses a
+  length-delimited AST payload.
 
 Generic raw decoding should have a tag-matrix test for every tag range that the
 raw layer accepts. Semantic decoding may be introduced incrementally, but a

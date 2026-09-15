@@ -538,6 +538,53 @@ fn all_tasty_fixture_top_level_nodes_expose_structured_ast_references() {
 }
 
 #[test]
+fn all_tasty_fixture_ast_references_resolve_in_the_global_ast_index() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let top_level_count = file.asts().unwrap().len();
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+
+        assert!(
+            index.len() >= top_level_count,
+            "global AST index in {} lost top-level nodes",
+            path.display()
+        );
+
+        for reference in file.ast_references().unwrap_or_else(|error| {
+            panic!(
+                "failed to collect AST references from {}: {error}",
+                path.display()
+            )
+        }) {
+            assert!(
+                index.resolve_node(reference.reference).is_some(),
+                "AST reference {} from owner {} does not resolve in {}",
+                reference.reference.address,
+                reference.owner_address,
+                path.display()
+            );
+            assert_eq!(
+                file.resolve_ast_reference(reference.reference).unwrap(),
+                index.resolve_node(reference.reference)
+            );
+        }
+
+        file.validate_ast_reference_targets()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "AST reference target validation failed in {}: {error}",
+                    path.display()
+                )
+            });
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

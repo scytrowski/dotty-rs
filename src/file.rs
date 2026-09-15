@@ -1,10 +1,11 @@
-use crate::ast::{AstError, AstReference, RawNodes, StructuredNode};
+use crate::ast::{AstAddressIndex, AstError, AstReference, RawNodes, StructuredNode};
 use crate::header::{Header, HeaderError};
 use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
 use crate::section::{
     Attribute, Comment, PositionSection, Section, SectionError, SectionTable, StandardSection,
 };
+use crate::term::{AstRef, AstTreeNode};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -52,6 +53,10 @@ pub enum TastyFileError {
         address: i64,
         asts_length: usize,
     },
+    InvalidAstNodeAddress {
+        context: &'static str,
+        address: u32,
+    },
 }
 
 impl fmt::Display for TastyFileError {
@@ -76,6 +81,10 @@ impl fmt::Display for TastyFileError {
             } => write!(
                 formatter,
                 "{context} contains AST address {address}, outside the ASTs payload of {asts_length} bytes"
+            ),
+            Self::InvalidAstNodeAddress { context, address } => write!(
+                formatter,
+                "{context} contains AST address {address}, which is not the start of a visible AST node"
             ),
         }
     }
@@ -244,6 +253,28 @@ impl<'a> TastyFile<'a> {
         Ok(self.asts()?.address_index().get(address).cloned())
     }
 
+    /// Index every visible AST node in the ASTs section, including nodes
+    /// nested inside expression, type, package, and template payloads.
+    pub fn ast_address_index(&self) -> Result<AstAddressIndex<'a>, TastyFileError> {
+        let section = self
+            .section(StandardSection::Asts)
+            .ok_or(TastyFileError::MissingSection(StandardSection::Asts))?;
+        let mut reader = section.reader();
+        let nodes = RawNodes::decode(&mut reader)?;
+        Ok(nodes.deep_address_index_with_source(section.payload)?)
+    }
+
+    /// Resolve an AST reference against the global AST node index.
+    ///
+    /// `None` means that the address is inside the ASTs section but does not
+    /// identify the start of a visible AST node.
+    pub fn resolve_ast_reference(
+        &self,
+        reference: AstRef,
+    ) -> Result<Option<AstTreeNode>, TastyFileError> {
+        Ok(self.ast_address_index()?.resolve_node(reference))
+    }
+
     /// Collect AST references from every top-level node in wire order.
     ///
     /// The owner address identifies the top-level node containing the
@@ -270,6 +301,22 @@ impl<'a> TastyFile<'a> {
     pub fn validate_ast_references(&self) -> Result<(), TastyFileError> {
         for reference in self.ast_references()? {
             self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
+        }
+        Ok(())
+    }
+
+    /// Validate that every collected AST reference points to the start of a
+    /// visible AST node, not merely somewhere inside the ASTs section.
+    pub fn validate_ast_reference_targets(&self) -> Result<(), TastyFileError> {
+        let index = self.ast_address_index()?;
+        for reference in self.ast_references()? {
+            self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
+            if index.resolve_node(reference.reference).is_none() {
+                return Err(TastyFileError::InvalidAstNodeAddress {
+                    context: "AST reference",
+                    address: reference.reference.address,
+                });
+            }
         }
         Ok(())
     }
@@ -684,6 +731,36 @@ mod tests {
                 context: "AST reference",
                 address: 127,
                 asts_length: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_file_ast_reference_that_is_not_a_node_start() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[crate::APPLY_TAG, 0x82, crate::TERMREFDIRECT_TAG, 0x81],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.validate_ast_reference_targets(),
+            Err(TastyFileError::InvalidAstNodeAddress {
+                context: "AST reference",
+                address: 1,
             })
         );
     }
