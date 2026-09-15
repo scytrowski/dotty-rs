@@ -460,6 +460,10 @@ the file's `NameTable`.
 `TastyFile::validate_name_references()` applies this check eagerly, and the
 general `TastyFile::validate()` path includes it.
 
+`NameTable::get_utf8()` and `RawName::as_utf8()` provide a checked shortcut
+for direct UTF-8 entries. Composite names deliberately remain structured
+`RawName` values rather than being flattened with an assumed separator.
+
 `BIND` is context-dependent: in a pattern it carries a pattern tree, while in
 a type it carries zero or more modifiers. `BindNode` exposes these alternatives
 as `BindBody::Pattern` and `BindBody::Type`; bytes after an undecidable pattern

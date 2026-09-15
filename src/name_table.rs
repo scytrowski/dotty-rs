@@ -174,6 +174,15 @@ impl NameTable {
             .and_then(|index| self.entries.get(index as usize))
     }
 
+    /// Returns the UTF-8 text stored directly at a name-table reference.
+    ///
+    /// Composite names intentionally return `None`; callers that need their
+    /// structure can inspect [`NameTable::get`] and the public `RawName`
+    /// variants instead.
+    pub fn get_utf8(&self, reference: NameRef) -> Option<&str> {
+        self.get(reference).and_then(RawName::as_utf8)
+    }
+
     pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
         self.entries.get(index as usize)
     }
@@ -457,6 +466,14 @@ where
 }
 
 impl RawName {
+    /// Returns the text of a direct UTF-8 name entry.
+    pub fn as_utf8(&self) -> Option<&str> {
+        match self {
+            Self::Utf8(value) => Some(value),
+            _ => None,
+        }
+    }
+
     fn references(&self) -> Vec<NameRef> {
         match self {
             Self::Utf8(_) | Self::Unknown { .. } => Vec::new(),
@@ -563,6 +580,31 @@ mod tests {
 
         assert_eq!(names.len(), 2);
         assert_eq!(names.get(2), Some(&names.entries()[1]));
+    }
+
+    #[test]
+    fn resolves_direct_utf8_name_references() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
+
+        assert_eq!(table.get_utf8(1), Some("member"));
+        assert_eq!(table.get_utf8(0), None);
+        assert_eq!(table.get_utf8(2), None);
+    }
+
+    #[test]
+    fn does_not_resolve_a_composite_name_as_direct_utf8() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.get_utf8(3), None);
+        assert_eq!(table.get(3).and_then(RawName::as_utf8), None);
     }
 
     #[test]
