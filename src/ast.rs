@@ -42,6 +42,9 @@ pub const BIND_TAG: u8 = 150;
 pub const ALTERNATIVE_TAG: u8 = 151;
 pub const UNAPPLY_TAG: u8 = 152;
 pub const CASEDEF_TAG: u8 = 155;
+pub const REFINEDTYPE_TAG: u8 = 159;
+pub const REFINEDTPT_TAG: u8 = 160;
+pub const LAMBDATPT_TAG: u8 = 171;
 pub const TERMREFIN_TAG: u8 = 174;
 pub const TYPEREFIN_TAG: u8 = 175;
 pub const SELECTIN_TAG: u8 = 176;
@@ -331,6 +334,26 @@ pub struct UnapplyNode<'a> {
     pub implicit_args: Vec<AstChildNode<'a>>,
     pub type_tree: RawTree<'a>,
     pub patterns: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefinedTypeNode<'a> {
+    pub tag: u8,
+    pub name: u32,
+    pub parent: RawTree<'a>,
+    pub refinement: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefinedTptNode<'a> {
+    pub qualifier: RawTree<'a>,
+    pub stats: RawNodes<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaTptNode<'a> {
+    pub type_params: Vec<ParameterNode<'a>>,
+    pub body: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -927,6 +950,79 @@ impl<'a> RawNode<'a> {
             type_tree,
             patterns,
         })
+    }
+
+    pub fn decode_refined_type(&self) -> Result<RefinedTypeNode<'a>, AstError> {
+        if self.tag != REFINEDTYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: REFINEDTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let name = reader.read_nat()?;
+        let parent = RawTree::decode(&mut reader)?;
+        let refinement = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(RefinedTypeNode {
+            tag: self.tag,
+            name,
+            parent,
+            refinement,
+        })
+    }
+
+    pub fn decode_refined_tpt(&self) -> Result<RefinedTptNode<'a>, AstError> {
+        if self.tag != REFINEDTPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: REFINEDTPT_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let qualifier = RawTree::decode(&mut reader)?;
+        let stats = RawNodes::decode(&mut reader)?;
+
+        Ok(RefinedTptNode { qualifier, stats })
+    }
+
+    pub fn decode_lambda_tpt(&self) -> Result<LambdaTptNode<'a>, AstError> {
+        if self.tag != LAMBDATPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: LAMBDATPT_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let mut type_params = Vec::new();
+        while !reader.is_at_end() && reader.peek_u8()? == TYPEPARAM_TAG {
+            let parameter = match RawTree::decode(&mut reader)? {
+                RawTree::LengthNode(raw) => raw.decode_parameter()?,
+                _ => unreachable!("type parameter tags are category-five tags"),
+            };
+            type_params.push(parameter);
+        }
+        let body = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(LambdaTptNode { type_params, body })
     }
 
     pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
@@ -1821,16 +1917,17 @@ mod tests {
         BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG, CLASSCONST_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG,
         EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICITARG_TAG, IMPORT_TAG,
-        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG,
-        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
-        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-        QUALTHIS_TAG, RECTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
-        RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG,
-        SINGLETONTPT_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG,
-        TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG,
-        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
-        TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode,
-        UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG,
+        MATCHCASETYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG,
+        PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
+        PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, RECTYPE_TAG, REFINEDTPT_TAG,
+        REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
+        SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG,
+        SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
+        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
+        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG,
+        WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -3182,6 +3279,70 @@ mod tests {
         };
 
         assert!(node.decode_unapply().is_err());
+    }
+
+    #[test]
+    fn decodes_a_refined_type_with_name_parent_and_refinement() {
+        let bytes = [
+            REFINEDTYPE_TAG,
+            0x85,
+            0x85,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let refined = nodes.get(0).unwrap().decode_refined_type().unwrap();
+
+        assert_eq!(refined.tag, REFINEDTYPE_TAG);
+        assert_eq!(refined.name, 5);
+        assert!(matches!(refined.parent, RawTree::Leaf(_)));
+        assert!(matches!(refined.refinement, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn decodes_a_refined_tpt_with_qualifier_and_stats() {
+        let bytes = [
+            REFINEDTPT_TAG,
+            0x84,
+            TERMREFPKG_TAG,
+            0x81,
+            PACKAGE_TAG,
+            0x80,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let refined = nodes.get(0).unwrap().decode_refined_tpt().unwrap();
+
+        assert!(matches!(refined.qualifier, RawTree::Leaf(_)));
+        assert_eq!(refined.stats.len(), 1);
+    }
+
+    #[test]
+    fn decodes_a_lambda_tpt_with_type_parameters_and_body() {
+        let bytes = [
+            LAMBDATPT_TAG,
+            0x87,
+            TYPEPARAM_TAG,
+            0x83,
+            0x85,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let lambda = nodes.get(0).unwrap().decode_lambda_tpt().unwrap();
+
+        assert_eq!(lambda.type_params.len(), 1);
+        assert!(matches!(
+            lambda.type_params[0],
+            ParameterNode::TypeParam { name: 5, .. }
+        ));
+        assert!(matches!(lambda.body, RawTree::Leaf(_)));
     }
 
     #[test]
