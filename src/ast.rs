@@ -929,7 +929,7 @@ mod tests {
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
         DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
         IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector, NEW_TAG, NodeCategory,
-        PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG, RawNodes, RawTree,
+        PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
         SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
         TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
         WHILE_TAG,
@@ -1001,6 +1001,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_package_with_an_invalid_path_tree() {
+        let node = RawNode {
+            tag: PACKAGE_TAG,
+            offset: 4,
+            payload: &[2],
+        };
+
+        assert_eq!(
+            node.decode_package(),
+            Err(AstError::UnexpectedTag {
+                expected: TERMREFPKG_TAG,
+                actual: 2,
+                offset: 4,
+            })
+        );
+    }
+
+    #[test]
     fn decodes_a_definition_name_and_preserves_its_remaining_body() {
         let bytes = [VALDEF_TAG, 0x83, 0x81, b'a', b'b'];
         let mut reader = Reader::new(&bytes);
@@ -1044,6 +1062,17 @@ mod tests {
                 ref tail,
             } if tail == &[DefinitionTail::Modifier(17)]
         ));
+    }
+
+    #[test]
+    fn reports_a_truncated_definition_body() {
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &[1],
+        };
+
+        assert!(node.decode_definition_body().is_err());
     }
 
     #[test]
@@ -1259,6 +1288,17 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_defdef_without_a_return_type() {
+        let node = RawNode {
+            tag: DEFDEF_TAG,
+            offset: 0,
+            payload: &[1],
+        };
+
+        assert!(node.decode_defdef_body().is_err());
+    }
+
+    #[test]
     fn decodes_import_selectors_and_bounded_types() {
         let bytes = [
             IMPORT_TAG,
@@ -1300,6 +1340,24 @@ mod tests {
 
         assert_eq!(export.kind, ImportExportKind::Export);
         assert_eq!(export.selectors, vec![ImportSelector::Imported { name: 5 }]);
+    }
+
+    #[test]
+    fn rejects_an_import_selector_with_an_unknown_tag() {
+        let node = RawNode {
+            tag: IMPORT_TAG,
+            offset: 0,
+            payload: &[2, 200],
+        };
+
+        assert_eq!(
+            node.decode_import_export(),
+            Err(AstError::UnexpectedTag {
+                expected: IMPORTED_TAG,
+                actual: 200,
+                offset: 1,
+            })
+        );
     }
 
     #[test]
@@ -1359,6 +1417,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_typed_node_with_an_extra_tree() {
+        let node = RawNode {
+            tag: TYPED_TAG,
+            offset: 0,
+            payload: &[2, 2, 2],
+        };
+
+        assert_eq!(
+            node.decode_typed(),
+            Err(AstError::UnsupportedCategory {
+                tag: TYPED_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
     fn decodes_assign_left_and_right_operands() {
         let bytes = [ASSIGN_TAG, 0x84, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82];
         let mut reader = Reader::new(&bytes);
@@ -1367,6 +1442,17 @@ mod tests {
 
         assert!(matches!(assign.left, RawTree::Leaf(_)));
         assert!(matches!(assign.right, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn reports_an_assign_node_without_a_right_operand() {
+        let node = RawNode {
+            tag: ASSIGN_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert!(matches!(node.decode_assign(), Err(AstError::Term(_))));
     }
 
     #[test]
@@ -1381,6 +1467,17 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_return_node_without_a_target() {
+        let node = RawNode {
+            tag: RETURN_TAG,
+            offset: 0,
+            payload: &[],
+        };
+
+        assert!(matches!(node.decode_return(), Err(AstError::Read(_))));
+    }
+
+    #[test]
     fn decodes_while_condition_and_body() {
         let bytes = [WHILE_TAG, 0x83, 3, TERMREFPKG_TAG, 0x81];
         let mut reader = Reader::new(&bytes);
@@ -1389,6 +1486,17 @@ mod tests {
 
         assert!(matches!(while_node.condition, RawTree::Leaf(_)));
         assert!(matches!(while_node.body, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn reports_a_while_node_without_a_body() {
+        let node = RawNode {
+            tag: WHILE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert!(matches!(node.decode_while(), Err(AstError::Term(_))));
     }
 
     #[test]
