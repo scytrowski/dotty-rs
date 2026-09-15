@@ -1,3 +1,4 @@
+use crate::ast::RawNode;
 use crate::reader::{ReadError, Reader};
 use std::fmt;
 
@@ -18,6 +19,23 @@ pub struct SimpleTerm {
     pub tag: u8,
     pub offset: usize,
     pub value: TermValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawTree<'a> {
+    Leaf(SimpleTerm),
+    Ast {
+        tag: u8,
+        offset: usize,
+        child: Box<RawTree<'a>>,
+    },
+    NatAst {
+        tag: u8,
+        offset: usize,
+        value: u32,
+        child: Box<RawTree<'a>>,
+    },
+    LengthNode(RawNode<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +72,10 @@ impl SimpleTerm {
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, TermError> {
         let offset = reader.position();
         let tag = reader.read_u8()?;
+        Self::decode_tagged(reader, tag, offset)
+    }
+
+    fn decode_tagged(reader: &mut Reader<'_>, tag: u8, offset: usize) -> Result<Self, TermError> {
         let value = match tag {
             2 => TermValue::Unit,
             3 => TermValue::Boolean(false),
@@ -69,6 +91,49 @@ impl SimpleTerm {
         };
 
         Ok(Self { tag, offset, value })
+    }
+}
+
+impl<'a> RawTree<'a> {
+    pub fn decode(reader: &mut Reader<'a>) -> Result<Self, TermError> {
+        let offset = reader.position();
+        let tag = reader.read_u8()?;
+        let category = match tag {
+            1..=59 => 1,
+            60..=89 => 2,
+            90..=109 => 3,
+            110..=127 => 4,
+            128..=255 => 5,
+            0 => return Err(TermError::InvalidTag { tag, offset }),
+        };
+
+        match category {
+            1 | 2 => Ok(Self::Leaf(SimpleTerm::decode_tagged(reader, tag, offset)?)),
+            3 => Ok(Self::Ast {
+                tag,
+                offset,
+                child: Box::new(Self::decode(reader)?),
+            }),
+            4 => {
+                let value = reader.read_nat()?;
+                Ok(Self::NatAst {
+                    tag,
+                    offset,
+                    value,
+                    child: Box::new(Self::decode(reader)?),
+                })
+            }
+            5 => {
+                let length = reader.read_nat()? as usize;
+                let payload = reader.read_bytes(length)?;
+                Ok(Self::LengthNode(RawNode {
+                    tag,
+                    offset,
+                    payload,
+                }))
+            }
+            _ => unreachable!("all AST tags are covered above"),
+        }
     }
 }
 
@@ -151,5 +216,33 @@ mod tests {
                 remaining: 0,
             }))
         );
+    }
+
+    #[test]
+    fn decodes_nested_category_three_and_four_raw_trees() {
+        let mut reader = Reader::new(&[112, 0x85, 64, 0x86]);
+        let tree = super::RawTree::decode(&mut reader).unwrap();
+
+        assert!(matches!(
+            tree,
+            super::RawTree::NatAst {
+                tag: 112,
+                value: 5,
+                child: _,
+                ..
+            }
+        ));
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn preserves_a_category_five_node_as_a_bounded_raw_node() {
+        let mut reader = Reader::new(&[128, 0x82, b'a', b'b']);
+        let tree = super::RawTree::decode(&mut reader).unwrap();
+
+        assert!(matches!(
+            tree,
+            super::RawTree::LengthNode(raw) if raw.tag == 128 && raw.payload == b"ab"
+        ));
     }
 }
