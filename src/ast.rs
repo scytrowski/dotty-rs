@@ -1,5 +1,7 @@
 use crate::reader::{ReadError, Reader};
-use crate::term::{AstRef, AstTreeNode, RawTree, TermEncodeError, TermError};
+use crate::term::{
+    AstRef, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
+};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -213,6 +215,26 @@ pub enum StructuredNode<'a> {
     InReference(InReferenceNode<'a>),
     SelectIn(SelectInNode<'a>),
     Raw(RawNode<'a>),
+}
+
+/// Semantic dispatch for one complete raw tree.
+///
+/// Unlike [`StructuredNode`], which represents bounded category-5 AST
+/// payloads, this type also covers category-1 through category-4 trees. The
+/// original `RawTree` remains available for lossless encoding and for fields
+/// whose grammar depends on an enclosing context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuredTree<'a> {
+    Constant(ConstantValue),
+    Leaf(SimpleTerm),
+    AstChild(AstChildNode<'a>),
+    ClassConstant(ClassConstNode<'a>),
+    Ident(IdentNode<'a>),
+    Select(SelectNode<'a>),
+    Reference(ReferenceNode<'a>),
+    SelfDef(SelfDefNode<'a>),
+    NamedArg(NamedArgNode<'a>),
+    Length(StructuredNode<'a>),
 }
 
 impl EncodedAstNodes {
@@ -3643,6 +3665,43 @@ fn encode_trees<'a>(trees: &[RawTree<'a>], writer: &mut Writer) -> Result<(), Te
 }
 
 impl<'a> RawTree<'a> {
+    /// Dispatches this raw tree to its typed representation.
+    ///
+    /// Category-1 leaves that are not constants remain available as
+    /// `StructuredTree::Leaf`, because they can be references or modifiers
+    /// whose meaning is supplied by the enclosing grammar. Unknown or
+    /// context-dependent details inside a category-5 payload are preserved
+    /// by the existing `StructuredNode::Raw` variant.
+    pub fn decode_structured(&self) -> Result<StructuredTree<'a>, AstError> {
+        match self {
+            Self::Leaf(term) => match term.constant_value()? {
+                Some(value) => Ok(StructuredTree::Constant(value)),
+                None => Ok(StructuredTree::Leaf(term.clone())),
+            },
+            Self::Ast { tag, .. } => {
+                if *tag == CLASSCONST_TAG {
+                    Ok(StructuredTree::ClassConstant(self.decode_class_constant()?))
+                } else {
+                    Ok(StructuredTree::AstChild(self.decode_ast_child(*tag)?))
+                }
+            }
+            Self::NatAst { tag, .. } => match *tag {
+                IDENT_TAG | IDENTTPT_TAG => Ok(StructuredTree::Ident(self.decode_ident()?)),
+                SELECT_TAG | SELECTTPT_TAG => Ok(StructuredTree::Select(self.decode_select()?)),
+                TERMREFSYMBOL_TAG | TERMREF_TAG | TYPEREFSYMBOL_TAG | TYPEREF_TAG => {
+                    Ok(StructuredTree::Reference(self.decode_reference()?))
+                }
+                SELFDEF_TAG => Ok(StructuredTree::SelfDef(self.decode_self_def()?)),
+                NAMEDARG_TAG => Ok(StructuredTree::NamedArg(self.decode_named_arg()?)),
+                _ => Err(AstError::InvalidTag {
+                    tag: *tag,
+                    offset: raw_tree_tag_offset(self).1,
+                }),
+            },
+            Self::LengthNode(node) => Ok(StructuredTree::Length(node.decode_structured()?)),
+        }
+    }
+
     pub fn encode_ast_child(&self, tag: u8, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(tag, 90..=104) {
             return Err(TermEncodeError::InvalidValue { tag });
@@ -4302,11 +4361,11 @@ mod tests {
         QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG,
         RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG,
         SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
-        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, TEMPLATE_TAG,
-        TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
-        TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
-        TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree,
+        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
+        TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::TermEncodeError;
@@ -4656,6 +4715,97 @@ mod tests {
                 offset: 0,
             })
         );
+    }
+
+    fn decode_structured_tree(bytes: &[u8]) -> StructuredTree<'_> {
+        let mut reader = Reader::new(bytes);
+        let tree = RawTree::decode(&mut reader).unwrap();
+        let structured = tree.decode_structured().unwrap();
+        assert!(reader.is_at_end());
+        structured
+    }
+
+    #[test]
+    fn dispatches_a_typed_constant_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[70, 0xaa]),
+            StructuredTree::Constant(crate::term::ConstantValue::Int(42))
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_non_constant_leaf_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[TERMREFPKG_TAG, 0x81]),
+            StructuredTree::Leaf(term)
+                if term.tag == TERMREFPKG_TAG
+                    && term.value == crate::term::TermValue::NameRef(1)
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_category_three_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[THIS_TAG, TERMREFPKG_TAG, 0x81]),
+            StructuredTree::AstChild(node) if node.tag == THIS_TAG
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_class_constant_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[CLASSCONST_TAG, TERMREFPKG_TAG, 0x81]),
+            StructuredTree::ClassConstant(node)
+                if matches!(node.type_tree, RawTree::Leaf(_))
+        ));
+    }
+
+    #[test]
+    fn dispatches_an_identifier_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[IDENT_TAG, 0x81, 2]),
+            StructuredTree::Ident(node) if node.name == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_select_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[SELECT_TAG, 0x81, 2]),
+            StructuredTree::Select(node) if node.name == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_reference_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[TERMREF_TAG, 0x81, 2]),
+            StructuredTree::Reference(node) if node.reference == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_self_definition_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[SELFDEF_TAG, 0x81, 2]),
+            StructuredTree::SelfDef(node) if node.name == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_named_argument_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[NAMEDARG_TAG, 0x81, 2]),
+            StructuredTree::NamedArg(node) if node.name == 1
+        ));
+    }
+
+    #[test]
+    fn dispatches_a_bounded_structured_tree() {
+        assert!(matches!(
+            decode_structured_tree(&[APPLY_TAG, 0x81, 2]),
+            StructuredTree::Length(StructuredNode::Apply(_))
+        ));
     }
 
     #[test]

@@ -418,6 +418,11 @@ all currently supported structured category-5 nodes, including nested package
 and template statements, as well as `ANNOTATION` payloads. Unknown category-5
 nodes remain opaque and produce no references from this convenience API.
 
+`RawTree::decode_structured()` provides the corresponding one-tree dispatcher.
+It recognizes typed constants, category-3 AST children, `CLASSconst`, the
+category-4 identifier/select/reference/self-definition/named-argument forms,
+and known category-5 payloads through `StructuredTree`.
+
 At file level, `TastyFile::ast_references()` returns the collected edges with
 the owning top-level AST address and the typed target `AstRef`.
 `TastyFile::ast_address_index()` indexes every visible AST node, including
