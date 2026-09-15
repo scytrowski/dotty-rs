@@ -28,6 +28,9 @@ pub const PARAMTYPE_TAG: u8 = 172;
 pub const FLEXIBLETYPE_TAG: u8 = 193;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
+pub const TERMREFIN_TAG: u8 = 174;
+pub const TYPEREFIN_TAG: u8 = 175;
+pub const SELECTIN_TAG: u8 = 176;
 pub const APPLY_TAG: u8 = 136;
 pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
@@ -48,6 +51,8 @@ pub const RENAMED_TAG: u8 = 76;
 pub const BOUNDED_TAG: u8 = 102;
 pub const IDENT_TAG: u8 = 110;
 pub const IDENTTPT_TAG: u8 = 111;
+pub const SELECT_TAG: u8 = 112;
+pub const SELECTTPT_TAG: u8 = 113;
 pub const TERMREFSYMBOL_TAG: u8 = 114;
 pub const TERMREF_TAG: u8 = 115;
 pub const TYPEREFSYMBOL_TAG: u8 = 116;
@@ -262,6 +267,29 @@ pub struct ReferenceNode<'a> {
     pub tag: u8,
     pub reference: u32,
     pub qualifier: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectNode<'a> {
+    pub tag: u8,
+    pub name: u32,
+    pub qualifier: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InReferenceNode<'a> {
+    pub tag: u8,
+    pub name: u32,
+    pub qualifier: RawTree<'a>,
+    pub underlying_type: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectInNode<'a> {
+    pub tag: u8,
+    pub name: u32,
+    pub qualifier: RawTree<'a>,
+    pub underlying_type: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +724,62 @@ impl<'a> RawNode<'a> {
             kind,
             expr,
             selectors,
+        })
+    }
+
+    pub fn decode_in_reference(&self) -> Result<InReferenceNode<'a>, AstError> {
+        if !matches!(self.tag, TERMREFIN_TAG | TYPEREFIN_TAG) {
+            return Err(AstError::UnexpectedTag {
+                expected: TERMREFIN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let name = reader.read_nat()?;
+        let qualifier = RawTree::decode(&mut reader)?;
+        let underlying_type = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(InReferenceNode {
+            tag: self.tag,
+            name,
+            qualifier,
+            underlying_type,
+        })
+    }
+
+    pub fn decode_select_in(&self) -> Result<SelectInNode<'a>, AstError> {
+        if self.tag != SELECTIN_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: SELECTIN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let name = reader.read_nat()?;
+        let qualifier = RawTree::decode(&mut reader)?;
+        let underlying_type = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(SelectInNode {
+            tag: self.tag,
+            name,
+            qualifier,
+            underlying_type,
         })
     }
 
@@ -1436,6 +1520,29 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    pub fn decode_select(&self) -> Result<SelectNode<'a>, AstError> {
+        match self {
+            RawTree::NatAst {
+                tag: tag @ (SELECT_TAG | SELECTTPT_TAG),
+                value: name,
+                child,
+                ..
+            } => Ok(SelectNode {
+                tag: *tag,
+                name: *name,
+                qualifier: (**child).clone(),
+            }),
+            tree => {
+                let (actual, offset) = raw_tree_tag_offset(tree);
+                Err(AstError::UnexpectedTag {
+                    expected: SELECT_TAG,
+                    actual,
+                    offset,
+                })
+            }
+        }
+    }
+
     pub fn decode_reference(&self) -> Result<ReferenceNode<'a>, AstError> {
         match self {
             RawTree::NatAst {
@@ -1526,11 +1633,11 @@ mod tests {
         ImportExportKind, ImportSelector, LAMBDA_TAG, MATCHCASETYPE_TAG, METHODTYPE_TAG,
         NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG,
         POLYTYPE_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes,
-        RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG,
-        TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
-        TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode,
-        TypedNode, VALDEF_TAG, WHILE_TAG,
+        RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG,
+        SPLITCLAUSE_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
+        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
+        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1953,6 +2060,75 @@ mod tests {
         let mut reader = Reader::new(&[TERMREF_TAG, 0x85]);
 
         assert!(RawTree::decode(&mut reader).is_err());
+    }
+
+    #[test]
+    fn decodes_select_and_selecttpt_with_the_shared_structure() {
+        for tag in [SELECT_TAG, SELECTTPT_TAG] {
+            let bytes = [tag, 0x85, TERMREFPKG_TAG, 0x81];
+            let mut reader = Reader::new(&bytes);
+            let tree = RawTree::decode(&mut reader).unwrap();
+            let node = tree.decode_select().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert_eq!(node.name, 5);
+            assert!(matches!(node.qualifier, RawTree::Leaf(_)));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn decodes_termrefin_and_typerefin_with_two_trees() {
+        for tag in [TERMREFIN_TAG, TYPEREFIN_TAG] {
+            let bytes = [tag, 0x85, 0x85, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82];
+            let mut reader = Reader::new(&bytes);
+            let tree = RawTree::decode(&mut reader).unwrap();
+            let RawTree::LengthNode(raw) = tree else {
+                panic!("expected a length-delimited node");
+            };
+            let node = raw.decode_in_reference().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert_eq!(node.name, 5);
+            assert!(matches!(node.qualifier, RawTree::Leaf(_)));
+            assert!(matches!(node.underlying_type, RawTree::Leaf(_)));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn decodes_selectin_with_a_name_qualifier_and_type() {
+        let bytes = [SELECTIN_TAG, 0x85, 0x85, TERMREFPKG_TAG, 0x81, 70, 0x82];
+        let mut reader = Reader::new(&bytes);
+        let tree = RawTree::decode(&mut reader).unwrap();
+        let RawTree::LengthNode(raw) = tree else {
+            panic!("expected a length-delimited node");
+        };
+        let node = raw.decode_select_in().unwrap();
+
+        assert_eq!(node.tag, SELECTIN_TAG);
+        assert_eq!(node.name, 5);
+        assert!(matches!(node.qualifier, RawTree::Leaf(_)));
+        assert!(matches!(node.underlying_type, RawTree::Leaf(_)));
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn rejects_an_in_reference_with_the_wrong_tag() {
+        let raw = RawNode {
+            tag: SELECTIN_TAG,
+            offset: 0,
+            payload: &[],
+        };
+
+        assert_eq!(
+            raw.decode_in_reference(),
+            Err(AstError::UnexpectedTag {
+                expected: TERMREFIN_TAG,
+                actual: SELECTIN_TAG,
+                offset: 0,
+            })
+        );
     }
 
     #[test]
