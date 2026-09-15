@@ -10,6 +10,8 @@ pub const TYPEDEF_TAG: u8 = 131;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
 pub const APPLY_TAG: u8 = 136;
+pub const TYPEAPPLY_TAG: u8 = 137;
+pub const TYPED_TAG: u8 = 138;
 pub const BLOCK_TAG: u8 = 140;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
@@ -136,6 +138,18 @@ pub struct ApplyNode<'a> {
 pub struct BlockNode<'a> {
     pub expression: RawTree<'a>,
     pub stats: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeApplyNode<'a> {
+    pub function: RawTree<'a>,
+    pub type_arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedNode<'a> {
+    pub expression: RawTree<'a>,
+    pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +565,53 @@ impl<'a> RawNode<'a> {
         Ok(BlockNode { expression, stats })
     }
 
+    pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
+        if self.tag != TYPEAPPLY_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TYPEAPPLY_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let function = RawTree::decode(&mut reader)?;
+        let mut type_arguments = Vec::new();
+        while !reader.is_at_end() {
+            type_arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(TypeApplyNode {
+            function,
+            type_arguments,
+        })
+    }
+
+    pub fn decode_typed(&self) -> Result<TypedNode<'a>, AstError> {
+        if self.tag != TYPED_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: TYPED_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let expression = RawTree::decode(&mut reader)?;
+        let type_tree = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(TypedNode {
+            expression,
+            type_tree,
+        })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -740,7 +801,8 @@ mod tests {
         APPLY_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody,
         DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind,
         ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RawNodes, RawTree,
-        SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+        SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1037,5 +1099,38 @@ mod tests {
         assert!(matches!(block.expression, RawTree::Leaf(_)));
         assert_eq!(block.stats.len(), 1);
         assert!(matches!(block.stats[0], RawTree::LengthNode(_)));
+    }
+
+    #[test]
+    fn decodes_type_apply_function_and_type_arguments() {
+        let bytes = [
+            TYPEAPPLY_TAG,
+            0x86,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let type_apply = nodes.get(0).unwrap().decode_type_apply().unwrap();
+
+        assert!(matches!(type_apply.function, RawTree::Leaf(_)));
+        assert_eq!(type_apply.type_arguments.len(), 2);
+        assert!(matches!(type_apply, TypeApplyNode { .. }));
+    }
+
+    #[test]
+    fn decodes_typed_expression_and_type() {
+        let bytes = [TYPED_TAG, 0x84, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let typed = nodes.get(0).unwrap().decode_typed().unwrap();
+
+        assert!(matches!(typed.expression, RawTree::Leaf(_)));
+        assert!(matches!(typed.type_tree, RawTree::Leaf(_)));
+        assert!(matches!(typed, TypedNode { .. }));
     }
 }

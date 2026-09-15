@@ -305,6 +305,22 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                             )
                                         });
                                     }
+                                    tasty_rs::TYPEAPPLY_TAG => {
+                                        raw.decode_type_apply().unwrap_or_else(|error| {
+                                            panic!(
+                                                "failed to parse type apply in {}: {error}",
+                                                path.display()
+                                            )
+                                        });
+                                    }
+                                    tasty_rs::TYPED_TAG => {
+                                        raw.decode_typed().unwrap_or_else(|error| {
+                                            panic!(
+                                                "failed to parse typed tree in {}: {error}",
+                                                path.display()
+                                            )
+                                        });
+                                    }
                                     _ => {}
                                 }
                             }
