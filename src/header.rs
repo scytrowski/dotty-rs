@@ -2,6 +2,9 @@ use crate::reader::{ReadError, Reader};
 use std::fmt;
 
 pub const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
+pub const SCALA_3_9_MAJOR_VERSION: u32 = 28;
+pub const SCALA_3_9_MINOR_VERSION: u32 = 9;
+pub const SCALA_3_9_EXPERIMENTAL_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
@@ -15,7 +18,14 @@ pub struct Header {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderError {
     Read(ReadError),
-    InvalidMagic { actual: [u8; 4] },
+    InvalidMagic {
+        actual: [u8; 4],
+    },
+    UnsupportedVersion {
+        major: u32,
+        minor: u32,
+        experimental: u32,
+    },
 }
 
 impl fmt::Display for HeaderError {
@@ -26,6 +36,14 @@ impl fmt::Display for HeaderError {
                 formatter,
                 "invalid TASTy magic header: {:02x} {:02x} {:02x} {:02x}",
                 actual[0], actual[1], actual[2], actual[3]
+            ),
+            Self::UnsupportedVersion {
+                major,
+                minor,
+                experimental,
+            } => write!(
+                formatter,
+                "unsupported TASTy version {major}.{minor}.{experimental}; expected Scala 3.9.0 format version 28.9.0"
             ),
         }
     }
@@ -69,6 +87,24 @@ impl Header {
             tooling_version,
             uuid,
         })
+    }
+
+    pub fn is_scala_3_9(&self) -> bool {
+        self.major_version == SCALA_3_9_MAJOR_VERSION
+            && self.minor_version == SCALA_3_9_MINOR_VERSION
+            && self.experimental_version == SCALA_3_9_EXPERIMENTAL_VERSION
+    }
+
+    pub fn validate_scala_3_9(&self) -> Result<(), HeaderError> {
+        if self.is_scala_3_9() {
+            Ok(())
+        } else {
+            Err(HeaderError::UnsupportedVersion {
+                major: self.major_version,
+                minor: self.minor_version,
+                experimental: self.experimental_version,
+            })
+        }
     }
 }
 
@@ -123,5 +159,35 @@ mod tests {
 
         assert_eq!(header.tooling_version, "Scala 3.9.0");
         assert_eq!(reader.position(), 35);
+    }
+
+    #[test]
+    fn recognizes_and_validates_the_scala_3_9_format_version() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let header = Header::parse(bytes).unwrap();
+
+        assert!(header.is_scala_3_9());
+        assert_eq!(header.validate_scala_3_9(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_a_different_format_version_only_when_validation_is_requested() {
+        let header = Header {
+            major_version: 29,
+            minor_version: 0,
+            experimental_version: 0,
+            tooling_version: "future compiler".to_owned(),
+            uuid: [0; 16],
+        };
+
+        assert!(!header.is_scala_3_9());
+        assert_eq!(
+            header.validate_scala_3_9(),
+            Err(HeaderError::UnsupportedVersion {
+                major: 29,
+                minor: 0,
+                experimental: 0,
+            })
+        );
     }
 }

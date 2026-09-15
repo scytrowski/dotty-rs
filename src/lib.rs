@@ -32,7 +32,10 @@ pub use ast::{
     TypeBoundsNode, TypedNode, UNAPPLY_TAG, UnapplyNode, VALDEF_TAG, WhileNode,
 };
 pub use file::{TastyFile, TastyFileError};
-pub use header::{Header, HeaderError, TASTY_MAGIC};
+pub use header::{
+    Header, HeaderError, SCALA_3_9_EXPERIMENTAL_VERSION, SCALA_3_9_MAJOR_VERSION,
+    SCALA_3_9_MINOR_VERSION, TASTY_MAGIC,
+};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
 pub use section::{

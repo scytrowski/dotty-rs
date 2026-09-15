@@ -371,7 +371,7 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse(&bytes)
+        let file = TastyFile::parse_scala_3_9(&bytes)
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
 
         assert_eq!(

@@ -1,6 +1,6 @@
 use crate::ast::{AstError, RawNodes};
 use crate::header::{Header, HeaderError};
-use crate::name_table::{NameTable, NameTableError};
+use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
 use crate::section::{
     Attribute, Comment, PositionSection, Section, SectionError, SectionTable, StandardSection,
@@ -21,6 +21,10 @@ pub enum TastyFileError {
     Sections(SectionError),
     Asts(AstError),
     MissingSection(StandardSection),
+    InvalidNameReference {
+        context: &'static str,
+        reference: NameRef,
+    },
 }
 
 impl fmt::Display for TastyFileError {
@@ -33,6 +37,10 @@ impl fmt::Display for TastyFileError {
             Self::MissingSection(section) => {
                 write!(formatter, "TASTy file has no {} section", section.as_str())
             }
+            Self::InvalidNameReference { context, reference } => write!(
+                formatter,
+                "{context} contains invalid name reference {reference}"
+            ),
         }
     }
 }
@@ -77,6 +85,12 @@ impl<'a> TastyFile<'a> {
         })
     }
 
+    pub fn parse_scala_3_9(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
+        let file = Self::parse(bytes)?;
+        file.header.validate_scala_3_9()?;
+        Ok(file)
+    }
+
     pub fn header(&self) -> &Header {
         &self.header
     }
@@ -95,6 +109,10 @@ impl<'a> TastyFile<'a> {
             .find(|section| section.standard_kind(&self.names) == Some(kind))
     }
 
+    pub fn name(&self, reference: NameRef) -> Option<&RawName> {
+        self.names.get(reference)
+    }
+
     pub fn asts(&self) -> Result<RawNodes<'a>, TastyFileError> {
         let section = self
             .section(StandardSection::Asts)
@@ -106,13 +124,29 @@ impl<'a> TastyFile<'a> {
     }
 
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
-        self.section(StandardSection::Attributes)
+        let attributes = self
+            .section(StandardSection::Attributes)
             .map(|section| {
                 section
                     .decode_attributes()
                     .map_err(TastyFileError::Sections)
             })
-            .transpose()
+            .transpose()?;
+
+        if let Some(attributes) = &attributes {
+            for attribute in attributes {
+                if let Attribute::SourceFile(reference) = attribute {
+                    if self.name(*reference).is_none() {
+                        return Err(TastyFileError::InvalidNameReference {
+                            context: "SOURCEFILE attribute",
+                            reference: *reference,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(attributes)
     }
 
     pub fn comments(&self) -> Result<Option<Vec<Comment>>, TastyFileError> {
@@ -136,7 +170,7 @@ mod tests {
     #[test]
     fn decodes_a_complete_scala_3_9_fixture_as_one_file_model() {
         let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
-        let file = TastyFile::parse(bytes).unwrap();
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
         assert_eq!(file.header().tooling_version, "Scala 3.9.0");
         assert!(!file.names().is_empty());
