@@ -423,6 +423,10 @@ It recognizes typed constants, category-3 AST children, `CLASSconst`, the
 category-4 identifier/select/reference/self-definition/named-argument forms,
 and known category-5 payloads through `StructuredTree`.
 
+Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
+and `DefDefBody` expose it through `name()` and can be re-encoded with
+`encode_self()`, so structural decoding no longer loses the definition name.
+
 At file level, `TastyFile::ast_references()` returns the collected edges with
 the owning top-level AST address and the typed target `AstRef`.
 `TastyFile::ast_address_index()` indexes every visible AST node, including

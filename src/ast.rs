@@ -271,11 +271,13 @@ pub enum DefinitionNode<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionBody<'a> {
     ValDef {
+        name: u32,
         type_tree: RawTree<'a>,
         rhs: Option<RawTree<'a>>,
         tail: Vec<DefinitionTail<'a>>,
     },
     TypeDef {
+        name: u32,
         type_or_template: RawTree<'a>,
         tail: Vec<DefinitionTail<'a>>,
     },
@@ -283,6 +285,7 @@ pub enum DefinitionBody<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefDefBody<'a> {
+    pub name: u32,
     pub parameters: Vec<ParameterNode<'a>>,
     pub clauses: Vec<u8>,
     pub return_type: RawTree<'a>,
@@ -1099,6 +1102,7 @@ fn collect_definition_body_nodes<'a>(
             type_tree,
             rhs,
             tail,
+            ..
         } => {
             collect_tree_nodes(type_tree, source, base, output, all_output)?;
             if let Some(rhs) = rhs {
@@ -1109,6 +1113,7 @@ fn collect_definition_body_nodes<'a>(
         DefinitionBody::TypeDef {
             type_or_template,
             tail,
+            ..
         } => {
             collect_tree_nodes(type_or_template, source, base, output, all_output)?;
             collect_definition_tail_nodes(tail, source, base, output, all_output)?;
@@ -1589,7 +1594,7 @@ impl<'a> RawNode<'a> {
 
     pub fn decode_definition_body(&self) -> Result<DefinitionBody<'a>, AstError> {
         let mut reader = self.reader();
-        let _name = reader.read_nat()?;
+        let name = reader.read_nat()?;
         let first = RawTree::decode(&mut reader)?;
 
         match self.tag {
@@ -1601,12 +1606,14 @@ impl<'a> RawNode<'a> {
                 };
                 let tail = read_definition_tail(&mut reader)?;
                 Ok(DefinitionBody::ValDef {
+                    name,
                     type_tree: first,
                     rhs,
                     tail,
                 })
             }
             TYPEDEF_TAG => Ok(DefinitionBody::TypeDef {
+                name,
                 type_or_template: first,
                 tail: read_definition_tail(&mut reader)?,
             }),
@@ -1628,7 +1635,7 @@ impl<'a> RawNode<'a> {
         }
 
         let mut reader = self.reader();
-        let _name = reader.read_nat()?;
+        let name = reader.read_nat()?;
         let mut parameters = Vec::new();
         let mut clauses = Vec::new();
 
@@ -1655,6 +1662,7 @@ impl<'a> RawNode<'a> {
         let tail = read_definition_tail(&mut reader)?;
 
         Ok(DefDefBody {
+            name,
             parameters,
             clauses,
             return_type,
@@ -3065,6 +3073,16 @@ impl<'a> DefinitionTail<'a> {
 }
 
 impl<'a> DefinitionBody<'a> {
+    pub fn name(&self) -> u32 {
+        match self {
+            Self::ValDef { name, .. } | Self::TypeDef { name, .. } => *name,
+        }
+    }
+
+    pub fn encode_self(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        self.encode(self.name(), writer)
+    }
+
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         let tag = match self {
             Self::ValDef { .. } => VALDEF_TAG,
@@ -3077,6 +3095,7 @@ impl<'a> DefinitionBody<'a> {
                     type_tree,
                     rhs,
                     tail,
+                    ..
                 } => {
                     type_tree.encode(payload)?;
                     if let Some(rhs) = rhs {
@@ -3089,6 +3108,7 @@ impl<'a> DefinitionBody<'a> {
                 Self::TypeDef {
                     type_or_template,
                     tail,
+                    ..
                 } => {
                     type_or_template.encode(payload)?;
                     for entry in tail {
@@ -3102,6 +3122,14 @@ impl<'a> DefinitionBody<'a> {
 }
 
 impl<'a> DefDefBody<'a> {
+    pub fn name(&self) -> u32 {
+        self.name
+    }
+
+    pub fn encode_self(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
+        self.encode(self.name, writer)
+    }
+
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(DEFDEF_TAG, writer, |payload| {
             payload.write_nat(name);
@@ -4034,6 +4062,7 @@ fn collect_definition_body_ast_refs(
             type_tree,
             rhs,
             tail,
+            ..
         } => {
             collect_tree_ast_refs(type_tree, visitor);
             if let Some(rhs) = rhs {
@@ -4044,6 +4073,7 @@ fn collect_definition_body_ast_refs(
         DefinitionBody::TypeDef {
             type_or_template,
             tail,
+            ..
         } => {
             collect_tree_ast_refs(type_or_template, visitor);
             collect_definition_tail_ast_refs(tail, visitor)?;
@@ -4499,12 +4529,14 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let body = nodes.get(0).unwrap().decode_definition_body().unwrap();
 
+        assert_eq!(body.name(), 1);
         assert!(matches!(
             body,
             DefinitionBody::ValDef {
                 type_tree: _,
                 rhs: Some(_),
                 ref tail,
+                ..
             } if tail == &[DefinitionTail::Modifier(17)]
         ));
     }
@@ -4574,6 +4606,7 @@ mod tests {
             assert_eq!(
                 body,
                 DefinitionBody::ValDef {
+                    name: 1,
                     type_tree: RawTree::Leaf(crate::term::SimpleTerm {
                         tag: 2,
                         offset: 1,
@@ -4598,8 +4631,66 @@ mod tests {
             Ok(DefinitionBody::TypeDef {
                 type_or_template: _,
                 tail,
+                ..
             }) if tail == vec![DefinitionTail::Modifier(17)]
         ));
+        assert_eq!(
+            nodes
+                .get(0)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+                .name(),
+            1
+        );
+    }
+
+    #[test]
+    fn round_trips_a_valdef_body_with_its_decoded_name() {
+        let bytes = [VALDEF_TAG, 0x82, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let body = RawNodes::decode(&mut reader)
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let mut writer = Writer::new();
+
+        body.encode_self(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
+    }
+
+    #[test]
+    fn round_trips_a_defdef_body_with_its_decoded_name() {
+        let bytes = [DEFDEF_TAG, 0x82, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let body = RawNodes::decode(&mut reader)
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        let mut writer = Writer::new();
+
+        body.encode_self(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
+    }
+
+    #[test]
+    fn round_trips_a_typedef_body_with_its_decoded_name() {
+        let bytes = [TYPEDEF_TAG, 0x82, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let body = RawNodes::decode(&mut reader)
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let mut writer = Writer::new();
+
+        body.encode_self(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
     }
 
     #[test]
@@ -4987,6 +5078,7 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let body = nodes.get(0).unwrap().decode_defdef_body().unwrap();
 
+        assert_eq!(body.name(), 1);
         assert_eq!(body.parameters.len(), 1);
         assert_eq!(body.clauses, vec![45]);
         assert!(matches!(body.return_type, RawTree::Leaf(_)));
