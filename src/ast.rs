@@ -7032,6 +7032,66 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn encodes_a_structured_valdef_with_its_decoded_name() {
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &[0x81, 2],
+        };
+        let structured = node.decode_structured().unwrap();
+
+        assert!(matches!(
+            &structured,
+            StructuredNode::ValDef(body) if body.name() == 1
+        ));
+
+        let mut writer = Writer::new();
+        structured.encode(&mut writer).unwrap();
+        let mut expected = Writer::new();
+        node.encode(&mut expected).unwrap();
+        assert_eq!(writer.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn encodes_a_structured_defdef_with_its_decoded_name() {
+        let node = RawNode {
+            tag: DEFDEF_TAG,
+            offset: 0,
+            payload: &[0x81, 2],
+        };
+        let structured = node.decode_structured().unwrap();
+
+        assert!(matches!(
+            &structured,
+            StructuredNode::DefDef(body) if body.name() == 1
+        ));
+
+        let mut writer = Writer::new();
+        structured.encode(&mut writer).unwrap();
+        let mut expected = Writer::new();
+        node.encode(&mut expected).unwrap();
+        assert_eq!(writer.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn encodes_an_unknown_structured_node_without_reinterpreting_its_payload() {
+        let node = RawNode {
+            tag: 200,
+            offset: 0,
+            payload: b"future",
+        };
+        let structured = node.decode_structured().unwrap();
+
+        assert!(matches!(&structured, StructuredNode::Raw(raw) if raw.tag == 200));
+
+        let mut writer = Writer::new();
+        structured.encode(&mut writer).unwrap();
+        let mut expected = Writer::new();
+        node.encode(&mut expected).unwrap();
+        assert_eq!(writer.as_slice(), expected.as_slice());
+    }
+
     macro_rules! dispatches_to_structured_variant {
         ($name:ident, $tag:expr, $payload:expr, $pattern:pat) => {
             #[test]
