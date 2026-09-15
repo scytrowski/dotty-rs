@@ -147,6 +147,25 @@ pub struct NameReference {
 }
 
 impl<'a> RawNode<'a> {
+    /// Construct a category-five AST node ready for encoding.
+    ///
+    /// Newly constructed nodes start at offset zero; [`RawNodes::encode`] and
+    /// [`RawNodes::encode_with_addresses`] derive their emitted positions from
+    /// the output stream.
+    pub fn new(tag: u8, payload: &'a [u8]) -> Result<Self, AstError> {
+        let Some(category) = NodeCategory::from_tag(tag) else {
+            return Err(AstError::InvalidTag { tag, offset: 0 });
+        };
+        if category != NodeCategory::Category5 {
+            return Err(AstError::UnsupportedCategory { tag, offset: 0 });
+        }
+        Ok(Self {
+            tag,
+            offset: 0,
+            payload,
+        })
+    }
+
     pub fn category(&self) -> NodeCategory {
         NodeCategory::from_tag(self.tag).expect("RawNode tags are validated during decoding")
     }
@@ -4930,6 +4949,36 @@ mod tests {
 
         assert_eq!(writer.as_slice(), &[VALDEF_TAG, 0x82, 1, 2]);
         assert_eq!(nodes.encode_with_addresses().unwrap().addresses(), &[0]);
+    }
+
+    #[test]
+    fn constructs_a_raw_node_without_an_explicit_offset() {
+        let node = RawNode::new(VALDEF_TAG, &[1, 2]).unwrap();
+        let mut writer = Writer::new();
+
+        node.encode(&mut writer).unwrap();
+
+        assert_eq!(node.offset, 0);
+        assert_eq!(writer.as_slice(), &[VALDEF_TAG, 0x82, 1, 2]);
+    }
+
+    #[test]
+    fn rejects_a_non_category_five_tag_when_constructing_a_raw_node() {
+        assert_eq!(
+            RawNode::new(SELECT_TAG, &[]),
+            Err(AstError::UnsupportedCategory {
+                tag: SELECT_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_tag_when_constructing_a_raw_node() {
+        assert_eq!(
+            RawNode::new(0, &[]),
+            Err(AstError::InvalidTag { tag: 0, offset: 0 })
+        );
     }
 
     #[test]

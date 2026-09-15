@@ -450,6 +450,8 @@ context-dependent category-5 payloads remain indexed as opaque boundaries.
 `RawNodes::from_entries()` constructs a validated top-level node list for
 programmatic encoding; `encode_with_addresses()` then assigns fresh offsets
 from the emitted stream.
+`RawNode::new()` is the corresponding validated constructor for an individual
+category-5 node.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
