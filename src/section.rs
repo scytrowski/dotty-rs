@@ -225,6 +225,15 @@ impl From<ReadError> for SectionError {
 }
 
 impl<'a> Section<'a> {
+    pub fn new(name: NameRef, payload: &'a [u8]) -> Self {
+        Self {
+            name,
+            offset: 0,
+            length: payload.len(),
+            payload,
+        }
+    }
+
     pub fn reader(&self) -> Reader<'a> {
         Reader::new(self.payload)
     }
@@ -335,6 +344,10 @@ impl<'a> Section<'a> {
 }
 
 impl<'a> SectionTable<'a> {
+    pub fn from_sections(sections: Vec<Section<'a>>) -> Self {
+        Self { sections }
+    }
+
     pub fn decode(reader: &mut Reader<'a>, name_count: usize) -> Result<Self, SectionError> {
         let mut sections = Vec::new();
 
@@ -385,6 +398,19 @@ impl<'a> SectionTable<'a> {
 
     pub fn entries(&self) -> &[Section<'a>] {
         &self.sections
+    }
+
+    pub(crate) fn validate_references(&self, name_count: usize) -> Result<(), SectionError> {
+        for section in &self.sections {
+            if section.name as usize >= name_count {
+                return Err(SectionError::InvalidNameReference {
+                    reference: section.name,
+                    name_count,
+                    offset: section.offset,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
@@ -569,6 +595,16 @@ mod tests {
         assert_eq!(sections.get(0).unwrap().length, 3);
         assert_eq!(sections.get(0).unwrap().payload, b"abc".as_slice());
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn constructs_sections_with_derived_lengths() {
+        let section = Section::new(3, b"abc");
+
+        assert_eq!(section.name, 3);
+        assert_eq!(section.offset, 0);
+        assert_eq!(section.length, 3);
+        assert_eq!(section.payload, b"abc");
     }
 
     #[test]

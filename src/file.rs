@@ -81,6 +81,19 @@ impl From<WriteError> for TastyFileError {
 }
 
 impl<'a> TastyFile<'a> {
+    pub fn from_parts(
+        header: Header,
+        names: NameTable,
+        sections: SectionTable<'a>,
+    ) -> Result<Self, TastyFileError> {
+        sections.validate_references(names.len())?;
+        Ok(Self {
+            header,
+            names,
+            sections,
+        })
+    }
+
     pub fn parse(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
         let mut reader = Reader::new(bytes);
         let header = Header::decode(&mut reader)?;
@@ -218,5 +231,89 @@ mod tests {
             file.asts(),
             Err(TastyFileError::MissingSection(StandardSection::Asts))
         );
+    }
+
+    #[test]
+    fn builds_and_reparses_a_complete_file_from_parts() {
+        let names = crate::NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("Attributes".to_owned()),
+            crate::RawName::Utf8("Comments".to_owned()),
+            crate::RawName::Utf8("Positions".to_owned()),
+            crate::RawName::Utf8("Example.scala".to_owned()),
+        ])
+        .unwrap();
+
+        let mut attributes = crate::Writer::new();
+        crate::Attribute::encode_all(&[crate::Attribute::SourceFile(5)], &mut attributes).unwrap();
+        let mut comments = crate::Writer::new();
+        crate::Comment::encode_all(
+            &[crate::Comment {
+                text: "example".to_owned(),
+                coordinates: 0,
+            }],
+            &mut comments,
+        )
+        .unwrap();
+        let mut positions = crate::Writer::new();
+        crate::PositionSection {
+            line_sizes: vec![7],
+            entries: vec![crate::PositionEntry::Source(5)],
+        }
+        .encode(&mut positions)
+        .unwrap();
+
+        let sections = crate::SectionTable::from_sections(vec![
+            crate::Section::new(0, &[]),
+            crate::Section::new(1, attributes.as_slice()),
+            crate::Section::new(2, comments.as_slice()),
+            crate::Section::new(3, positions.as_slice()),
+        ]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [7; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        let bytes = file.encode().unwrap();
+        let reparsed = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        assert_eq!(reparsed.header().uuid, [7; 16]);
+        assert!(reparsed.asts().unwrap().is_empty());
+        assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
+        assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
+        assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
+    }
+
+    #[test]
+    fn rejects_a_section_reference_when_building_from_parts() {
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(1, &[])]);
+        let error = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap(),
+            sections,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TastyFileError::Sections(crate::SectionError::InvalidNameReference {
+                reference: 1,
+                name_count: 1,
+                ..
+            })
+        ));
     }
 }

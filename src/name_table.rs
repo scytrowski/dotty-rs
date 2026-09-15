@@ -106,6 +106,12 @@ impl From<ReadError> for NameTableError {
 }
 
 impl NameTable {
+    pub fn from_entries(entries: Vec<RawName>) -> Result<Self, NameTableError> {
+        let table = Self { entries };
+        table.validate_references()?;
+        Ok(table)
+    }
+
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, NameTableError> {
         let table_length = reader.read_nat()? as usize;
         let mut table_reader = reader.read_sub_reader(table_length)?;
@@ -486,6 +492,36 @@ mod tests {
 
         assert_eq!(
             NameTable::decode(&mut reader),
+            Err(NameTableError::InvalidReference {
+                reference: 2,
+                entry_index: 0,
+                entry_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn constructs_and_validates_name_entries() {
+        let names = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 1,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(names.len(), 2);
+        assert_eq!(names.get(2), Some(&names.entries()[1]));
+    }
+
+    #[test]
+    fn rejects_invalid_references_when_constructing_name_entries() {
+        assert_eq!(
+            NameTable::from_entries(vec![RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            }]),
             Err(NameTableError::InvalidReference {
                 reference: 2,
                 entry_index: 0,
