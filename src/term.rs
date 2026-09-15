@@ -1,4 +1,6 @@
-use crate::ast::RawNode;
+use crate::ast::{
+    RECTHIS_TAG, RawNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+};
 use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
@@ -141,11 +143,11 @@ impl SimpleTerm {
         }
 
         match self.tag {
-            60 => Some(AstRefKind::SharedTerm),
-            61 => Some(AstRefKind::SharedType),
-            62 => Some(AstRefKind::TermRefDirect),
-            63 => Some(AstRefKind::TypeRefDirect),
-            66 => Some(AstRefKind::RecursiveThis),
+            SHAREDTERM_TAG => Some(AstRefKind::SharedTerm),
+            SHAREDTYPE_TAG => Some(AstRefKind::SharedType),
+            TERMREFDIRECT_TAG => Some(AstRefKind::TermRefDirect),
+            TYPEREFDIRECT_TAG => Some(AstRefKind::TypeRefDirect),
+            RECTHIS_TAG => Some(AstRefKind::RecursiveThis),
             _ => None,
         }
     }
@@ -267,6 +269,9 @@ impl<'a> RawTree<'a> {
 #[cfg(test)]
 mod tests {
     use super::{AstRefKind, RawTree, SimpleTerm, TermEncodeError, TermError, TermValue};
+    use crate::ast::{
+        RECTHIS_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+    };
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
 
@@ -355,11 +360,11 @@ mod tests {
     #[test]
     fn classifies_ast_reference_kinds_from_the_scala_3_9_tag_matrix() {
         let cases = [
-            (60, AstRefKind::SharedTerm),
-            (61, AstRefKind::SharedType),
-            (62, AstRefKind::TermRefDirect),
-            (63, AstRefKind::TypeRefDirect),
-            (66, AstRefKind::RecursiveThis),
+            (SHAREDTERM_TAG, AstRefKind::SharedTerm),
+            (SHAREDTYPE_TAG, AstRefKind::SharedType),
+            (TERMREFDIRECT_TAG, AstRefKind::TermRefDirect),
+            (TYPEREFDIRECT_TAG, AstRefKind::TypeRefDirect),
+            (RECTHIS_TAG, AstRefKind::RecursiveThis),
         ];
 
         for (tag, expected_kind) in cases {

@@ -4,6 +4,11 @@ use crate::writer::{WriteError, Writer};
 use std::fmt;
 
 pub const TERMREFPKG_TAG: u8 = 64;
+pub const SHAREDTERM_TAG: u8 = 60;
+pub const SHAREDTYPE_TAG: u8 = 61;
+pub const TERMREFDIRECT_TAG: u8 = 62;
+pub const TYPEREFDIRECT_TAG: u8 = 63;
+pub const RECTHIS_TAG: u8 = 66;
 pub const THIS_TAG: u8 = 90;
 pub const QUALTHIS_TAG: u8 = 91;
 pub const CLASSCONST_TAG: u8 = 92;
