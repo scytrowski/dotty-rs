@@ -12,6 +12,7 @@ pub const PARAM_TAG: u8 = 134;
 pub const APPLY_TAG: u8 = 136;
 pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
+pub const ASSIGN_TAG: u8 = 139;
 pub const BLOCK_TAG: u8 = 140;
 pub const TEMPLATE_TAG: u8 = 156;
 pub const IMPORT_TAG: u8 = 132;
@@ -150,6 +151,12 @@ pub struct TypeApplyNode<'a> {
 pub struct TypedNode<'a> {
     pub expression: RawTree<'a>,
     pub type_tree: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignNode<'a> {
+    pub left: RawTree<'a>,
+    pub right: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,6 +619,28 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_assign(&self) -> Result<AssignNode<'a>, AstError> {
+        if self.tag != ASSIGN_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: ASSIGN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let left = RawTree::decode(&mut reader)?;
+        let right = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(AssignNode { left, right })
+    }
+
     pub fn decode_parameter(&self) -> Result<ParameterNode<'a>, AstError> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
@@ -798,11 +827,11 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        APPLY_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody,
-        DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind,
-        ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG, RawNodes, RawTree,
-        SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
+        APPLY_TAG, ASSIGN_TAG, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody,
+        DefinitionBody, DefinitionNode, DefinitionTail, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG,
+        ImportExportKind, ImportSelector, NodeCategory, PACKAGE_TAG, PARAM_TAG, RENAMED_TAG,
+        RawNodes, RawTree, SELFDEF_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1132,5 +1161,16 @@ mod tests {
         assert!(matches!(typed.expression, RawTree::Leaf(_)));
         assert!(matches!(typed.type_tree, RawTree::Leaf(_)));
         assert!(matches!(typed, TypedNode { .. }));
+    }
+
+    #[test]
+    fn decodes_assign_left_and_right_operands() {
+        let bytes = [ASSIGN_TAG, 0x84, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let assign = nodes.get(0).unwrap().decode_assign().unwrap();
+
+        assert!(matches!(assign.left, RawTree::Leaf(_)));
+        assert!(matches!(assign.right, RawTree::Leaf(_)));
     }
 }
