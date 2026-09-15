@@ -13,6 +13,8 @@ pub const DEFDEF_TAG: u8 = 130;
 pub const TYPEDEF_TAG: u8 = 131;
 pub const ANDTYPE_TAG: u8 = 165;
 pub const ORTYPE_TAG: u8 = 167;
+pub const APPLIEDTYPE_TAG: u8 = 161;
+pub const APPLIEDTPT_TAG: u8 = 162;
 pub const TYPEPARAM_TAG: u8 = 133;
 pub const PARAM_TAG: u8 = 134;
 pub const APPLY_TAG: u8 = 136;
@@ -245,6 +247,13 @@ pub struct BinaryTypeNode<'a> {
     pub tag: u8,
     pub left: RawTree<'a>,
     pub right: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedTypeNode<'a> {
+    pub tag: u8,
+    pub tycon: RawTree<'a>,
+    pub arguments: Vec<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -838,6 +847,29 @@ impl<'a> RawNode<'a> {
         })
     }
 
+    pub fn decode_applied_type(&self) -> Result<AppliedTypeNode<'a>, AstError> {
+        if self.tag != APPLIEDTYPE_TAG && self.tag != APPLIEDTPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: APPLIEDTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let tycon = RawTree::decode(&mut reader)?;
+        let mut arguments = Vec::new();
+        while !reader.is_at_end() {
+            arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(AppliedTypeNode {
+            tag: self.tag,
+            tycon,
+            arguments,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -1213,14 +1245,15 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 #[cfg(test)]
 mod tests {
     use super::{
-        ANDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG,
-        DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
-        EXPORT_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
-        ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
-        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
-        RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG,
-        TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG, WHILE_TAG,
+        ANDTYPE_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, ASSIGN_TAG, AstChildNode,
+        AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode,
+        DefinitionTail, ELIDED_TAG, EXPORT_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG,
+        IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, NAMEDARG_TAG,
+        NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG,
+        REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG,
+        SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
+        TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
+        WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -2055,6 +2088,35 @@ mod tests {
         };
 
         assert!(node.decode_or_type().is_err());
+    }
+
+    #[test]
+    fn decodes_applied_types_with_zero_or_more_arguments() {
+        for (tag, payload, expected_arguments) in [
+            (APPLIEDTYPE_TAG, vec![2], 0),
+            (APPLIEDTPT_TAG, vec![2, 3, 4], 2),
+        ] {
+            let mut bytes = vec![tag, 0x80 | payload.len() as u8];
+            bytes.extend(payload);
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let node = nodes.get(0).unwrap().decode_applied_type().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert!(matches!(node.tycon, RawTree::Leaf(_)));
+            assert_eq!(node.arguments.len(), expected_arguments);
+        }
+    }
+
+    #[test]
+    fn rejects_a_tree_with_an_invalid_applied_type_tag() {
+        let node = RawNode {
+            tag: ORTYPE_TAG,
+            offset: 0,
+            payload: &[2, 3],
+        };
+
+        assert!(node.decode_applied_type().is_err());
     }
 
     #[test]
