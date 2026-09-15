@@ -51,6 +51,10 @@ pub const SELECTIN_TAG: u8 = 176;
 pub const QUOTE_TAG: u8 = 178;
 pub const SPLICE_TAG: u8 = 179;
 pub const APPLYSIGPOLY_TAG: u8 = 181;
+pub const QUOTEPATTERN_TAG: u8 = 182;
+pub const SPLICEPATTERN_TAG: u8 = 183;
+pub const MATCHTYPE_TAG: u8 = 190;
+pub const MATCHTPT_TAG: u8 = 191;
 pub const APPLY_TAG: u8 = 136;
 pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
@@ -397,6 +401,40 @@ pub struct ApplySigPolyNode<'a> {
     pub function: RawTree<'a>,
     pub type_tree: RawTree<'a>,
     pub arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotePatternNode<'a> {
+    pub body: RawTree<'a>,
+    pub quotes: RawTree<'a>,
+    pub pattern_type: RawTree<'a>,
+    pub bindings: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplicePatternNode<'a> {
+    pub pattern: RawTree<'a>,
+    pub pattern_type: RawTree<'a>,
+    /// The format does not encode a count separating type arguments from
+    /// term arguments. Keep the complete ordered tail until typed decoding
+    /// context is available to classify it.
+    pub arguments: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchTypeNode<'a> {
+    pub bound: RawTree<'a>,
+    pub selector: RawTree<'a>,
+    pub cases: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchTptNode<'a> {
+    /// The grammar has an optional bound followed by a selector, but does
+    /// not encode a presence bit. Preserve the leading trees in order until
+    /// typed context can distinguish the one-tree and two-tree forms.
+    pub prefix: Vec<RawTree<'a>>,
+    pub cases: Vec<CaseDefNode<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1214,6 +1252,111 @@ impl<'a> RawNode<'a> {
             type_tree,
             arguments,
         })
+    }
+
+    pub fn decode_quote_pattern(&self) -> Result<QuotePatternNode<'a>, AstError> {
+        if self.tag != QUOTEPATTERN_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: QUOTEPATTERN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let body = RawTree::decode(&mut reader)?;
+        let quotes = RawTree::decode(&mut reader)?;
+        let pattern_type = RawTree::decode(&mut reader)?;
+        let mut bindings = Vec::new();
+        while !reader.is_at_end() {
+            bindings.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(QuotePatternNode {
+            body,
+            quotes,
+            pattern_type,
+            bindings,
+        })
+    }
+
+    pub fn decode_splice_pattern(&self) -> Result<SplicePatternNode<'a>, AstError> {
+        if self.tag != SPLICEPATTERN_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: SPLICEPATTERN_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let pattern = RawTree::decode(&mut reader)?;
+        let pattern_type = RawTree::decode(&mut reader)?;
+        let mut arguments = Vec::new();
+        while !reader.is_at_end() {
+            arguments.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(SplicePatternNode {
+            pattern,
+            pattern_type,
+            arguments,
+        })
+    }
+
+    pub fn decode_match_type(&self) -> Result<MatchTypeNode<'a>, AstError> {
+        if self.tag != MATCHTYPE_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: MATCHTYPE_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let bound = RawTree::decode(&mut reader)?;
+        let selector = RawTree::decode(&mut reader)?;
+        let mut cases = Vec::new();
+        while !reader.is_at_end() {
+            cases.push(RawTree::decode(&mut reader)?);
+        }
+
+        Ok(MatchTypeNode {
+            bound,
+            selector,
+            cases,
+        })
+    }
+
+    pub fn decode_match_tpt(&self) -> Result<MatchTptNode<'a>, AstError> {
+        if self.tag != MATCHTPT_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: MATCHTPT_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let mut prefix = Vec::new();
+        while !reader.is_at_end() && reader.peek_u8()? != CASEDEF_TAG {
+            prefix.push(RawTree::decode(&mut reader)?);
+        }
+        if prefix.is_empty() {
+            return Err(AstError::Term(TermError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            }));
+        }
+        let cases = read_case_defs(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(MatchTptNode { prefix, cases })
     }
 
     pub fn decode_apply(&self) -> Result<ApplyNode<'a>, AstError> {
@@ -2122,11 +2265,12 @@ mod tests {
         EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
         IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG,
         ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG,
-        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
-        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-        QUALTHIS_TAG, QUOTE_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG,
-        REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG,
-        SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLITCLAUSE_TAG,
+        MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
+        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
+        PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG,
+        RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
+        SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG,
         SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG,
         TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG,
         TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
@@ -3666,6 +3810,138 @@ mod tests {
         assert!(matches!(apply.function, RawTree::Leaf(_)));
         assert!(matches!(apply.type_tree, RawTree::Leaf(_)));
         assert_eq!(apply.arguments.len(), 2);
+    }
+
+    #[test]
+    fn decodes_quote_pattern_with_body_quotes_type_and_bindings() {
+        let bytes = [
+            QUOTEPATTERN_TAG,
+            0x88,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let quote = nodes.get(0).unwrap().decode_quote_pattern().unwrap();
+
+        assert!(matches!(quote.body, RawTree::Leaf(_)));
+        assert!(matches!(quote.quotes, RawTree::Leaf(_)));
+        assert!(matches!(quote.pattern_type, RawTree::Leaf(_)));
+        assert_eq!(quote.bindings.len(), 1);
+    }
+
+    #[test]
+    fn decodes_splice_pattern_and_preserves_its_ordered_argument_tail() {
+        let bytes = [
+            SPLICEPATTERN_TAG,
+            0x8a,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            TERMREFPKG_TAG,
+            0x84,
+            TERMREFPKG_TAG,
+            0x85,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let splice = nodes.get(0).unwrap().decode_splice_pattern().unwrap();
+
+        assert!(matches!(splice.pattern, RawTree::Leaf(_)));
+        assert!(matches!(splice.pattern_type, RawTree::Leaf(_)));
+        assert_eq!(splice.arguments.len(), 3);
+    }
+
+    #[test]
+    fn decodes_match_type_with_raw_case_type_trees() {
+        let bytes = [
+            MATCHTYPE_TAG,
+            0x8c,
+            TERMREFPKG_TAG,
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            MATCHCASETYPE_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            MATCHCASETYPE_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x84,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let matched = nodes.get(0).unwrap().decode_match_type().unwrap();
+
+        assert!(matches!(matched.bound, RawTree::Leaf(_)));
+        assert!(matches!(matched.selector, RawTree::Leaf(_)));
+        assert_eq!(matched.cases.len(), 2);
+        assert!(matches!(matched.cases[0], RawTree::LengthNode(_)));
+    }
+
+    #[test]
+    fn decodes_match_tpt_with_one_or_two_leading_trees() {
+        for (payload, expected_prefix_len) in [
+            (
+                vec![
+                    TERMREFPKG_TAG,
+                    0x81,
+                    CASEDEF_TAG,
+                    0x84,
+                    TERMREFPKG_TAG,
+                    0x82,
+                    TERMREFPKG_TAG,
+                    0x83,
+                ],
+                1,
+            ),
+            (
+                vec![
+                    TERMREFPKG_TAG,
+                    0x81,
+                    TERMREFPKG_TAG,
+                    0x82,
+                    CASEDEF_TAG,
+                    0x84,
+                    TERMREFPKG_TAG,
+                    0x83,
+                    TERMREFPKG_TAG,
+                    0x84,
+                ],
+                2,
+            ),
+        ] {
+            let mut bytes = vec![MATCHTPT_TAG, 0x80 | payload.len() as u8];
+            bytes.extend(payload);
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let matched = nodes.get(0).unwrap().decode_match_tpt().unwrap();
+
+            assert_eq!(matched.prefix.len(), expected_prefix_len);
+            assert_eq!(matched.cases.len(), 1);
+            assert!(matched.cases[0].guard.is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_match_tpt_without_a_selector() {
+        let node = RawNode {
+            tag: MATCHTPT_TAG,
+            offset: 0,
+            payload: &[CASEDEF_TAG, 0x80],
+        };
+
+        assert!(node.decode_match_tpt().is_err());
     }
 
     #[test]
