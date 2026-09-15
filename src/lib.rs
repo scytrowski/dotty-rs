@@ -1,10 +1,12 @@
 pub mod header;
 pub mod name_table;
 pub mod reader;
+pub mod section;
 
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
+pub use section::{Section, SectionError, SectionTable};
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

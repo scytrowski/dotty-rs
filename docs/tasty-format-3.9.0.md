@@ -200,14 +200,15 @@ The `SIGNED` and `TARGETSIGNED` codes are intentionally unusual: `TARGETSIGNED=6
 ## 5. Sections
 
 ```text
-Section = NameRef Length Bytes
+Section = SectionNameIndex Length Bytes
+SectionNameIndex = Nat
 Length  = Nat
 ```
 
 `Length` is the number of remaining bytes in the section payload. The recommended decoding pattern is:
 
 ```text
-name = read_name_ref()
+name_index = read_nat()
 len  = read_nat()
 end  = current_offset + len
 payload_reader = sub_reader(current_offset, end)
@@ -225,7 +226,7 @@ Comments
 Attributes
 ```
 
-The section name is a reference into the `NameTable`, not inline text. Unknown sections can be skipped using their length, provided that bounds are validated correctly.
+The section name is an index into the `NameTable`, not inline text. The Scala 3.9.0 compiler emits this section index as zero-based (`ASTs` is `0`, followed by the later standard-section names). This is distinct from the one-based `NameRef` convention used by names referenced from AST nodes and composite name entries. Unknown sections can be skipped using their length, provided that bounds are validated correctly.
 
 ## 6. AST grammar
 
