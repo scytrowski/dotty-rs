@@ -48,6 +48,23 @@ pub struct Comment {
     pub coordinates: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PositionEntry {
+    Association {
+        address_delta: u32,
+        start_delta: Option<i64>,
+        end_delta: Option<i64>,
+        point_delta: Option<i64>,
+    },
+    Source(NameRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionSection {
+    pub line_sizes: Vec<u32>,
+    pub entries: Vec<PositionEntry>,
+}
+
 impl StandardSection {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -165,6 +182,48 @@ impl<'a> Section<'a> {
         Ok(comments)
     }
 
+    pub fn decode_positions(&self) -> Result<PositionSection, SectionError> {
+        let mut reader = self.reader();
+        let line_count = reader.read_nat()? as usize;
+        let mut line_sizes = Vec::with_capacity(line_count);
+        for _ in 0..line_count {
+            line_sizes.push(reader.read_nat()?);
+        }
+
+        let mut entries = Vec::new();
+        while !reader.is_at_end() {
+            let header = reader.read_nat()?;
+            if header == 4 {
+                entries.push(PositionEntry::Source(reader.read_nat()?));
+                continue;
+            }
+
+            entries.push(PositionEntry::Association {
+                address_delta: header >> 3,
+                start_delta: if header & 0b100 != 0 {
+                    Some(reader.read_int()? as i64)
+                } else {
+                    None
+                },
+                end_delta: if header & 0b010 != 0 {
+                    Some(reader.read_int()? as i64)
+                } else {
+                    None
+                },
+                point_delta: if header & 0b001 != 0 {
+                    Some(reader.read_int()? as i64)
+                } else {
+                    None
+                },
+            });
+        }
+
+        Ok(PositionSection {
+            line_sizes,
+            entries,
+        })
+    }
+
     pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
         let name = match names.get_zero_based(self.name)? {
             crate::name_table::RawName::Utf8(name) => name.as_str(),
@@ -237,7 +296,9 @@ impl<'a> SectionTable<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attribute, Comment, Section, SectionError, SectionTable};
+    use super::{
+        Attribute, Comment, PositionEntry, PositionSection, Section, SectionError, SectionTable,
+    };
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -370,6 +431,52 @@ mod tests {
                 needed: 1,
                 remaining: 0,
             }))
+        );
+    }
+
+    #[test]
+    fn decodes_line_sizes_and_position_associations() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[0x82, 0x8a, 0x94, 0x8f, 0x82, 0x83, 0x84, 0x84, 0x85],
+        };
+
+        assert_eq!(
+            section.decode_positions().unwrap(),
+            PositionSection {
+                line_sizes: vec![10, 20],
+                entries: vec![
+                    PositionEntry::Association {
+                        address_delta: 1,
+                        start_delta: Some(2),
+                        end_delta: Some(3),
+                        point_delta: Some(4),
+                    },
+                    PositionEntry::Source(5),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_signed_position_deltas() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[0x80, 0x8e, 0xfe, 0x82],
+        };
+
+        assert_eq!(
+            section.decode_positions().unwrap().entries,
+            vec![PositionEntry::Association {
+                address_delta: 1,
+                start_delta: Some(-2),
+                end_delta: Some(2),
+                point_delta: None,
+            }]
         );
     }
 }

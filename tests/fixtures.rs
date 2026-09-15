@@ -181,6 +181,15 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             });
         }
 
+        if let Some(positions) = sections
+            .iter()
+            .find(|section| section.standard_kind(&names) == Some(StandardSection::Positions))
+        {
+            positions.decode_positions().unwrap_or_else(|error| {
+                panic!("failed to parse positions in {}: {error}", path.display())
+            });
+        }
+
         let asts = sections
             .iter()
             .find(|section| section.standard_kind(&names) == Some(StandardSection::Asts))
