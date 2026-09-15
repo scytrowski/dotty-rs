@@ -165,6 +165,37 @@ impl From<ReadError> for TermError {
 }
 
 impl SimpleTerm {
+    /// Construct a validated category-1 or category-2 leaf for encoding.
+    ///
+    /// Newly constructed terms start at offset zero; offsets are metadata
+    /// derived while decoding and are not needed when encoding a new tree.
+    pub fn new(tag: u8, value: TermValue) -> Result<Self, TermEncodeError> {
+        if !matches!(tag, 2..=5 | 60..=76) {
+            return Err(TermEncodeError::InvalidTag { tag });
+        }
+
+        if !matches!(
+            (&value, tag),
+            (TermValue::Unit, 2)
+                | (TermValue::Boolean(false), 3)
+                | (TermValue::Boolean(true), 4)
+                | (TermValue::Null, 5)
+                | (TermValue::AstRef(_), 60..=63 | 66)
+                | (TermValue::NameRef(_), 64..=65 | 74..=76)
+                | (TermValue::Int(_), 67 | 68 | 70 | 72)
+                | (TermValue::Nat(_), 69)
+                | (TermValue::LongInt(_), 71 | 73)
+        ) {
+            return Err(TermEncodeError::InvalidValue { tag });
+        }
+
+        Ok(Self {
+            tag,
+            offset: 0,
+            value,
+        })
+    }
+
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, TermError> {
         let offset = reader.position();
         let tag = reader.read_u8()?;
@@ -353,6 +384,36 @@ impl ConstantValue {
 }
 
 impl<'a> RawTree<'a> {
+    /// Construct a validated category-1 or category-2 leaf for encoding.
+    pub fn leaf(tag: u8, value: TermValue) -> Result<Self, TermEncodeError> {
+        Ok(Self::Leaf(SimpleTerm::new(tag, value)?))
+    }
+
+    /// Construct a validated category-3 AST wrapper for encoding.
+    pub fn ast(tag: u8, child: Self) -> Result<Self, TermEncodeError> {
+        if !(90..=104).contains(&tag) {
+            return Err(TermEncodeError::InvalidTag { tag });
+        }
+        Ok(Self::Ast {
+            tag,
+            offset: 0,
+            child: Box::new(child),
+        })
+    }
+
+    /// Construct a validated category-4 `Nat AST` wrapper for encoding.
+    pub fn nat_ast(tag: u8, value: u32, child: Self) -> Result<Self, TermEncodeError> {
+        if !(110..=119).contains(&tag) {
+            return Err(TermEncodeError::InvalidTag { tag });
+        }
+        Ok(Self::NatAst {
+            tag,
+            offset: 0,
+            value,
+            child: Box::new(child),
+        })
+    }
+
     /// Returns the nodes visible in this raw tree in wire order.
     ///
     /// The returned metadata includes category-3 and category-4 wrappers,
@@ -606,7 +667,8 @@ mod tests {
     };
     use crate::ast::{
         IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, SELECT_TAG, SELECTTPT_TAG, SELFDEF_TAG,
-        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+        SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, THIS_TAG,
+        TYPEREFDIRECT_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::writer::Writer;
@@ -650,6 +712,81 @@ mod tests {
                 offset: 0,
                 value: TermValue::LongInt(1),
             }
+        );
+    }
+
+    #[test]
+    fn constructs_a_validated_integer_leaf() {
+        let term = SimpleTerm::new(70, TermValue::Int(-42)).unwrap();
+
+        assert_eq!(
+            term,
+            SimpleTerm {
+                tag: 70,
+                offset: 0,
+                value: TermValue::Int(-42),
+            }
+        );
+    }
+
+    #[test]
+    fn constructs_a_validated_name_reference_leaf() {
+        let term = SimpleTerm::new(64, TermValue::NameRef(7)).unwrap();
+
+        assert_eq!(term.offset, 0);
+        assert_eq!(term.name_ref(), Some(7));
+    }
+
+    #[test]
+    fn rejects_a_non_leaf_tag_when_constructing_a_simple_term() {
+        assert_eq!(
+            SimpleTerm::new(90, TermValue::AstRef(1)),
+            Err(TermEncodeError::InvalidTag { tag: 90 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_mismatched_value_when_constructing_a_simple_term() {
+        assert_eq!(
+            SimpleTerm::new(70, TermValue::LongInt(1)),
+            Err(TermEncodeError::InvalidValue { tag: 70 })
+        );
+    }
+
+    #[test]
+    fn constructs_and_encodes_a_category_three_tree() {
+        let tree = RawTree::ast(THIS_TAG, RawTree::leaf(70, TermValue::Int(42)).unwrap()).unwrap();
+        let mut writer = Writer::new();
+
+        tree.encode(&mut writer).unwrap();
+
+        assert_eq!(writer.as_slice(), &[THIS_TAG, 70, 0xAA]);
+    }
+
+    #[test]
+    fn constructs_and_encodes_a_category_four_tree() {
+        let tree =
+            RawTree::nat_ast(IDENT_TAG, 7, RawTree::leaf(2, TermValue::Unit).unwrap()).unwrap();
+        let mut writer = Writer::new();
+
+        tree.encode(&mut writer).unwrap();
+
+        assert_eq!(writer.as_slice(), &[IDENT_TAG, 0x87, 2]);
+    }
+
+    #[test]
+    fn rejects_an_invalid_category_three_wrapper_tag() {
+        assert_eq!(
+            RawTree::ast(105, RawTree::leaf(2, TermValue::Unit).unwrap()),
+            Err(TermEncodeError::InvalidTag { tag: 105 })
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_category_four_wrapper_tag() {
+        assert_eq!(
+            RawTree::nat_ast(120, 1, RawTree::leaf(2, TermValue::Unit).unwrap()),
+            Err(TermEncodeError::InvalidTag { tag: 120 })
         );
     }
 

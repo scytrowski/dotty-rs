@@ -452,6 +452,11 @@ programmatic encoding; `encode_with_addresses()` then assigns fresh offsets
 from the emitted stream.
 `RawNode::new()` is the corresponding validated constructor for an individual
 category-5 node.
+`SimpleTerm::new()`, `RawTree::leaf()`, `RawTree::ast()`, and
+`RawTree::nat_ast()` provide the corresponding validated constructors for
+programmatically building category-1 through category-4 trees. Their offsets
+start at zero and are derived from the emitted stream only when decoding or
+allocating AST addresses.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
