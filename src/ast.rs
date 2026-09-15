@@ -31,6 +31,8 @@ pub const EXPORT_TAG: u8 = 177;
 pub const IMPORTED_TAG: u8 = 75;
 pub const RENAMED_TAG: u8 = 76;
 pub const BOUNDED_TAG: u8 = 102;
+pub const IDENT_TAG: u8 = 110;
+pub const IDENTTPT_TAG: u8 = 111;
 pub const SELFDEF_TAG: u8 = 118;
 pub const NAMEDARG_TAG: u8 = 119;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
@@ -227,6 +229,13 @@ pub struct AstChildNode<'a> {
 pub struct NamedArgNode<'a> {
     pub name: u32,
     pub argument: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentNode<'a> {
+    pub tag: u8,
+    pub name: u32,
+    pub type_tree: RawTree<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1077,6 +1086,29 @@ impl<'a> RawTree<'a> {
             }
         }
     }
+
+    pub fn decode_ident(&self) -> Result<IdentNode<'a>, AstError> {
+        match self {
+            RawTree::NatAst {
+                tag: tag @ (IDENT_TAG | IDENTTPT_TAG),
+                value: name,
+                child,
+                ..
+            } => Ok(IdentNode {
+                tag: *tag,
+                name: *name,
+                type_tree: (**child).clone(),
+            }),
+            tree => {
+                let (actual, offset) = raw_tree_tag_offset(tree);
+                Err(AstError::UnexpectedTag {
+                    expected: IDENT_TAG,
+                    actual,
+                    offset,
+                })
+            }
+        }
+    }
 }
 
 fn is_template_stat_tag(tag: u8) -> bool {
@@ -1139,13 +1171,13 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
-        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG, IF_TAG,
-        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
-        NAMEDARG_TAG, NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG,
-        REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECTOUTER_TAG, SELFDEF_TAG,
-        SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
-        TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
-        WHILE_TAG,
+        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
+        IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind,
+        ImportSelector, LAMBDA_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG,
+        ParameterNode, RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
+        SELECTOUTER_TAG, SELFDEF_TAG, SPLITCLAUSE_TAG, SUPER_TAG, TEMPLATE_TAG, TERMREFPKG_TAG,
+        THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
+        TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1493,6 +1525,36 @@ mod tests {
             Err(AstError::UnexpectedTag {
                 expected: NAMEDARG_TAG,
                 actual: TERMREFPKG_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_ident_and_identtpt_with_the_shared_structure() {
+        for tag in [IDENT_TAG, IDENTTPT_TAG] {
+            let bytes = [tag, 0x85, 2];
+            let mut reader = Reader::new(&bytes);
+            let tree = RawTree::decode(&mut reader).unwrap();
+            let node = tree.decode_ident().unwrap();
+
+            assert_eq!(node.tag, tag);
+            assert_eq!(node.name, 5);
+            assert!(matches!(node.type_tree, RawTree::Leaf(_)));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn rejects_a_tree_with_the_wrong_ident_tag() {
+        let mut reader = Reader::new(&[NAMEDARG_TAG, 0x85, 2]);
+        let tree = RawTree::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            tree.decode_ident(),
+            Err(AstError::UnexpectedTag {
+                expected: IDENT_TAG,
+                actual: NAMEDARG_TAG,
                 offset: 0,
             })
         );
