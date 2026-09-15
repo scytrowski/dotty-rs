@@ -345,7 +345,7 @@ Path = Constant
      | RECthis ASTRef
      | SHAREDtype ASTRef
 
-Type = Path
+ Type = Path
      | TYPEREFdirect ASTRef
      | TYPEREFsymbol ASTRef Type
      | TYPEREFpkg NameRef
@@ -430,6 +430,11 @@ context-dependent category-5 payloads remain indexed as opaque boundaries.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
+
+`BIND` is context-dependent: in a pattern it carries a pattern tree, while in
+a type it carries zero or more modifiers. `BindNode` exposes these alternatives
+as `BindBody::Pattern` and `BindBody::Type`; bytes after an undecidable pattern
+body are preserved in `BindNode::remainder` for lossless re-encoding.
 
 ### 6.6. Constants
 

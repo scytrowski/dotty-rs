@@ -12,7 +12,7 @@ pub use ast::{
     APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AlternativeNode,
     AnnotatedNode, AnnotationNode, AppliedTypeNode, ApplyNode, ApplySigPolyNode, AssignNode,
     AstAddressIndex, AstChildNode, AstError, AstReference, BIND_TAG, BLOCK_TAG, BOUNDED_TAG,
-    BYNAMETPT_TAG, BYNAMETYPE_TAG, BinaryTypeNode, BindNode, CASEDEF_TAG, CLASSCONST_TAG,
+    BYNAMETPT_TAG, BYNAMETYPE_TAG, BinaryTypeNode, BindBody, BindNode, CASEDEF_TAG, CLASSCONST_TAG,
     CaseDefNode, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
     ELIDED_TAG, EMPTYCLAUSE_TAG, EXPLICITTPT_TAG, EXPORT_TAG, EncodedAstNodes, FLEXIBLETYPE_TAG,
     FlexibleTypeNode, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG,

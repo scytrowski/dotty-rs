@@ -424,10 +424,19 @@ pub struct CaseDefNode<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindBody<'a> {
+    Pattern(RawTree<'a>),
+    Type { modifiers: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindNode<'a> {
     pub name: u32,
     pub type_tree: RawTree<'a>,
-    pub pattern: RawTree<'a>,
+    pub body: BindBody<'a>,
+    /// Bytes after a pattern body whose meaning depends on the enclosing
+    /// type or pattern context.
+    pub remainder: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1254,7 +1263,9 @@ fn collect_structured_nodes<'a>(
         }
         StructuredNode::Bind(bind) => {
             tree!(&bind.type_tree);
-            tree!(&bind.pattern);
+            if let BindBody::Pattern(pattern) = &bind.body {
+                tree!(pattern);
+            }
         }
         StructuredNode::Alternative(alternative) => {
             trees!(&alternative.alternatives);
@@ -1754,18 +1765,42 @@ impl<'a> RawNode<'a> {
         let mut reader = self.reader();
         let name = reader.read_nat()?;
         let type_tree = RawTree::decode(&mut reader)?;
-        let pattern = RawTree::decode(&mut reader)?;
-        if !reader.is_at_end() {
-            return Err(AstError::UnsupportedCategory {
-                tag: self.tag,
-                offset: self.offset,
-            });
-        }
+        let (body, remainder) = if reader.is_at_end() {
+            (
+                BindBody::Type {
+                    modifiers: Vec::new(),
+                },
+                &self.payload[reader.position()..],
+            )
+        } else if is_modifier_tag(reader.peek_u8()?) {
+            let mut modifiers = Vec::new();
+            while !reader.is_at_end() {
+                let offset = reader.position();
+                let modifier = reader.read_u8()?;
+                if !is_modifier_tag(modifier) {
+                    return Err(AstError::UnexpectedTag {
+                        expected: INLINE_TAG,
+                        actual: modifier,
+                        offset: self.offset + offset,
+                    });
+                }
+                modifiers.push(modifier);
+            }
+            (
+                BindBody::Type { modifiers },
+                &self.payload[reader.position()..],
+            )
+        } else {
+            let pattern = RawTree::decode(&mut reader)?;
+            let remainder = reader.read_bytes(reader.remaining())?;
+            (BindBody::Pattern(pattern), remainder)
+        };
 
         Ok(BindNode {
             name,
             type_tree,
-            pattern,
+            body,
+            remainder,
         })
     }
 
@@ -3349,7 +3384,16 @@ impl<'a> BindNode<'a> {
         encode_length_node(BIND_TAG, writer, |payload| {
             payload.write_nat(self.name);
             self.type_tree.encode(payload)?;
-            self.pattern.encode(payload)
+            match &self.body {
+                BindBody::Pattern(pattern) => pattern.encode(payload)?,
+                BindBody::Type { modifiers } => {
+                    for modifier in modifiers {
+                        payload.write_u8(*modifier);
+                    }
+                }
+            }
+            payload.write_bytes(self.remainder);
+            Ok(())
         })
     }
 }
@@ -3932,7 +3976,9 @@ fn collect_structured_ast_refs(
         }
         StructuredNode::Bind(bind) => {
             collect_tree_ast_refs(&bind.type_tree, visitor);
-            collect_tree_ast_refs(&bind.pattern, visitor);
+            if let BindBody::Pattern(pattern) = &bind.body {
+                collect_tree_ast_refs(pattern, visitor);
+            }
         }
         StructuredNode::Alternative(alternative) => {
             collect_trees_ast_refs(&alternative.alternatives, visitor);
@@ -5421,8 +5467,52 @@ mod tests {
 
         assert_eq!(bind.name, 5);
         assert!(matches!(bind.type_tree, RawTree::Leaf(_)));
-        assert!(matches!(bind.pattern, RawTree::Leaf(_)));
+        assert!(matches!(
+            bind.body,
+            super::BindBody::Pattern(RawTree::Leaf(_))
+        ));
+        assert!(bind.remainder.is_empty());
         assert_eq!(alternative.alternatives.len(), 2);
+    }
+
+    #[test]
+    fn decodes_bind_type_form_with_modifiers() {
+        let bytes = [
+            BIND_TAG,
+            0x85,
+            0x85,
+            TERMREFPKG_TAG,
+            0x81,
+            INLINE_TAG,
+            IMPLICIT_TAG,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let bind = nodes.get(0).unwrap().decode_bind().unwrap();
+
+        assert!(matches!(
+            bind.body,
+            super::BindBody::Type { modifiers } if modifiers == vec![INLINE_TAG, IMPLICIT_TAG]
+        ));
+        assert!(bind.remainder.is_empty());
+    }
+
+    #[test]
+    fn preserves_an_ambiguous_bind_remainder_for_round_trip() {
+        let bytes = [BIND_TAG, 0x85, 0x85, 2, 3, super::SHAREDTYPE_TAG, 0x81];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let bind = nodes.get(0).unwrap().decode_bind().unwrap();
+
+        assert!(matches!(
+            bind.body,
+            super::BindBody::Pattern(RawTree::Leaf(_))
+        ));
+        assert_eq!(bind.remainder, &[super::SHAREDTYPE_TAG, 0x81]);
+
+        let mut writer = Writer::new();
+        bind.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), bytes);
     }
 
     #[test]
