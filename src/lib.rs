@@ -8,12 +8,13 @@ pub mod term;
 pub use ast::{
     APPLY_TAG, ASSIGN_TAG, ApplyNode, AssignNode, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG,
     DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG,
-    EMPTYCLAUSE_TAG, EXPORT_TAG, IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportExportNode,
-    ImportSelector, NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterBody,
-    ParameterNode, RENAMED_TAG, RETURN_TAG, RawNode, RawNodes, ReturnNode, SELFDEF_TAG,
-    SPLITCLAUSE_TAG, SelfDefNode, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG,
-    TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TemplateNode, TemplateStructure, TypeApplyNode,
-    TypedNode, VALDEF_TAG, WHILE_TAG, WhileNode,
+    EMPTYCLAUSE_TAG, EXPORT_TAG, IF_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, IfNode,
+    ImportExportKind, ImportExportNode, ImportSelector, LAMBDA_TAG, LambdaNode, NEW_TAG,
+    NodeCategory, PACKAGE_TAG, PARAM_TAG, PackageNode, ParameterBody, ParameterNode, RENAMED_TAG,
+    RETURN_TAG, RawNode, RawNodes, ReturnNode, SELFDEF_TAG, SPLITCLAUSE_TAG, SelfDefNode,
+    TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+    TYPEPARAM_TAG, TemplateNode, TemplateStructure, TypeApplyNode, TypedNode, VALDEF_TAG,
+    WHILE_TAG, WhileNode,
 };
 pub use header::{Header, HeaderError, TASTY_MAGIC};
 pub use name_table::{NameRef, NameTable, NameTableError, ParamSig, RawName};

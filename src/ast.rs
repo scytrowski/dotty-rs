@@ -18,6 +18,8 @@ pub const TYPEAPPLY_TAG: u8 = 137;
 pub const TYPED_TAG: u8 = 138;
 pub const ASSIGN_TAG: u8 = 139;
 pub const BLOCK_TAG: u8 = 140;
+pub const IF_TAG: u8 = 141;
+pub const LAMBDA_TAG: u8 = 142;
 pub const RETURN_TAG: u8 = 144;
 pub const WHILE_TAG: u8 = 145;
 pub const TEMPLATE_TAG: u8 = 156;
@@ -29,6 +31,7 @@ pub const BOUNDED_TAG: u8 = 102;
 pub const SELFDEF_TAG: u8 = 118;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
 pub const SPLITCLAUSE_TAG: u8 = 46;
+pub const INLINE_TAG: u8 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -145,6 +148,20 @@ pub struct ApplyNode<'a> {
 pub struct BlockNode<'a> {
     pub expression: RawTree<'a>,
     pub stats: Vec<RawTree<'a>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfNode<'a> {
+    pub inline: bool,
+    pub condition: RawTree<'a>,
+    pub then_branch: RawTree<'a>,
+    pub else_branch: RawTree<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaNode<'a> {
+    pub method: RawTree<'a>,
+    pub target_type: Option<RawTree<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,6 +616,69 @@ impl<'a> RawNode<'a> {
         Ok(BlockNode { expression, stats })
     }
 
+    pub fn decode_if(&self) -> Result<IfNode<'a>, AstError> {
+        if self.tag != IF_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: IF_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let inline = if !reader.is_at_end() && reader.peek_u8()? == INLINE_TAG {
+            reader.read_u8()?;
+            true
+        } else {
+            false
+        };
+        let condition = RawTree::decode(&mut reader)?;
+        let then_branch = RawTree::decode(&mut reader)?;
+        let else_branch = RawTree::decode(&mut reader)?;
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(IfNode {
+            inline,
+            condition,
+            then_branch,
+            else_branch,
+        })
+    }
+
+    pub fn decode_lambda(&self) -> Result<LambdaNode<'a>, AstError> {
+        if self.tag != LAMBDA_TAG {
+            return Err(AstError::UnexpectedTag {
+                expected: LAMBDA_TAG,
+                actual: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        let mut reader = self.reader();
+        let method = RawTree::decode(&mut reader)?;
+        let target_type = if reader.is_at_end() {
+            None
+        } else {
+            Some(RawTree::decode(&mut reader)?)
+        };
+        if !reader.is_at_end() {
+            return Err(AstError::UnsupportedCategory {
+                tag: self.tag,
+                offset: self.offset,
+            });
+        }
+
+        Ok(LambdaNode {
+            method,
+            target_type,
+        })
+    }
+
     pub fn decode_type_apply(&self) -> Result<TypeApplyNode<'a>, AstError> {
         if self.tag != TYPEAPPLY_TAG {
             return Err(AstError::UnexpectedTag {
@@ -930,12 +1010,12 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
 mod tests {
     use super::{
         APPLY_TAG, ASSIGN_TAG, AstChildNode, AstError, BLOCK_TAG, BOUNDED_TAG, DEFDEF_TAG,
-        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG,
-        IMPORT_TAG, IMPORTED_TAG, ImportExportKind, ImportSelector, NEW_TAG, NodeCategory,
-        PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree,
-        SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, THROW_TAG,
-        TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode, TypedNode, VALDEF_TAG,
-        WHILE_TAG,
+        DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPORT_TAG, IF_TAG,
+        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG,
+        NEW_TAG, NodeCategory, PACKAGE_TAG, PARAM_TAG, ParameterNode, RENAMED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELFDEF_TAG, SPLITCLAUSE_TAG, TEMPLATE_TAG, TERMREFPKG_TAG,
+        THIS_TAG, THROW_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TypeApplyNode,
+        TypedNode, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1495,6 +1575,39 @@ mod tests {
     }
 
     #[test]
+    fn decodes_if_without_the_inline_modifier() {
+        let bytes = [IF_TAG, 0x83, 2, 3, 4];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_if().unwrap();
+
+        assert!(!node.inline);
+        assert!(matches!(node.condition, RawTree::Leaf(_)));
+        assert!(matches!(node.then_branch, RawTree::Leaf(_)));
+        assert!(matches!(node.else_branch, RawTree::Leaf(_)));
+    }
+
+    #[test]
+    fn decodes_if_with_the_inline_modifier() {
+        let bytes = [IF_TAG, 0x84, INLINE_TAG, 2, 3, 4];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert!(nodes.get(0).unwrap().decode_if().unwrap().inline);
+    }
+
+    #[test]
+    fn rejects_if_with_a_missing_branch() {
+        let node = RawNode {
+            tag: IF_TAG,
+            offset: 0,
+            payload: &[2, 3],
+        };
+
+        assert!(node.decode_if().is_err());
+    }
+
+    #[test]
     fn decodes_type_apply_function_and_type_arguments() {
         let bytes = [
             TYPEAPPLY_TAG,
@@ -1530,6 +1643,39 @@ mod tests {
                 .type_arguments
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn decodes_lambda_without_a_target_type() {
+        let bytes = [LAMBDA_TAG, 0x81, 2];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_lambda().unwrap();
+
+        assert!(matches!(node.method, RawTree::Leaf(_)));
+        assert!(node.target_type.is_none());
+    }
+
+    #[test]
+    fn decodes_lambda_with_a_target_type() {
+        let bytes = [LAMBDA_TAG, 0x82, 2, 3];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let node = nodes.get(0).unwrap().decode_lambda().unwrap();
+
+        assert!(matches!(node.method, RawTree::Leaf(_)));
+        assert!(matches!(node.target_type, Some(RawTree::Leaf(_))));
+    }
+
+    #[test]
+    fn rejects_lambda_with_more_than_one_target_type() {
+        let node = RawNode {
+            tag: LAMBDA_TAG,
+            offset: 0,
+            payload: &[2, 3, 4],
+        };
+
+        assert!(node.decode_lambda().is_err());
     }
 
     #[test]
