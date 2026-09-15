@@ -890,7 +890,7 @@ fn raw_tree_tag_offset(tree: &RawTree<'_>) -> (u8, usize) {
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
-    (6..=49).contains(&tag)
+    matches!(tag, 6 | 8..=29 | 31..=49)
 }
 
 fn is_tail_tag(tag: u8) -> bool {
@@ -1044,6 +1044,56 @@ mod tests {
                 ref tail,
             } if tail == &[DefinitionTail::Modifier(17)]
         ));
+    }
+
+    #[test]
+    fn recognizes_every_assigned_category_one_modifier_and_rejects_holes() {
+        let assigned = [
+            6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+        ];
+
+        for tag in assigned {
+            assert!(
+                super::is_modifier_tag(tag),
+                "modifier tag {tag} was rejected"
+            );
+        }
+        for tag in [0, 1, 2, 5, 7, 30, 50, 255] {
+            assert!(
+                !super::is_modifier_tag(tag),
+                "non-modifier tag {tag} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_each_assigned_category_one_modifier_as_a_definition_tail() {
+        let assigned = [
+            6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+        ];
+
+        for modifier in assigned {
+            let bytes = [VALDEF_TAG, 0x83, 0x81, 2, modifier];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            let body = nodes.get(0).unwrap().decode_definition_body().unwrap();
+
+            assert_eq!(
+                body,
+                DefinitionBody::ValDef {
+                    type_tree: RawTree::Leaf(crate::term::SimpleTerm {
+                        tag: 2,
+                        offset: 1,
+                        value: crate::term::TermValue::Unit,
+                    }),
+                    rhs: None,
+                    tail: vec![DefinitionTail::Modifier(modifier)],
+                },
+                "modifier tag {modifier} was not decoded as a definition tail"
+            );
+        }
     }
 
     #[test]
