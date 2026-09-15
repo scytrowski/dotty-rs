@@ -3,6 +3,9 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
+    Unit,
+    Boolean(bool),
+    Null,
     AstRef(u32),
     NameRef(u32),
     Nat(u32),
@@ -52,6 +55,10 @@ impl SimpleTerm {
         let offset = reader.position();
         let tag = reader.read_u8()?;
         let value = match tag {
+            2 => TermValue::Unit,
+            3 => TermValue::Boolean(false),
+            4 => TermValue::Boolean(true),
+            5 => TermValue::Null,
             60..=63 | 66 => TermValue::AstRef(reader.read_nat()?),
             64..=65 | 74..=76 => TermValue::NameRef(reader.read_nat()?),
             67..=68 | 70 | 72 => TermValue::Int(reader.read_int()?),
@@ -97,6 +104,28 @@ mod tests {
                 offset: 4,
                 value: TermValue::LongInt(1),
             }
+        );
+    }
+
+    #[test]
+    fn decodes_category_one_constant_terms() {
+        let mut reader = Reader::new(&[2, 3, 4, 5]);
+
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap().value,
+            TermValue::Unit
+        );
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap().value,
+            TermValue::Boolean(false)
+        );
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap().value,
+            TermValue::Boolean(true)
+        );
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap().value,
+            TermValue::Null
         );
     }
 
