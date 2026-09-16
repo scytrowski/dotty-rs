@@ -474,6 +474,19 @@ impl<'a> Section<'a> {
     pub fn decode_positions(&self) -> Result<PositionSection, SectionError> {
         let mut reader = self.reader();
         let line_count = reader.read_nat()? as usize;
+
+        // Every line size occupies at least one byte. Check that minimum
+        // before reserving capacity so a malformed count cannot trigger an
+        // allocation unrelated to the bounded section payload.
+        if line_count > reader.remaining() {
+            return Err(ReadError::UnexpectedEof {
+                offset: reader.position(),
+                needed: line_count,
+                remaining: reader.remaining(),
+            }
+            .into());
+        }
+
         let mut line_sizes = Vec::with_capacity(line_count);
         for _ in 0..line_count {
             line_sizes.push(reader.read_nat()?);
@@ -1395,6 +1408,25 @@ mod tests {
                     PositionEntry::Source(5),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn rejects_a_position_line_count_larger_than_the_remaining_payload() {
+        let section = Section {
+            name: 0,
+            offset: 0,
+            length: 0,
+            payload: &[0x82],
+        };
+
+        assert_eq!(
+            section.decode_positions(),
+            Err(SectionError::Read(ReadError::UnexpectedEof {
+                offset: 1,
+                needed: 2,
+                remaining: 0,
+            }))
         );
     }
 

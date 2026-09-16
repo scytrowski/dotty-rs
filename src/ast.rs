@@ -3314,6 +3314,19 @@ impl<'a> RawNode<'a> {
 
         let mut reader = self.reader();
         let result_type = RawTree::decode(&mut reader)?;
+
+        // A TypeName contains two Nat values, so two bytes is the minimum
+        // possible representation. Check that lower bound before reserving
+        // capacity for a caller-supplied count.
+        let minimum_bytes = type_name_count.saturating_mul(2);
+        if minimum_bytes > reader.remaining() {
+            return Err(AstError::Read(ReadError::UnexpectedEof {
+                offset: reader.position(),
+                needed: minimum_bytes,
+                remaining: reader.remaining(),
+            }));
+        }
+
         let mut type_names = Vec::with_capacity(type_name_count);
         for _ in 0..type_name_count {
             type_names.push(TypeName {
@@ -7050,6 +7063,24 @@ mod tests {
         };
 
         assert!(node.decode_method_type().is_err());
+    }
+
+    #[test]
+    fn rejects_an_excessive_contextual_method_type_name_count_before_allocating() {
+        let node = RawNode {
+            tag: METHODTYPE_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+
+        assert_eq!(
+            node.decode_method_type_with_type_name_count(usize::MAX),
+            Err(AstError::Read(ReadError::UnexpectedEof {
+                offset: 1,
+                needed: usize::MAX,
+                remaining: 0,
+            }))
+        );
     }
 
     #[test]
