@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use tasty_rs::{
     Attribute, Comment, DEFDEF_TAG, EXPORT_TAG, Header, IMPORT_TAG, NameTable, PACKAGE_TAG,
-    RawNodes, Reader, SectionTable, StandardSection, TYPEDEF_TAG, TastyFile, VALDEF_TAG, Writer,
+    RawName, RawNodes, Reader, SectionTable, StandardSection, TYPEDEF_TAG, TastyFile, VALDEF_TAG,
+    Writer,
 };
 
 const EXPECTED_FIXTURE_COUNT: usize = 33;
@@ -683,6 +684,36 @@ fn all_tasty_fixture_name_references_resolve_in_the_name_table() {
             );
         }
     }
+}
+
+#[test]
+fn all_tasty_fixture_signed_names_have_typed_views() {
+    let mut signed_name_count = 0;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for (index, name) in file.names().entries().iter().enumerate() {
+            if matches!(name, RawName::Signed { .. } | RawName::TargetSigned { .. }) {
+                signed_name_count += 1;
+                let reference = index as u32 + 1;
+                assert!(
+                    name.signed_name().is_some(),
+                    "fixture {} has a malformed typed signature at name {}",
+                    path.display(),
+                    reference
+                );
+            }
+        }
+    }
+
+    assert!(
+        signed_name_count > 0,
+        "fixtures contain no signature-bearing names"
+    );
 }
 
 #[test]
