@@ -5,6 +5,23 @@ use std::fmt;
 pub type NameRef = u32;
 pub type ParamSig = i32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawNameKind {
+    Utf8,
+    Qualified,
+    Expanded,
+    ExpandPrefix,
+    Unique,
+    DefaultGetter,
+    SuperAccessor,
+    InlineAccessor,
+    ObjectClass,
+    BodyRetainer,
+    Signed,
+    TargetSigned,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawName {
     Utf8(String),
@@ -625,6 +642,27 @@ where
 }
 
 impl RawName {
+    /// Returns the wire-level variant of this name entry without exposing its
+    /// payload. Use the matching [`RawName`] variant to inspect references or
+    /// preserve the entry's complete data.
+    pub fn kind(&self) -> RawNameKind {
+        match self {
+            Self::Utf8(_) => RawNameKind::Utf8,
+            Self::Qualified { .. } => RawNameKind::Qualified,
+            Self::Expanded { .. } => RawNameKind::Expanded,
+            Self::ExpandPrefix { .. } => RawNameKind::ExpandPrefix,
+            Self::Unique { .. } => RawNameKind::Unique,
+            Self::DefaultGetter { .. } => RawNameKind::DefaultGetter,
+            Self::SuperAccessor { .. } => RawNameKind::SuperAccessor,
+            Self::InlineAccessor { .. } => RawNameKind::InlineAccessor,
+            Self::ObjectClass { .. } => RawNameKind::ObjectClass,
+            Self::BodyRetainer { .. } => RawNameKind::BodyRetainer,
+            Self::Signed { .. } => RawNameKind::Signed,
+            Self::TargetSigned { .. } => RawNameKind::TargetSigned,
+            Self::Unknown { .. } => RawNameKind::Unknown,
+        }
+    }
+
     /// Returns the text of a direct UTF-8 name entry.
     pub fn as_utf8(&self) -> Option<&str> {
         match self {
@@ -711,7 +749,7 @@ fn read_parameter_signatures(reader: &mut Reader<'_>) -> Result<Vec<ParamSig>, N
 
 #[cfg(test)]
 mod tests {
-    use super::{NameTable, NameTableError, RawName};
+    use super::{NameTable, NameTableError, RawName, RawNameKind};
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -727,6 +765,143 @@ mod tests {
                 .entries()
                 .iter()
                 .any(|name| matches!(name, RawName::Utf8(_)))
+        );
+    }
+
+    #[test]
+    fn classifies_utf8_names() {
+        assert_eq!(RawName::Utf8("name".to_owned()).kind(), RawNameKind::Utf8);
+    }
+
+    #[test]
+    fn classifies_qualified_names() {
+        assert_eq!(
+            RawName::Qualified {
+                prefix: 1,
+                selector: 1,
+            }
+            .kind(),
+            RawNameKind::Qualified
+        );
+    }
+
+    #[test]
+    fn classifies_expanded_names() {
+        assert_eq!(
+            RawName::Expanded {
+                prefix: 1,
+                selector: 1,
+            }
+            .kind(),
+            RawNameKind::Expanded
+        );
+    }
+
+    #[test]
+    fn classifies_expand_prefix_names() {
+        assert_eq!(
+            RawName::ExpandPrefix {
+                prefix: 1,
+                selector: 1,
+            }
+            .kind(),
+            RawNameKind::ExpandPrefix
+        );
+    }
+
+    #[test]
+    fn classifies_unique_names() {
+        assert_eq!(
+            RawName::Unique {
+                separator: 1,
+                uniqid: 1,
+                underlying: None,
+            }
+            .kind(),
+            RawNameKind::Unique
+        );
+    }
+
+    #[test]
+    fn classifies_default_getter_names() {
+        assert_eq!(
+            RawName::DefaultGetter {
+                underlying: 1,
+                index: 1,
+            }
+            .kind(),
+            RawNameKind::DefaultGetter
+        );
+    }
+
+    #[test]
+    fn classifies_super_accessor_names() {
+        assert_eq!(
+            RawName::SuperAccessor { underlying: 1 }.kind(),
+            RawNameKind::SuperAccessor
+        );
+    }
+
+    #[test]
+    fn classifies_inline_accessor_names() {
+        assert_eq!(
+            RawName::InlineAccessor { underlying: 1 }.kind(),
+            RawNameKind::InlineAccessor
+        );
+    }
+
+    #[test]
+    fn classifies_object_class_names() {
+        assert_eq!(
+            RawName::ObjectClass { underlying: 1 }.kind(),
+            RawNameKind::ObjectClass
+        );
+    }
+
+    #[test]
+    fn classifies_body_retainer_names() {
+        assert_eq!(
+            RawName::BodyRetainer { underlying: 1 }.kind(),
+            RawNameKind::BodyRetainer
+        );
+    }
+
+    #[test]
+    fn classifies_signed_names() {
+        assert_eq!(
+            RawName::Signed {
+                original: 1,
+                result_signature: 1,
+                parameter_signatures: vec![],
+            }
+            .kind(),
+            RawNameKind::Signed
+        );
+    }
+
+    #[test]
+    fn classifies_target_signed_names() {
+        assert_eq!(
+            RawName::TargetSigned {
+                original: 1,
+                target: 1,
+                result_signature: 1,
+                parameter_signatures: vec![],
+            }
+            .kind(),
+            RawNameKind::TargetSigned
+        );
+    }
+
+    #[test]
+    fn classifies_unknown_names() {
+        assert_eq!(
+            RawName::Unknown {
+                tag: 99,
+                payload: vec![],
+            }
+            .kind(),
+            RawNameKind::Unknown
         );
     }
 

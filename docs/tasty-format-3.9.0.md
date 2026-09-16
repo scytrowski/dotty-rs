@@ -510,6 +510,9 @@ for direct UTF-8 entries. `NameTable::find_utf8()` provides the inverse lookup
 for the first direct entry with a given string. Composite names deliberately
 remain structured `RawName` values rather than being flattened with an
 assumed separator.
+`RawName::kind()` provides a payload-independent [`RawNameKind`] classification
+for all known and unknown entry variants; the original `RawName` remains
+available for inspecting payloads and preserving lossless data.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns
