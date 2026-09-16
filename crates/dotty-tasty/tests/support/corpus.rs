@@ -11,6 +11,7 @@ pub struct CorpusManifest {
     pub fixture_bytes: u64,
     pub tasty_root: PathBuf,
     pub selection_file: Option<PathBuf>,
+    pub expectation_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +163,9 @@ impl CorpusManifest {
                 .lines()
                 .filter_map(parse_assignment)
                 .find_map(|(key, value)| (key == "selection_file").then_some(PathBuf::from(value))),
+            expectation_file: input.lines().filter_map(parse_assignment).find_map(
+                |(key, value)| (key == "expectation_file").then_some(PathBuf::from(value)),
+            ),
         })
     }
 }
@@ -205,6 +209,7 @@ mod tests {
         assert_eq!(manifest.fixture_bytes, 42);
         assert_eq!(manifest.tasty_root, PathBuf::from("tasty"));
         assert_eq!(manifest.selection_file, None);
+        assert_eq!(manifest.expectation_file, None);
     }
 
     #[test]
@@ -223,5 +228,6 @@ mod tests {
 
         assert_eq!(manifest.tasty_root, PathBuf::from("."));
         assert_eq!(manifest.selection_file, None);
+        assert_eq!(manifest.expectation_file, None);
     }
 }

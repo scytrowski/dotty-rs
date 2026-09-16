@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use serde::Deserialize;
+
 #[path = "support/corpus.rs"]
 mod corpus;
 
@@ -9,6 +11,25 @@ use dotty_tasty::tasty::{
     EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile,
     TastyFileBuilder, Writer,
 };
+
+#[derive(Debug, Deserialize)]
+struct SemanticExpectation {
+    schema_version: u32,
+    scala_version: String,
+    files: Vec<SemanticExpectationFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticExpectationFile {
+    path: String,
+    nodes: Vec<SemanticExpectationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SemanticExpectationNode {
+    kind: String,
+    symbol: String,
+}
 
 fn scala3_library_corpus() -> corpus::Corpus {
     corpus::Corpus::load(
@@ -63,6 +84,97 @@ fn scala3_library_semantic_selection_is_resolved_from_manifest() {
             .iter()
             .any(|path| path.ends_with("collection/immutable/List.tasty"))
     );
+}
+
+#[test]
+fn scala3_library_semantic_expectations_cover_selected_fixtures() {
+    let corpus = scala3_library_corpus();
+    let expectation_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/scala3-library")
+        .join(
+            corpus
+                .manifest()
+                .expectation_file
+                .as_ref()
+                .expect("scala3-library manifest must identify its semantic expectations"),
+        );
+    let expectation: SemanticExpectation =
+        serde_json::from_slice(&fs::read(&expectation_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read semantic expectations {}: {error}",
+                expectation_path.display()
+            )
+        }))
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to parse semantic expectations {}: {error}",
+                expectation_path.display()
+            )
+        });
+
+    assert_eq!(expectation.schema_version, 1);
+    assert_eq!(expectation.scala_version, "3.9.0");
+    assert_eq!(
+        expectation.files.len(),
+        corpus.selected_fixture_paths().len()
+    );
+
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-library");
+    let selected_paths: BTreeSet<_> = corpus
+        .selected_fixture_paths()
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&fixture_root)
+                .expect("selected fixture must be inside corpus root")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
+        .collect();
+    let expectation_paths: BTreeSet<_> = expectation
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    assert_eq!(expectation_paths, selected_paths);
+
+    for expected in expectation.files {
+        assert!(
+            !expected.nodes.is_empty(),
+            "{} has no semantic nodes",
+            expected.path
+        );
+        assert!(
+            expected.nodes.iter().all(|node| !node.kind.is_empty()),
+            "semantic expectation for {} contains an empty node kind",
+            expected.path
+        );
+        assert!(
+            expected
+                .nodes
+                .iter()
+                .all(|node| !node.symbol.contains('\0')),
+            "semantic expectation for {} contains an invalid symbol",
+            expected.path
+        );
+        let fixture_path = fixture_root.join(&expected.path);
+        let bytes = fs::read(&fixture_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture_path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", fixture_path.display()));
+        assert!(
+            !file
+                .asts()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to decode ASTs in {}: {error}",
+                        fixture_path.display()
+                    )
+                })
+                .is_empty(),
+            "{} has no AST roots",
+            expected.path
+        );
+    }
 }
 
 #[test]
