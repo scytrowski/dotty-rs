@@ -6,6 +6,46 @@ pub type NameRef = u32;
 pub type ParamSig = i32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamSigValue {
+    TypeParameterSectionLength(u32),
+    TermParameter(NameRef),
+}
+
+/// Interprets a raw `ParamSig` without changing its lossless representation.
+///
+/// Negative values encode the length of a type-parameter section, while
+/// positive values encode a name-table reference for a term parameter. Zero
+/// and `i32::MIN` are invalid encodings and return `None`.
+pub fn interpret_param_sig(value: ParamSig) -> Option<ParamSigValue> {
+    match value {
+        i32::MIN | 0 => None,
+        value if value < 0 => Some(ParamSigValue::TypeParameterSectionLength(
+            value.unsigned_abs(),
+        )),
+        value => Some(ParamSigValue::TermParameter(value as NameRef)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameSignature {
+    pub result: NameRef,
+    pub parameters: Vec<ParamSigValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedName {
+    Signed {
+        original: NameRef,
+        signature: NameSignature,
+    },
+    TargetSigned {
+        original: NameRef,
+        target: NameRef,
+        signature: NameSignature,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawNameKind {
     Utf8,
     Qualified,
@@ -497,7 +537,7 @@ impl NameTable {
                 _ => &[],
             };
             for signature in parameter_signatures {
-                if *signature == 0 || *signature == i32::MIN {
+                if interpret_param_sig(*signature).is_none() {
                     return Err(NameTableError::InvalidParamSig {
                         value: *signature,
                         entry_index,
@@ -799,6 +839,46 @@ impl RawName {
         }
     }
 
+    /// Returns a typed view of a `SIGNED` or `TARGETSIGNED` entry.
+    ///
+    /// The raw signed parameter values remain available in the enum itself.
+    /// `None` means that this entry is not signature-bearing or contains an
+    /// invalid raw `ParamSig` value.
+    pub fn signed_name(&self) -> Option<SignedName> {
+        let signature = |result, parameter_signatures: &[ParamSig]| {
+            Some(NameSignature {
+                result,
+                parameters: parameter_signatures
+                    .iter()
+                    .copied()
+                    .map(interpret_param_sig)
+                    .collect::<Option<Vec<_>>>()?,
+            })
+        };
+
+        match self {
+            Self::Signed {
+                original,
+                result_signature,
+                parameter_signatures,
+            } => Some(SignedName::Signed {
+                original: *original,
+                signature: signature(*result_signature, parameter_signatures)?,
+            }),
+            Self::TargetSigned {
+                original,
+                target,
+                result_signature,
+                parameter_signatures,
+            } => Some(SignedName::TargetSigned {
+                original: *original,
+                target: *target,
+                signature: signature(*result_signature, parameter_signatures)?,
+            }),
+            _ => None,
+        }
+    }
+
     /// Returns the text of a direct UTF-8 name entry.
     pub fn as_utf8(&self) -> Option<&str> {
         match self {
@@ -845,8 +925,10 @@ impl RawName {
                 visitor(*original);
                 visitor(*result_signature);
                 for signature in parameter_signatures {
-                    if *signature > 0 {
-                        visitor(*signature as NameRef);
+                    if let Some(ParamSigValue::TermParameter(reference)) =
+                        interpret_param_sig(*signature)
+                    {
+                        visitor(reference);
                     }
                 }
             }
@@ -860,8 +942,10 @@ impl RawName {
                 visitor(*target);
                 visitor(*result_signature);
                 for signature in parameter_signatures {
-                    if *signature > 0 {
-                        visitor(*signature as NameRef);
+                    if let Some(ParamSigValue::TermParameter(reference)) =
+                        interpret_param_sig(*signature)
+                    {
+                        visitor(reference);
                     }
                 }
             }
@@ -885,7 +969,10 @@ fn read_parameter_signatures(reader: &mut Reader<'_>) -> Result<Vec<ParamSig>, N
 
 #[cfg(test)]
 mod tests {
-    use super::{NameRenderError, NameTable, NameTableError, RawName, RawNameKind};
+    use super::{
+        NameRenderError, NameSignature, NameTable, NameTableError, ParamSigValue, RawName,
+        RawNameKind, SignedName, interpret_param_sig,
+    };
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -1039,6 +1126,131 @@ mod tests {
             .kind(),
             RawNameKind::Unknown
         );
+    }
+
+    #[test]
+    fn interprets_a_positive_parameter_signature_as_a_term_parameter() {
+        assert_eq!(
+            interpret_param_sig(17),
+            Some(ParamSigValue::TermParameter(17))
+        );
+    }
+
+    #[test]
+    fn interprets_the_largest_positive_parameter_signature() {
+        assert_eq!(
+            interpret_param_sig(i32::MAX),
+            Some(ParamSigValue::TermParameter(i32::MAX as u32))
+        );
+    }
+
+    #[test]
+    fn interprets_a_negative_parameter_signature_as_a_type_section_length() {
+        assert_eq!(
+            interpret_param_sig(-17),
+            Some(ParamSigValue::TypeParameterSectionLength(17))
+        );
+    }
+
+    #[test]
+    fn interprets_minus_one_as_a_one_element_type_section_length_marker() {
+        assert_eq!(
+            interpret_param_sig(-1),
+            Some(ParamSigValue::TypeParameterSectionLength(1))
+        );
+    }
+
+    #[test]
+    fn rejects_zero_as_a_parameter_signature() {
+        assert_eq!(interpret_param_sig(0), None);
+    }
+
+    #[test]
+    fn rejects_the_minimum_i32_as_a_parameter_signature() {
+        assert_eq!(interpret_param_sig(i32::MIN), None);
+    }
+
+    #[test]
+    fn exposes_a_typed_signed_name_without_parameters() {
+        let name = RawName::Signed {
+            original: 7,
+            result_signature: 11,
+            parameter_signatures: vec![],
+        };
+
+        assert_eq!(
+            name.signed_name(),
+            Some(SignedName::Signed {
+                original: 7,
+                signature: NameSignature {
+                    result: 11,
+                    parameters: vec![],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn exposes_typed_parameter_sections_and_term_parameters_in_wire_order() {
+        let name = RawName::Signed {
+            original: 7,
+            result_signature: 11,
+            parameter_signatures: vec![-2, 13, -1, 17],
+        };
+
+        assert_eq!(
+            name.signed_name(),
+            Some(SignedName::Signed {
+                original: 7,
+                signature: NameSignature {
+                    result: 11,
+                    parameters: vec![
+                        ParamSigValue::TypeParameterSectionLength(2),
+                        ParamSigValue::TermParameter(13),
+                        ParamSigValue::TypeParameterSectionLength(1),
+                        ParamSigValue::TermParameter(17),
+                    ],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn exposes_the_target_of_a_target_signed_name() {
+        let name = RawName::TargetSigned {
+            original: 7,
+            target: 11,
+            result_signature: 13,
+            parameter_signatures: vec![17],
+        };
+
+        assert_eq!(
+            name.signed_name(),
+            Some(SignedName::TargetSigned {
+                original: 7,
+                target: 11,
+                signature: NameSignature {
+                    result: 13,
+                    parameters: vec![ParamSigValue::TermParameter(17)],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_expose_a_signature_for_another_name_kind() {
+        assert_eq!(RawName::Utf8("name".to_owned()).signed_name(), None);
+    }
+
+    #[test]
+    fn rejects_a_typed_view_of_a_malformed_signed_name() {
+        let name = RawName::Signed {
+            original: 1,
+            result_signature: 1,
+            parameter_signatures: vec![0],
+        };
+
+        assert_eq!(name.signed_name(), None);
     }
 
     #[test]

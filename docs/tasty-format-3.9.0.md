@@ -209,6 +209,12 @@ ParamSig > 0  =>  ParamSig is a NameRef for a fully qualified term parameter nam
 
 Zero is not a valid `ParamSig`, and the minimum `i32` value is invalid because
 its negation cannot represent the length of a type-parameter section.
+The Rust API keeps the raw `ParamSig` value for lossless encoding and exposes
+`interpret_param_sig()` as a typed view returning `ParamSigValue`.
+`RawName::signed_name()` builds a `NameSignature` view for `SIGNED` and
+`TARGETSIGNED` entries, preserving the original/target references and the
+wire order of interpreted parameters. It returns no view for non-signature,
+unknown, or malformed raw entries.
 
 Name references are range-checked, and cyclic name-entry dependencies are
 rejected by the validated name-table model.
