@@ -8,8 +8,8 @@ use serde::Deserialize;
 mod corpus;
 
 use dotty_tasty::tasty::{
-    EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile,
-    TastyFileBuilder, Writer,
+    EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, RenderedSignedName, StandardSection,
+    TastyFile, TastyFileBuilder, Writer,
 };
 
 #[derive(Debug, Deserialize)]
@@ -22,13 +22,13 @@ struct SemanticExpectation {
 #[derive(Debug, Deserialize)]
 struct SemanticExpectationFile {
     path: String,
-    nodes: Vec<SemanticExpectationNode>,
+    declarations: Vec<SemanticExpectationDeclaration>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SemanticExpectationNode {
+struct SemanticExpectationDeclaration {
     kind: String,
-    symbol: String,
+    name: String,
 }
 
 fn scala3_library_corpus() -> corpus::Corpus {
@@ -139,21 +139,24 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
 
     for expected in expectation.files {
         assert!(
-            !expected.nodes.is_empty(),
-            "{} has no semantic nodes",
-            expected.path
-        );
-        assert!(
-            expected.nodes.iter().all(|node| !node.kind.is_empty()),
-            "semantic expectation for {} contains an empty node kind",
+            !expected.declarations.is_empty(),
+            "{} has no semantic-lite declarations",
             expected.path
         );
         assert!(
             expected
-                .nodes
+                .declarations
                 .iter()
-                .all(|node| !node.symbol.contains('\0')),
-            "semantic expectation for {} contains an invalid symbol",
+                .all(|declaration| !declaration.kind.is_empty()),
+            "semantic expectation for {} contains an empty declaration kind",
+            expected.path
+        );
+        assert!(
+            expected
+                .declarations
+                .iter()
+                .all(|declaration| !declaration.name.contains('\0')),
+            "semantic expectation for {} contains an invalid declaration name",
             expected.path
         );
         let fixture_path = fixture_root.join(&expected.path);
@@ -161,6 +164,30 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture_path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", fixture_path.display()));
+        let actual_names: BTreeSet<_> = file
+            .names()
+            .iter()
+            .filter_map(|(reference, _)| {
+                let name = file.render_name(reference).ok().or_else(|| {
+                    match file.render_signed_name(reference).ok()? {
+                        Some(RenderedSignedName::Signed { original, .. })
+                        | Some(RenderedSignedName::TargetSigned { original, .. }) => Some(original),
+                        None => None,
+                    }
+                })?;
+                let name = name.rsplit('.').next().unwrap_or(&name);
+                Some(name.strip_suffix('$').unwrap_or(name).to_owned())
+            })
+            .collect();
+        for declaration in &expected.declarations {
+            assert!(
+                actual_names.contains(&declaration.name),
+                "{} is missing semantic-lite name {} ({})",
+                expected.path,
+                declaration.name,
+                declaration.kind
+            );
+        }
         assert!(
             !file
                 .asts()

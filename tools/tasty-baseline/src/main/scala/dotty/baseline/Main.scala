@@ -146,21 +146,28 @@ object Main:
     finally jar.close()
 
   private def fileJson(path: String)(using quotes: Quotes)(tree: quotes.reflect.Tree): String =
-    s"{\"path\":${json(path)},\"nodes\":${fileTreeJson(tree)}}"
+    s"{\"path\":${json(path)},\"declarations\":${semanticDeclarations(tree)}}"
 
-  private def fileTreeJson(using quotes: Quotes)(tree: quotes.reflect.Tree): String =
+  private def semanticDeclarations(using quotes: Quotes)(tree: quotes.reflect.Tree): String =
     import quotes.reflect.*
-    val nodes = ArrayBuffer.empty[String]
+    val declarations = ArrayBuffer.empty[(String, String)]
     class Collector extends TreeTraverser:
       override def traverseTree(current: Tree)(owner: Symbol): Unit =
         val symbol = current.symbol
-        val symbolName = if symbol.exists then symbol.fullName else ""
         val kind = current.getClass.getSimpleName.stripSuffix("$")
-        nodes += s"{\"kind\":${json(kind)},\"symbol\":${json(symbolName)}}"
+        if Set("TypeDef", "DefDef", "ValDef").contains(kind) && symbol.exists then
+          val name = symbol.fullName.split('.').lastOption.getOrElse("")
+          val normalized = name.stripSuffix("$")
+          if normalized.nonEmpty && !normalized.startsWith("_") && !normalized.startsWith("<") &&
+              normalized.forall(char => char.isLetterOrDigit || char == '_') then
+            declarations += ((kind, normalized))
         super.traverseTree(current)(owner)
 
     new Collector().traverseTree(tree)(Symbol.noSymbol)
-    s"[${nodes.mkString(",")}]"
+    val unique = declarations.distinct.sortBy((kind, name) => (kind, name))
+    s"[${unique.map { case (kind, name) =>
+        s"{\"kind\":${json(kind)},\"name\":${json(name)}}"
+      }.mkString(",")}]"
 
   private def json(value: String): String =
     val escaped = value.flatMap {
