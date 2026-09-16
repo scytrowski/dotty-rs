@@ -686,6 +686,58 @@ fn all_tasty_fixture_name_references_resolve_in_the_name_table() {
 }
 
 #[test]
+fn all_tasty_fixtures_preserve_name_dependency_order() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let names = file.names();
+
+        for root in 1..=names.len() as u32 {
+            let order = names.dependency_order(root).unwrap_or_else(|| {
+                panic!(
+                    "fixture {} has no dependency order for name {}",
+                    path.display(),
+                    root
+                )
+            });
+            let root_position = order
+                .iter()
+                .position(|reference| *reference == root)
+                .unwrap();
+
+            for dependency in &order[..root_position] {
+                assert!(
+                    names.get(*dependency).is_some(),
+                    "fixture {} has an unresolved dependency {} of name {}",
+                    path.display(),
+                    dependency,
+                    root
+                );
+            }
+            for (position, current) in order.iter().enumerate() {
+                let name = names.get(*current).unwrap();
+                name.visit_references(&mut |dependency| {
+                    let dependency_position = order
+                        .iter()
+                        .position(|reference| *reference == dependency)
+                        .unwrap();
+                    assert!(
+                        dependency_position < position,
+                        "fixture {} places dependency {} after name {}",
+                        path.display(),
+                        dependency,
+                        current
+                    );
+                });
+            }
+            assert_eq!(order.last(), Some(&root));
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixture_ast_references_resolve_in_the_global_ast_index() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

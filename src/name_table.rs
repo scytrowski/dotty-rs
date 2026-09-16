@@ -206,6 +206,49 @@ impl NameTable {
         self.get(reference).and_then(RawName::as_utf8)
     }
 
+    /// Returns the root name and all of its transitive dependencies in
+    /// dependency-first order, visiting each name reference at most once.
+    ///
+    /// The result is structural: it contains [`NameRef`] values rather than
+    /// guessing how Scala should render composite names. `None` is returned
+    /// when `reference` does not identify an entry in this table.
+    ///
+    /// Traversal is iterative so a valid but deeply chained name table cannot
+    /// overflow the process stack.
+    pub fn dependency_order(&self, reference: NameRef) -> Option<Vec<NameRef>> {
+        let root = reference.checked_sub(1)? as usize;
+        self.entries.get(root)?;
+
+        let mut visited = vec![false; self.entries.len()];
+        let mut order = Vec::new();
+        let mut stack = vec![(reference, false)];
+
+        while let Some((current, expanded)) = stack.pop() {
+            let index = (current - 1) as usize;
+            if expanded {
+                order.push(current);
+                continue;
+            }
+            if visited[index] {
+                continue;
+            }
+
+            visited[index] = true;
+            stack.push((current, true));
+
+            let mut references = Vec::new();
+            self.entries[index].visit_references(&mut |dependency| references.push(dependency));
+            for dependency in references.into_iter().rev() {
+                let dependency_index = (dependency - 1) as usize;
+                if !visited[dependency_index] {
+                    stack.push((dependency, false));
+                }
+            }
+        }
+
+        Some(order)
+    }
+
     pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
         self.entries.get(index as usize)
     }
@@ -751,6 +794,40 @@ mod tests {
 
         assert_eq!(table.get_utf8(3), None);
         assert_eq!(table.get(3).and_then(RawName::as_utf8), None);
+    }
+
+    #[test]
+    fn returns_the_root_for_a_direct_name_dependency_order() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
+
+        assert_eq!(table.dependency_order(1), Some(vec![1]));
+    }
+
+    #[test]
+    fn returns_unique_name_dependencies_before_the_root() {
+        let table = NameTable::from_entries(vec![
+            RawName::Qualified {
+                prefix: 2,
+                selector: 3,
+            },
+            RawName::Qualified {
+                prefix: 4,
+                selector: 4,
+            },
+            RawName::Utf8("member".to_owned()),
+            RawName::Utf8("owner".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(table.dependency_order(1), Some(vec![4, 2, 3, 1]));
+    }
+
+    #[test]
+    fn returns_none_for_an_unknown_name_dependency_order_root() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
+
+        assert_eq!(table.dependency_order(0), None);
+        assert_eq!(table.dependency_order(2), None);
     }
 
     #[test]

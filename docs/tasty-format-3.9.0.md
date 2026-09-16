@@ -510,6 +510,10 @@ for direct UTF-8 entries. Composite names deliberately remain structured
 `RawName` values rather than being flattened with an assumed separator.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
+`NameTable::dependency_order()` follows those edges transitively and returns
+each reachable `NameRef` once in dependency-first order. It is an iterative,
+structural traversal: it does not flatten composite names or assume a textual
+separator, and returns `None` for an unknown root reference.
 
 `BIND` is context-dependent: in a pattern it carries a pattern tree, while in
 a type it carries zero or more modifiers. `BindNode` exposes these alternatives
