@@ -328,13 +328,13 @@ impl<'a> TastyFile<'a> {
         compiler_experimental: u32,
         max_depth: usize,
     ) -> Result<Self, TastyFileError> {
-        let file = Self::parse_compatible_with(
-            bytes,
+        let file = Self::parse(bytes)?;
+        file.validate_compatible_with_max_ast_index_depth(
             compiler_major,
             compiler_minor,
             compiler_experimental,
+            max_depth,
         )?;
-        file.validate_with_max_ast_index_depth(max_depth)?;
         Ok(file)
     }
 
@@ -370,12 +370,29 @@ impl<'a> TastyFile<'a> {
         compiler_minor: u32,
         compiler_experimental: u32,
     ) -> Result<(), TastyFileError> {
+        self.validate_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate compiler compatibility and file contents with an explicit AST
+    /// nesting limit.
+    pub fn validate_compatible_with_max_ast_index_depth(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
         self.header.validate_compatible_with(
             compiler_major,
             compiler_minor,
             compiler_experimental,
         )?;
-        self.validate()
+        self.validate_with_max_ast_index_depth(max_depth)
     }
 
     /// Validate that every name-table reference used by a supported AST
@@ -766,6 +783,20 @@ mod tests {
 
         assert!(matches!(
             file.validate_with_max_ast_index_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_compatible_validation() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert!(matches!(
+            file.validate_compatible_with_max_ast_index_depth(28, 10, 0, 0),
             Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
                 limit: 0,
                 ..

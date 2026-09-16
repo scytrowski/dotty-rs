@@ -151,8 +151,9 @@ file model additionally exposes `TastyFile::parse_compatible_with`,
 `TastyFile::parse_and_validate_compatible_with`,
 `TastyFile::parse_and_validate_scala_3_9_with_max_ast_index_depth`, and
 `TastyFile::parse_and_validate_compatible_with_max_ast_index_depth`,
-`TastyFile::validate_compatible_with`, and corresponding validated builder and
-encoder methods.
+`TastyFile::validate_compatible_with`, and
+`TastyFile::validate_compatible_with_max_ast_index_depth`, and corresponding
+validated builder and encoder methods.
 
 ## 4. Name table
 
