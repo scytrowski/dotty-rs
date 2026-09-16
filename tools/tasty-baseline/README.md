@@ -39,6 +39,11 @@ revision, checksum, and generated expectations together. This command is a
 developer-side regeneration step; normal Rust CI consumes the checked-in
 corpus and does not need network access or SBT.
 
+The script runs SBT in foreground `--server` mode and supplies a temporary
+writable `XDG_RUNTIME_DIR`, so it does not depend on an already-running SBT
+client or on a pre-existing runtime directory. The execution environment must
+still allow local Unix IPC sockets, as required by SBT 2.
+
 The output contains `schema_version = 3` and `scala_version = 3.9.0`. Each file
 contains a sorted, duplicate-free `declarations` list with simplified
 `TypeDef`, `DefDef`, and `ValDef` identifier names. Operator names are omitted

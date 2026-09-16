@@ -66,14 +66,16 @@ fi
 
 tool_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 temporary_output=$(mktemp "${TMPDIR:-/tmp}/tasty-baseline.XXXXXX.json")
+sbt_runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/tasty-baseline-runtime.XXXXXX")
 cleanup() {
   rm -f "$temporary_output"
+  rmdir "$sbt_runtime_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 (
   cd "$tool_dir"
-  sbt -batch "run $temporary_output --select=$selection_path $artifact_path"
+  XDG_RUNTIME_DIR="$sbt_runtime_dir" sbt --server -batch "run $temporary_output --select=$selection_path $artifact_path"
 )
 
 mkdir -p "$(dirname "$output_path")"
