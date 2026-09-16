@@ -713,6 +713,19 @@ impl<'a> TastyFile<'a> {
             .collect())
     }
 
+    /// Collect visible AST nodes whose absolute addresses are in
+    /// `[start, end)`, retaining address order.
+    pub fn ast_nodes_in_address_range(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        Ok(self
+            .ast_address_index()?
+            .iter_nodes_in_address_range(start, end)
+            .collect())
+    }
+
     /// Collect AST references from every top-level node in wire order.
     ///
     /// The owner address identifies the top-level node containing the
@@ -1017,6 +1030,23 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn queries_fixture_nodes_in_an_absolute_address_range() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let all_nodes = file
+            .ast_address_index()
+            .unwrap()
+            .node_addresses()
+            .collect::<Vec<_>>();
+        let end = all_nodes.last().copied().unwrap() + 1;
+
+        assert_eq!(
+            file.ast_nodes_in_address_range(0, end).unwrap().len(),
+            all_nodes.len()
+        );
     }
 
     #[test]

@@ -1143,6 +1143,19 @@ impl<'a> AstAddressIndex<'a> {
             .filter(move |node| node.tag == tag)
     }
 
+    /// Iterates over visible nodes whose absolute addresses are in
+    /// `[start, end)`, retaining address order.
+    pub fn iter_nodes_in_address_range(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> impl Iterator<Item = AstTreeNode> + '_ {
+        self.all_nodes.iter().copied().filter(move |node| {
+            let address = node.offset as u64;
+            address >= u64::from(start) && address < u64::from(end)
+        })
+    }
+
     pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
         self.all_nodes.iter().map(|node| node.offset as u32)
     }
@@ -8407,6 +8420,39 @@ mod tests {
             index.iter_nodes_with_tag(DEFDEF_TAG).collect::<Vec<_>>(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn filters_visible_ast_nodes_by_an_absolute_address_range() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(
+            index
+                .iter_nodes_in_address_range(2, 8)
+                .map(|node| node.offset)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 5]
+        );
+    }
+
+    #[test]
+    fn returns_no_visible_ast_nodes_for_an_empty_address_range() {
+        let nodes = RawNodes::from_entries(vec![RawNode {
+            tag: VALDEF_TAG,
+            offset: 4,
+            payload: &[],
+        }])
+        .unwrap();
+        let index = nodes.address_index();
+
+        assert!(index.iter_nodes_in_address_range(4, 4).next().is_none());
     }
 
     #[test]

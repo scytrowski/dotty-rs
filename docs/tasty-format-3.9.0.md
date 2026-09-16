@@ -515,6 +515,9 @@ empty result for an unknown or absent tag. Its
 `ast_nodes_with_tag_with_max_depth()` variant exposes the same recursion limit
 as the underlying global index. These queries are structural and do not assign
 Scala semantic meaning to a tag.
+`AstAddressIndex::iter_nodes_in_address_range()` and
+`TastyFile::ast_nodes_in_address_range()` provide the analogous half-open
+address-range query `[start, end)`.
 
 `RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
 name-table references contained in supported structured payloads. At file
