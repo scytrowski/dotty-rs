@@ -460,6 +460,10 @@ At file level, `TastyFile::ast_references()` returns the collected edges with
 the owning top-level AST address and the typed target `AstRef`.
 `TastyFile::ast_address_index()` indexes every visible AST node, including
 category-1 through category-4 tree nodes and nested category-5 nodes.
+It uses `DEFAULT_MAX_AST_INDEX_DEPTH` as a safety bound; callers handling
+untrusted or unusually deep input can use
+`TastyFile::ast_address_index_with_max_depth()` to choose a stricter or more
+permissive limit. Exceeding the limit returns `AstError::RecursionLimit`.
 `AstAddressIndex::resolve_node()` and
 `TastyFile::resolve_ast_reference()` resolve a target address to its tag and
 absolute AST-section offset. `AstAddressIndex::get()` remains the payload
@@ -861,7 +865,9 @@ The decoder should validate:
 8. that no payload bytes remain after a node parser finishes;
 9. maximum recursion depth or an equivalent protection limit. The Rust raw-tree
    decoder uses `DEFAULT_MAX_TREE_DEPTH` by default and exposes
-   `decode_with_max_depth` for callers that need a different bound;
+   `decode_with_max_depth` for callers that need a different bound. The global
+   AST index uses `DEFAULT_MAX_AST_INDEX_DEPTH` and exposes
+   `ast_address_index_with_max_depth` for the same purpose;
 10. the absence of infinite loops in base-128 numbers and boundary-terminated lists.
 
 Unknown sections can be skipped. Unknown category-5 nodes are preserved as raw

@@ -455,12 +455,24 @@ impl<'a> TastyFile<'a> {
     /// Index every visible AST node in the ASTs section, including nodes
     /// nested inside expression, type, package, and template payloads.
     pub fn ast_address_index(&self) -> Result<AstAddressIndex<'a>, TastyFileError> {
+        self.ast_address_index_with_max_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Index every visible AST node using an explicit nesting limit.
+    ///
+    /// The limit applies to category-one through category-five nodes reached
+    /// while traversing the ASTs section. A zero limit rejects even the first
+    /// top-level node.
+    pub fn ast_address_index_with_max_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<AstAddressIndex<'a>, TastyFileError> {
         let section = self
             .section(StandardSection::Asts)
             .ok_or(TastyFileError::MissingSection(StandardSection::Asts))?;
         let mut reader = section.reader();
         let nodes = RawNodes::decode(&mut reader)?;
-        Ok(nodes.deep_address_index_with_source(section.payload)?)
+        Ok(nodes.deep_address_index_with_source_and_max_depth(section.payload, max_depth)?)
     }
 
     /// Resolve an AST reference against the global AST node index.
@@ -681,6 +693,20 @@ mod tests {
 
         assert!(!nodes.is_empty());
         assert!(matches!(nodes.first(), Some(StructuredNode::Package(_))));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_when_indexing_file_asts() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_address_index_with_max_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]

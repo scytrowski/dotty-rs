@@ -4,7 +4,10 @@ use crate::term::{
     AstRef, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
 };
 use crate::writer::{WriteError, Writer};
+use std::cell::Cell;
 use std::fmt;
+
+pub const DEFAULT_MAX_AST_INDEX_DEPTH: usize = 1024;
 
 pub const TERMREFPKG_TAG: u8 = 64;
 pub const SHAREDTERM_TAG: u8 = 60;
@@ -874,6 +877,10 @@ pub enum AstError {
         actual: u8,
         offset: usize,
     },
+    RecursionLimit {
+        offset: usize,
+        limit: usize,
+    },
 }
 
 impl fmt::Display for AstError {
@@ -895,6 +902,10 @@ impl fmt::Display for AstError {
             } => write!(
                 formatter,
                 "expected AST tag {expected} at offset {offset}, found {actual}"
+            ),
+            Self::RecursionLimit { offset, limit } => write!(
+                formatter,
+                "AST index traversal at offset {offset} exceeds the maximum depth of {limit}"
             ),
         }
     }
@@ -1002,13 +1013,15 @@ impl<'a> RawNodes<'a> {
         }
     }
 
-    pub(crate) fn deep_address_index_with_source(
+    pub(crate) fn deep_address_index_with_source_and_max_depth(
         &self,
         source: &[u8],
+        max_depth: usize,
     ) -> Result<AstAddressIndex<'a>, AstError> {
         let mut nodes = Vec::new();
         let mut all_nodes = Vec::new();
-        collect_raw_nodes_deep(self, source, 0, &mut nodes, &mut all_nodes)?;
+        let context = AstIndexContext::new(max_depth);
+        collect_raw_nodes_deep(self, source, 0, &context, &mut nodes, &mut all_nodes)?;
         nodes.sort_unstable_by_key(|node| node.offset);
         all_nodes.sort_unstable_by_key(|node| node.offset);
         Ok(AstAddressIndex { nodes, all_nodes })
@@ -1038,6 +1051,44 @@ impl<'a> RawNodes<'a> {
             bytes: writer.into_inner(),
             addresses,
         })
+    }
+}
+
+struct AstIndexContext {
+    depth: Cell<usize>,
+    max_depth: usize,
+}
+
+impl AstIndexContext {
+    fn new(max_depth: usize) -> Self {
+        Self {
+            depth: Cell::new(0),
+            max_depth,
+        }
+    }
+
+    fn enter(&self, offset: usize) -> Result<AstIndexDepth<'_>, AstError> {
+        let depth = self.depth.get();
+        if depth >= self.max_depth {
+            return Err(AstError::RecursionLimit {
+                offset,
+                limit: self.max_depth,
+            });
+        }
+        self.depth.set(depth + 1);
+        Ok(AstIndexDepth { context: self })
+    }
+}
+
+struct AstIndexDepth<'a> {
+    context: &'a AstIndexContext,
+}
+
+impl Drop for AstIndexDepth<'_> {
+    fn drop(&mut self) {
+        self.context
+            .depth
+            .set(self.context.depth.get().saturating_sub(1));
     }
 }
 
@@ -1119,11 +1170,12 @@ fn collect_raw_nodes_deep<'a>(
     nodes: &RawNodes<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for node in &nodes.nodes {
-        collect_raw_node_deep(node, source, base, output, all_output)?;
+        collect_raw_node_deep(node, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1132,9 +1184,11 @@ fn collect_raw_node_deep<'a>(
     node: &RawNode<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
+    let _depth = context.enter(base.saturating_add(node.offset))?;
     let absolute_offset = base.saturating_add(node.offset);
     let mut located = node.clone();
     located.offset = absolute_offset;
@@ -1148,16 +1202,30 @@ fn collect_raw_node_deep<'a>(
     let Ok(structured) = node.decode_structured() else {
         return Ok(());
     };
-    collect_structured_nodes(&structured, node.payload, payload_base, output, all_output)
+    collect_structured_nodes(
+        &structured,
+        node.payload,
+        payload_base,
+        context,
+        output,
+        all_output,
+    )
 }
 
 fn collect_tree_nodes<'a>(
     tree: &RawTree<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
+    let offset = match tree {
+        RawTree::Leaf(term) => term.offset,
+        RawTree::Ast { offset, .. } | RawTree::NatAst { offset, .. } => *offset,
+        RawTree::LengthNode(node) => node.offset,
+    };
+    let _depth = context.enter(base.saturating_add(offset))?;
     match tree {
         RawTree::Leaf(term) => {
             all_output.push(AstTreeNode {
@@ -1173,7 +1241,7 @@ fn collect_tree_nodes<'a>(
                 tag: *tag,
                 offset: base.saturating_add(*offset),
             });
-            collect_tree_nodes(child, source, base, output, all_output)?;
+            collect_tree_nodes(child, source, base, context, output, all_output)?;
         }
         RawTree::LengthNode(node) => {
             let absolute_offset = base.saturating_add(node.offset);
@@ -1189,7 +1257,14 @@ fn collect_tree_nodes<'a>(
             let Ok(structured) = node.decode_structured() else {
                 return Ok(());
             };
-            collect_structured_nodes(&structured, node.payload, payload_base, output, all_output)?;
+            collect_structured_nodes(
+                &structured,
+                node.payload,
+                payload_base,
+                context,
+                output,
+                all_output,
+            )?;
         }
     }
     Ok(())
@@ -1199,11 +1274,12 @@ fn collect_trees_nodes<'a>(
     trees: &[RawTree<'a>],
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for tree in trees {
-        collect_tree_nodes(tree, source, base, output, all_output)?;
+        collect_tree_nodes(tree, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1212,22 +1288,24 @@ fn collect_raw_node_list_nodes<'a>(
     nodes: &RawNodes<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
-    collect_raw_nodes_deep(nodes, source, base, output, all_output)
+    collect_raw_nodes_deep(nodes, source, base, context, output, all_output)
 }
 
 fn collect_definition_tail_nodes<'a>(
     tail: &[DefinitionTail<'a>],
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for entry in tail {
         if let DefinitionTail::Annotation(node) = entry {
-            collect_raw_node_deep(node, source, base, output, all_output)?;
+            collect_raw_node_deep(node, source, base, context, output, all_output)?;
         }
     }
     Ok(())
@@ -1237,6 +1315,7 @@ fn collect_definition_body_nodes<'a>(
     body: &DefinitionBody<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
@@ -1247,19 +1326,19 @@ fn collect_definition_body_nodes<'a>(
             tail,
             ..
         } => {
-            collect_tree_nodes(type_tree, source, base, output, all_output)?;
+            collect_tree_nodes(type_tree, source, base, context, output, all_output)?;
             if let Some(rhs) = rhs {
-                collect_tree_nodes(rhs, source, base, output, all_output)?;
+                collect_tree_nodes(rhs, source, base, context, output, all_output)?;
             }
-            collect_definition_tail_nodes(tail, source, base, output, all_output)?;
+            collect_definition_tail_nodes(tail, source, base, context, output, all_output)?;
         }
         DefinitionBody::TypeDef {
             type_or_template,
             tail,
             ..
         } => {
-            collect_tree_nodes(type_or_template, source, base, output, all_output)?;
-            collect_definition_tail_nodes(tail, source, base, output, all_output)?;
+            collect_tree_nodes(type_or_template, source, base, context, output, all_output)?;
+            collect_definition_tail_nodes(tail, source, base, context, output, all_output)?;
         }
     }
     Ok(())
@@ -1269,6 +1348,7 @@ fn collect_parameter_nodes<'a>(
     parameter: &ParameterNode<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
@@ -1280,21 +1360,30 @@ fn collect_parameter_nodes<'a>(
         &body.type_tree,
         parameter.body(),
         body_base,
+        context,
         output,
         all_output,
     )?;
-    collect_definition_tail_nodes(&body.tail, parameter.body(), body_base, output, all_output)
+    collect_definition_tail_nodes(
+        &body.tail,
+        parameter.body(),
+        body_base,
+        context,
+        output,
+        all_output,
+    )
 }
 
 fn collect_parameters_nodes<'a>(
     parameters: &[ParameterNode<'a>],
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for parameter in parameters {
-        collect_parameter_nodes(parameter, source, base, output, all_output)?;
+        collect_parameter_nodes(parameter, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1303,13 +1392,14 @@ fn collect_case_def_nodes<'a>(
     case_def: &CaseDefNode<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
-    collect_tree_nodes(&case_def.pattern, source, base, output, all_output)?;
-    collect_tree_nodes(&case_def.body, source, base, output, all_output)?;
+    collect_tree_nodes(&case_def.pattern, source, base, context, output, all_output)?;
+    collect_tree_nodes(&case_def.body, source, base, context, output, all_output)?;
     if let Some(guard) = &case_def.guard {
-        collect_tree_nodes(guard, source, base, output, all_output)?;
+        collect_tree_nodes(guard, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1318,11 +1408,12 @@ fn collect_case_defs_nodes<'a>(
     case_defs: &[CaseDefNode<'a>],
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for case_def in case_defs {
-        collect_case_def_nodes(case_def, source, base, output, all_output)?;
+        collect_case_def_nodes(case_def, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1331,42 +1422,43 @@ fn collect_structured_nodes<'a>(
     node: &StructuredNode<'a>,
     source: &[u8],
     base: usize,
+    context: &AstIndexContext,
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     macro_rules! tree {
         ($tree:expr) => {
-            collect_tree_nodes($tree, source, base, output, all_output)?
+            collect_tree_nodes($tree, source, base, context, output, all_output)?
         };
     }
     macro_rules! trees {
         ($trees:expr) => {
-            collect_trees_nodes($trees, source, base, output, all_output)?
+            collect_trees_nodes($trees, source, base, context, output, all_output)?
         };
     }
     macro_rules! raw_nodes {
         ($nodes:expr) => {
-            collect_raw_node_list_nodes($nodes, source, base, output, all_output)?
+            collect_raw_node_list_nodes($nodes, source, base, context, output, all_output)?
         };
     }
     macro_rules! definition_body {
         ($body:expr) => {
-            collect_definition_body_nodes($body, source, base, output, all_output)?
+            collect_definition_body_nodes($body, source, base, context, output, all_output)?
         };
     }
     macro_rules! definition_tail {
         ($tail:expr) => {
-            collect_definition_tail_nodes($tail, source, base, output, all_output)?
+            collect_definition_tail_nodes($tail, source, base, context, output, all_output)?
         };
     }
     macro_rules! parameters {
         ($parameters:expr) => {
-            collect_parameters_nodes($parameters, source, base, output, all_output)?
+            collect_parameters_nodes($parameters, source, base, context, output, all_output)?
         };
     }
     macro_rules! case_defs {
         ($case_defs:expr) => {
-            collect_case_defs_nodes($case_defs, source, base, output, all_output)?
+            collect_case_defs_nodes($case_defs, source, base, context, output, all_output)?
         };
     }
 
@@ -1390,7 +1482,7 @@ fn collect_structured_nodes<'a>(
             }
         }
         StructuredNode::Parameter(parameter) => {
-            collect_parameter_nodes(parameter, source, base, output, all_output)?;
+            collect_parameter_nodes(parameter, source, base, context, output, all_output)?;
         }
         StructuredNode::Apply(apply) => {
             tree!(&apply.function);
@@ -1484,7 +1576,7 @@ fn collect_structured_nodes<'a>(
             tree!(&annotation.full_annotation);
         }
         StructuredNode::CaseDef(case_def) => {
-            collect_case_def_nodes(case_def, source, base, output, all_output)?;
+            collect_case_def_nodes(case_def, source, base, context, output, all_output)?;
         }
         StructuredNode::Template(template) => {
             parameters!(&template.type_params);
@@ -4923,21 +5015,22 @@ mod tests {
         ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, ANNOTATION_TAG,
         APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstError,
         BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
-        CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefDefHeaderItem, DefinitionBody, DefinitionNode,
-        DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG,
-        IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG,
-        INLINE_TAG, INLINED_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG,
-        MATCH_TAG, MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG,
-        NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
-        PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG,
-        QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG,
-        RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG,
-        SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
-        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree,
-        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
-        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
-        TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        CLASSCONST_TAG, DEFAULT_MAX_AST_INDEX_DEPTH, DEFDEF_TAG, DefDefBody, DefDefHeaderItem,
+        DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG,
+        FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG,
+        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG, ImportExportKind, ImportSelector,
+        LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG,
+        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
+        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
+        QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG,
+        RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG,
+        SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG,
+        SPLICEPATTERN_TAG, SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode,
+        StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
+        TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
+        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG,
+        VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::TermEncodeError;
@@ -8191,7 +8284,9 @@ mod tests {
         ];
         let mut reader = Reader::new(&bytes);
         let nodes = RawNodes::decode(&mut reader).unwrap();
-        let index = nodes.deep_address_index_with_source(&bytes).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
 
         assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 2, 5]);
         assert_eq!(
@@ -8229,6 +8324,23 @@ mod tests {
                     address: 1,
                 })
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_ast_index_traversal_that_exceeds_the_configured_depth() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+
+        assert_eq!(
+            nodes.deep_address_index_with_source_and_max_depth(&bytes, 1),
+            Err(AstError::RecursionLimit {
+                offset: 2,
+                limit: 1,
+            })
         );
     }
 }
