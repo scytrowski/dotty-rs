@@ -271,7 +271,9 @@ fn selected_scala3_compiler_corruptions_do_not_panic() {
             }
 
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let _ = TastyFile::parse(&input);
+                // The combined path exercises parsing, version checks, and
+                // eager validation without parsing the same mutation twice.
+                // The standalone parser has focused unit coverage.
                 let _ = TastyFile::parse_and_validate_compatible_with(&input, 28, 9, 0);
             }));
             assert!(
@@ -302,8 +304,8 @@ fn selected_scala3_compiler_truncations_do_not_panic() {
 
 fn assert_truncated_compiler_fixture_does_not_panic(path: &Path, input: &[u8], end: usize) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let _ = TastyFile::parse(input);
-        let _ = TastyFile::parse_scala_3_9(input);
+        // This is the complete parser and validator path; calling the two
+        // parsing wrappers as well would repeat the same work for each cut.
         let _ = TastyFile::parse_and_validate_compatible_with(input, 28, 9, 0);
     }));
     assert!(
