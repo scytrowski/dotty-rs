@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,7 @@ impl std::error::Error for WriteError {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Writer {
     bytes: Vec<u8>,
+    ast_address_map: Option<BTreeMap<u32, u32>>,
 }
 
 impl Writer {
@@ -53,7 +55,34 @@ impl Writer {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             bytes: Vec::with_capacity(capacity),
+            ast_address_map: None,
         }
+    }
+
+    pub(crate) fn with_ast_address_map(map: BTreeMap<u32, u32>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ast_address_map: Some(map),
+        }
+    }
+
+    pub(crate) fn nested(&self) -> Self {
+        Self {
+            bytes: Vec::new(),
+            ast_address_map: self.ast_address_map.clone(),
+        }
+    }
+
+    pub(crate) fn has_ast_address_map(&self) -> bool {
+        self.ast_address_map.is_some()
+    }
+
+    pub(crate) fn relocated_ast_ref(&self, value: u32) -> u32 {
+        self.ast_address_map
+            .as_ref()
+            .and_then(|map| map.get(&value))
+            .copied()
+            .unwrap_or(value)
     }
 
     pub fn position(&self) -> usize {
@@ -70,6 +99,10 @@ impl Writer {
 
     pub fn write_nat(&mut self, value: u32) {
         write_unsigned(&mut self.bytes, u64::from(value));
+    }
+
+    pub(crate) fn write_ast_ref(&mut self, value: u32) {
+        self.write_nat(self.relocated_ast_ref(value));
     }
 
     pub fn write_long_nat(&mut self, value: u64) {

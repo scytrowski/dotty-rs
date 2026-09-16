@@ -310,12 +310,11 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
                 path.display()
             )
         });
-        let ast_name = file
+        let original_ast_section = file
             .section(StandardSection::Asts)
-            .expect("Scala library fixture must have an ASTs section")
-            .name;
-        let ast_section =
-            EncodedSection::structured_asts(ast_name, &structured).unwrap_or_else(|error| {
+            .expect("Scala library fixture must have an ASTs section");
+        let ast_section = EncodedSection::structured_asts(original_ast_section.name, &structured)
+            .unwrap_or_else(|error| {
                 panic!(
                     "failed to encode structured ASTs in {}: {error}",
                     path.display()
@@ -347,6 +346,36 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
         TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap_or_else(|error| {
             panic!(
                 "structured file output is not a valid Scala 3.9.0 TASTy file {}: {error}",
+                path.display()
+            )
+        });
+    }
+}
+
+#[test]
+fn all_scala3_library_structured_relocated_files_validate() {
+    for path in scala3_library_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let structured = file.structured_asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode structured ASTs in {}: {error}",
+                path.display()
+            )
+        });
+        let encoded = file
+            .encode_structured_relocated(&structured)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to re-encode relocated file {}: {error}",
+                    path.display()
+                )
+            });
+        TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap_or_else(|error| {
+            panic!(
+                "relocated file is not a valid Scala 3.9.0 TASTy file {}: {error}",
                 path.display()
             )
         });

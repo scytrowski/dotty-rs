@@ -1,8 +1,11 @@
-use crate::ast::{AstError, DEFAULT_MAX_AST_INDEX_DEPTH, RawNodes, StructuredNode};
+use crate::ast::{
+    AstAddressIndex, AstError, DEFAULT_MAX_AST_INDEX_DEPTH, RawNodes, StructuredNode,
+};
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::term::TermEncodeError;
 use crate::writer::{WriteError, Writer};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +39,7 @@ pub struct EncodedSection {
 pub struct EncodedAstSection {
     section: EncodedSection,
     ast_addresses: Vec<u32>,
+    ast_address_map: BTreeMap<u32, u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +175,23 @@ impl Comment {
             writer.write_long_int(comment.coordinates);
         }
         Ok(())
+    }
+
+    pub(crate) fn relocate_ast_addresses(
+        comments: &[Self],
+        address_map: &BTreeMap<u32, u32>,
+    ) -> Vec<Self> {
+        comments
+            .iter()
+            .map(|comment| Self {
+                address: address_map
+                    .get(&comment.address)
+                    .copied()
+                    .unwrap_or(comment.address),
+                text: comment.text.clone(),
+                coordinates: comment.coordinates,
+            })
+            .collect()
     }
 }
 
@@ -322,6 +343,67 @@ impl PositionSection {
             .into_iter()
             .find(|association| association.address == address))
     }
+
+    /// Rebuild address deltas after AST nodes have moved within the AST
+    /// section. Source and source-coordinate entries retain their wire order
+    /// and values; only association address deltas are changed.
+    pub(crate) fn relocate_ast_addresses(
+        &self,
+        address_map: &BTreeMap<u32, u32>,
+    ) -> Result<Self, SectionError> {
+        let mut old_address = 0i64;
+        let mut new_address = 0i64;
+        let mut entries = Vec::with_capacity(self.entries.len());
+
+        for entry in &self.entries {
+            match entry {
+                PositionEntry::Source(reference) => {
+                    entries.push(PositionEntry::Source(*reference));
+                }
+                PositionEntry::Association {
+                    address_delta,
+                    start_delta,
+                    end_delta,
+                    point_delta,
+                } => {
+                    old_address = add_position_delta(
+                        old_address,
+                        *address_delta,
+                        PositionCoordinate::Address,
+                    )?;
+                    let old_address_u32 = u32::try_from(old_address).map_err(|_| {
+                        SectionError::InvalidAstAddress {
+                            address: old_address,
+                        }
+                    })?;
+                    let relocated = address_map
+                        .get(&old_address_u32)
+                        .copied()
+                        .unwrap_or(old_address_u32);
+                    let relocated = i64::from(relocated);
+                    let relocated_delta = relocated.checked_sub(new_address).ok_or(
+                        SectionError::PositionOverflow {
+                            coordinate: PositionCoordinate::Address,
+                            previous: new_address,
+                            delta: relocated,
+                        },
+                    )?;
+                    new_address = relocated;
+                    entries.push(PositionEntry::Association {
+                        address_delta: relocated_delta,
+                        start_delta: *start_delta,
+                        end_delta: *end_delta,
+                        point_delta: *point_delta,
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            line_sizes: self.line_sizes.clone(),
+            entries,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +430,9 @@ pub enum SectionError {
         coordinate: PositionCoordinate,
         previous: i64,
         delta: i64,
+    },
+    InvalidAstAddress {
+        address: i64,
     },
 }
 
@@ -388,6 +473,12 @@ impl fmt::Display for SectionError {
                 formatter,
                 "position {coordinate:?} overflows when adding delta {delta} to {previous}"
             ),
+            Self::InvalidAstAddress { address } => {
+                write!(
+                    formatter,
+                    "AST address {address} does not fit in a TASTy address"
+                )
+            }
         }
     }
 }
@@ -626,6 +717,23 @@ impl EncodedSection {
         EncodedAstSection::from_structured(name, nodes)
     }
 
+    /// Re-encode structured AST nodes while relocating references from an
+    /// original AST-section layout to the newly emitted layout.
+    ///
+    /// The original payload is required because structured nodes retain AST
+    /// addresses but not the complete address index from which they came.
+    /// Relocation is iterative because changing the width of an address can
+    /// change the address of a later node. Opaque unknown nodes are rejected
+    /// when their position changes because their hidden reference grammar is
+    /// not available to the structural encoder.
+    pub fn structured_asts_relocated(
+        name: NameRef,
+        original_payload: &[u8],
+        nodes: &[StructuredNode<'_>],
+    ) -> Result<EncodedAstSection, TermEncodeError> {
+        EncodedAstSection::from_structured_relocated(name, original_payload, nodes)
+    }
+
     pub fn name(&self) -> NameRef {
         self.name
     }
@@ -650,6 +758,7 @@ impl EncodedAstSection {
         Ok(Self {
             section: EncodedSection::raw(name, encoded.as_slice().to_vec()),
             ast_addresses: encoded.addresses().to_vec(),
+            ast_address_map: BTreeMap::new(),
         })
     }
 
@@ -674,7 +783,98 @@ impl EncodedAstSection {
         Ok(Self {
             section: EncodedSection::raw(name, writer.into_inner()),
             ast_addresses,
+            ast_address_map: BTreeMap::new(),
         })
+    }
+
+    fn from_structured_relocated(
+        name: NameRef,
+        original_payload: &[u8],
+        nodes: &[StructuredNode<'_>],
+    ) -> Result<Self, TermEncodeError> {
+        let original_index = ast_index(original_payload)?;
+        let original_top_level = top_level_nodes(original_payload)?;
+        if original_top_level.len() != nodes.len() {
+            return Err(AstError::AstNodeCountMismatch {
+                expected: original_top_level.len(),
+                actual: nodes.len(),
+            }
+            .into());
+        }
+
+        let original_visible = original_index.iter_nodes().collect::<Vec<_>>();
+        let mut address_map = BTreeMap::new();
+
+        for iteration in 0..MAX_AST_RELOCATION_ITERATIONS {
+            let bytes = encode_structured_nodes(nodes, &address_map)?;
+            let (encoded_nodes, encoded_index) = ast_index_with_nodes(&bytes)?;
+            let encoded_visible = encoded_index.iter_nodes().collect::<Vec<_>>();
+
+            if encoded_visible.len() != original_visible.len() {
+                return Err(AstError::AstNodeCountMismatch {
+                    expected: original_visible.len(),
+                    actual: encoded_visible.len(),
+                }
+                .into());
+            }
+
+            for (expected, actual) in original_visible.iter().zip(&encoded_visible) {
+                if expected.tag != actual.tag {
+                    return Err(AstError::UnexpectedTag {
+                        expected: expected.tag,
+                        actual: actual.tag,
+                        offset: actual.offset,
+                    }
+                    .into());
+                }
+            }
+
+            let next_map = original_visible
+                .iter()
+                .zip(&encoded_visible)
+                .filter_map(|(old, new)| {
+                    (old.offset != new.offset).then_some((old.offset, new.offset))
+                })
+                .map(|(old, new)| {
+                    Ok((ast_address_from_offset(old)?, ast_address_from_offset(new)?))
+                })
+                .collect::<Result<BTreeMap<_, _>, TermEncodeError>>()?;
+
+            for node in original_index.iter() {
+                let old_address = ast_address_from_offset(node.offset)?;
+                let new_address = next_map.get(&old_address).copied().unwrap_or(old_address);
+                if !node.is_known() && new_address != old_address {
+                    return Err(AstError::UnsupportedRelocation {
+                        tag: node.tag,
+                        offset: node.offset,
+                    }
+                    .into());
+                }
+            }
+
+            if next_map == address_map {
+                validate_structured_ast_payload(&bytes)?;
+                let ast_addresses = encoded_nodes
+                    .iter()
+                    .map(|node| ast_address_from_offset(node.offset))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Self {
+                    section: EncodedSection::raw(name, bytes),
+                    ast_addresses,
+                    ast_address_map: address_map,
+                });
+            }
+
+            address_map = next_map;
+            if iteration + 1 == MAX_AST_RELOCATION_ITERATIONS {
+                return Err(AstError::RelocationDidNotConverge {
+                    iterations: MAX_AST_RELOCATION_ITERATIONS,
+                }
+                .into());
+            }
+        }
+
+        unreachable!("AST relocation loop always returns or reaches its limit")
     }
 
     pub fn name(&self) -> NameRef {
@@ -689,6 +889,10 @@ impl EncodedAstSection {
         &self.ast_addresses
     }
 
+    pub(crate) fn ast_address_map(&self) -> &BTreeMap<u32, u32> {
+        &self.ast_address_map
+    }
+
     pub fn section(&self) -> &EncodedSection {
         &self.section
     }
@@ -700,6 +904,51 @@ impl EncodedAstSection {
     pub fn into_parts(self) -> (EncodedSection, Vec<u32>) {
         (self.section, self.ast_addresses)
     }
+}
+
+const MAX_AST_RELOCATION_ITERATIONS: usize = 16;
+
+fn encode_structured_nodes(
+    nodes: &[StructuredNode<'_>],
+    address_map: &BTreeMap<u32, u32>,
+) -> Result<Vec<u8>, TermEncodeError> {
+    let mut writer = Writer::with_ast_address_map(address_map.clone());
+    for node in nodes {
+        node.encode(&mut writer)?;
+    }
+    Ok(writer.into_inner())
+}
+
+fn ast_address_from_offset(offset: usize) -> Result<u32, TermEncodeError> {
+    u32::try_from(offset).map_err(|_| {
+        let value = u64::try_from(offset).unwrap_or(u64::MAX);
+        WriteError::NatOverflow { value }.into()
+    })
+}
+
+fn ast_index<'a>(bytes: &'a [u8]) -> Result<AstAddressIndex<'a>, TermEncodeError> {
+    Ok(ast_index_with_nodes(bytes)?.1)
+}
+
+fn ast_index_with_nodes<'a>(
+    bytes: &'a [u8],
+) -> Result<(RawNodes<'a>, AstAddressIndex<'a>), TermEncodeError> {
+    let mut reader = Reader::new(bytes);
+    let nodes = RawNodes::decode(&mut reader)?;
+    if !reader.is_at_end() {
+        return Err(AstError::UnsupportedCategory {
+            tag: reader.peek_u8().map_err(AstError::from)?,
+            offset: reader.position(),
+        }
+        .into());
+    }
+    let index =
+        nodes.deep_address_index_with_source_and_max_depth(bytes, DEFAULT_MAX_AST_INDEX_DEPTH)?;
+    Ok((nodes, index))
+}
+
+fn top_level_nodes<'a>(bytes: &'a [u8]) -> Result<RawNodes<'a>, TermEncodeError> {
+    Ok(ast_index_with_nodes(bytes)?.0)
 }
 
 fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
@@ -807,10 +1056,14 @@ mod tests {
         Attribute, Comment, EncodedSection, PositionCoordinate, PositionEntry, PositionSection,
         ResolvedPosition, ResolvedPositionEntry, Section, SectionError, SectionTable,
     };
-    use crate::ast::{AstError, PackageNode, RawNode, RawNodes, ReturnNode, StructuredNode};
+    use crate::ast::{
+        AstError, DEFAULT_MAX_AST_INDEX_DEPTH, PackageNode, RawNode, RawNodes, ReturnNode,
+        StructuredNode,
+    };
     use crate::reader::{ReadError, Reader};
     use crate::term::{AstRef, AstRefKind, RawTree, TermEncodeError, TermValue};
     use crate::writer::{WriteError, Writer};
+    use std::collections::BTreeMap;
 
     #[test]
     fn encodes_all_attributes_in_wire_order() {
@@ -958,6 +1211,101 @@ mod tests {
                 },
                 ResolvedPositionEntry::Source(8),
             ])
+        );
+    }
+
+    #[test]
+    fn relocates_position_association_addresses_and_preserves_coordinates() {
+        let positions = PositionSection {
+            line_sizes: vec![20],
+            entries: vec![
+                PositionEntry::Source(7),
+                PositionEntry::Association {
+                    address_delta: 10,
+                    start_delta: Some(4),
+                    end_delta: Some(9),
+                    point_delta: None,
+                },
+                PositionEntry::Association {
+                    address_delta: 3,
+                    start_delta: Some(2),
+                    end_delta: None,
+                    point_delta: Some(-1),
+                },
+            ],
+        };
+        let address_map = BTreeMap::from([(10, 100), (13, 109)]);
+
+        let relocated = positions.relocate_ast_addresses(&address_map).unwrap();
+
+        assert_eq!(
+            relocated.entries,
+            vec![
+                PositionEntry::Source(7),
+                PositionEntry::Association {
+                    address_delta: 100,
+                    start_delta: Some(4),
+                    end_delta: Some(9),
+                    point_delta: None,
+                },
+                PositionEntry::Association {
+                    address_delta: 9,
+                    start_delta: Some(2),
+                    end_delta: None,
+                    point_delta: Some(-1),
+                },
+            ]
+        );
+        assert_eq!(
+            relocated.resolved_entries().unwrap(),
+            vec![
+                ResolvedPositionEntry::Source(7),
+                ResolvedPositionEntry::Association {
+                    address: 100,
+                    start: 4,
+                    end: 9,
+                    point: 0,
+                },
+                ResolvedPositionEntry::Association {
+                    address: 109,
+                    start: 6,
+                    end: 9,
+                    point: -1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn relocates_comment_ast_addresses_without_changing_comment_metadata() {
+        let comments = vec![
+            Comment {
+                address: 10,
+                text: "pierwszy".to_owned(),
+                coordinates: -4,
+            },
+            Comment {
+                address: 13,
+                text: "drugi".to_owned(),
+                coordinates: 19,
+            },
+        ];
+        let address_map = BTreeMap::from([(10, 100), (13, 109)]);
+
+        assert_eq!(
+            Comment::relocate_ast_addresses(&comments, &address_map),
+            vec![
+                Comment {
+                    address: 100,
+                    text: "pierwszy".to_owned(),
+                    coordinates: -4,
+                },
+                Comment {
+                    address: 109,
+                    text: "drugi".to_owned(),
+                    coordinates: 19,
+                },
+            ]
         );
     }
 
@@ -1226,6 +1574,90 @@ mod tests {
                 address: 4,
             }))
         );
+    }
+
+    #[test]
+    fn relocates_structured_ast_references_after_node_growth() {
+        fn select_outer_tree(levels: u32) -> RawTree<'static> {
+            let mut payload = Writer::new();
+            payload.write_nat(levels);
+            RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1))
+                .unwrap()
+                .encode(&mut payload)
+                .unwrap();
+            RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1))
+                .unwrap()
+                .encode(&mut payload)
+                .unwrap();
+
+            let mut bytes = Writer::new();
+            bytes.write_u8(crate::SELECTOUTER_TAG);
+            bytes
+                .write_length_prefixed_bytes(payload.as_slice())
+                .unwrap();
+            let leaked = Box::leak(bytes.into_inner().into_boxed_slice());
+            let mut reader = Reader::new(leaked);
+            RawTree::decode(&mut reader).unwrap()
+        }
+
+        let expression = select_outer_tree(127);
+        let second = StructuredNode::Package(PackageNode {
+            path: RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1)).unwrap(),
+            stats: RawNodes::from_entries(Vec::new()).unwrap(),
+        });
+        let placeholder = StructuredNode::Return(ReturnNode {
+            target: AstRef {
+                kind: AstRefKind::ReturnTarget,
+                address: 0,
+            },
+            expression: Some(expression),
+        });
+        let mut placeholder_writer = Writer::new();
+        placeholder.encode(&mut placeholder_writer).unwrap();
+        let second_address = placeholder_writer.position() as u32;
+        second.encode(&mut placeholder_writer).unwrap();
+
+        let original = StructuredNode::Return(ReturnNode {
+            target: AstRef {
+                kind: AstRefKind::ReturnTarget,
+                address: second_address,
+            },
+            expression: Some(select_outer_tree(127)),
+        });
+        let mut original_writer = Writer::new();
+        original.encode(&mut original_writer).unwrap();
+        second.encode(&mut original_writer).unwrap();
+        let original_payload = original_writer.into_inner();
+
+        let mut structured = {
+            let mut reader = Reader::new(&original_payload);
+            let original_nodes = RawNodes::decode(&mut reader).unwrap();
+            original_nodes
+                .iter()
+                .map(|node| node.decode_structured().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let StructuredNode::Return(return_node) = &mut structured[0] else {
+            panic!("expected a return node");
+        };
+        return_node.expression = Some(select_outer_tree(128));
+
+        let encoded =
+            EncodedSection::structured_asts_relocated(4, &original_payload, &structured).unwrap();
+        assert_eq!(encoded.ast_addresses()[0], 0);
+        assert!(encoded.ast_addresses()[1] > second_address);
+
+        let mut reparsed_reader = Reader::new(encoded.payload());
+        let reparsed_nodes = RawNodes::decode(&mut reparsed_reader).unwrap();
+        let return_node = reparsed_nodes.get(0).unwrap().decode_return().unwrap();
+        assert_eq!(return_node.target.address, encoded.ast_addresses()[1]);
+        let reparsed_index = reparsed_nodes
+            .deep_address_index_with_source_and_max_depth(
+                encoded.payload(),
+                DEFAULT_MAX_AST_INDEX_DEPTH,
+            )
+            .unwrap();
+        assert!(reparsed_index.resolve_node(return_node.target).is_some());
     }
 
     #[test]

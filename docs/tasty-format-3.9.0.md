@@ -490,11 +490,17 @@ and known category-5 payloads through `StructuredTree`.
 Category-1/2 constants use their canonical tags, while leaves, wrappers, and
 bounded nodes retain the tags represented by their typed payloads.
 Structured encoding may therefore canonicalize wire-level integer lengths and
-does not preserve decoded offset metadata. The owned structured AST-section
-builders validate the emitted AST references and reject references that no
-longer target visible nodes after a size change; they do not guess a
-relocation for stale addresses. Use the raw AST-section builders when exact
-bytes and original addresses must be preserved.
+does not preserve decoded offset metadata. The ordinary owned structured
+AST-section builders validate the emitted AST references and reject references
+that no longer target visible nodes after a size change. When a caller
+intentionally changes node sizes, `EncodedSection::structured_asts_relocated()`
+can relocate references from the original AST payload to the new layout. The
+relocation is iterative because changing the width of an address can move
+later nodes; opaque unknown nodes are rejected if their positions change.
+`TastyFile::encode_structured_relocated()` applies the same mapping to the
+`Positions` and `Comments` sections and validates the complete resulting file.
+Use the raw AST-section builders when exact bytes and original addresses must
+be preserved.
 
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
@@ -866,6 +872,9 @@ The corresponding `*_with_addresses()` constructors return an
 top-level node addresses.
 `TastyFileBuilder` owns these encoded sections and produces either a complete
 byte stream or an `EncodedTastyFile` with the allocated AST addresses.
+`TastyFile::encode_structured_relocated()` is the file-level path for
+re-encoding decoded structured ASTs while keeping AST references, comments,
+and source-position associations consistent with the newly allocated layout.
 Its `validate()` and `validate_scala_3_9()` methods allow checking the complete
 owned file before serialization; corresponding
 `*_with_max_ast_index_depth` methods allow an explicit AST nesting limit.

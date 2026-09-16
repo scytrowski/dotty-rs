@@ -1019,6 +1019,17 @@ pub enum AstError {
     InvalidAstReference {
         address: u32,
     },
+    AstNodeCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    UnsupportedRelocation {
+        tag: u8,
+        offset: usize,
+    },
+    RelocationDidNotConverge {
+        iterations: usize,
+    },
 }
 
 impl fmt::Display for AstError {
@@ -1048,6 +1059,18 @@ impl fmt::Display for AstError {
             Self::InvalidAstReference { address } => write!(
                 formatter,
                 "AST reference address {address} does not identify a visible node"
+            ),
+            Self::AstNodeCountMismatch { expected, actual } => write!(
+                formatter,
+                "AST relocation changed the visible node count from {expected} to {actual}"
+            ),
+            Self::UnsupportedRelocation { tag, offset } => write!(
+                formatter,
+                "cannot relocate opaque AST tag {tag} at offset {offset}"
+            ),
+            Self::RelocationDidNotConverge { iterations } => write!(
+                formatter,
+                "AST address relocation did not converge after {iterations} iterations"
             ),
         }
     }
@@ -1185,6 +1208,16 @@ impl<'a> RawNodes<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for node in &self.nodes {
             node.encode(writer)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode_with_ast_address_map(
+        &self,
+        writer: &mut Writer,
+    ) -> Result<(), TermEncodeError> {
+        for node in &self.nodes {
+            node.encode_with_ast_address_map(writer)?;
         }
         Ok(())
     }
@@ -2148,6 +2181,24 @@ impl<'a> RawNode<'a> {
         }
         writer.write_u8(self.tag);
         writer.write_length_prefixed_bytes(self.payload)
+    }
+
+    pub(crate) fn encode_with_ast_address_map(
+        &self,
+        writer: &mut Writer,
+    ) -> Result<(), TermEncodeError> {
+        let structured = self.decode_structured()?;
+        let mut needs_relocation = false;
+        collect_structured_ast_refs(&structured, &mut |reference| {
+            needs_relocation |= writer.relocated_ast_ref(reference.address) != reference.address;
+        })?;
+        if !needs_relocation {
+            return self.encode(writer).map_err(TermEncodeError::from);
+        }
+        match structured {
+            StructuredNode::Raw(_) => self.encode(writer).map_err(TermEncodeError::from),
+            structured => structured.encode(writer),
+        }
     }
 
     pub fn decode_package(&self) -> Result<PackageNode<'a>, AstError> {
@@ -3637,7 +3688,7 @@ impl<'a> PackageNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PACKAGE_TAG, writer, |payload| {
             self.path.encode(payload)?;
-            self.stats.encode(payload).map_err(TermEncodeError::from)
+            encode_raw_nodes(&self.stats, payload)
         })
     }
 
@@ -3722,7 +3773,11 @@ impl<'a> DefinitionTail<'a> {
             }
             Self::QualifiedModifier(modifier) => modifier.encode(writer)?,
             Self::Annotation(annotation) => {
-                annotation.encode(writer).map_err(TermEncodeError::from)?
+                if writer.has_ast_address_map() {
+                    annotation.encode_with_ast_address_map(writer)?;
+                } else {
+                    annotation.encode(writer).map_err(TermEncodeError::from)?;
+                }
             }
         }
         Ok(())
@@ -3950,7 +4005,7 @@ impl<'a> SelectOuterNode<'a> {
 impl<'a> ReturnNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(RETURN_TAG, writer, |payload| {
-            payload.write_nat(self.target.address);
+            payload.write_ast_ref(self.target.address);
             if let Some(expression) = &self.expression {
                 expression.encode(payload)?;
             }
@@ -4021,9 +4076,7 @@ impl<'a> InlinedNode<'a> {
             if let Some(call_site) = &self.call_site {
                 call_site.encode(payload)?;
             }
-            self.definitions
-                .encode(payload)
-                .map_err(TermEncodeError::from)
+            encode_raw_nodes(&self.definitions, payload)
         })
     }
 }
@@ -4139,7 +4192,7 @@ impl<'a> AnnotationNode<'a> {
 impl ParamTypeNode {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PARAMTYPE_TAG, writer, |payload| {
-            payload.write_nat(self.binder.address);
+            payload.write_ast_ref(self.binder.address);
             payload.write_nat(self.parameter_number);
             Ok(())
         })
@@ -4198,7 +4251,7 @@ impl<'a> RefinedTptNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(REFINEDTPT_TAG, writer, |payload| {
             self.qualifier.encode(payload)?;
-            self.stats.encode(payload).map_err(TermEncodeError::from)
+            encode_raw_nodes(&self.stats, payload)
         })
     }
 }
@@ -4209,9 +4262,18 @@ impl<'a> ParameterNode<'a> {
             Self::TypeParam { name, .. } => (TYPEPARAM_TAG, *name),
             Self::TermParam { name, .. } => (PARAM_TAG, *name),
         };
+        let remap_ast_refs = writer.has_ast_address_map();
         encode_length_node(tag, writer, |payload| {
             payload.write_nat(name);
-            payload.write_bytes(self.body());
+            if remap_ast_refs {
+                let body = self.decode_body()?;
+                body.type_tree.encode(payload)?;
+                for entry in &body.tail {
+                    entry.encode(payload)?;
+                }
+            } else {
+                payload.write_bytes(self.body());
+            }
             Ok(())
         })
     }
@@ -4358,7 +4420,7 @@ fn encode_length_node<F>(
 where
     F: FnOnce(&mut Writer) -> Result<(), TermEncodeError>,
 {
-    let mut payload = Writer::new();
+    let mut payload = writer.nested();
     encode_payload(&mut payload)?;
     writer.write_u8(tag);
     writer.write_length_prefixed_bytes(payload.as_slice())?;
@@ -4370,6 +4432,14 @@ fn encode_trees<'a>(trees: &[RawTree<'a>], writer: &mut Writer) -> Result<(), Te
         tree.encode(writer)?;
     }
     Ok(())
+}
+
+fn encode_raw_nodes(nodes: &RawNodes<'_>, writer: &mut Writer) -> Result<(), TermEncodeError> {
+    if writer.has_ast_address_map() {
+        nodes.encode_with_ast_address_map(writer)
+    } else {
+        nodes.encode(writer).map_err(TermEncodeError::from)
+    }
 }
 
 impl<'a> RawTree<'a> {

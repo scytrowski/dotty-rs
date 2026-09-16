@@ -10,7 +10,7 @@ use crate::section::{
     Attribute, Comment, EncodedSection, PositionSection, ResolvedPosition, Section, SectionError,
     SectionTable, StandardSection,
 };
-use crate::term::{AstRef, AstTreeNode};
+use crate::term::{AstRef, AstTreeNode, TermEncodeError};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -67,6 +67,7 @@ pub enum TastyFileError {
     Names(NameTableError),
     Sections(SectionError),
     Asts(AstError),
+    Terms(TermEncodeError),
     Write(WriteError),
     MissingSection(StandardSection),
     InvalidNameReference {
@@ -100,6 +101,10 @@ impl fmt::Display for TastyFileError {
             Self::Names(error) => write!(formatter, "invalid TASTy name table: {error}"),
             Self::Sections(error) => write!(formatter, "invalid TASTy section table: {error}"),
             Self::Asts(error) => write!(formatter, "invalid TASTy ASTs section: {error}"),
+            Self::Terms(error) => write!(
+                formatter,
+                "failed to encode structured TASTy terms: {error}"
+            ),
             Self::Write(error) => write!(formatter, "failed to encode TASTy file: {error}"),
             Self::MissingSection(section) => {
                 write!(formatter, "TASTy file has no {} section", section.as_str())
@@ -160,6 +165,12 @@ impl From<SectionError> for TastyFileError {
 impl From<AstError> for TastyFileError {
     fn from(error: AstError) -> Self {
         Self::Asts(error)
+    }
+}
+
+impl From<TermEncodeError> for TastyFileError {
+    fn from(error: TermEncodeError) -> Self {
+        Self::Terms(error)
     }
 }
 
@@ -680,6 +691,45 @@ impl<'a> TastyFile<'a> {
             .iter()
             .map(|node| node.decode_structured())
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Re-encode structured AST nodes and relocate all references to the new
+    /// AST layout, including addresses stored in `Positions` and `Comments`.
+    /// The resulting file is fully validated before it is returned.
+    pub fn encode_structured_relocated(
+        &self,
+        nodes: &[StructuredNode<'a>],
+    ) -> Result<Vec<u8>, TastyFileError> {
+        let original_ast_section = self
+            .section(StandardSection::Asts)
+            .ok_or(TastyFileError::MissingSection(StandardSection::Asts))?;
+        let ast_section = EncodedSection::structured_asts_relocated(
+            original_ast_section.name,
+            original_ast_section.payload,
+            nodes,
+        )?;
+        let ast_address_map = ast_section.ast_address_map().clone();
+
+        let mut builder = TastyFileBuilder::new(self.header.clone(), self.names.clone());
+        for section in self.sections.iter() {
+            let encoded = match section.standard_kind(&self.names) {
+                Some(StandardSection::Asts) => ast_section.section().clone(),
+                Some(StandardSection::Comments) => {
+                    let comments = section.decode_comments()?;
+                    let comments = Comment::relocate_ast_addresses(&comments, &ast_address_map);
+                    EncodedSection::comments(section.name, &comments)?
+                }
+                Some(StandardSection::Positions) => {
+                    let positions = section.decode_positions()?;
+                    let positions = positions.relocate_ast_addresses(&ast_address_map)?;
+                    EncodedSection::positions(section.name, &positions)?
+                }
+                _ => EncodedSection::raw(section.name, section.payload),
+            };
+            builder.push_section(encoded);
+        }
+
+        builder.encode_validated()
     }
 
     pub fn ast_at(&self, address: u32) -> Result<Option<crate::RawNode<'a>>, TastyFileError> {

@@ -345,9 +345,10 @@ impl SimpleTerm {
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
             | (TermValue::Null, 5) => {}
-            (TermValue::AstRef(value), 60..=63 | 66)
-            | (TermValue::NameRef(value), 64..=65 | 74..=76)
-            | (TermValue::Nat(value), 69) => writer.write_nat(*value),
+            (TermValue::AstRef(value), 60..=63 | 66) => writer.write_ast_ref(*value),
+            (TermValue::NameRef(value), 64..=65 | 74..=76) | (TermValue::Nat(value), 69) => {
+                writer.write_nat(*value)
+            }
             (TermValue::Int(value), 67 | 68 | 70 | 72) => writer.write_int(*value),
             (TermValue::LongInt(value), 71 | 73) => writer.write_long_int(*value),
             _ => return Err(TermEncodeError::InvalidValue { tag: self.tag }),
@@ -688,6 +689,9 @@ impl<'a> RawTree<'a> {
                 writer.write_u8(*tag);
                 writer.write_nat(*value);
                 child.encode(writer)
+            }
+            Self::LengthNode(node) if writer.has_ast_address_map() => {
+                node.encode_with_ast_address_map(writer)
             }
             Self::LengthNode(node) => node.encode(writer).map_err(TermEncodeError::from),
         }
