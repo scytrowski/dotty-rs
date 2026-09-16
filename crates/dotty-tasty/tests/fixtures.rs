@@ -249,7 +249,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                 panic!("failed to parse package in {}: {error}", path.display())
             });
         assert!(
-            names.get(package.path_name).is_some(),
+            names.get(package.path_name().unwrap()).is_some(),
             "fixture {} has an unresolved package path name",
             path.display()
         );
@@ -373,6 +373,9 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                         }
                     }
                     for nested in structure.stats.iter() {
+                        let dotty_tasty::tasty::RawTree::LengthNode(nested) = nested else {
+                            continue;
+                        };
                         if matches!(
                             nested.tag,
                             dotty_tasty::tasty::IMPORT_TAG | dotty_tasty::tasty::EXPORT_TAG

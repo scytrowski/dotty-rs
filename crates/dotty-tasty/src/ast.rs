@@ -463,7 +463,9 @@ impl EncodedAstNodes {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageNode<'a> {
-    pub path_name: u32,
+    /// The package path. TASTy permits any `Path` form here, including a
+    /// shared type reference used by nested package nodes.
+    pub path: RawTree<'a>,
     pub stats: RawNodes<'a>,
 }
 
@@ -838,6 +840,8 @@ pub struct TypeBoundsNode<'a> {
     pub tag: u8,
     pub low_or_alias: RawTree<'a>,
     pub high: Option<RawTree<'a>>,
+    /// The optional alias tree used by `TYPEBOUNDStpt`.
+    pub alias: Option<RawTree<'a>>,
     pub variances: Vec<u8>,
 }
 
@@ -861,8 +865,13 @@ pub struct ParamTypeNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeName {
-    pub type_or_bounds: AstRef,
+pub struct TypeName<'a> {
+    /// The complete type or bounds tree associated with the type parameter.
+    ///
+    /// The Scala compiler writes this tree before the parameter name. It is
+    /// not an AST reference encoded as a bare Nat; keeping the tree here
+    /// preserves nested references and names for indexing and round-trips.
+    pub type_or_bounds: RawTree<'a>,
     pub name: u32,
 }
 
@@ -870,13 +879,13 @@ pub struct TypeName {
 pub struct PolyTypeNode<'a> {
     pub tag: u8,
     pub result_type: RawTree<'a>,
-    pub type_names: Vec<TypeName>,
+    pub type_names: Vec<TypeName<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodTypeNode<'a> {
     pub result_type: RawTree<'a>,
-    pub type_names: Vec<TypeName>,
+    pub type_names: Vec<TypeName<'a>>,
     pub modifiers: Vec<u8>,
 }
 
@@ -959,7 +968,9 @@ pub struct TemplateStructure<'a> {
     pub parents: Vec<RawTree<'a>>,
     pub self_def: Option<RawTree<'a>>,
     pub split_clause: bool,
-    pub stats: RawNodes<'a>,
+    /// Template stats are ordered terms, not only category-five definitions.
+    /// Compiler-generated templates can contain a path or another term here.
+    pub stats: Vec<RawTree<'a>>,
 }
 
 impl<'a> DefinitionNode<'a> {
@@ -1770,7 +1781,10 @@ fn collect_structured_nodes<'a>(
     }
 
     match node {
-        StructuredNode::Package(package) => raw_nodes!(&package.stats),
+        StructuredNode::Package(package) => {
+            tree!(&package.path);
+            raw_nodes!(&package.stats);
+        }
         StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => definition_body!(body),
         StructuredNode::DefDef(body) => {
             parameters!(&body.parameters);
@@ -1908,7 +1922,7 @@ fn collect_structured_nodes<'a>(
             if let Some(self_def) = &template.self_def {
                 tree!(self_def);
             }
-            raw_nodes!(&template.stats);
+            trees!(&template.stats);
         }
         StructuredNode::Super(super_node) => {
             tree!(&super_node.this_term);
@@ -1937,6 +1951,9 @@ fn collect_structured_nodes<'a>(
             if let Some(high) = &bounds.high {
                 tree!(high);
             }
+            if let Some(alias) = &bounds.alias {
+                tree!(alias);
+            }
         }
         StructuredNode::FlexibleType(flexible) => {
             tree!(&flexible.underlying_type);
@@ -1947,10 +1964,16 @@ fn collect_structured_nodes<'a>(
         }
         StructuredNode::PolyType(poly) => {
             tree!(&poly.result_type);
+            for type_name in &poly.type_names {
+                tree!(&type_name.type_or_bounds);
+            }
         }
         StructuredNode::ParamType(_) => {}
         StructuredNode::MethodType(method) => {
             tree!(&method.result_type);
+            for type_name in &method.type_names {
+                tree!(&type_name.type_or_bounds);
+            }
         }
         StructuredNode::ApplySigPoly(apply) => {
             tree!(&apply.function);
@@ -2130,19 +2153,10 @@ impl<'a> RawNode<'a> {
             });
         }
 
-        let path_offset = reader.position();
-        let path_tag = reader.read_u8()?;
-        if path_tag != TERMREFPKG_TAG {
-            return Err(AstError::UnexpectedTag {
-                expected: TERMREFPKG_TAG,
-                actual: path_tag,
-                offset: self.offset + path_offset,
-            });
-        }
-        let path_name = reader.read_nat()?;
+        let path = RawTree::decode(&mut reader)?;
         let stats = RawNodes::decode(&mut reader)?;
 
-        Ok(PackageNode { path_name, stats })
+        Ok(PackageNode { path, stats })
     }
 
     pub fn decode_definition(&self) -> Result<DefinitionNode<'a>, AstError> {
@@ -3141,15 +3155,36 @@ impl<'a> RawNode<'a> {
 
         let mut reader = self.reader();
         let low_or_alias = RawTree::decode(&mut reader)?;
-        let high = if reader.is_at_end() || matches!(reader.peek_u8()?, 28 | 29) {
-            None
+        let (high, alias) = if self.tag == TYPEBOUNDSTPT_TAG {
+            let high = if reader.is_at_end() {
+                None
+            } else {
+                Some(RawTree::decode(&mut reader)?)
+            };
+            let alias = if reader.is_at_end() {
+                None
+            } else {
+                Some(RawTree::decode(&mut reader)?)
+            };
+            (high, alias)
         } else {
-            Some(RawTree::decode(&mut reader)?)
+            let high = if reader.is_at_end() || matches!(reader.peek_u8()?, STABLE_TAG | 28 | 29) {
+                None
+            } else {
+                Some(RawTree::decode(&mut reader)?)
+            };
+            (high, None)
         };
         let mut variances = Vec::new();
         while !reader.is_at_end() {
+            if self.tag != TYPEBOUNDS_TAG {
+                return Err(AstError::UnsupportedCategory {
+                    tag: self.tag,
+                    offset: self.offset,
+                });
+            }
             let variance = reader.read_u8()?;
-            if !matches!(variance, 28 | 29) {
+            if !matches!(variance, STABLE_TAG | 28 | 29) {
                 return Err(AstError::UnexpectedTag {
                     expected: 28,
                     actual: variance,
@@ -3163,6 +3198,7 @@ impl<'a> RawNode<'a> {
             tag: self.tag,
             low_or_alias,
             high,
+            alias,
             variances,
         })
     }
@@ -3260,10 +3296,7 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::new();
         while !reader.is_at_end() {
             type_names.push(TypeName {
-                type_or_bounds: AstRef {
-                    kind: AstRefKind::TypeNameBounds,
-                    address: reader.read_nat()?,
-                },
+                type_or_bounds: RawTree::decode(&mut reader)?,
                 name: reader.read_nat()?,
             });
         }
@@ -3289,10 +3322,7 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::new();
         while !reader.is_at_end() && !is_modifier_tag(reader.peek_u8()?) {
             type_names.push(TypeName {
-                type_or_bounds: AstRef {
-                    kind: AstRefKind::TypeNameBounds,
-                    address: reader.read_nat()?,
-                },
+                type_or_bounds: RawTree::decode(&mut reader)?,
                 name: reader.read_nat()?,
             });
         }
@@ -3319,9 +3349,8 @@ impl<'a> RawNode<'a> {
     }
 
     /// Decodes a method type when the surrounding typed context provides the
-    /// number of `TypeName` entries. The wire format does not delimit those
-    /// entries from the trailing modifiers, so this is the unambiguous form
-    /// for type-name values whose first byte happens to be a modifier tag.
+    /// number of `TypeName` entries. This is useful when the surrounding
+    /// typed context already knows how many parameter names are present.
     pub fn decode_method_type_with_type_name_count(
         &self,
         type_name_count: usize,
@@ -3337,9 +3366,9 @@ impl<'a> RawNode<'a> {
         let mut reader = self.reader();
         let result_type = RawTree::decode(&mut reader)?;
 
-        // A TypeName contains two Nat values, so two bytes is the minimum
-        // possible representation. Check that lower bound before reserving
-        // capacity for a caller-supplied count.
+        // A TypeName contains a tree and a name Nat. A one-byte leaf plus a
+        // one-byte name is the minimum representation; check that lower bound
+        // before reserving capacity for a caller-supplied count.
         let minimum_bytes = type_name_count.saturating_mul(2);
         if minimum_bytes > reader.remaining() {
             return Err(AstError::Read(ReadError::UnexpectedEof {
@@ -3352,10 +3381,7 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::with_capacity(type_name_count);
         for _ in 0..type_name_count {
             type_names.push(TypeName {
-                type_or_bounds: AstRef {
-                    kind: AstRefKind::TypeNameBounds,
-                    address: reader.read_nat()?,
-                },
+                type_or_bounds: RawTree::decode(&mut reader)?,
                 name: reader.read_nat()?,
             });
         }
@@ -3583,17 +3609,7 @@ impl<'a> RawNode<'a> {
             }
 
             if in_stats {
-                let offset = reader.position();
-                match RawTree::decode(&mut reader)? {
-                    RawTree::LengthNode(raw) => stats.push(raw),
-                    _ => {
-                        return Err(AstError::UnexpectedTag {
-                            expected: PACKAGE_TAG,
-                            actual: tag,
-                            offset,
-                        });
-                    }
-                }
+                stats.push(RawTree::decode(&mut reader)?);
             } else {
                 parents.push(RawTree::decode(&mut reader)?);
             }
@@ -3605,7 +3621,7 @@ impl<'a> RawNode<'a> {
             parents,
             self_def,
             split_clause,
-            stats: RawNodes { nodes: stats },
+            stats,
         })
     }
 }
@@ -3613,10 +3629,20 @@ impl<'a> RawNode<'a> {
 impl<'a> PackageNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PACKAGE_TAG, writer, |payload| {
-            payload.write_u8(TERMREFPKG_TAG);
-            payload.write_nat(self.path_name);
+            self.path.encode(payload)?;
             self.stats.encode(payload).map_err(TermEncodeError::from)
         })
+    }
+
+    /// Returns the direct package name when the path uses `TERMREFpkg`.
+    pub fn path_name(&self) -> Option<u32> {
+        match &self.path {
+            RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => match term.value {
+                crate::term::TermValue::NameRef(reference) => Some(reference),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 
@@ -3808,7 +3834,7 @@ impl<'a> TemplateStructure<'a> {
             if self.split_clause {
                 payload.write_u8(SPLITCLAUSE_TAG);
             }
-            self.stats.encode(payload).map_err(TermEncodeError::from)
+            encode_trees(&self.stats, payload)
         })
     }
 }
@@ -4062,11 +4088,20 @@ impl<'a> TypeBoundsNode<'a> {
             if let Some(high) = &self.high {
                 high.encode(payload)?;
             }
-            for variance in &self.variances {
-                if !matches!(*variance, 28 | 29) {
+            if self.tag == TYPEBOUNDS_TAG {
+                for variance in &self.variances {
+                    if !matches!(*variance, STABLE_TAG | 28 | 29) {
+                        return Err(TermEncodeError::InvalidValue { tag: *variance });
+                    }
+                    payload.write_u8(*variance);
+                }
+            } else {
+                if let Some(alias) = &self.alias {
+                    alias.encode(payload)?;
+                }
+                if let Some(variance) = self.variances.first() {
                     return Err(TermEncodeError::InvalidValue { tag: *variance });
                 }
-                payload.write_u8(*variance);
             }
             Ok(())
         })
@@ -4112,7 +4147,7 @@ impl<'a> PolyTypeNode<'a> {
         encode_length_node(self.tag, writer, |payload| {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
-                payload.write_nat(type_name.type_or_bounds.address);
+                type_name.type_or_bounds.encode(payload)?;
                 payload.write_nat(type_name.name);
             }
             Ok(())
@@ -4125,7 +4160,7 @@ impl<'a> MethodTypeNode<'a> {
         encode_length_node(METHODTYPE_TAG, writer, |payload| {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
-                payload.write_nat(type_name.type_or_bounds.address);
+                type_name.type_or_bounds.encode(payload)?;
                 payload.write_nat(type_name.name);
             }
             for modifier in &self.modifiers {
@@ -4767,7 +4802,10 @@ fn collect_structured_ast_refs(
     visitor: &mut impl FnMut(AstRef),
 ) -> Result<(), AstError> {
     match node {
-        StructuredNode::Package(package) => collect_raw_nodes_ast_refs(&package.stats, visitor)?,
+        StructuredNode::Package(package) => {
+            collect_tree_ast_refs(&package.path, visitor);
+            collect_raw_nodes_ast_refs(&package.stats, visitor)?;
+        }
         StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => {
             collect_definition_body_ast_refs(body, visitor)?;
         }
@@ -4888,7 +4926,7 @@ fn collect_structured_ast_refs(
             if let Some(self_def) = &template.self_def {
                 collect_tree_ast_refs(self_def, visitor);
             }
-            collect_raw_nodes_ast_refs(&template.stats, visitor)?;
+            collect_trees_ast_refs(&template.stats, visitor);
         }
         StructuredNode::Super(super_node) => {
             collect_tree_ast_refs(&super_node.this_term, visitor);
@@ -4917,6 +4955,9 @@ fn collect_structured_ast_refs(
             if let Some(high) = &bounds.high {
                 collect_tree_ast_refs(high, visitor);
             }
+            if let Some(alias) = &bounds.alias {
+                collect_tree_ast_refs(alias, visitor);
+            }
         }
         StructuredNode::FlexibleType(flexible) => {
             collect_tree_ast_refs(&flexible.underlying_type, visitor);
@@ -4928,14 +4969,14 @@ fn collect_structured_ast_refs(
         StructuredNode::PolyType(poly) => {
             collect_tree_ast_refs(&poly.result_type, visitor);
             for type_name in &poly.type_names {
-                visitor(type_name.type_or_bounds);
+                collect_tree_ast_refs(&type_name.type_or_bounds, visitor);
             }
         }
         StructuredNode::ParamType(param_type) => visitor(param_type.binder),
         StructuredNode::MethodType(method) => {
             collect_tree_ast_refs(&method.result_type, visitor);
             for type_name in &method.type_names {
-                visitor(type_name.type_or_bounds);
+                collect_tree_ast_refs(&type_name.type_or_bounds, visitor);
             }
         }
         StructuredNode::ApplySigPoly(apply) => {
@@ -5131,7 +5172,7 @@ fn collect_structured_name_refs(
 
     match node {
         StructuredNode::Package(package) => {
-            visitor(package.path_name);
+            package.path.visit_name_refs(visitor);
             raw_nodes!(&package.stats);
         }
         StructuredNode::ValDef(body) | StructuredNode::TypeDef(body) => definition_body!(body),
@@ -5254,7 +5295,7 @@ fn collect_structured_name_refs(
             if let Some(self_def) = &template.self_def {
                 tree!(self_def);
             }
-            raw_nodes!(&template.stats);
+            trees!(&template.stats);
         }
         StructuredNode::Super(super_node) => {
             tree!(&super_node.this_term);
@@ -5284,6 +5325,9 @@ fn collect_structured_name_refs(
             if let Some(high) = &bounds.high {
                 tree!(high);
             }
+            if let Some(alias) = &bounds.alias {
+                tree!(alias);
+            }
         }
         StructuredNode::FlexibleType(flexible) => tree!(&flexible.underlying_type),
         StructuredNode::LambdaTpt(lambda) => {
@@ -5293,6 +5337,7 @@ fn collect_structured_name_refs(
         StructuredNode::PolyType(poly) => {
             tree!(&poly.result_type);
             for type_name in &poly.type_names {
+                tree!(&type_name.type_or_bounds);
                 visitor(type_name.name);
             }
         }
@@ -5300,6 +5345,7 @@ fn collect_structured_name_refs(
         StructuredNode::MethodType(method) => {
             tree!(&method.result_type);
             for type_name in &method.type_names {
+                tree!(&type_name.type_or_bounds);
                 visitor(type_name.name);
             }
         }
@@ -5465,11 +5511,12 @@ mod tests {
         RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
         RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
         SELFDEF_TAG, SHAREDTYPE_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
-        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree,
-        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
-        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
-        TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        SPLITCLAUSE_TAG, STABLE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode,
+        StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
+        TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
+        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
+        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG,
+        WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::{AstRef, AstTreeNode, TermEncodeError};
@@ -5720,9 +5767,45 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let package = nodes.get(0).unwrap().decode_package().unwrap();
 
-        assert_eq!(package.path_name, 5);
+        assert_eq!(package.path_name(), Some(5));
         assert_eq!(package.stats.len(), 1);
         assert_eq!(package.stats.get(0).unwrap().tag, 129);
+    }
+
+    #[test]
+    fn decodes_and_round_trips_a_shared_package_path() {
+        let bytes = [
+            PACKAGE_TAG,
+            0x86,
+            SHAREDTYPE_TAG,
+            0x81,
+            PACKAGE_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x81,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let package = nodes.get(0).unwrap().decode_package().unwrap();
+
+        assert!(matches!(
+            &package.path,
+            RawTree::Leaf(term)
+                if term.tag == SHAREDTYPE_TAG
+                    && term.value == crate::term::TermValue::AstRef(1)
+        ));
+        assert_eq!(package.stats.len(), 1);
+        assert_eq!(
+            nodes.get(0).unwrap().ast_refs().unwrap(),
+            vec![AstRef {
+                kind: crate::term::AstRefKind::SharedType,
+                address: 1,
+            }]
+        );
+
+        let mut writer = Writer::new();
+        package.encode(&mut writer).unwrap();
+        assert_eq!(writer.as_slice(), &bytes);
     }
 
     #[test]
@@ -5730,16 +5813,18 @@ mod tests {
         let node = RawNode {
             tag: PACKAGE_TAG,
             offset: 4,
-            payload: &[2],
+            payload: &[],
         };
 
         assert_eq!(
             node.decode_package(),
-            Err(AstError::UnexpectedTag {
-                expected: TERMREFPKG_TAG,
-                actual: 2,
-                offset: 4,
-            })
+            Err(AstError::Term(crate::term::TermError::Read(
+                ReadError::UnexpectedEof {
+                    offset: 0,
+                    needed: 1,
+                    remaining: 0,
+                },
+            )))
         );
     }
 
@@ -6979,10 +7064,31 @@ mod tests {
 
     #[test]
     fn decodes_type_bounds_with_optional_high_type_and_variances() {
-        for (tag, payload, has_high, expected_variances) in [
-            (TYPEBOUNDS_TAG, vec![2], false, vec![]),
-            (TYPEBOUNDSTPT_TAG, vec![2, 28, 29], false, vec![28, 29]),
-            (TYPEBOUNDS_TAG, vec![2, 5, 28], true, vec![28]),
+        for (tag, payload, has_high, has_alias, expected_variances) in [
+            (TYPEBOUNDS_TAG, vec![2], false, false, vec![]),
+            (TYPEBOUNDSTPT_TAG, vec![2], false, false, vec![]),
+            (
+                TYPEBOUNDS_TAG,
+                vec![2, STABLE_TAG],
+                false,
+                false,
+                vec![STABLE_TAG],
+            ),
+            (
+                TYPEBOUNDSTPT_TAG,
+                vec![2, TERMREFPKG_TAG, 0x81],
+                true,
+                false,
+                vec![],
+            ),
+            (
+                TYPEBOUNDSTPT_TAG,
+                vec![2, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82],
+                true,
+                true,
+                vec![],
+            ),
+            (TYPEBOUNDS_TAG, vec![2, 5, 28], true, false, vec![28]),
         ] {
             let mut bytes = vec![tag, 0x80 | payload.len() as u8];
             bytes.extend(payload);
@@ -6993,6 +7099,7 @@ mod tests {
             assert_eq!(node.tag, tag);
             assert!(matches!(node.low_or_alias, RawTree::Leaf(_)));
             assert_eq!(node.high.is_some(), has_high);
+            assert_eq!(node.alias.is_some(), has_alias);
             assert_eq!(node.variances, expected_variances);
         }
     }
@@ -7006,6 +7113,23 @@ mod tests {
         };
 
         assert!(node.decode_type_bounds().is_err());
+    }
+
+    #[test]
+    fn rejects_an_extra_tree_after_a_type_parameter_bound() {
+        let node = RawNode {
+            tag: TYPEBOUNDSTPT_TAG,
+            offset: 0,
+            payload: &[2, TERMREFPKG_TAG, 0x81, TERMREFPKG_TAG, 0x82, 28],
+        };
+
+        assert_eq!(
+            node.decode_type_bounds(),
+            Err(AstError::UnsupportedCategory {
+                tag: TYPEBOUNDSTPT_TAG,
+                offset: 0,
+            })
+        );
     }
 
     #[test]
@@ -7076,32 +7200,36 @@ mod tests {
     #[test]
     fn decodes_poly_and_type_lambda_types_with_type_names() {
         for tag in [POLYTYPE_TAG, TYPELAMBDATYPE_TAG] {
-            let bytes = [tag, 0x85, 2, 0x85, 0x86, 0x87, 0x88];
+            let bytes = [
+                tag,
+                0x87,
+                2,
+                TERMREFPKG_TAG,
+                0x81,
+                0x82,
+                TERMREFPKG_TAG,
+                0x83,
+                0x84,
+            ];
             let mut reader = Reader::new(&bytes);
             let nodes = RawNodes::decode(&mut reader).unwrap();
             let node = nodes.get(0).unwrap().decode_poly_type().unwrap();
 
             assert_eq!(node.tag, tag);
             assert!(matches!(node.result_type, RawTree::Leaf(_)));
-            assert_eq!(
-                node.type_names,
-                vec![
-                    super::TypeName {
-                        type_or_bounds: crate::term::AstRef {
-                            kind: crate::term::AstRefKind::TypeNameBounds,
-                            address: 5,
-                        },
-                        name: 6,
-                    },
-                    super::TypeName {
-                        type_or_bounds: crate::term::AstRef {
-                            kind: crate::term::AstRefKind::TypeNameBounds,
-                            address: 7,
-                        },
-                        name: 8,
-                    },
-                ]
-            );
+            assert_eq!(node.type_names.len(), 2);
+            assert_eq!(node.type_names[0].name, 2);
+            assert_eq!(node.type_names[1].name, 4);
+            assert!(matches!(
+                &node.type_names[0].type_or_bounds,
+                RawTree::Leaf(term)
+                    if term.tag == TERMREFPKG_TAG && term.name_ref() == Some(1)
+            ));
+            assert!(matches!(
+                &node.type_names[1].type_or_bounds,
+                RawTree::Leaf(term)
+                    if term.tag == TERMREFPKG_TAG && term.name_ref() == Some(3)
+            ));
         }
     }
 
@@ -7117,22 +7245,22 @@ mod tests {
     }
 
     #[test]
-    fn collects_poly_type_name_bounds_as_ast_references() {
+    fn collects_poly_type_tree_ast_references() {
         let node = RawNode {
             tag: POLYTYPE_TAG,
             offset: 0,
-            payload: &[2, 0x85, 0x86, 0x87, 0x88],
+            payload: &[2, SHAREDTYPE_TAG, 0x85, 0x86, SHAREDTYPE_TAG, 0x87, 0x88],
         };
 
         assert_eq!(
             node.ast_refs().unwrap(),
             vec![
                 crate::term::AstRef {
-                    kind: crate::term::AstRefKind::TypeNameBounds,
+                    kind: crate::term::AstRefKind::SharedType,
                     address: 5,
                 },
                 crate::term::AstRef {
-                    kind: crate::term::AstRefKind::TypeNameBounds,
+                    kind: crate::term::AstRefKind::SharedType,
                     address: 7,
                 },
             ]
@@ -7152,7 +7280,19 @@ mod tests {
 
     #[test]
     fn decodes_a_method_type_with_type_names_and_modifiers() {
-        let bytes = [METHODTYPE_TAG, 0x87, 2, 0x85, 0x86, 0x87, 0x88, 17, 37];
+        let bytes = [
+            METHODTYPE_TAG,
+            0x89,
+            2,
+            TERMREFPKG_TAG,
+            0x81,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+            0x84,
+            17,
+            37,
+        ];
         let mut reader = Reader::new(&bytes);
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let node = nodes.get(0).unwrap().decode_method_type().unwrap();
@@ -7163,42 +7303,40 @@ mod tests {
     }
 
     #[test]
-    fn collects_method_type_name_bounds_as_ast_references() {
+    fn collects_method_type_tree_ast_references() {
         let node = RawNode {
             tag: METHODTYPE_TAG,
             offset: 0,
-            payload: &[2, 0x85, 0x86],
+            payload: &[2, SHAREDTYPE_TAG, 0x85, 0x86],
         };
 
         assert_eq!(
             node.ast_refs().unwrap(),
             vec![crate::term::AstRef {
-                kind: crate::term::AstRefKind::TypeNameBounds,
+                kind: crate::term::AstRefKind::SharedType,
                 address: 5,
             }]
         );
     }
 
     #[test]
-    fn decodes_a_method_type_with_an_ambiguous_type_name_using_context() {
+    fn decodes_a_method_type_with_type_name_count() {
         let node = RawNode {
             tag: METHODTYPE_TAG,
             offset: 0,
-            payload: &[2, 0x91, 0x85, 37],
+            payload: &[2, SHAREDTYPE_TAG, 0x85, 0x86, 37],
         };
 
         let node = node.decode_method_type_with_type_name_count(1).unwrap();
 
-        assert_eq!(
-            node.type_names,
-            vec![TypeName {
-                type_or_bounds: crate::term::AstRef {
-                    kind: crate::term::AstRefKind::TypeNameBounds,
-                    address: INLINE_TAG as u32,
-                },
-                name: 5,
-            }]
-        );
+        assert_eq!(node.type_names.len(), 1);
+        assert_eq!(node.type_names[0].name, 6);
+        assert!(matches!(
+            &node.type_names[0].type_or_bounds,
+            RawTree::Leaf(term)
+                if term.tag == SHAREDTYPE_TAG
+                    && term.value == crate::term::TermValue::AstRef(5)
+        ));
         assert_eq!(node.modifiers, vec![37]);
     }
 
@@ -8062,6 +8200,39 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_a_type_parameter_bound_with_an_alias() {
+        assert_structured_round_trip(
+            &[
+                TYPEBOUNDSTPT_TAG,
+                0x85,
+                2,
+                TERMREFPKG_TAG,
+                0x81,
+                TERMREFPKG_TAG,
+                0x82,
+            ],
+            |raw, writer| raw.decode_type_bounds().unwrap().encode(writer),
+        );
+    }
+
+    #[test]
+    fn rejects_variances_when_encoding_a_type_parameter_bound() {
+        let raw = RawNode {
+            tag: TYPEBOUNDSTPT_TAG,
+            offset: 0,
+            payload: &[2],
+        };
+        let mut node = raw.decode_type_bounds().unwrap();
+        node.variances.push(28);
+
+        let mut writer = Writer::new();
+        assert_eq!(
+            node.encode(&mut writer),
+            Err(TermEncodeError::InvalidValue { tag: 28 })
+        );
+    }
+
+    #[test]
     fn round_trips_annotated_type_encoding() {
         assert_structured_round_trip(&[ANNOTATEDTYPE_TAG, 0x82, 2, 3], |raw, writer| {
             raw.decode_annotated().unwrap().encode(writer)
@@ -8084,25 +8255,30 @@ mod tests {
 
     #[test]
     fn round_trips_poly_type_encoding() {
-        assert_structured_round_trip(&[POLYTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
-            raw.decode_poly_type().unwrap().encode(writer)
-        });
+        assert_structured_round_trip(
+            &[POLYTYPE_TAG, 0x84, 2, TERMREFPKG_TAG, 0x81, 0x82],
+            |raw, writer| raw.decode_poly_type().unwrap().encode(writer),
+        );
     }
 
     #[test]
     fn round_trips_method_type_encoding() {
-        assert_structured_round_trip(&[METHODTYPE_TAG, 0x83, 2, 0x85, 0x86], |raw, writer| {
-            raw.decode_method_type().unwrap().encode(writer)
-        });
+        assert_structured_round_trip(
+            &[METHODTYPE_TAG, 0x84, 2, TERMREFPKG_TAG, 0x81, 0x82],
+            |raw, writer| raw.decode_method_type().unwrap().encode(writer),
+        );
     }
 
     #[test]
     fn round_trips_contextual_method_type_encoding() {
-        assert_structured_round_trip(&[METHODTYPE_TAG, 0x84, 2, 0x91, 0x85, 37], |raw, writer| {
-            raw.decode_method_type_with_type_name_count(1)
-                .unwrap()
-                .encode(writer)
-        });
+        assert_structured_round_trip(
+            &[METHODTYPE_TAG, 0x85, 2, TERMREFPKG_TAG, 0x81, 0x82, 37],
+            |raw, writer| {
+                raw.decode_method_type_with_type_name_count(1)
+                    .unwrap()
+                    .encode(writer)
+            },
+        );
     }
 
     #[test]
@@ -8454,7 +8630,7 @@ mod tests {
         assert!(matches!(
             node.decode_structured().unwrap(),
             super::StructuredNode::Package(package)
-                if package.path_name == 1 && package.stats.len() == 1
+                if package.path_name() == Some(1) && package.stats.len() == 1
         ));
     }
 
@@ -8558,10 +8734,10 @@ mod tests {
         let node = RawNode {
             tag: super::POLYTYPE_TAG,
             offset: 0,
-            payload: &[2, 0x81, 0x85],
+            payload: &[2, super::TERMREFPKG_TAG, 0x81, 0x85],
         };
 
-        assert_eq!(node.name_refs().unwrap(), vec![5]);
+        assert_eq!(node.name_refs().unwrap(), vec![1, 5]);
     }
 
     #[test]
@@ -9337,6 +9513,30 @@ mod tests {
                 })
                 .is_none()
         );
+    }
+
+    #[test]
+    fn indexes_category_five_type_name_trees_with_absolute_ast_addresses() {
+        let bytes = [
+            VALDEF_TAG,
+            0x88,
+            0x81,
+            POLYTYPE_TAG,
+            0x85,
+            2,
+            TYPEBOUNDS_TAG,
+            0x81,
+            2,
+            0x81,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 3, 6]);
+        assert_eq!(index.get(6).map(|node| node.tag), Some(TYPEBOUNDS_TAG));
     }
 
     #[test]

@@ -365,7 +365,7 @@ TypeTree = IDENTtpt NameRef Type
          | REFINEDtpt Length Term Stat*
          | APPLIEDtpt Length Term Term*
          | LAMBDAtpt Length TypeParam* Term
-         | TYPEBOUNDStpt Length Term Term?
+         | TYPEBOUNDStpt Length Term Term? Term?
          | ANNOTATEDtpt Length Term Term
          | MATCHtpt Length Term? Term CaseDef*
          | BYNAMEtpt Term
@@ -420,6 +420,8 @@ Annotation = ANNOTATION Length Type Term
 
 ```text
 ASTRef = Nat
+
+TypeName = Type NameRef
 ```
 
 `TERMREFdirect` and `TYPEREFdirect` point to a local symbol, normally its definition node. `SHAREDterm` and `SHAREDtype` refer to previously serialized trees.
@@ -433,10 +435,14 @@ untyped integer.
 `AstRefKind::ReturnTarget` and is included in AST reference collection and
 target validation.
 
-Each `TypeName` in `POLYtype`, `METHODtype`, and `TYPELAMBDAtype` begins with
-an `ASTRef` to its type or bounds tree. The Rust model represents this as
-`AstRefKind::TypeNameBounds` and includes it in reference collection and
-target validation.
+Each `TypeName` in `POLYtype`, `METHODtype`, and `TYPELAMBDAtype` contains a
+complete `Type` tree followed by a name reference. The Rust model preserves
+that tree as `RawTree`, so nested AST and name references remain available to
+indexing, validation, and round-trip encoding.
+
+`TYPEBOUNDStpt` stores a lower bound, an optional upper bound, and an optional
+alias tree. `TYPEBOUNDS` uses its first field as either a lower bound or an
+alias and may then contain an upper bound followed by variance markers.
 
 The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
@@ -614,9 +620,9 @@ lets a typed caller apply that context without changing the lossless raw model;
 an out-of-range count returns `None`.
 
 `METHODtype` likewise has an undelimited `TypeName* Modifier*` suffix. The
-heuristic decoder remains available for ordinary payloads, while
-`decode_method_type_with_type_name_count(count)` lets typed callers decode the
-suffix unambiguously when a `TypeName` starts with a modifier-valued byte.
+heuristic decoder reads complete type trees until the modifier suffix begins,
+while `decode_method_type_with_type_name_count(count)` lets typed callers use
+the known number of type-name entries directly.
 
 `HOLE` is a valid special category-5 node. Its typed representation contains
 the hole index, its type tree, and the remaining ordered argument trees.

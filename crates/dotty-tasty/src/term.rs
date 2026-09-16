@@ -31,7 +31,6 @@ pub enum AstRefKind {
     RecursiveThis,
     ParamTypeBinder,
     ReturnTarget,
-    TypeNameBounds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

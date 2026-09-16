@@ -186,3 +186,41 @@ fn all_scala3_library_ast_indexes_build_with_qualified_modifiers() {
         );
     }
 }
+
+#[test]
+fn all_scala3_library_ast_references_resolve() {
+    for path in scala3_library_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        file.validate_ast_reference_targets()
+            .unwrap_or_else(|error| panic!("invalid AST reference in {}: {error}", path.display()));
+    }
+}
+
+#[test]
+fn all_scala3_library_indexed_nodes_decode_structurally() {
+    for path in scala3_library_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file
+            .ast_address_index()
+            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+
+        for address in index.addresses() {
+            let raw = index
+                .get(address)
+                .expect("indexed address must resolve to a raw node");
+            raw.decode_structured().unwrap_or_else(|error| {
+                panic!(
+                    "failed to structurally decode AST node at address {address} in {}: {error}",
+                    path.display()
+                )
+            });
+        }
+    }
+}
