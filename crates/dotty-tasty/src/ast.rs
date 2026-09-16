@@ -1439,12 +1439,19 @@ fn nat_width(mut value: usize) -> usize {
 }
 
 fn subslice_offset(source: &[u8], subslice: &[u8]) -> Option<usize> {
-    if subslice.is_empty() || subslice.len() > source.len() {
+    if subslice.len() > source.len() {
         return None;
     }
 
     (0..=source.len() - subslice.len())
         .find(|start| std::ptr::eq(source[*start..].as_ptr(), subslice.as_ptr()))
+}
+
+fn raw_node_offset(source: &[u8], node: &RawNode<'_>) -> usize {
+    let header_length = 1usize.saturating_add(nat_width(node.payload.len()));
+    subslice_offset(source, node.payload)
+        .and_then(|payload_offset| payload_offset.checked_sub(header_length))
+        .unwrap_or(node.offset)
 }
 
 fn collect_raw_nodes_deep<'a>(
@@ -1469,8 +1476,9 @@ fn collect_raw_node_deep<'a>(
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
-    let _depth = context.enter(base.saturating_add(node.offset))?;
-    let absolute_offset = base.saturating_add(node.offset);
+    let relative_offset = raw_node_offset(source, node);
+    let _depth = context.enter(base.saturating_add(relative_offset))?;
+    let absolute_offset = base.saturating_add(relative_offset);
     let mut located = node.clone();
     located.offset = absolute_offset;
     output.push(located);
@@ -1535,7 +1543,8 @@ fn collect_tree_nodes<'a>(
             })?;
         }
         RawTree::LengthNode(node) => {
-            let absolute_offset = base.saturating_add(node.offset);
+            let relative_offset = raw_node_offset(source, node);
+            let absolute_offset = base.saturating_add(relative_offset);
             let mut located = node.clone();
             located.offset = absolute_offset;
             output.push(located);
@@ -1695,10 +1704,9 @@ fn collect_parameters_nodes<'a>(
             offset: absolute_offset,
             payload: parameter.body(),
         };
-        let tag = raw.tag;
         output.push(raw);
         let visible = AstTreeNode {
-            tag,
+            tag: parameter.tag(),
             offset: absolute_offset,
         };
         context.record_node(visible);
@@ -1734,12 +1742,12 @@ fn collect_embedded_case_def_node<'a>(
     output: &mut Vec<RawNode<'a>>,
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
-    let absolute_offset = base.saturating_add(case_def.offset);
     let raw = RawNode {
         tag: CASEDEF_TAG,
         offset: case_def.offset,
         payload: case_def.payload,
     };
+    let absolute_offset = base.saturating_add(raw_node_offset(source, &raw));
     let mut located = raw.clone();
     located.offset = absolute_offset;
     output.push(located);
@@ -1934,7 +1942,7 @@ fn collect_structured_nodes<'a>(
                     collect_tree_nodes(
                         &implicit_arg.child,
                         source,
-                        base.saturating_add(implicit_arg.offset).saturating_add(1),
+                        base,
                         context,
                         output,
                         all_output,
@@ -9589,6 +9597,84 @@ mod tests {
                     address: 1,
                 })
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn indexes_empty_package_stats_using_their_payload_address() {
+        let bytes = [PACKAGE_TAG, 0x84, TERMREFPKG_TAG, 0x85, 0x81, 0x80];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(
+            index.get_node(4),
+            Some(crate::AstTreeNode {
+                tag: VALDEF_TAG,
+                offset: 4,
+            })
+        );
+        assert_eq!(
+            index.parent_of(4),
+            Some(crate::AstTreeNode {
+                tag: PACKAGE_TAG,
+                offset: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn indexes_unapply_implicit_argument_children_at_their_wire_addresses() {
+        let bytes = [
+            UNAPPLY_TAG,
+            0x87,
+            TERMREFPKG_TAG,
+            0x81,
+            IMPLICITARG_TAG,
+            TERMREFPKG_TAG,
+            0x82,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(
+            index.iter_nodes().collect::<Vec<_>>(),
+            vec![
+                crate::AstTreeNode {
+                    tag: UNAPPLY_TAG,
+                    offset: 0,
+                },
+                crate::AstTreeNode {
+                    tag: TERMREFPKG_TAG,
+                    offset: 2,
+                },
+                crate::AstTreeNode {
+                    tag: IMPLICITARG_TAG,
+                    offset: 4,
+                },
+                crate::AstTreeNode {
+                    tag: TERMREFPKG_TAG,
+                    offset: 5,
+                },
+                crate::AstTreeNode {
+                    tag: TERMREFPKG_TAG,
+                    offset: 7,
+                },
+            ]
+        );
+        assert_eq!(
+            index.parent_of(5),
+            Some(crate::AstTreeNode {
+                tag: IMPLICITARG_TAG,
+                offset: 4,
+            })
         );
     }
 

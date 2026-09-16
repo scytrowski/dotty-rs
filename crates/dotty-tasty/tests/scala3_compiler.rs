@@ -305,6 +305,82 @@ fn assert_truncated_compiler_fixture_does_not_panic(path: &Path, input: &[u8], e
     );
 }
 
+#[test]
+fn all_scala3_compiler_positions_join_visible_ast_nodes() {
+    let mut files_with_positions = 0;
+    let mut mapped_positions = 0;
+
+    for path in scala3_compiler_corpus().fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+        let Some(positions) = file.ast_node_positions().unwrap_or_else(|error| {
+            panic!("failed to join positions in {}: {error}", path.display())
+        }) else {
+            continue;
+        };
+        let index = file
+            .ast_address_index()
+            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+
+        files_with_positions += 1;
+        mapped_positions += positions.len();
+        for entry in positions {
+            assert_eq!(
+                index.get_node(entry.node.offset as u32),
+                Some(entry.node),
+                "position mapped to an unindexed AST address {} in {}",
+                entry.node.offset,
+                path.display()
+            );
+        }
+    }
+
+    assert!(files_with_positions > 0);
+    assert!(mapped_positions > 0);
+}
+
+#[test]
+fn all_scala3_compiler_ast_parent_child_edges_are_consistent() {
+    let mut edge_count = 0;
+
+    for path in scala3_compiler_corpus().fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+        let index = file
+            .ast_address_index()
+            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+
+        for edge in index.iter_tree_edges() {
+            edge_count += 1;
+            assert_eq!(
+                index.get_node(edge.parent.offset as u32),
+                Some(edge.parent),
+                "edge parent is not indexed in {}",
+                path.display()
+            );
+            assert_eq!(
+                index.get_node(edge.child.offset as u32),
+                Some(edge.child),
+                "edge child is not indexed in {}",
+                path.display()
+            );
+            assert_eq!(
+                index.parent_of(edge.child.offset as u32),
+                Some(edge.parent),
+                "parent edge changed for AST address {} in {}",
+                edge.child.offset,
+                path.display()
+            );
+        }
+    }
+
+    assert!(edge_count > 0);
+}
+
 fn next_random(state: &mut u64) -> u64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
