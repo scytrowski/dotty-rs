@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dotty_tasty::tasty::{PACKAGE_TAG, StandardSection, TastyFile};
+use dotty_tasty::tasty::{PACKAGE_TAG, RawNodes, Reader, StandardSection, TastyFile, Writer};
 
 const EXPECTED_FIXTURE_COUNT: usize = 941;
 const EXPECTED_TASTY_BYTES: u64 = 7_579_936;
@@ -201,7 +201,11 @@ fn all_scala3_library_ast_references_resolve() {
 }
 
 #[test]
-fn all_scala3_library_indexed_nodes_decode_structurally() {
+fn all_scala3_library_indexed_structured_nodes_round_trip() {
+    let mut node_count = 0;
+    let mut byte_exact_count = 0;
+    let mut normalized_count = 0;
+
     for path in scala3_library_fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -212,15 +216,84 @@ fn all_scala3_library_indexed_nodes_decode_structurally() {
             .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
 
         for address in index.addresses() {
+            node_count += 1;
             let raw = index
                 .get(address)
                 .expect("indexed address must resolve to a raw node");
-            raw.decode_structured().unwrap_or_else(|error| {
+            let structured = raw.decode_structured().unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally decode AST node at address {address} in {}: {error}",
                     path.display()
                 )
             });
+
+            let mut encoded = Writer::new();
+            structured.encode(&mut encoded).unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode AST node at address {address} in {}: {error}",
+                    path.display()
+                )
+            });
+
+            let mut reparsed_reader = Reader::new(encoded.as_slice());
+            let reparsed_nodes = RawNodes::decode(&mut reparsed_reader).unwrap_or_else(|error| {
+                panic!(
+                    "failed to reparse encoded AST node at address {address} in {}: {error}",
+                    path.display()
+                )
+            });
+            assert!(
+                reparsed_reader.is_at_end(),
+                "structured encoding left trailing bytes for AST node at address {address} in {}",
+                path.display()
+            );
+            assert_eq!(
+                reparsed_nodes.len(),
+                1,
+                "address {address} in {}",
+                path.display()
+            );
+
+            let reparsed_raw = reparsed_nodes
+                .get(0)
+                .expect("one encoded node must be present");
+            let reparsed_structured = reparsed_raw.decode_structured().unwrap_or_else(|error| {
+                panic!(
+                    "failed to structurally reparse AST node at address {address} in {}: {error}",
+                    path.display()
+                )
+            });
+            let mut normalized = Writer::new();
+            reparsed_structured
+                .encode(&mut normalized)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to re-encode AST node at address {address} in {}: {error}",
+                        path.display()
+                    )
+                });
+
+            assert_eq!(
+                encoded.as_slice(),
+                normalized.as_slice(),
+                "structured encoding is not stable for AST node at address {address} in {}",
+                path.display()
+            );
+            let mut original = Writer::new();
+            raw.encode(&mut original).unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode raw AST node at address {address} in {}: {error}",
+                    path.display()
+                )
+            });
+            if original.as_slice() == encoded.as_slice() {
+                byte_exact_count += 1;
+            } else {
+                normalized_count += 1;
+            }
         }
     }
+
+    assert!(node_count > 0);
+    assert_eq!(node_count, byte_exact_count + normalized_count);
 }
