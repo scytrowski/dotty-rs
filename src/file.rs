@@ -7,8 +7,8 @@ use crate::name_table::{
 };
 use crate::reader::Reader;
 use crate::section::{
-    Attribute, Comment, EncodedSection, PositionSection, Section, SectionError, SectionTable,
-    StandardSection,
+    Attribute, Comment, EncodedSection, PositionSection, ResolvedPosition, Section, SectionError,
+    SectionTable, StandardSection,
 };
 use crate::term::{AstRef, AstTreeNode};
 use crate::writer::{WriteError, Writer};
@@ -840,6 +840,20 @@ impl<'a> TastyFile<'a> {
         Ok(positions)
     }
 
+    /// Resolve position associations when the file contains a `Positions`
+    /// section.
+    ///
+    /// `None` means that the section is absent. The returned associations carry
+    /// the active source reference and omit standalone source-change events.
+    pub fn resolved_position_associations(
+        &self,
+    ) -> Result<Option<Vec<ResolvedPosition>>, TastyFileError> {
+        self.positions()?
+            .map(|positions| positions.resolved_associations())
+            .transpose()
+            .map_err(TastyFileError::from)
+    }
+
     fn asts_length(&self) -> usize {
         self.section(StandardSection::Asts)
             .map(|section| section.payload.len())
@@ -959,6 +973,20 @@ mod tests {
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
         assert!(file.ast_nodes_with_tag(255).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolves_fixture_position_associations_through_the_file_api() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(
+            !file
+                .resolved_position_associations()
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

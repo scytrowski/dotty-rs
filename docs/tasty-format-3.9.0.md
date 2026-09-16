@@ -761,6 +761,8 @@ lossless re-encoding.
 that omits source-change events and attaches the currently active source
 `NameRef`—or `None` before the first source event—to each association. Use
 `resolved_entries()` when source-event ordering itself is significant.
+`TastyFile::resolved_position_associations()` exposes the same view directly
+from a parsed file and returns `None` when the file has no `Positions` section.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an
