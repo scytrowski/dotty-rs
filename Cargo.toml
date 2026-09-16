@@ -1,9 +1,3 @@
-[package]
-name = "dotty-tasty"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-name = "dotty"
-
-[dependencies]
+[workspace]
+members = ["crates/dotty-tasty"]
+resolver = "3"
