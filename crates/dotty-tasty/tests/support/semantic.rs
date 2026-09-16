@@ -189,6 +189,27 @@ pub fn assert_expectations_cover_selected_fixtures(
                 Some(name.strip_suffix('$').unwrap_or(name).to_owned())
             })
             .collect();
+        let actual_definition_kinds: std::collections::BTreeSet<_> = index
+            .iter()
+            .filter_map(|node| match node.tag {
+                dotty_tasty::tasty::DEFDEF_TAG => Some("DefDef"),
+                dotty_tasty::tasty::TYPEDEF_TAG => Some("TypeDef"),
+                dotty_tasty::tasty::VALDEF_TAG => Some("ValDef"),
+                _ => None,
+            })
+            .collect();
+        let expected_definition_kinds: std::collections::BTreeSet<_> = expected
+            .declarations
+            .iter()
+            .map(|declaration| declaration.kind.as_str())
+            .collect();
+        for kind in expected_definition_kinds {
+            assert!(
+                actual_definition_kinds.contains(kind),
+                "{} has no indexed {kind} declaration",
+                expected.path
+            );
+        }
         for declaration in &expected.declarations {
             assert!(
                 actual_names.contains(&declaration.name),

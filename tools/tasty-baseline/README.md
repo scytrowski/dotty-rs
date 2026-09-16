@@ -48,9 +48,10 @@ The output contains `schema_version = 3` and `scala_version = 3.9.0`. Each file
 contains a sorted, duplicate-free `declarations` list with simplified
 `TypeDef`, `DefDef`, and `ValDef` identifier names. Operator names are omitted
 in this first version, plus basic AST shape counts and a histogram of method
-parameter-clause counts. Rust checks that at least one oracle clause arity is
-visible in the currently decoded DefDef bodies and checks shape presence;
-counts are retained for future exact matching because TASTy may contain
-additional compiler bookkeeping nodes or traversal boundaries. The projection deliberately excludes absolute AST
-offsets, types, overload-resolution details, and compiler-generated symbols.
+parameter-clause counts. Rust checks declaration-kind presence, that at least
+one oracle clause arity is visible in the currently decoded DefDef bodies, and
+shape presence; counts are retained for future exact matching because TASTy
+may contain additional compiler bookkeeping nodes or traversal boundaries.
+The projection deliberately excludes absolute AST offsets, types,
+overload-resolution details, and compiler-generated symbols.
 It is a semantic-lite oracle, not a Rust semantic model.
