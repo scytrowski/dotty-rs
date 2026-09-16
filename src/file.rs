@@ -184,6 +184,16 @@ impl TastyFileBuilder {
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
         self.build()?.encode_with_ast_addresses()
     }
+
+    /// Validate all supported file contents before encoding.
+    pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
+        self.build()?.encode_validated()
+    }
+
+    /// Validate all supported file contents before encoding and allocating AST addresses.
+    pub fn encode_validated_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
+        self.build()?.encode_validated_with_ast_addresses()
+    }
 }
 
 impl<'a> TastyFile<'a> {
@@ -262,6 +272,12 @@ impl<'a> TastyFile<'a> {
         Ok(writer.into_inner())
     }
 
+    /// Validate all supported file contents before encoding.
+    pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
+        self.validate()?;
+        self.encode()
+    }
+
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
@@ -285,6 +301,12 @@ impl<'a> TastyFile<'a> {
             bytes: writer.into_inner(),
             ast_addresses,
         })
+    }
+
+    /// Validate all supported file contents before encoding and allocating AST addresses.
+    pub fn encode_validated_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
+        self.validate()?;
+        self.encode_with_ast_addresses()
     }
 
     pub fn header(&self) -> &Header {
@@ -698,7 +720,7 @@ mod tests {
             .unwrap(),
         );
 
-        let bytes = builder.encode().unwrap();
+        let bytes = builder.encode_validated().unwrap();
         let reparsed = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
 
         assert_eq!(reparsed.header().uuid, [8; 16]);
@@ -710,8 +732,11 @@ mod tests {
 
     #[test]
     fn exposes_ast_addresses_when_encoding_from_owned_sections() {
-        let names =
-            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let names = crate::NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("value".to_owned()),
+        ])
+        .unwrap();
         let builder = super::TastyFileBuilder::new(
             crate::Header {
                 major_version: 28,
@@ -724,7 +749,7 @@ mod tests {
         )
         .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
 
-        let encoded = builder.encode_with_ast_addresses().unwrap();
+        let encoded = builder.encode_validated_with_ast_addresses().unwrap();
 
         assert_eq!(encoded.ast_addresses(), &[0]);
         assert_eq!(
@@ -761,6 +786,51 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn validated_encoders_preserve_a_complete_fixture() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert_eq!(file.encode_validated().unwrap(), bytes);
+        assert_eq!(
+            file.encode_validated_with_ast_addresses()
+                .unwrap()
+                .as_slice(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_name_references_during_validated_encoding() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[crate::APPLY_TAG, 0x82, crate::TERMREFPKG_TAG, 0x83],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert!(file.encode().is_ok());
+        assert_eq!(
+            file.encode_validated(),
+            Err(TastyFileError::InvalidNameReference {
+                context: "AST name reference",
+                reference: 3,
+            })
+        );
     }
 
     #[test]

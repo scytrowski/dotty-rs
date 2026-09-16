@@ -680,6 +680,10 @@ together with the section boundary.
 unknown or application-specific sections without requiring a guessed grammar.
 `TastyFileBuilder` owns these encoded sections and produces either a complete
 byte stream or an `EncodedTastyFile` with the allocated AST addresses.
+For callers that require an eager safety boundary, `TastyFile::encode_validated()`
+and `TastyFile::encode_validated_with_ast_addresses()` validate AST references,
+name references, and supported standard sections before writing; the builder
+exposes the same two methods.
 
 ## 10. Comments
 
