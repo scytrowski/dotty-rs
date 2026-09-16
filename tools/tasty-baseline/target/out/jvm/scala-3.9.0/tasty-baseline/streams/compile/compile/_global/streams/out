@@ -1,9 +1,0 @@
-[error] -- [E008] Not Found Error: /home/vdrake6/dotty-rs/tools/tasty-baseline/src/main/scala/dotty/baseline/Main.scala:83:24 
-[error] 83 |    val children = tree.children.map(child => fileTreeJson(child))
-[error]    |                   ^^^^^^^^^^^^^
-[error]    |                   value children is not a member of quotes.reflect.Tree
-[error] -- [E008] Not Found Error: /home/vdrake6/dotty-rs/tools/tasty-baseline/src/main/scala/dotty/baseline/Main.scala:91:24 
-[error] 91 |    val children = tree.children.map(fileTreeJson)
-[error]    |                   ^^^^^^^^^^^^^
-[error]    |                   value children is not a member of quotes.reflect.Tree
-[error] two errors found

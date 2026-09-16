@@ -1,1 +1,6 @@
 /target
+
+# Scala/SBT baseline generator build output
+tools/tasty-baseline/.bsp/
+tools/tasty-baseline/project/target/
+tools/tasty-baseline/target/

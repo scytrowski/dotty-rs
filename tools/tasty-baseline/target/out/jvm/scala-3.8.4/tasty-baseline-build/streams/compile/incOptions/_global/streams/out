@@ -1,5 +1,0 @@
-[debug] Created transactional ClassFileManager with tempDir = /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.8.4/tasty-baseline-build/classes.bak
-[debug] About to delete class files:
-[debug] We backup class files:
-[debug] Created transactional ClassFileManager with tempDir = /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.8.4/tasty-baseline-build/classes.bak
-[debug] Removing the temporary directory used for backing up class files: /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.8.4/tasty-baseline-build/classes.bak
