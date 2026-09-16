@@ -215,6 +215,9 @@ The Rust API keeps the raw `ParamSig` value for lossless encoding and exposes
 `TARGETSIGNED` entries, preserving the original/target references and the
 wire order of interpreted parameters. It returns no view for non-signature,
 unknown, or malformed raw entries.
+`NameTable::render_signed_name()` resolves that view to
+`RenderedSignedName`, including rendered result and term-parameter names while
+keeping type-parameter section lengths explicit.
 
 Name references are range-checked, and cyclic name-entry dependencies are
 rejected by the validated name-table model.

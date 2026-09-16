@@ -42,7 +42,8 @@ pub use header::{
 };
 pub use name_table::{
     NameRef, NameRenderError, NameSignature, NameTable, NameTableBuilder, NameTableError, ParamSig,
-    ParamSigValue, RawName, RawNameKind, SignedName, interpret_param_sig,
+    ParamSigValue, RawName, RawNameKind, RenderedNameSignature, RenderedParamSig,
+    RenderedSignedName, SignedName, interpret_param_sig,
 };
 pub use reader::{ReadError, Reader};
 pub use section::{

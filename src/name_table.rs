@@ -45,6 +45,31 @@ pub enum SignedName {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderedParamSig {
+    TypeParameterSectionLength(u32),
+    TermParameter(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedNameSignature {
+    pub result: String,
+    pub parameters: Vec<RenderedParamSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderedSignedName {
+    Signed {
+        original: String,
+        signature: RenderedNameSignature,
+    },
+    TargetSigned {
+        original: String,
+        target: String,
+        signature: RenderedNameSignature,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawNameKind {
     Utf8,
@@ -434,6 +459,65 @@ impl NameTable {
         rendered[root_index]
             .clone()
             .ok_or(NameRenderError::InvalidReference { reference })
+    }
+
+    /// Renders a signature-bearing name and all name references contained in
+    /// its signature. Returns `Ok(None)` for non-signature entries.
+    pub fn render_signed_name(
+        &self,
+        reference: NameRef,
+    ) -> Result<Option<RenderedSignedName>, NameRenderError> {
+        let entry = self
+            .get(reference)
+            .ok_or(NameRenderError::InvalidReference { reference })?;
+        let signed = match entry.signed_name() {
+            Some(signed) => signed,
+            None => return Ok(None),
+        };
+
+        let rendered = match signed {
+            SignedName::Signed {
+                original,
+                signature,
+            } => RenderedSignedName::Signed {
+                original: self.render(original)?,
+                signature: self.render_name_signature(signature)?,
+            },
+            SignedName::TargetSigned {
+                original,
+                target,
+                signature,
+            } => RenderedSignedName::TargetSigned {
+                original: self.render(original)?,
+                target: self.render(target)?,
+                signature: self.render_name_signature(signature)?,
+            },
+        };
+
+        Ok(Some(rendered))
+    }
+
+    fn render_name_signature(
+        &self,
+        signature: NameSignature,
+    ) -> Result<RenderedNameSignature, NameRenderError> {
+        let parameters = signature
+            .parameters
+            .into_iter()
+            .map(|parameter| match parameter {
+                ParamSigValue::TypeParameterSectionLength(length) => {
+                    Ok(RenderedParamSig::TypeParameterSectionLength(length))
+                }
+                ParamSigValue::TermParameter(reference) => {
+                    Ok(RenderedParamSig::TermParameter(self.render(reference)?))
+                }
+            })
+            .collect::<Result<Vec<_>, NameRenderError>>()?;
+
+        Ok(RenderedNameSignature {
+            result: self.render(signature.result)?,
+            parameters,
+        })
     }
 
     pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
@@ -971,7 +1055,8 @@ fn read_parameter_signatures(reader: &mut Reader<'_>) -> Result<Vec<ParamSig>, N
 mod tests {
     use super::{
         NameRenderError, NameSignature, NameTable, NameTableError, ParamSigValue, RawName,
-        RawNameKind, SignedName, interpret_param_sig,
+        RawNameKind, RenderedNameSignature, RenderedParamSig, RenderedSignedName, SignedName,
+        interpret_param_sig,
     };
     use crate::reader::{ReadError, Reader};
 
@@ -1251,6 +1336,70 @@ mod tests {
         };
 
         assert_eq!(name.signed_name(), None);
+    }
+
+    #[test]
+    fn renders_a_signed_name_signature_and_term_parameter() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Utf8("result".to_owned()),
+            RawName::Utf8("parameter".to_owned()),
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: vec![-2, 3],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render_signed_name(4),
+            Ok(Some(RenderedSignedName::Signed {
+                original: "method".to_owned(),
+                signature: RenderedNameSignature {
+                    result: "result".to_owned(),
+                    parameters: vec![
+                        RenderedParamSig::TypeParameterSectionLength(2),
+                        RenderedParamSig::TermParameter("parameter".to_owned()),
+                    ],
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn renders_a_target_signed_name_target_and_signature() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Utf8("target".to_owned()),
+            RawName::Utf8("result".to_owned()),
+            RawName::TargetSigned {
+                original: 1,
+                target: 2,
+                result_signature: 3,
+                parameter_signatures: vec![],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render_signed_name(4),
+            Ok(Some(RenderedSignedName::TargetSigned {
+                original: "method".to_owned(),
+                target: "target".to_owned(),
+                signature: RenderedNameSignature {
+                    result: "result".to_owned(),
+                    parameters: vec![],
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn returns_no_rendered_signature_for_a_non_signature_name() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
+
+        assert_eq!(table.render_signed_name(1), Ok(None));
     }
 
     #[test]
