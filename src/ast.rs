@@ -102,9 +102,46 @@ pub const SELFDEF_TAG: u8 = 118;
 pub const NAMEDARG_TAG: u8 = 119;
 pub const EMPTYCLAUSE_TAG: u8 = 45;
 pub const SPLITCLAUSE_TAG: u8 = 46;
-pub const INLINE_TAG: u8 = 17;
-pub const IMPLICIT_TAG: u8 = 13;
 pub const SUBMATCH_TAG: u8 = 48;
+pub const PRIVATE_TAG: u8 = 6;
+pub const PROTECTED_TAG: u8 = 8;
+pub const ABSTRACT_TAG: u8 = 9;
+pub const FINAL_TAG: u8 = 10;
+pub const SEALED_TAG: u8 = 11;
+pub const CASE_TAG: u8 = 12;
+pub const IMPLICIT_TAG: u8 = 13;
+pub const LAZY_TAG: u8 = 14;
+pub const OVERRIDE_TAG: u8 = 15;
+pub const INLINEPROXY_TAG: u8 = 16;
+pub const INLINE_TAG: u8 = 17;
+pub const STATIC_TAG: u8 = 18;
+pub const OBJECT_TAG: u8 = 19;
+pub const TRAIT_TAG: u8 = 20;
+pub const ENUM_TAG: u8 = 21;
+pub const LOCAL_TAG: u8 = 22;
+pub const SYNTHETIC_TAG: u8 = 23;
+pub const ARTIFACT_TAG: u8 = 24;
+pub const MUTABLE_TAG: u8 = 25;
+pub const FIELDACCESSOR_TAG: u8 = 26;
+pub const CASEACCESSOR_TAG: u8 = 27;
+pub const COVARIANT_TAG: u8 = 28;
+pub const CONTRAVARIANT_TAG: u8 = 29;
+pub const HASDEFAULT_TAG: u8 = 31;
+pub const STABLE_TAG: u8 = 32;
+pub const MACRO_TAG: u8 = 33;
+pub const ERASED_TAG: u8 = 34;
+pub const OPAQUE_TAG: u8 = 35;
+pub const EXTENSION_TAG: u8 = 36;
+pub const GIVEN_TAG: u8 = 37;
+pub const PARAMSETTER_TAG: u8 = 38;
+pub const EXPORTED_TAG: u8 = 39;
+pub const OPEN_TAG: u8 = 40;
+pub const PARAMALIAS_TAG: u8 = 41;
+pub const TRANSPARENT_TAG: u8 = 42;
+pub const INFIX_TAG: u8 = 43;
+pub const INVISIBLE_TAG: u8 = 44;
+pub const TRACKED_TAG: u8 = 47;
+pub const INTO_TAG: u8 = 49;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
@@ -5229,7 +5266,48 @@ fn collect_structured_name_refs(
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
-    matches!(tag, 6 | 8..=29 | 31..=44 | 47 | 49)
+    matches!(
+        tag,
+        PRIVATE_TAG
+            | PROTECTED_TAG
+            | ABSTRACT_TAG
+            | FINAL_TAG
+            | SEALED_TAG
+            | CASE_TAG
+            | IMPLICIT_TAG
+            | LAZY_TAG
+            | OVERRIDE_TAG
+            | INLINEPROXY_TAG
+            | INLINE_TAG
+            | STATIC_TAG
+            | OBJECT_TAG
+            | TRAIT_TAG
+            | ENUM_TAG
+            | LOCAL_TAG
+            | SYNTHETIC_TAG
+            | ARTIFACT_TAG
+            | MUTABLE_TAG
+            | FIELDACCESSOR_TAG
+            | CASEACCESSOR_TAG
+            | COVARIANT_TAG
+            | CONTRAVARIANT_TAG
+            | HASDEFAULT_TAG
+            | STABLE_TAG
+            | MACRO_TAG
+            | ERASED_TAG
+            | OPAQUE_TAG
+            | EXTENSION_TAG
+            | GIVEN_TAG
+            | PARAMSETTER_TAG
+            | EXPORTED_TAG
+            | OPEN_TAG
+            | PARAMALIAS_TAG
+            | TRANSPARENT_TAG
+            | INFIX_TAG
+            | INVISIBLE_TAG
+            | TRACKED_TAG
+            | INTO_TAG
+    )
 }
 
 fn is_tail_tag(tag: u8) -> bool {
@@ -5309,6 +5387,70 @@ mod tests {
         assert_eq!(NodeCategory::from_tag(110), Some(NodeCategory::Category4));
         assert_eq!(NodeCategory::from_tag(128), Some(NodeCategory::Category5));
         assert_eq!(NodeCategory::from_tag(0), None);
+    }
+
+    #[test]
+    fn exposes_the_complete_category_one_tag_matrix() {
+        use super::{
+            ABSTRACT_TAG, ARTIFACT_TAG, CASE_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG,
+            COVARIANT_TAG, EMPTYCLAUSE_TAG, ENUM_TAG, ERASED_TAG, EXPORTED_TAG, EXTENSION_TAG,
+            FIELDACCESSOR_TAG, FINAL_TAG, GIVEN_TAG, HASDEFAULT_TAG, IMPLICIT_TAG, INFIX_TAG,
+            INLINE_TAG, INLINEPROXY_TAG, INTO_TAG, INVISIBLE_TAG, LAZY_TAG, LOCAL_TAG, MACRO_TAG,
+            MUTABLE_TAG, OBJECT_TAG, OPAQUE_TAG, OPEN_TAG, OVERRIDE_TAG, PARAMALIAS_TAG,
+            PARAMSETTER_TAG, PRIVATE_TAG, PROTECTED_TAG, SEALED_TAG, SPLITCLAUSE_TAG, STABLE_TAG,
+            STATIC_TAG, SUBMATCH_TAG, SYNTHETIC_TAG, TRACKED_TAG, TRAIT_TAG, TRANSPARENT_TAG,
+        };
+
+        assert_eq!(
+            [
+                PRIVATE_TAG,
+                PROTECTED_TAG,
+                ABSTRACT_TAG,
+                FINAL_TAG,
+                SEALED_TAG,
+                CASE_TAG,
+                IMPLICIT_TAG,
+                LAZY_TAG,
+                OVERRIDE_TAG,
+                INLINEPROXY_TAG,
+                INLINE_TAG,
+                STATIC_TAG,
+                OBJECT_TAG,
+                TRAIT_TAG,
+                ENUM_TAG,
+                LOCAL_TAG,
+                SYNTHETIC_TAG,
+                ARTIFACT_TAG,
+                MUTABLE_TAG,
+                FIELDACCESSOR_TAG,
+                CASEACCESSOR_TAG,
+                COVARIANT_TAG,
+                CONTRAVARIANT_TAG,
+                HASDEFAULT_TAG,
+                STABLE_TAG,
+                MACRO_TAG,
+                ERASED_TAG,
+                OPAQUE_TAG,
+                EXTENSION_TAG,
+                GIVEN_TAG,
+                PARAMSETTER_TAG,
+                EXPORTED_TAG,
+                OPEN_TAG,
+                PARAMALIAS_TAG,
+                TRANSPARENT_TAG,
+                INFIX_TAG,
+                INVISIBLE_TAG,
+                EMPTYCLAUSE_TAG,
+                SPLITCLAUSE_TAG,
+                TRACKED_TAG,
+                SUBMATCH_TAG,
+                INTO_TAG,
+            ],
+            [
+                6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+                28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+            ]
+        );
     }
 
     #[test]
