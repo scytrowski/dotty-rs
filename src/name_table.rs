@@ -712,7 +712,7 @@ fn read_parameter_signatures(reader: &mut Reader<'_>) -> Result<Vec<ParamSig>, N
 #[cfg(test)]
 mod tests {
     use super::{NameTable, NameTableError, RawName};
-    use crate::reader::Reader;
+    use crate::reader::{ReadError, Reader};
 
     #[test]
     fn decodes_names_from_a_fixture() {
@@ -742,6 +742,118 @@ mod tests {
                 reference: 2,
                 entry_index: 0,
                 entry_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_truncated_name_table_payload() {
+        assert_unexpected_eof(&[0x82]);
+    }
+
+    #[test]
+    fn rejects_a_truncated_utf8_name_payload() {
+        assert_rejects_truncated_entry(RawName::Utf8("nested".to_owned()));
+    }
+
+    #[test]
+    fn rejects_a_truncated_qualified_name_payload() {
+        assert_rejects_truncated_entry(RawName::Qualified {
+            prefix: 1,
+            selector: 2,
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_expanded_name_payload() {
+        assert_rejects_truncated_entry(RawName::Expanded {
+            prefix: 1,
+            selector: 2,
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_expand_prefix_name_payload() {
+        assert_rejects_truncated_entry(RawName::ExpandPrefix {
+            prefix: 1,
+            selector: 2,
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_unique_name_payload() {
+        assert_rejects_truncated_entry(RawName::Unique {
+            separator: 2,
+            uniqid: 7,
+            underlying: None,
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_default_getter_name_payload() {
+        assert_rejects_truncated_entry(RawName::DefaultGetter {
+            underlying: 1,
+            index: 2,
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_super_accessor_name_payload() {
+        assert_rejects_truncated_entry(RawName::SuperAccessor { underlying: 1 });
+    }
+
+    #[test]
+    fn rejects_a_truncated_inline_accessor_name_payload() {
+        assert_rejects_truncated_entry(RawName::InlineAccessor { underlying: 1 });
+    }
+
+    #[test]
+    fn rejects_a_truncated_body_retainer_name_payload() {
+        assert_rejects_truncated_entry(RawName::BodyRetainer { underlying: 1 });
+    }
+
+    #[test]
+    fn rejects_a_truncated_object_class_name_payload() {
+        assert_rejects_truncated_entry(RawName::ObjectClass { underlying: 1 });
+    }
+
+    #[test]
+    fn rejects_a_truncated_signed_name_payload() {
+        assert_rejects_truncated_entry(RawName::Signed {
+            original: 1,
+            result_signature: 1,
+            parameter_signatures: vec![2],
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_target_signed_name_payload() {
+        assert_rejects_truncated_entry(RawName::TargetSigned {
+            original: 1,
+            target: 1,
+            result_signature: 1,
+            parameter_signatures: vec![2],
+        });
+    }
+
+    #[test]
+    fn rejects_a_truncated_unknown_name_payload() {
+        assert_rejects_truncated_entry(RawName::Unknown {
+            tag: 99,
+            payload: vec![0x42],
+        });
+    }
+
+    #[test]
+    fn rejects_trailing_payload_after_a_qualified_name() {
+        let bytes = [0x85, 2, 0x83, 0x81, 0x82, 0x80];
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::TrailingPayload {
+                tag: 2,
+                remaining: 1,
             })
         );
     }
@@ -1245,6 +1357,29 @@ mod tests {
         let mut reader = Reader::new(writer.as_slice());
         assert_eq!(NameTable::decode(&mut reader).unwrap(), names);
         assert!(reader.is_at_end());
+    }
+
+    fn assert_rejects_truncated_entry(entry: RawName) {
+        let names = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("separator".to_owned()),
+            entry,
+        ])
+        .unwrap();
+        let mut writer = crate::Writer::new();
+        names.encode(&mut writer).unwrap();
+        let mut bytes = writer.into_inner();
+        bytes.pop();
+
+        assert_unexpected_eof(&bytes);
+    }
+
+    fn assert_unexpected_eof(bytes: &[u8]) {
+        let mut reader = Reader::new(bytes);
+        assert!(matches!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::Read(ReadError::UnexpectedEof { .. }))
+        ));
     }
 
     #[test]
