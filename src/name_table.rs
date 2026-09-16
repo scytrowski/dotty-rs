@@ -206,6 +206,19 @@ impl NameTable {
         self.get(reference).and_then(RawName::as_utf8)
     }
 
+    /// Returns the first one-based [`NameRef`] whose entry stores `value`
+    /// directly as UTF-8.
+    ///
+    /// Composite names are deliberately not matched by their rendered form.
+    /// Callers that need to inspect or resolve those entries should use
+    /// [`NameTable::get`] and [`NameTable::dependency_order`].
+    pub fn find_utf8(&self, value: &str) -> Option<NameRef> {
+        self.entries
+            .iter()
+            .position(|entry| entry.as_utf8() == Some(value))
+            .and_then(|index| NameRef::try_from(index + 1).ok())
+    }
+
     /// Returns the root name and all of its transitive dependencies in
     /// dependency-first order, visiting each name reference at most once.
     ///
@@ -755,6 +768,50 @@ mod tests {
         assert_eq!(table.get_utf8(1), Some("member"));
         assert_eq!(table.get_utf8(0), None);
         assert_eq!(table.get_utf8(2), None);
+    }
+
+    #[test]
+    fn finds_a_direct_utf8_name_reference() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(table.find_utf8("member"), Some(2));
+    }
+
+    #[test]
+    fn returns_none_when_a_utf8_name_is_missing() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("owner".to_owned())]).unwrap();
+
+        assert_eq!(table.find_utf8("missing"), None);
+    }
+
+    #[test]
+    fn returns_the_first_reference_for_duplicate_utf8_names() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("member".to_owned()),
+            RawName::Utf8("member".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(table.find_utf8("member"), Some(1));
+    }
+
+    #[test]
+    fn does_not_find_composite_names_by_rendered_text() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.find_utf8("owner.member"), None);
     }
 
     #[test]

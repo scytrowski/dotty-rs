@@ -506,8 +506,10 @@ the file's `NameTable`.
 general `TastyFile::validate()` path includes it.
 
 `NameTable::get_utf8()` and `RawName::as_utf8()` provide a checked shortcut
-for direct UTF-8 entries. Composite names deliberately remain structured
-`RawName` values rather than being flattened with an assumed separator.
+for direct UTF-8 entries. `NameTable::find_utf8()` provides the inverse lookup
+for the first direct entry with a given string. Composite names deliberately
+remain structured `RawName` values rather than being flattened with an
+assumed separator.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns
