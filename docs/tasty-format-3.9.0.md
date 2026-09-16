@@ -756,6 +756,10 @@ Variance = STABLE | COVARIANT | CONTRAVARIANT
 
 `STABLE` means invariant variance in a `Variance` context.
 
+`EMPTYCLAUSE`, `SPLITCLAUSE`, and `SUBMATCH` are category-1 grammar markers,
+not definition modifiers. Parsers must keep these markers distinct when
+recognizing `Modifier*` tails and optional method-type modifiers.
+
 ## 9. Source positions
 
 The `Positions` section has the following shape:

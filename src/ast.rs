@@ -5229,7 +5229,7 @@ fn collect_structured_name_refs(
 }
 
 fn is_modifier_tag(tag: u8) -> bool {
-    matches!(tag, 6 | 8..=29 | 31..=49)
+    matches!(tag, 6 | 8..=29 | 31..=44 | 47 | 49)
 }
 
 fn is_tail_tag(tag: u8) -> bool {
@@ -5281,21 +5281,21 @@ mod tests {
         APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstError,
         AstTreeEdge, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
         CLASSCONST_TAG, DEFAULT_MAX_AST_INDEX_DEPTH, DEFDEF_TAG, DefDefBody, DefDefHeaderItem,
-        DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG,
-        FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG,
-        IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG, ImportExportKind, ImportSelector,
-        LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG,
-        METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG,
-        PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-        QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG,
-        RENAMED_TAG, REPEATED_TAG, RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG,
-        SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG, SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG,
-        SPLICEPATTERN_TAG, SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode,
-        StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
-        TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
-        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG,
-        VALDEF_TAG, WHILE_TAG,
+        DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EMPTYCLAUSE_TAG,
+        EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG,
+        IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG, INLINED_TAG,
+        ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHCASETYPE_TAG,
+        MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG, NodeCategory,
+        ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, PRIVATEQUALIFIED_TAG,
+        PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG,
+        RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
+        RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
+        SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG,
+        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree, TEMPLATE_TAG,
+        TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
+        TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
+        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
+        TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::{AstTreeNode, TermEncodeError};
@@ -5546,7 +5546,7 @@ mod tests {
     fn recognizes_every_assigned_category_one_modifier_and_rejects_holes() {
         let assigned = [
             6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 47, 49,
         ];
 
         for tag in assigned {
@@ -5555,7 +5555,7 @@ mod tests {
                 "modifier tag {tag} was rejected"
             );
         }
-        for tag in [0, 1, 2, 5, 7, 30, 50, 255] {
+        for tag in [0, 1, 2, 5, 7, 30, 45, 46, 48, 50, 255] {
             assert!(
                 !super::is_modifier_tag(tag),
                 "non-modifier tag {tag} was accepted"
@@ -5567,7 +5567,7 @@ mod tests {
     fn decodes_each_assigned_category_one_modifier_as_a_definition_tail() {
         let assigned = [
             6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+            29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 47, 49,
         ];
 
         for modifier in assigned {
@@ -5589,6 +5589,20 @@ mod tests {
                     tail: vec![DefinitionTail::Modifier(modifier)],
                 },
                 "modifier tag {modifier} was not decoded as a definition tail"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_decode_clause_markers_as_definition_modifiers() {
+        for marker in [EMPTYCLAUSE_TAG, SPLITCLAUSE_TAG, SUBMATCH_TAG] {
+            let bytes = [VALDEF_TAG, 0x83, 0x81, 2, marker];
+            let mut reader = Reader::new(&bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+
+            assert!(
+                nodes.get(0).unwrap().decode_definition_body().is_err(),
+                "category-one marker {marker} was accepted as a definition modifier"
             );
         }
     }
