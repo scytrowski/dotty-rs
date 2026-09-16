@@ -653,10 +653,10 @@ impl RawName {
                 underlying,
                 ..
             } => {
+                visitor(*separator);
                 if let Some(underlying) = underlying {
                     visitor(*underlying);
                 }
-                visitor(*separator);
             }
             Self::DefaultGetter { underlying, .. }
             | Self::SuperAccessor { underlying }
@@ -835,6 +835,155 @@ mod tests {
         name.visit_references(&mut |_| visited = true);
 
         assert!(!visited);
+    }
+
+    #[test]
+    fn visits_no_references_for_an_unknown_name() {
+        let name = RawName::Unknown {
+            tag: 99,
+            payload: vec![1, 2, 3],
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert!(references.is_empty());
+    }
+
+    #[test]
+    fn visits_expanded_name_references_in_wire_order() {
+        let name = RawName::Expanded {
+            prefix: 7,
+            selector: 3,
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 3]);
+    }
+
+    #[test]
+    fn visits_expand_prefix_name_references_in_wire_order() {
+        let name = RawName::ExpandPrefix {
+            prefix: 7,
+            selector: 3,
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 3]);
+    }
+
+    #[test]
+    fn visits_a_unique_name_separator_before_its_underlying_name() {
+        let name = RawName::Unique {
+            separator: 7,
+            uniqid: 3,
+            underlying: Some(11),
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 11]);
+    }
+
+    #[test]
+    fn visits_a_unique_name_separator_without_an_underlying_name() {
+        let name = RawName::Unique {
+            separator: 7,
+            uniqid: 3,
+            underlying: None,
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_default_getter_underlying_reference() {
+        let name = RawName::DefaultGetter {
+            underlying: 7,
+            index: 3,
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_super_accessor_underlying_reference() {
+        let name = RawName::SuperAccessor { underlying: 7 };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_inline_accessor_underlying_reference() {
+        let name = RawName::InlineAccessor { underlying: 7 };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_body_retainer_underlying_reference() {
+        let name = RawName::BodyRetainer { underlying: 7 };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_object_class_underlying_reference() {
+        let name = RawName::ObjectClass { underlying: 7 };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7]);
+    }
+
+    #[test]
+    fn visits_signed_name_positive_parameter_references_only() {
+        let name = RawName::Signed {
+            original: 7,
+            result_signature: 11,
+            parameter_signatures: vec![-2, 13, -1, 17],
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 11, 13, 17]);
+    }
+
+    #[test]
+    fn visits_target_signed_name_references_in_wire_order() {
+        let name = RawName::TargetSigned {
+            original: 7,
+            target: 11,
+            result_signature: 13,
+            parameter_signatures: vec![-2, 17],
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 11, 13, 17]);
     }
 
     #[test]
