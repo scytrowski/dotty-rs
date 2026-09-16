@@ -404,6 +404,9 @@ impl ConstantValue {
 impl<'a> RawTree<'a> {
     /// Construct a validated category-1 or category-2 leaf for encoding.
     pub fn leaf(tag: u8, value: TermValue) -> Result<Self, TermEncodeError> {
+        if matches!(&value, TermValue::Tag) {
+            return Err(TermEncodeError::InvalidValue { tag });
+        }
         Ok(Self::Leaf(SimpleTerm::new(tag, value)?))
     }
 
@@ -836,6 +839,14 @@ mod tests {
         assert_eq!(
             SimpleTerm::new(90, TermValue::AstRef(1)),
             Err(TermEncodeError::InvalidTag { tag: 90 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_tag_only_leaf_when_constructing_a_raw_tree() {
+        assert_eq!(
+            RawTree::leaf(37, TermValue::Tag),
+            Err(TermEncodeError::InvalidValue { tag: 37 })
         );
     }
 
