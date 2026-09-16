@@ -1823,6 +1823,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_maximal_name_table_length_without_allocating_it() {
+        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::Read(ReadError::UnexpectedEof {
+                offset: 5,
+                needed: u32::MAX as usize,
+                remaining: 0,
+            }))
+        );
+    }
+
+    #[test]
     fn rejects_a_truncated_utf8_name_payload() {
         assert_rejects_truncated_entry(RawName::Utf8("nested".to_owned()));
     }

@@ -1066,6 +1066,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_maximal_position_line_count_before_allocating_line_sizes() {
+        let bytes = [0x0f, 0x7f, 0x7f, 0x7f, 0xff];
+        let section = Section::new(0, &bytes);
+
+        assert_eq!(
+            section.decode_positions(),
+            Err(SectionError::Read(ReadError::UnexpectedEof {
+                offset: 5,
+                needed: u32::MAX as usize,
+                remaining: 0,
+            }))
+        );
+    }
+
+    #[test]
     fn builds_an_owned_raw_section() {
         let encoded = EncodedSection::raw(9, vec![1, 2, 3]);
 

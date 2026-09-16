@@ -1267,6 +1267,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_maximal_length_node_before_allocating_its_payload() {
+        let mut reader = Reader::new(&[128, 0x0f, 0x7f, 0x7f, 0x7f, 0xff]);
+
+        assert_eq!(
+            RawTree::decode(&mut reader),
+            Err(TermError::Read(ReadError::UnexpectedEof {
+                offset: 6,
+                needed: u32::MAX as usize,
+                remaining: 0,
+            }))
+        );
+    }
+
+    #[test]
     fn decodes_nested_category_three_and_four_raw_trees() {
         let mut reader = Reader::new(&[112, 0x85, 64, 0x86]);
         let tree = super::RawTree::decode(&mut reader).unwrap();

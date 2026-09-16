@@ -341,4 +341,33 @@ mod tests {
             Err(ReadError::InvalidUtf8 { offset: 0 })
         );
     }
+
+    #[test]
+    fn rejects_a_length_that_would_overflow_the_reader_range() {
+        let mut reader = Reader::new(&[0x42]);
+
+        assert_eq!(
+            reader.read_bytes(usize::MAX),
+            Err(ReadError::UnexpectedEof {
+                offset: 0,
+                needed: usize::MAX,
+                remaining: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_maximal_length_prefix_when_the_payload_is_truncated() {
+        let mut reader = Reader::new(&[0x0f, 0x7f, 0x7f, 0x7f, 0xff]);
+        let length = reader.read_nat().unwrap() as usize;
+
+        assert_eq!(
+            reader.read_bytes(length),
+            Err(ReadError::UnexpectedEof {
+                offset: 5,
+                needed: u32::MAX as usize,
+                remaining: 0,
+            })
+        );
+    }
 }
