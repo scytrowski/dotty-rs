@@ -285,8 +285,20 @@ impl<'a> TastyFile<'a> {
 
     /// Parse a Scala 3.9.0 file and eagerly validate all supported sections.
     pub fn parse_and_validate_scala_3_9(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
+        Self::parse_and_validate_scala_3_9_with_max_ast_index_depth(
+            bytes,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Parse and eagerly validate a Scala 3.9.0 file with an explicit AST
+    /// nesting limit.
+    pub fn parse_and_validate_scala_3_9_with_max_ast_index_depth(
+        bytes: &'a [u8],
+        max_depth: usize,
+    ) -> Result<Self, TastyFileError> {
         let file = Self::parse_scala_3_9(bytes)?;
-        file.validate()?;
+        file.validate_with_max_ast_index_depth(max_depth)?;
         Ok(file)
     }
 
@@ -298,13 +310,31 @@ impl<'a> TastyFile<'a> {
         compiler_minor: u32,
         compiler_experimental: u32,
     ) -> Result<Self, TastyFileError> {
+        Self::parse_and_validate_compatible_with_max_ast_index_depth(
+            bytes,
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Parse, validate compiler compatibility, and eagerly validate a file
+    /// with an explicit AST nesting limit.
+    pub fn parse_and_validate_compatible_with_max_ast_index_depth(
+        bytes: &'a [u8],
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+        max_depth: usize,
+    ) -> Result<Self, TastyFileError> {
         let file = Self::parse_compatible_with(
             bytes,
             compiler_major,
             compiler_minor,
             compiler_experimental,
         )?;
-        file.validate()?;
+        file.validate_with_max_ast_index_depth(max_depth)?;
         Ok(file)
     }
 
@@ -736,6 +766,32 @@ mod tests {
 
         assert!(matches!(
             file.validate_with_max_ast_index_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_scala_versioned_parsing() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+
+        assert!(matches!(
+            TastyFile::parse_and_validate_scala_3_9_with_max_ast_index_depth(bytes, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_compatible_parsing() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+
+        assert!(matches!(
+            TastyFile::parse_and_validate_compatible_with_max_ast_index_depth(bytes, 28, 10, 0, 0),
             Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
                 limit: 0,
                 ..

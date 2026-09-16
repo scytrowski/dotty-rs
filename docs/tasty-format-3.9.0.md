@@ -149,6 +149,8 @@ compiler_experimental)`. `TastyFile::parse_scala_3_9` remains the strict
 entry point for this repository's current compatibility target. The complete
 file model additionally exposes `TastyFile::parse_compatible_with`,
 `TastyFile::parse_and_validate_compatible_with`,
+`TastyFile::parse_and_validate_scala_3_9_with_max_ast_index_depth`, and
+`TastyFile::parse_and_validate_compatible_with_max_ast_index_depth`,
 `TastyFile::validate_compatible_with`, and corresponding validated builder and
 encoder methods.
 
@@ -882,7 +884,9 @@ The Rust file model keeps section decoding lazy: `parse_scala_3_9` validates the
 container header and section boundaries, while `TastyFile::validate()` eagerly
 decodes the ASTs, checks the byte range of their AST references, and decodes
 all supported standard sections. Applications that want the eager behavior at
-construction time can use `parse_and_validate_scala_3_9`.
+construction time can use `parse_and_validate_scala_3_9`. The
+`*_with_max_ast_index_depth` variants apply an explicit AST nesting limit while
+performing that eager validation.
 
 ## 15. Implementation plan
 
