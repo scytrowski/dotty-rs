@@ -275,6 +275,36 @@ fn selected_scala3_compiler_corruptions_do_not_panic() {
     }
 }
 
+#[test]
+fn selected_scala3_compiler_truncations_do_not_panic() {
+    for path in scala3_compiler_corpus().selected_fixture_paths() {
+        let original = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let prefix_sample_end = original.len().min(256);
+        let suffix_sample_start = original.len().saturating_sub(256);
+
+        for end in 0..prefix_sample_end {
+            assert_truncated_compiler_fixture_does_not_panic(&path, &original[..end], end);
+        }
+        for end in suffix_sample_start..original.len() {
+            assert_truncated_compiler_fixture_does_not_panic(&path, &original[..end], end);
+        }
+    }
+}
+
+fn assert_truncated_compiler_fixture_does_not_panic(path: &Path, input: &[u8], end: usize) {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _ = TastyFile::parse(input);
+        let _ = TastyFile::parse_scala_3_9(input);
+        let _ = TastyFile::parse_and_validate_compatible_with(input, 28, 9, 0);
+    }));
+    assert!(
+        result.is_ok(),
+        "parser panicked for truncated fixture {} at {end} bytes",
+        path.display()
+    );
+}
+
 fn next_random(state: &mut u64) -> u64 {
     *state = state
         .wrapping_mul(6_364_136_223_846_793_005)
