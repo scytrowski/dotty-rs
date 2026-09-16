@@ -1,0 +1,16 @@
+# Generated from the Scala 3.9.0 source tree at tag 3.9.0.
+# The fixture files are the TASTy entries from the nonbootstrapped compiler JAR.
+# The compiler implementation is bootstrapped by Scala 3.8.4, so its own
+# TASTy uses the compatible 28.8.0 format even though the artifact is 3.9.0.
+id = "scala3-compiler-3.9.0"
+source_kind = "jar"
+scala_version = "3.9.0"
+tasty_format = "28.8.0"
+tasty_root = "."
+source_repository = "https://github.com/scala/scala3"
+source_tag = "3.9.0"
+source_commit = "777528f19a58e794c9954a42f433373472ec57f8"
+artifact = "scala3-compiler_3-3.9.0-bin-SNAPSHOT-nonbootstrapped.jar"
+artifact_sha256 = "83b18f07cccac91f502f5083d2e59c7d162c6bc5b9737334d6423328ac170c58"
+fixture_count = 1148
+fixture_bytes = 17811626

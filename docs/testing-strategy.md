@@ -62,6 +62,12 @@ JAR-based manifests may declare `artifact` and `artifact_sha256` together. The
 shared manifest parser validates that the pair is complete and that the
 checksum is a 64-character hexadecimal SHA-256 digest.
 
+The TASTy format recorded in a manifest describes the bytes actually present
+in the corpus. A Scala compiler artifact can legitimately contain its own
+implementation classes bootstrapped with an older compatible TASTy minor
+version; such a corpus must record that observed format explicitly instead of
+assuming it from the artifact name.
+
 Future semantic expectations belong beside the materialized corpus and must
 record the Scala/compiler version and expectation-schema version. They should
 compare stable structural or semantic facts, not absolute AST offsets, unless

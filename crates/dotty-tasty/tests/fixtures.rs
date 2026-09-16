@@ -32,12 +32,9 @@ fn tasty_fixture_paths() -> Vec<PathBuf> {
                 .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", path.display()));
 
             if file_type.is_dir() {
-                if path
-                    .file_name()
-                    .is_some_and(|name| name == "scala3-library")
-                {
-                    // Keep the external Scala library corpus out of the original
-                    // 35-fixture inventory; it has a dedicated integration test.
+                if path.join("manifest.toml").is_file() {
+                    // Keep manifest-backed external corpora out of the original
+                    // fixture inventory; each corpus has a dedicated test.
                     continue;
                 }
                 directories.push(path);
