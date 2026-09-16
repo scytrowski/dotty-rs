@@ -27,6 +27,14 @@ pub enum HeaderError {
         minor: u32,
         experimental: u32,
     },
+    IncompatibleVersion {
+        major: u32,
+        minor: u32,
+        experimental: u32,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    },
 }
 
 impl fmt::Display for HeaderError {
@@ -45,6 +53,17 @@ impl fmt::Display for HeaderError {
             } => write!(
                 formatter,
                 "unsupported TASTy version {major}.{minor}.{experimental}; expected Scala 3.9.0 format version 28.9.0"
+            ),
+            Self::IncompatibleVersion {
+                major,
+                minor,
+                experimental,
+                compiler_major,
+                compiler_minor,
+                compiler_experimental,
+            } => write!(
+                formatter,
+                "TASTy version {major}.{minor}.{experimental} is incompatible with compiler version {compiler_major}.{compiler_minor}.{compiler_experimental}"
             ),
         }
     }
@@ -124,6 +143,28 @@ impl Header {
             || (self.major_version == compiler_major
                 && self.minor_version < compiler_minor
                 && self.experimental_version == 0)
+    }
+
+    /// Validates this file version against a compiler version using the
+    /// compatibility relation defined by the TASTy format.
+    pub fn validate_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<(), HeaderError> {
+        if self.is_compatible_with(compiler_major, compiler_minor, compiler_experimental) {
+            Ok(())
+        } else {
+            Err(HeaderError::IncompatibleVersion {
+                major: self.major_version,
+                minor: self.minor_version,
+                experimental: self.experimental_version,
+                compiler_major,
+                compiler_minor,
+                compiler_experimental,
+            })
+        }
     }
 
     pub fn validate_scala_3_9(&self) -> Result<(), HeaderError> {
@@ -251,6 +292,29 @@ mod tests {
         };
 
         assert!(!header.is_compatible_with(28, 9, 0));
+    }
+
+    #[test]
+    fn reports_an_incompatible_version_with_the_compiler_version() {
+        let header = Header {
+            major_version: 29,
+            minor_version: 0,
+            experimental_version: 0,
+            tooling_version: String::new(),
+            uuid: [0; 16],
+        };
+
+        assert_eq!(
+            header.validate_compatible_with(28, 9, 0),
+            Err(HeaderError::IncompatibleVersion {
+                major: 29,
+                minor: 0,
+                experimental: 0,
+                compiler_major: 28,
+                compiler_minor: 9,
+                compiler_experimental: 0,
+            })
+        );
     }
 
     #[test]

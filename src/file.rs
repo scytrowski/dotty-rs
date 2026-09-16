@@ -189,6 +189,18 @@ impl TastyFileBuilder {
         file.validate()
     }
 
+    /// Validate the file against a compiler version using TASTy's
+    /// compatibility relation.
+    pub fn validate_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<(), TastyFileError> {
+        let file = self.build()?;
+        file.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
         self.build()?.encode()
     }
@@ -200,6 +212,19 @@ impl TastyFileBuilder {
     /// Validate all supported file contents before encoding.
     pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
         self.build()?.encode_validated()
+    }
+
+    /// Validate all supported file contents against a compiler version before
+    /// encoding.
+    pub fn encode_validated_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        let file = self.build()?;
+        file.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)?;
+        file.encode()
     }
 
     /// Validate all supported file contents before encoding and allocating AST addresses.
@@ -241,6 +266,23 @@ impl<'a> TastyFile<'a> {
         Ok(file)
     }
 
+    /// Parse a file after validating its version against a compiler version.
+    /// The original file version remains available through [`TastyFile::header`].
+    pub fn parse_compatible_with(
+        bytes: &'a [u8],
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<Self, TastyFileError> {
+        let file = Self::parse(bytes)?;
+        file.header.validate_compatible_with(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+        )?;
+        Ok(file)
+    }
+
     /// Parse a Scala 3.9.0 file and eagerly validate all supported sections.
     pub fn parse_and_validate_scala_3_9(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
         let file = Self::parse_scala_3_9(bytes)?;
@@ -260,6 +302,21 @@ impl<'a> TastyFile<'a> {
         self.comments()?;
         self.positions()?;
         Ok(())
+    }
+
+    /// Validate the file contents and its version against a compiler version.
+    pub fn validate_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<(), TastyFileError> {
+        self.header.validate_compatible_with(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+        )?;
+        self.validate()
     }
 
     /// Validate that every name-table reference used by a supported AST
@@ -287,6 +344,18 @@ impl<'a> TastyFile<'a> {
     /// Validate all supported file contents before encoding.
     pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
         self.validate()?;
+        self.encode()
+    }
+
+    /// Validate the file contents and its version against a compiler version
+    /// before encoding.
+    pub fn encode_validated_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        self.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)?;
         self.encode()
     }
 
@@ -548,7 +617,29 @@ impl<'a> TastyFile<'a> {
 mod tests {
     use super::{TastyFile, TastyFileError};
     use crate::ast::StructuredNode;
+    use crate::header::Header;
+    use crate::name_table::NameTable;
     use crate::section::{EncodedSection, PositionEntry, PositionSection, StandardSection};
+
+    fn compatible_file_bytes() -> Vec<u8> {
+        super::TastyFileBuilder::new(
+            Header {
+                major_version: 28,
+                minor_version: 8,
+                experimental_version: 0,
+                tooling_version: "Scala 3.8.0".to_owned(),
+                uuid: [0; 16],
+            },
+            NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("value".to_owned()),
+            ])
+            .unwrap(),
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]))
+        .encode()
+        .unwrap()
+    }
 
     #[test]
     fn decodes_a_complete_scala_3_9_fixture_as_one_file_model() {
@@ -572,6 +663,41 @@ mod tests {
 
         assert!(!nodes.is_empty());
         assert!(matches!(nodes.first(), Some(StructuredNode::Package(_))));
+    }
+
+    #[test]
+    fn parses_a_file_with_an_older_compatible_minor_version() {
+        let bytes = compatible_file_bytes();
+        let file = TastyFile::parse_compatible_with(&bytes, 28, 9, 0).unwrap();
+
+        assert_eq!(file.header().minor_version, 8);
+    }
+
+    #[test]
+    fn rejects_a_file_with_an_incompatible_version_during_compatible_parse() {
+        let bytes = compatible_file_bytes();
+
+        assert_eq!(
+            TastyFile::parse_compatible_with(&bytes, 27, 9, 0),
+            Err(TastyFileError::Header(
+                crate::HeaderError::IncompatibleVersion {
+                    major: 28,
+                    minor: 8,
+                    experimental: 0,
+                    compiler_major: 27,
+                    compiler_minor: 9,
+                    compiler_experimental: 0,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn validates_a_fixture_against_a_newer_compatible_minor_version() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert_eq!(file.validate_compatible_with(28, 10, 0), Ok(()));
     }
 
     #[test]
@@ -733,6 +859,43 @@ mod tests {
         assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
+    }
+
+    #[test]
+    fn encodes_a_file_after_compatible_version_validation() {
+        let bytes = compatible_file_bytes();
+        let file = TastyFile::parse(&bytes).unwrap();
+
+        assert_eq!(
+            file.encode_validated_compatible_with(28, 9, 0).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn validates_and_encodes_owned_sections_with_an_older_compatible_version() {
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("value".to_owned()),
+        ])
+        .unwrap();
+        let builder = super::TastyFileBuilder::new(
+            Header {
+                major_version: 28,
+                minor_version: 8,
+                experimental_version: 0,
+                tooling_version: "Scala 3.8.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        assert_eq!(builder.validate_compatible_with(28, 9, 0), Ok(()));
+        assert_eq!(
+            builder.encode_validated_compatible_with(28, 9, 0),
+            Ok(compatible_file_bytes())
+        );
     }
 
     #[test]

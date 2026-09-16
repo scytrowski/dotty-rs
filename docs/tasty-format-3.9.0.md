@@ -146,7 +146,10 @@ A library can expose two modes:
 The Rust header API exposes this second relation through
 `Header::is_compatible_with(compiler_major, compiler_minor,
 compiler_experimental)`. `TastyFile::parse_scala_3_9` remains the strict
-entry point for this repository's current compatibility target.
+entry point for this repository's current compatibility target. The complete
+file model additionally exposes `TastyFile::parse_compatible_with`,
+`TastyFile::validate_compatible_with`, and corresponding validated builder
+and encoder methods.
 
 ## 4. Name table
 
