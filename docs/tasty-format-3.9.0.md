@@ -1023,10 +1023,10 @@ target. The checklist records the current boundary of this crate: it provides
 lossless wire and structural APIs, while a Scala semantic model remains a
 separate future layer.
 
-The workspace is named `dotty-rs`; this crate is published as `dotty-tasty`
-and its Rust library name is `dotty`. TASTy APIs are available under
-`dotty::tasty`, leaving the top-level namespace available for future compiler
-components.
+The workspace is named `dotty-rs`; the root `dotty` package is the public
+facade, while the implementation package is `dotty-tasty` under `crates/`.
+TASTy APIs are available under `dotty::tasty`, leaving the top-level namespace
+available for future compiler components.
 
 ### Stage 1: container — complete
 

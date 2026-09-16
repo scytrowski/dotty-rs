@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dotty::tasty::{
+use dotty_tasty::tasty::{
     Attribute, Comment, DEFDEF_TAG, EXPORT_TAG, Header, IMPORT_TAG, NameTable, PACKAGE_TAG,
     RawName, RawNodes, Reader, SectionTable, StandardSection, TYPEDEF_TAG, TastyFile, VALDEF_TAG,
     Writer,
@@ -181,11 +181,11 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
             for attribute in attributes.decode_attributes().unwrap_or_else(|error| {
                 panic!("failed to parse attributes in {}: {error}", path.display())
             }) {
-                if let dotty::tasty::Attribute::SourceFile(name) = attribute {
+                if let dotty_tasty::tasty::Attribute::SourceFile(name) = attribute {
                     assert!(
                         matches!(
                             names.entries().get(name as usize),
-                            Some(dotty::tasty::RawName::Utf8(_))
+                            Some(dotty_tasty::tasty::RawName::Utf8(_))
                         ),
                         "fixture {} has a non-UTF-8 SOURCEFILE reference {}: {:?}",
                         path.display(),
@@ -254,7 +254,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
         for stat in package.stats.iter() {
             if matches!(
                 stat.tag,
-                dotty::tasty::IMPORT_TAG | dotty::tasty::EXPORT_TAG
+                dotty_tasty::tasty::IMPORT_TAG | dotty_tasty::tasty::EXPORT_TAG
             ) {
                 stat.decode_import_export().unwrap_or_else(|error| {
                     panic!(
@@ -278,11 +278,11 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                         path.display()
                     )
                 });
-                if let dotty::tasty::DefinitionBody::TypeDef {
-                    type_or_template: dotty::tasty::RawTree::LengthNode(template),
+                if let dotty_tasty::tasty::DefinitionBody::TypeDef {
+                    type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
                     ..
                 } = body
-                    && template.tag == dotty::tasty::TEMPLATE_TAG
+                    && template.tag == dotty_tasty::tasty::TEMPLATE_TAG
                 {
                     let structure = template
                         .decode_template_structure()
@@ -310,13 +310,13 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                         });
                     }
                     for parent in &structure.parents {
-                        if let dotty::tasty::RawTree::Ast { tag, .. } = parent
+                        if let dotty_tasty::tasty::RawTree::Ast { tag, .. } = parent
                             && matches!(
                                 *tag,
-                                dotty::tasty::THIS_TAG
-                                    | dotty::tasty::NEW_TAG
-                                    | dotty::tasty::THROW_TAG
-                                    | dotty::tasty::ELIDED_TAG
+                                dotty_tasty::tasty::THIS_TAG
+                                    | dotty_tasty::tasty::NEW_TAG
+                                    | dotty_tasty::tasty::THROW_TAG
+                                    | dotty_tasty::tasty::ELIDED_TAG
                             )
                         {
                             parent.decode_ast_child(*tag).unwrap_or_else(|error| {
@@ -326,9 +326,9 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                 )
                             });
                         }
-                        if let dotty::tasty::RawTree::LengthNode(raw) = parent {
+                        if let dotty_tasty::tasty::RawTree::LengthNode(raw) = parent {
                             match raw.tag {
-                                dotty::tasty::APPLY_TAG => {
+                                dotty_tasty::tasty::APPLY_TAG => {
                                     raw.decode_apply().unwrap_or_else(|error| {
                                         panic!(
                                             "failed to parse apply in {}: {error}",
@@ -336,7 +336,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                         )
                                     });
                                 }
-                                dotty::tasty::BLOCK_TAG => {
+                                dotty_tasty::tasty::BLOCK_TAG => {
                                     raw.decode_block().unwrap_or_else(|error| {
                                         panic!(
                                             "failed to parse block in {}: {error}",
@@ -344,7 +344,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                         )
                                     });
                                 }
-                                dotty::tasty::TYPEAPPLY_TAG => {
+                                dotty_tasty::tasty::TYPEAPPLY_TAG => {
                                     raw.decode_type_apply().unwrap_or_else(|error| {
                                         panic!(
                                             "failed to parse type apply in {}: {error}",
@@ -352,7 +352,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                         )
                                     });
                                 }
-                                dotty::tasty::TYPED_TAG => {
+                                dotty_tasty::tasty::TYPED_TAG => {
                                     raw.decode_typed().unwrap_or_else(|error| {
                                         panic!(
                                             "failed to parse typed tree in {}: {error}",
@@ -367,7 +367,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                     for nested in structure.stats.iter() {
                         if matches!(
                             nested.tag,
-                            dotty::tasty::IMPORT_TAG | dotty::tasty::EXPORT_TAG
+                            dotty_tasty::tasty::IMPORT_TAG | dotty_tasty::tasty::EXPORT_TAG
                         ) {
                             nested.decode_import_export().unwrap_or_else(|error| {
                                 panic!(
@@ -376,7 +376,7 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                                 )
                             });
                         }
-                        if nested.tag == dotty::tasty::DEFDEF_TAG {
+                        if nested.tag == dotty_tasty::tasty::DEFDEF_TAG {
                             nested.decode_defdef_body().unwrap_or_else(|error| {
                                 panic!("failed to parse defdef body in {}: {error}", path.display())
                             });
@@ -548,7 +548,7 @@ fn all_tasty_fixture_top_level_definitions_decode_structurally() {
                     )
                 });
                 assert!(
-                    !matches!(structured, dotty::tasty::StructuredNode::Raw(_)),
+                    !matches!(structured, dotty_tasty::tasty::StructuredNode::Raw(_)),
                     "known top-level tag {} was not dispatched structurally in {}",
                     node.tag,
                     path.display()
