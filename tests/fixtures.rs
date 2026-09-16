@@ -470,6 +470,29 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
 }
 
 #[test]
+fn all_tasty_fixtures_pass_eager_compatible_validation() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 10, 0).unwrap_or_else(
+            |error| {
+                panic!(
+                    "failed compatible validation for {}: {error}",
+                    path.display()
+                )
+            },
+        );
+
+        assert_eq!(
+            file.header().minor_version,
+            9,
+            "fixture {} did not preserve its original version",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn all_tasty_fixture_top_level_definitions_decode_structurally() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

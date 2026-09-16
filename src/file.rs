@@ -290,6 +290,24 @@ impl<'a> TastyFile<'a> {
         Ok(file)
     }
 
+    /// Parse a file, validate its version against a compiler version, and
+    /// eagerly validate all supported file contents.
+    pub fn parse_and_validate_compatible_with(
+        bytes: &'a [u8],
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> Result<Self, TastyFileError> {
+        let file = Self::parse_compatible_with(
+            bytes,
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+        )?;
+        file.validate()?;
+        Ok(file)
+    }
+
     /// Validate the ASTs and every supported standard section in this file.
     ///
     /// Parsing keeps section payloads lazy so callers can inspect only the
@@ -698,6 +716,15 @@ mod tests {
         let file = TastyFile::parse(bytes).unwrap();
 
         assert_eq!(file.validate_compatible_with(28, 10, 0), Ok(()));
+    }
+
+    #[test]
+    fn parses_and_validates_a_fixture_against_a_newer_compatible_minor_version() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_and_validate_compatible_with(bytes, 28, 10, 0).unwrap();
+
+        assert_eq!(file.header().major_version, 28);
+        assert_eq!(file.header().minor_version, 9);
     }
 
     #[test]
