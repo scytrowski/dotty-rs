@@ -181,7 +181,7 @@ impl SimpleTerm {
         }
 
         let valid = match (&value, tag) {
-            (TermValue::Tag, tag) => is_assigned_category_one_tag(tag),
+            (TermValue::Tag, tag) => is_tag_only_category_one_tag(tag),
             (TermValue::Unit, 2)
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
@@ -216,7 +216,7 @@ impl SimpleTerm {
             3 => TermValue::Boolean(false),
             4 => TermValue::Boolean(true),
             5 => TermValue::Null,
-            tag if is_assigned_category_one_tag(tag) => TermValue::Tag,
+            tag if is_tag_only_category_one_tag(tag) => TermValue::Tag,
             60..=63 | 66 => TermValue::AstRef(reader.read_nat()?),
             64..=65 | 74..=76 => TermValue::NameRef(reader.read_nat()?),
             67..=68 | 70 | 72 => TermValue::Int(reader.read_int()?),
@@ -332,7 +332,7 @@ impl SimpleTerm {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
-            (TermValue::Tag, tag) if is_assigned_category_one_tag(tag) => {}
+            (TermValue::Tag, tag) if is_tag_only_category_one_tag(tag) => {}
             (TermValue::Unit, 2)
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
@@ -350,6 +350,10 @@ impl SimpleTerm {
 
 fn is_assigned_category_one_tag(tag: u8) -> bool {
     matches!(tag, 2..=6 | 8..=29 | 31..=49)
+}
+
+fn is_tag_only_category_one_tag(tag: u8) -> bool {
+    matches!(tag, 6 | 8..=29 | 31..=49)
 }
 
 impl ConstantValue {
@@ -794,6 +798,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_tag_only_value_for_a_constant_tag() {
+        assert_eq!(
+            SimpleTerm::new(2, TermValue::Tag),
+            Err(TermEncodeError::InvalidValue { tag: 2 })
+        );
+    }
+
+    #[test]
     fn rejects_an_unassigned_category_one_tag() {
         let mut reader = Reader::new(&[30]);
 
@@ -801,6 +813,22 @@ mod tests {
             SimpleTerm::decode(&mut reader),
             Err(TermError::UnsupportedCategory { tag: 30, offset: 0 })
         );
+    }
+
+    #[test]
+    fn round_trips_every_assigned_category_one_tag_only_leaf() {
+        let tags = (6..=6).chain(8..=29).chain(31..=49);
+
+        for tag in tags {
+            let bytes = [tag];
+            let mut reader = Reader::new(&bytes);
+            let term = SimpleTerm::decode(&mut reader).unwrap();
+            assert_eq!(term.value, TermValue::Tag);
+
+            let mut writer = Writer::new();
+            term.encode(&mut writer).unwrap();
+            assert_eq!(writer.as_slice(), &[tag]);
+        }
     }
 
     #[test]
