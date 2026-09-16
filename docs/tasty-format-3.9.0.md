@@ -899,8 +899,10 @@ Attributes:
 
 The Scala 3.9.0 compiler emits the `SOURCEFILEattr` `Utf8Ref` as a zero-based
 name-table index in the fixtures used by this project, despite the grammar's
-one-based `Utf8Ref` description. A decoder should preserve the raw value and
-apply the zero-based interpretation when reading compiler-emitted files.
+one-based `Utf8Ref` description. The decoder preserves the raw value in
+`Attribute::SourceFile` for lossless re-encoding, while the file-level
+`TastyFile::source_file()` API applies the zero-based interpretation and
+requires the target entry to be a direct UTF-8 name.
 
 ## 12. `numRefs` and tree structure calculation
 

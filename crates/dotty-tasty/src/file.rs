@@ -3,7 +3,7 @@ use crate::ast::{
 };
 use crate::header::{Header, HeaderError};
 use crate::name_table::{
-    NameRef, NameRenderError, NameTable, NameTableError, RawName, RenderedSignedName,
+    NameRef, NameRenderError, NameTable, NameTableError, RawName, RawNameKind, RenderedSignedName,
 };
 use crate::reader::Reader;
 use crate::section::{
@@ -73,6 +73,10 @@ pub enum TastyFileError {
         context: &'static str,
         reference: NameRef,
     },
+    InvalidSourceFileName {
+        reference: NameRef,
+        kind: RawNameKind,
+    },
     InvalidAstAddress {
         context: &'static str,
         address: i64,
@@ -98,6 +102,10 @@ impl fmt::Display for TastyFileError {
             Self::InvalidNameReference { context, reference } => write!(
                 formatter,
                 "{context} contains invalid name reference {reference}"
+            ),
+            Self::InvalidSourceFileName { reference, kind } => write!(
+                formatter,
+                "SOURCEFILE attribute reference {reference} resolves to {kind:?}, expected a UTF-8 name"
             ),
             Self::InvalidAstAddress {
                 context,
@@ -928,18 +936,33 @@ impl<'a> TastyFile<'a> {
 
         if let Some(attributes) = &attributes {
             for attribute in attributes {
-                if let Attribute::SourceFile(reference) = attribute
-                    && self.name(*reference).is_none()
-                {
-                    return Err(TastyFileError::InvalidNameReference {
-                        context: "SOURCEFILE attribute",
-                        reference: *reference,
-                    });
+                if let Attribute::SourceFile(reference) = attribute {
+                    self.resolve_source_file(*reference)?;
                 }
             }
         }
 
         Ok(attributes)
+    }
+
+    /// Resolve the compiler-emitted `SOURCEFILE` attribute.
+    ///
+    /// Unlike ordinary `NameRef` values, the attribute stores a zero-based
+    /// name-table index. The raw index remains available through
+    /// [`TastyFile::attributes`] so encoding can remain lossless.
+    pub fn source_file(&self) -> Result<Option<&str>, TastyFileError> {
+        let Some(attributes) = self.attributes()? else {
+            return Ok(None);
+        };
+
+        let Some(reference) = attributes.iter().find_map(|attribute| match attribute {
+            Attribute::SourceFile(reference) => Some(*reference),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+
+        self.resolve_source_file(reference).map(Some)
     }
 
     pub fn comments(&self) -> Result<Option<Vec<Comment>>, TastyFileError> {
@@ -1102,6 +1125,20 @@ impl<'a> TastyFile<'a> {
             .unwrap_or(0)
     }
 
+    fn resolve_source_file(&self, reference: NameRef) -> Result<&str, TastyFileError> {
+        match self.names.get_zero_based(reference) {
+            Some(RawName::Utf8(name)) => Ok(name),
+            Some(name) => Err(TastyFileError::InvalidSourceFileName {
+                reference,
+                kind: name.kind(),
+            }),
+            None => Err(TastyFileError::InvalidNameReference {
+                context: "SOURCEFILE attribute",
+                reference,
+            }),
+        }
+    }
+
     fn validate_ast_address(
         &self,
         context: &'static str,
@@ -1126,7 +1163,9 @@ mod tests {
     use crate::ast::StructuredNode;
     use crate::header::Header;
     use crate::name_table::NameTable;
-    use crate::section::{EncodedSection, PositionEntry, PositionSection, StandardSection};
+    use crate::section::{
+        EncodedSection, PositionEntry, PositionSection, Section, StandardSection,
+    };
 
     fn compatible_file_bytes() -> Vec<u8> {
         super::TastyFileBuilder::new(
@@ -1179,6 +1218,102 @@ mod tests {
         let reference = file.names().find_utf8("ASTs").unwrap();
 
         assert_eq!(file.render_name(reference), Ok("ASTs".to_owned()));
+    }
+
+    #[test]
+    fn resolves_a_fixture_source_file_using_a_zero_based_name_index() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert_eq!(
+            file.source_file(),
+            Ok(Some(
+                "IdeaProjects/TastyFixtures/src/main/scala/me/cytrowski/tastyfixtures/SimpleDef.scala",
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_a_source_file_index_outside_the_name_table() {
+        let attributes = [crate::SOURCEFILE_ATTR, 0x82];
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("Attributes".to_owned()),
+            crate::RawName::Utf8("Example.scala".to_owned()),
+        ])
+        .unwrap();
+        let sections = crate::SectionTable::from_sections(vec![Section::new(0, &attributes)]);
+        let file = TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.source_file(),
+            Err(TastyFileError::InvalidNameReference {
+                context: "SOURCEFILE attribute",
+                reference: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn returns_no_source_file_when_the_attributes_section_is_absent() {
+        let file = TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            NameTable::from_entries(vec![crate::RawName::Utf8("Attributes".to_owned())]).unwrap(),
+            crate::SectionTable::from_sections(Vec::new()),
+        )
+        .unwrap();
+
+        assert_eq!(file.source_file(), Ok(None));
+    }
+
+    #[test]
+    fn rejects_a_source_file_index_that_targets_a_composite_name() {
+        let attributes = [crate::SOURCEFILE_ATTR, 0x81];
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("Attributes".to_owned()),
+            crate::RawName::Qualified {
+                prefix: 1,
+                selector: 1,
+            },
+        ])
+        .unwrap();
+        let sections = crate::SectionTable::from_sections(vec![Section::new(0, &attributes)]);
+        let file = TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.attributes(),
+            Err(TastyFileError::InvalidSourceFileName {
+                reference: 1,
+                kind: crate::RawNameKind::Qualified,
+            })
+        );
     }
 
     #[test]
@@ -1727,7 +1862,7 @@ mod tests {
         .unwrap();
 
         let mut attributes = crate::Writer::new();
-        crate::Attribute::encode_all(&[crate::Attribute::SourceFile(5)], &mut attributes).unwrap();
+        crate::Attribute::encode_all(&[crate::Attribute::SourceFile(4)], &mut attributes).unwrap();
         let mut comments = crate::Writer::new();
         crate::Comment::encode_all(
             &[crate::Comment {
@@ -1794,7 +1929,7 @@ mod tests {
             names,
         )
         .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]))
-        .with_section(EncodedSection::attributes(1, &[crate::Attribute::SourceFile(5)]).unwrap())
+        .with_section(EncodedSection::attributes(1, &[crate::Attribute::SourceFile(4)]).unwrap())
         .with_section(
             EncodedSection::comments(
                 2,

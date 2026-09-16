@@ -62,6 +62,7 @@ pub enum Attribute {
     WithPureFuns,
     Java,
     Outline,
+    /// Raw zero-based name-table index emitted by Scala's `SOURCEFILEattr`.
     SourceFile(NameRef),
 }
 
