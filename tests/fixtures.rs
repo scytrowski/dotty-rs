@@ -517,6 +517,40 @@ fn all_tasty_fixture_top_level_definitions_decode_structurally() {
 }
 
 #[test]
+fn all_tasty_fixtures_round_trip_top_level_structured_ast_nodes() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let ast_section = file.section(StandardSection::Asts).unwrap();
+        let structured = file.structured_asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode structured AST nodes in {}: {error}",
+                path.display()
+            )
+        });
+        let mut writer = Writer::new();
+
+        for node in &structured {
+            node.encode(&mut writer).unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode structured AST node in {}: {error}",
+                    path.display()
+                )
+            });
+        }
+
+        assert_eq!(
+            writer.as_slice(),
+            ast_section.payload,
+            "structured AST round-trip changed {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn all_tasty_fixture_top_level_nodes_expose_structured_ast_references() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

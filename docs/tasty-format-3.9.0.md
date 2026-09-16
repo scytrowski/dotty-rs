@@ -893,3 +893,7 @@ Before declaring the implementation compatible, confirm the following using real
 - behavior for unknown tags and trailing bytes;
 - the relation between `ASTRef` and the beginning of the `ASTs` section;
 - `SIGNED`/`TARGETSIGNED` behavior for actual overloaded-method signatures.
+
+The fixture suite should also round-trip every top-level AST through the
+structured encoder once its corresponding semantic node is supported. Raw
+fallback nodes may remain opaque, but their bytes must still be preserved.
