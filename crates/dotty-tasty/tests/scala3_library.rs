@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -8,8 +8,9 @@ use serde::Deserialize;
 mod corpus;
 
 use dotty_tasty::tasty::{
-    EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, RenderedSignedName, StandardSection,
-    TastyFile, TastyFileBuilder, Writer,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EncodedSection, IF_TAG, LAMBDA_TAG, MATCH_TAG, NEW_TAG,
+    PACKAGE_TAG, RETURN_TAG, RawNode, RawNodes, Reader, RenderedSignedName, StandardSection,
+    TRY_TAG, TYPEAPPLY_TAG, TYPED_TAG, TastyFile, TastyFileBuilder, WHILE_TAG, Writer,
 };
 
 #[derive(Debug, Deserialize)]
@@ -23,12 +24,15 @@ struct SemanticExpectation {
 struct SemanticExpectationFile {
     path: String,
     declarations: Vec<SemanticExpectationDeclaration>,
+    shapes: BTreeMap<String, usize>,
+    parameter_clause_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SemanticExpectationDeclaration {
     kind: String,
     name: String,
+    parameter_clauses: Option<usize>,
 }
 
 fn scala3_library_corpus() -> corpus::Corpus {
@@ -48,6 +52,23 @@ fn normalized_structured_encoding(raw: &RawNode<'_>) -> Result<Vec<u8>, String> 
         .encode(&mut writer)
         .map_err(|error| error.to_string())?;
     Ok(writer.into_inner())
+}
+
+fn semantic_shape(tag: u8) -> Option<&'static str> {
+    match tag {
+        APPLY_TAG => Some("Apply"),
+        BLOCK_TAG => Some("Block"),
+        IF_TAG => Some("If"),
+        LAMBDA_TAG => Some("Lambda"),
+        MATCH_TAG => Some("Match"),
+        NEW_TAG => Some("New"),
+        RETURN_TAG => Some("Return"),
+        TRY_TAG => Some("Try"),
+        TYPEAPPLY_TAG => Some("TypeApply"),
+        TYPED_TAG => Some("Typed"),
+        WHILE_TAG => Some("WhileDo"),
+        _ => None,
+    }
 }
 
 #[test]
@@ -112,7 +133,7 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
             )
         });
 
-    assert_eq!(expectation.schema_version, 2);
+    assert_eq!(expectation.schema_version, 3);
     assert_eq!(expectation.scala_version, "3.9.0");
     assert_eq!(
         expectation.files.len(),
@@ -159,11 +180,68 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
             "semantic expectation for {} contains an invalid declaration name",
             expected.path
         );
+        assert!(
+            expected.declarations.iter().all(|declaration| {
+                (declaration.kind == "DefDef") == declaration.parameter_clauses.is_some()
+            }),
+            "semantic expectation for {} has inconsistent parameter-clause metadata",
+            expected.path
+        );
         let fixture_path = fixture_root.join(&expected.path);
         let bytes = fs::read(&fixture_path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture_path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", fixture_path.display()));
+        let index = file
+            .ast_address_index()
+            .unwrap_or_else(|error| panic!("failed to index {}: {error}", fixture_path.display()));
+        let mut actual_shapes = BTreeMap::new();
+        for node in index.iter_nodes() {
+            if let Some(shape) = semantic_shape(node.tag) {
+                *actual_shapes.entry(shape.to_owned()).or_insert(0) += 1;
+            }
+        }
+        for (shape, expected_count) in &expected.shapes {
+            let actual_count = actual_shapes.get(shape).copied().unwrap_or_default();
+            assert!(
+                actual_count > 0,
+                "{} has no wire-level {shape} node (oracle has {expected_count})",
+                expected.path
+            );
+        }
+
+        let mut actual_parameter_clause_counts = BTreeMap::new();
+        for node in index.iter().filter(|node| node.tag == DEFDEF_TAG) {
+            let body = node.decode_defdef_body().unwrap_or_else(|error| {
+                panic!(
+                    "failed to decode DefDef in {}: {error}",
+                    fixture_path.display()
+                )
+            });
+            let count = if body.parameters.is_empty() && body.clauses.is_empty() {
+                0
+            } else {
+                body.clauses.len() + 1
+            };
+            *actual_parameter_clause_counts
+                .entry(count.to_string())
+                .or_insert(0) += 1;
+        }
+        let mut matched_parameter_clause_arity = false;
+        for clause_count in expected.parameter_clause_counts.keys() {
+            let actual_occurrences = actual_parameter_clause_counts
+                .get(clause_count)
+                .copied()
+                .unwrap_or_default();
+            matched_parameter_clause_arity |= actual_occurrences > 0;
+        }
+        if !expected.parameter_clause_counts.is_empty() {
+            assert!(
+                matched_parameter_clause_arity,
+                "{} has no wire-level method with a parameter-clause arity present in the oracle",
+                expected.path
+            );
+        }
         let actual_names: BTreeSet<_> = file
             .names()
             .iter()

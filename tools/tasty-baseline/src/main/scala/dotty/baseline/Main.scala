@@ -14,6 +14,11 @@ import scala.tasty.inspector.*
 object Main:
   private final case class Input(path: String, tastyPath: Path)
   private final case class Selection(paths: Set[String])
+  private final case class Projection(
+      declarations: List[(String, String, Option[Int])],
+      shapes: Map[String, Int],
+      parameterClauseCounts: Map[Int, Int]
+  )
 
   def main(args: Array[String]): Unit =
     if args.length < 2 then
@@ -79,7 +84,7 @@ object Main:
       )
     Files.writeString(
       output,
-      s"{\"schema_version\":2,\"scala_version\":\"3.9.0\",\"files\":[${result.mkString(",")}]}\n"
+      s"{\"schema_version\":3,\"scala_version\":\"3.9.0\",\"files\":[${result.mkString(",")}]}\n"
     )
 
   private def materialize(arguments: List[String]): List[Input] =
@@ -146,28 +151,67 @@ object Main:
     finally jar.close()
 
   private def fileJson(path: String)(using quotes: Quotes)(tree: quotes.reflect.Tree): String =
-    s"{\"path\":${json(path)},\"declarations\":${semanticDeclarations(tree)}}"
+    val projection = semanticProjection(tree)
+    val declarations = projection.declarations.map { case (kind, name, clauses) =>
+      val clauseJson = clauses.map(value => s",\"parameter_clauses\":$value").getOrElse("")
+      s"{\"kind\":${json(kind)},\"name\":${json(name)}$clauseJson}"
+    }
+    val shapes = stringIntMapJson(projection.shapes)
+    val parameterClauses = stringIntMapJson(
+      projection.parameterClauseCounts.map { case (count, occurrences) =>
+        count.toString -> occurrences
+      }
+    )
+    s"{\"path\":${json(path)},\"declarations\":[${declarations.mkString(",")}],\"shapes\":$shapes,\"parameter_clause_counts\":$parameterClauses}"
 
-  private def semanticDeclarations(using quotes: Quotes)(tree: quotes.reflect.Tree): String =
+  private def semanticProjection(using quotes: Quotes)(tree: quotes.reflect.Tree): Projection =
     import quotes.reflect.*
-    val declarations = ArrayBuffer.empty[(String, String)]
+    val declarations = ArrayBuffer.empty[(String, String, Option[Int])]
+    val shapes = scala.collection.mutable.Map.empty[String, Int]
+    val parameterClauseCounts = scala.collection.mutable.Map.empty[Int, Int]
+    val shapeKinds = Set(
+      "Apply",
+      "Block",
+      "If",
+      "Lambda",
+      "Match",
+      "New",
+      "Return",
+      "Try",
+      "TypeApply",
+      "Typed",
+      "WhileDo"
+    )
     class Collector extends TreeTraverser:
       override def traverseTree(current: Tree)(owner: Symbol): Unit =
         val symbol = current.symbol
         val kind = current.getClass.getSimpleName.stripSuffix("$")
+        if shapeKinds.contains(kind) then
+          shapes(kind) = shapes.getOrElse(kind, 0) + 1
         if Set("TypeDef", "DefDef", "ValDef").contains(kind) && symbol.exists then
           val name = symbol.fullName.split('.').lastOption.getOrElse("")
           val normalized = name.stripSuffix("$")
           if normalized.nonEmpty && !normalized.startsWith("_") && !normalized.startsWith("<") &&
               normalized.forall(char => char.isLetterOrDigit || char == '_') then
-            declarations += ((kind, normalized))
+            val clauses = if kind == "DefDef" then Some(symbol.paramSymss.length) else None
+            declarations += ((kind, normalized, clauses))
+            clauses.foreach { count =>
+              parameterClauseCounts(count) = parameterClauseCounts.getOrElse(count, 0) + 1
+            }
         super.traverseTree(current)(owner)
 
     new Collector().traverseTree(tree)(Symbol.noSymbol)
-    val unique = declarations.distinct.sortBy((kind, name) => (kind, name))
-    s"[${unique.map { case (kind, name) =>
-        s"{\"kind\":${json(kind)},\"name\":${json(name)}}"
-      }.mkString(",")}]"
+    Projection(
+      declarations.distinct.sortBy { case (kind, name, clauses) => (kind, name, clauses) }.toList,
+      shapes.toMap,
+      parameterClauseCounts.toMap
+    )
+
+  private def stringIntMapJson(values: Map[String, Int]): String =
+    val entries = values.toList.sortBy(_._1).map { case (key, value) =>
+      s"${json(key)}:$value"
+    }
+    s"{${entries.mkString(",")}}"
 
   private def json(value: String): String =
     val escaped = value.flatMap {
