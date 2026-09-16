@@ -2,11 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use dotty_tasty::tasty::{
-    APPLIEDTPT_TAG, APPLIEDTYPE_TAG, BLOCK_TAG, CASEDEF_TAG, ConstantValue, DEFDEF_TAG,
-    DefinitionBody, IF_TAG, INLINE_TAG, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHTPT_TAG,
-    PARAM_TAG, REFINEDTPT_TAG, RawNode, RawTree, SELECTIN_TAG, StructuredNode, StructuredTree,
-    TEMPLATE_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEPARAM_TAG, TastyFile,
-    UNAPPLY_TAG, VALDEF_TAG,
+    APPLIEDTPT_TAG, APPLIEDTYPE_TAG, BLOCK_TAG, CASE_TAG, CASEDEF_TAG, ConstantValue, DEFDEF_TAG,
+    DefinitionBody, DefinitionTail, EXTENSION_TAG, GIVEN_TAG, IF_TAG, INLINE_TAG, LAMBDA_TAG,
+    LAMBDATPT_TAG, MATCH_TAG, MATCHTPT_TAG, OPAQUE_TAG, PARAM_TAG, REFINEDTPT_TAG, RawNode,
+    RawTree, SELECTIN_TAG, StructuredNode, StructuredTree, TEMPLATE_TAG, TRAIT_TAG, TYPEBOUNDS_TAG,
+    TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TastyFile, UNAPPLY_TAG, VALDEF_TAG,
 };
 
 fn assert_fixture_has_structured_nodes(relative_path: &str, expected_tags: &[u8]) {
@@ -266,6 +266,14 @@ fn wire_name(file: &TastyFile<'_>, reference: u32) -> String {
         .unwrap_or_else(|| panic!("wire name reference {reference} is not a direct UTF-8 name"))
 }
 
+fn try_wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    file.names()
+        .entries()
+        .get(reference as usize)
+        .and_then(dotty_tasty::tasty::RawName::as_utf8)
+        .map(str::to_owned)
+}
+
 fn assert_named_definition<F>(
     file: &TastyFile<'_>,
     index: &dotty_tasty::tasty::AstAddressIndex<'_>,
@@ -284,7 +292,7 @@ fn assert_named_definition<F>(
             let Ok(definition) = node.decode_definition() else {
                 return false;
             };
-            wire_name(file, definition.name()) == expected_name
+            try_wire_name(file, definition.name()).as_deref() == Some(expected_name)
         })
         .unwrap_or_else(|| panic!("fixture has no definition {expected_name:?} with tag {tag}"));
     check(node.decode_structured().unwrap());
@@ -334,6 +342,11 @@ where
         panic!("expected val definition {expected_name:?}");
     };
     check(node.decode_definition_body().unwrap());
+}
+
+fn has_modifier(tail: &[DefinitionTail<'_>], expected: u8) -> bool {
+    tail.iter()
+        .any(|item| matches!(item, DefinitionTail::Modifier(tag) if *tag == expected))
 }
 
 #[test]
@@ -588,6 +601,716 @@ fn match_fixture_has_three_cases_and_expected_results() {
                 assert!(block.stats.is_empty());
                 assert_string_constant(file, &block.expression, expected);
             }
+        });
+    });
+}
+
+#[test]
+fn bounds_fixture_has_a_type_parameter_with_an_upper_bound() {
+    with_fixture("bounds/Bounds.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "accept", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("accept is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 2);
+            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "A");
+            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
+            assert_eq!(wire_name(file, body.parameters[1].name()), "value");
+
+            let type_parameter = body.parameters[0].decode_body().unwrap();
+            let RawTree::LengthNode(bounds_node) = type_parameter.type_tree else {
+                panic!("type parameter A has no TypeBoundsTpt body");
+            };
+            assert_eq!(bounds_node.tag, TYPEBOUNDSTPT_TAG);
+            let StructuredNode::TypeBounds(bounds) = bounds_node.decode_structured().unwrap()
+            else {
+                panic!("type parameter A body is not TypeBoundsTpt");
+            };
+            assert!(bounds.high.is_some());
+        });
+    });
+}
+
+#[test]
+fn shape_fixture_is_a_trait() {
+    with_fixture("bounds/Shape.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Shape", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Shape is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+    });
+}
+
+#[test]
+fn circle_fixture_has_shape_as_a_parent() {
+    with_fixture("bounds/Circle.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Circle", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Circle is not a TypeDef");
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Circle has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Circle body is not a Template");
+            };
+            assert!(template.parents.iter().any(|parent| {
+                parent
+                    .name_refs()
+                    .iter()
+                    .any(|reference| wire_name(file, *reference) == "Shape")
+            }));
+        });
+    });
+}
+
+#[test]
+fn case_class_fixture_has_point_constructor_parameters() {
+    with_fixture("case_class/Point.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Point", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template,
+                tail,
+                ..
+            }) = structured
+            else {
+                panic!("Point is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, CASE_TAG));
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Point has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Point body is not a Template");
+            };
+            assert_eq!(template.term_params.len(), 2);
+            assert_eq!(wire_name(file, template.term_params[0].name()), "x");
+            assert_eq!(wire_name(file, template.term_params[1].name()), "y");
+        });
+    });
+}
+
+#[test]
+fn box_fixture_has_a_type_parameter() {
+    with_fixture("generic/Box.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Box", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Box is not a TypeDef");
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Box has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Box body is not a Template");
+            };
+            assert_eq!(template.type_params.len(), 1);
+            assert_eq!(wire_name(file, template.type_params[0].name()), "A");
+            assert_eq!(template.term_params.len(), 1);
+            assert_eq!(wire_name(file, template.term_params[0].name()), "value");
+        });
+    });
+}
+
+#[test]
+fn generic_fixture_has_identity_signature() {
+    with_fixture("generic/Generic.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "identity", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("identity is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 2);
+            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "A");
+            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
+            assert_eq!(wire_name(file, body.parameters[1].name()), "value");
+        });
+    });
+}
+
+#[test]
+fn generic_fixture_has_pair_signature() {
+    with_fixture("generic/Generic.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "pair", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("pair is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 4);
+            for (parameter, expected) in body.parameters.iter().zip(["A", "B", "a", "b"]) {
+                assert_eq!(wire_name(file, parameter.name()), expected);
+            }
+            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(body.parameters[1].tag(), TYPEPARAM_TAG);
+            assert_eq!(body.parameters[2].tag(), PARAM_TAG);
+            assert_eq!(body.parameters[3].tag(), PARAM_TAG);
+        });
+    });
+}
+
+#[test]
+fn given_fixture_has_a_given_display_instance() {
+    with_fixture("given/Display.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Display", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template,
+                tail,
+                ..
+            }) = structured
+            else {
+                panic!("Display is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Display has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Display body is not a Template");
+            };
+            assert_eq!(template.type_params.len(), 1);
+            assert_eq!(wire_name(file, template.type_params[0].name()), "A");
+        });
+
+        assert_named_definition(
+            file,
+            &index,
+            VALDEF_TAG,
+            "given_Display_Int",
+            |structured| {
+                let StructuredNode::ValDef(DefinitionBody::ValDef {
+                    type_tree, tail, ..
+                }) = structured
+                else {
+                    panic!("given_Display_Int is not a ValDef");
+                };
+                assert!(has_modifier(&tail, GIVEN_TAG));
+                assert!(matches!(type_tree, RawTree::NatAst { .. }));
+            },
+        );
+    });
+}
+
+#[test]
+fn inline_fixture_marks_method_and_parameter_inline() {
+    with_fixture("inline/Inline.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "twice", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("twice is not a DefDef");
+            };
+            assert!(has_modifier(&body.tail, INLINE_TAG));
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "x");
+            let parameter_body = body.parameters[0].decode_body().unwrap();
+            assert!(has_modifier(&parameter_body.tail, INLINE_TAG));
+
+            let Some(RawTree::LengthNode(rhs_node)) = body.rhs else {
+                panic!("twice has no RHS");
+            };
+            let StructuredNode::Typed(typed) = rhs_node.decode_structured().unwrap() else {
+                panic!("twice RHS is not Typed");
+            };
+            let RawTree::LengthNode(expression_node) = typed.expression else {
+                panic!("twice typed expression is not an Apply");
+            };
+            assert!(matches!(
+                expression_node.decode_structured().unwrap(),
+                StructuredNode::Apply(_)
+            ));
+        });
+    });
+}
+
+#[test]
+fn opaque_fixture_has_an_opaque_type_alias() {
+    with_fixture("opaque/UserId.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "UserId", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("UserId is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, OPAQUE_TAG));
+        });
+    });
+}
+
+#[test]
+fn opaque_fixture_has_apply_and_extension_methods() {
+    with_fixture("opaque/UserId.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "apply", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("apply is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "value", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("value is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "id");
+            assert!(has_modifier(&body.tail, EXTENSION_TAG));
+        });
+    });
+}
+
+#[test]
+fn class_fixture_has_person_constructor_parameters() {
+    with_fixture("class/Person.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Person", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Person is not a TypeDef");
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Person has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Person body is not a Template");
+            };
+            assert_eq!(template.term_params.len(), 2);
+            assert_eq!(wire_name(file, template.term_params[0].name()), "name");
+            assert_eq!(wire_name(file, template.term_params[1].name()), "age");
+        });
+    });
+}
+
+#[test]
+fn empty_object_fixture_has_an_object_module_value() {
+    with_fixture("empty_object/EmptyObject.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, VALDEF_TAG, "EmptyObject", |structured| {
+            let StructuredNode::ValDef(DefinitionBody::ValDef { rhs, .. }) = structured else {
+                panic!("EmptyObject is not a ValDef");
+            };
+            assert!(rhs.is_some());
+        });
+    });
+}
+
+#[test]
+fn extension_fixture_marks_squared_as_an_extension_method() {
+    with_fixture("extension/Extension.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "squared", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("squared is not a DefDef");
+            };
+            assert!(has_modifier(&body.tail, EXTENSION_TAG));
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+        });
+    });
+}
+
+#[test]
+fn animal_fixture_is_a_trait_with_sound_method() {
+    with_fixture("inheritance/Animal.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Animal", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Animal is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "sound", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("sound is not a DefDef");
+            };
+            assert!(body.parameters.is_empty());
+        });
+    });
+}
+
+#[test]
+fn dog_fixture_has_animal_as_a_parent() {
+    with_fixture("inheritance/Dog.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Dog", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Dog is not a TypeDef");
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Dog has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Dog body is not a Template");
+            };
+            assert!(template.parents.iter().any(|parent| {
+                parent
+                    .name_refs()
+                    .iter()
+                    .any(|reference| wire_name(file, *reference) == "Animal")
+            }));
+        });
+    });
+}
+
+#[test]
+fn inline_match_fixture_marks_classify_and_its_parameter_inline() {
+    with_fixture("inline_match/InlineMatch.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "classify", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("classify is not a DefDef");
+            };
+            assert!(has_modifier(&body.tail, INLINE_TAG));
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+            assert!(has_modifier(
+                &body.parameters[0].decode_body().unwrap().tail,
+                INLINE_TAG
+            ));
+        });
+        assert_eq!(
+            index.iter().filter(|node| node.tag == CASEDEF_TAG).count(),
+            2
+        );
+    });
+}
+
+#[test]
+fn aged_fixture_is_a_trait_with_age_method() {
+    with_fixture("intersection/Aged.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Aged", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Aged is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "age", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("age is not a DefDef");
+            };
+            assert!(body.parameters.is_empty());
+        });
+    });
+}
+
+#[test]
+fn named_fixture_is_a_trait_with_name_method() {
+    with_fixture("intersection/Named.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Named", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Named is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "name", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("name is not a DefDef");
+            };
+            assert!(body.parameters.is_empty());
+        });
+    });
+}
+
+#[test]
+fn intersection_fixture_has_a_named_and_aged_parameter() {
+    with_fixture("intersection/Intersection.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "describe", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("describe is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+        });
+    });
+}
+
+#[test]
+fn match_type_fixture_has_head_match_type_alias() {
+    with_fixture("match_type/MatchType.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Head", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Head is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("Head has no type lambda");
+            };
+            assert_eq!(node.tag, LAMBDATPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn match_type_fixture_has_element_match_type_alias() {
+    with_fixture("match_type/MatchType.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Element", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Element is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("Element has no type lambda");
+            };
+            assert_eq!(node.tag, LAMBDATPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn path_dependent_container_has_an_abstract_element_type() {
+    with_fixture("path_dependent/Container.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Container", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Container is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Element", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Element is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("Element has no type bounds");
+            };
+            assert_eq!(node.tag, TYPEBOUNDSTPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn path_dependent_fixture_gets_a_container_parameter() {
+    with_fixture("path_dependent/PathDependent.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "get", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("get is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "container");
+        });
+    });
+}
+
+#[test]
+fn product_match_fixture_first_takes_a_tuple_parameter() {
+    with_fixture("product_match/ProductMatch.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "first", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("first is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "value");
+        });
+    });
+}
+
+#[test]
+fn refinement_fixture_has_a_string_service_refinement() {
+    with_fixture("refinement/Refinement.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "StringService", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("StringService is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("StringService has no refinement type");
+            };
+            assert_eq!(node.tag, REFINEDTPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn service_fixture_has_an_abstract_result_type() {
+    with_fixture("refinement/Service.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Service", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("Service is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Result", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Result is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("Result has no type bounds");
+            };
+            assert_eq!(node.tag, TYPEBOUNDSTPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn trait_fixture_is_a_trait_with_name_method() {
+    with_fixture("trait/WithName.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "WithName", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) = structured else {
+                panic!("WithName is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "name", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("name is not a DefDef");
+            };
+            assert!(body.parameters.is_empty());
+        });
+    });
+}
+
+#[test]
+fn type_lambda_fixture_has_container_alias() {
+    with_fixture("type_lambda/TypeLambda.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Container", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("Container is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("Container has no type lambda");
+            };
+            assert_eq!(node.tag, LAMBDATPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn type_lambda_fixture_has_either_string_alias() {
+    with_fixture("type_lambda/TypeLambda.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "EitherString", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("EitherString is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("EitherString has no type lambda");
+            };
+            assert_eq!(node.tag, LAMBDATPT_TAG);
+        });
+    });
+}
+
+#[test]
+fn union_fixture_has_string_or_int_alias_and_value_method() {
+    with_fixture("union/Union.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "StringOrInt", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template, ..
+            }) = structured
+            else {
+                panic!("StringOrInt is not a TypeDef");
+            };
+            let RawTree::LengthNode(node) = type_or_template else {
+                panic!("StringOrInt has no type tree");
+            };
+            assert_eq!(node.tag, APPLIEDTPT_TAG);
+        });
+        assert_named_definition(file, &index, DEFDEF_TAG, "value", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("value is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 1);
+            assert_eq!(wire_name(file, body.parameters[0].name()), "flag");
+        });
+    });
+}
+
+#[test]
+fn show_fixture_is_a_generic_trait() {
+    with_fixture("using/Show.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, TYPEDEF_TAG, "Show", |structured| {
+            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                type_or_template,
+                tail,
+                ..
+            }) = structured
+            else {
+                panic!("Show is not a TypeDef");
+            };
+            assert!(has_modifier(&tail, TRAIT_TAG));
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("Show has no template");
+            };
+            let StructuredNode::Template(template) = template_node.decode_structured().unwrap()
+            else {
+                panic!("Show body is not a Template");
+            };
+            assert_eq!(template.type_params.len(), 1);
+            assert_eq!(wire_name(file, template.type_params[0].name()), "A");
+        });
+    });
+}
+
+#[test]
+fn using_fixture_render_has_value_and_using_parameters() {
+    with_fixture("using/Using.tasty", |file| {
+        let index = file.ast_address_index().unwrap();
+        assert_named_definition(file, &index, DEFDEF_TAG, "render", |structured| {
+            let StructuredNode::DefDef(body) = structured else {
+                panic!("render is not a DefDef");
+            };
+            assert_eq!(body.parameters.len(), 3);
+            for (parameter, expected) in body.parameters.iter().zip(["A", "value", "show"]) {
+                assert_eq!(wire_name(file, parameter.name()), expected);
+            }
+            assert_eq!(body.parameters[0].tag(), TYPEPARAM_TAG);
+            assert_eq!(body.parameters[1].tag(), PARAM_TAG);
+            assert_eq!(body.parameters[2].tag(), PARAM_TAG);
+            assert!(!body.clauses.is_empty());
         });
     });
 }
