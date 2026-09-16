@@ -510,6 +510,12 @@ programmatic encoding; `encode_with_addresses()` then assigns fresh offsets
 from the emitted stream.
 `RawNode::new()` is the corresponding validated constructor for an individual
 category-5 node.
+`NodeCategory::from_tag()` classifies a byte by its category range, including
+reserved gaps. `NodeCategory::is_known_tag()` and
+`NodeCategory::contains_known_tag()` additionally identify tags assigned by
+the Scala 3.9.0 matrix; `RawNode::is_known()` exposes the same distinction for
+decoded or programmatically constructed raw nodes. Unknown category-five
+nodes remain preservable even when they are not assigned in this version.
 `SimpleTerm::new()`, `RawTree::leaf()`, `RawTree::ast()`, and
 `RawTree::nat_ast()` provide the corresponding validated constructors for
 programmatically building category-1 through category-4 trees. Their offsets
@@ -608,6 +614,11 @@ suffix unambiguously when a `TypeName` starts with a modifier-valued byte.
 
 `HOLE` is a valid special category-5 node. Its typed representation contains
 the hole index, its type tree, and the remaining ordered argument trees.
+
+Decoders that reserve storage from a count first verify the minimum encoded
+size against the bounded payload. This prevents malformed line counts and
+caller-supplied contextual type-name counts from causing allocations that are
+unrelated to the available input.
 
 ### 6.6. Constants
 
