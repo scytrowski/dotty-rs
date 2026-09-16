@@ -76,6 +76,10 @@ pub enum NameTableError {
         entry_index: usize,
         entry_count: usize,
     },
+    InvalidParamSig {
+        value: ParamSig,
+        entry_index: usize,
+    },
     TrailingPayload {
         tag: u8,
         remaining: usize,
@@ -96,6 +100,10 @@ impl fmt::Display for NameTableError {
             } => write!(
                 formatter,
                 "invalid name reference {reference} in entry {entry_index}; name table contains {entry_count} entries"
+            ),
+            Self::InvalidParamSig { value, entry_index } => write!(
+                formatter,
+                "invalid parameter signature {value} in name entry {entry_index}; expected a non-zero signed value"
             ),
             Self::TrailingPayload { tag, remaining } => write!(
                 formatter,
@@ -263,6 +271,26 @@ impl NameTable {
 
     fn validate_references(&self) -> Result<(), NameTableError> {
         for (entry_index, entry) in self.entries.iter().enumerate() {
+            let parameter_signatures: &[ParamSig] = match entry {
+                RawName::Signed {
+                    parameter_signatures,
+                    ..
+                }
+                | RawName::TargetSigned {
+                    parameter_signatures,
+                    ..
+                } => parameter_signatures,
+                _ => &[],
+            };
+            for signature in parameter_signatures {
+                if *signature == 0 || *signature == i32::MIN {
+                    return Err(NameTableError::InvalidParamSig {
+                        value: *signature,
+                        entry_index,
+                    });
+                }
+            }
+
             let references = entry.references();
             for reference in references {
                 if reference == 0 || reference as usize > self.entries.len() {
@@ -618,6 +646,35 @@ mod tests {
                 reference: 2,
                 entry_index: 0,
                 entry_count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_parameter_signature_when_decoding() {
+        let bytes = [0x85, 63, 0x83, 0x81, 0x81, 0x80];
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::InvalidParamSig {
+                value: 0,
+                entry_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_i32_min_parameter_signature_when_constructing_name_entries() {
+        assert_eq!(
+            NameTable::from_entries(vec![RawName::Signed {
+                original: 1,
+                result_signature: 1,
+                parameter_signatures: vec![i32::MIN],
+            }]),
+            Err(NameTableError::InvalidParamSig {
+                value: i32::MIN,
+                entry_index: 0,
             })
         );
     }
