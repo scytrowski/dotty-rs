@@ -487,7 +487,10 @@ allocating AST addresses.
 `TastyFile::validate_ast_references()` checks the AST-section range, while
 `TastyFile::validate_ast_reference_targets()` additionally requires every
 collected reference to resolve to a visible node start.
-The eager `TastyFile::validate()` path uses the stricter target validation.
+The eager `TastyFile::validate()` path uses the stricter target validation and
+the default index depth. `validate_with_max_ast_index_depth()` and
+`validate_ast_reference_targets_with_max_depth()` expose the same checks with
+an explicit nesting limit.
 
 `RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
 name-table references contained in supported structured payloads. At file

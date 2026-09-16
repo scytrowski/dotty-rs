@@ -314,8 +314,19 @@ impl<'a> TastyFile<'a> {
     /// parts they need. This method provides an explicit eager-validation
     /// boundary for applications that need the complete file checked.
     pub fn validate(&self) -> Result<(), TastyFileError> {
+        self.validate_with_max_ast_index_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate the file using an explicit maximum AST nesting depth.
+    ///
+    /// This is useful when eager validation is performed on input whose size
+    /// or nesting depth is controlled by an untrusted source.
+    pub fn validate_with_max_ast_index_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
         self.validate_name_references()?;
-        self.validate_ast_reference_targets()?;
+        self.validate_ast_reference_targets_with_max_depth(max_depth)?;
         self.attributes()?;
         self.comments()?;
         self.positions()?;
@@ -536,7 +547,16 @@ impl<'a> TastyFile<'a> {
     /// Validate that every collected AST reference points to the start of a
     /// visible AST node, not merely somewhere inside the ASTs section.
     pub fn validate_ast_reference_targets(&self) -> Result<(), TastyFileError> {
-        let index = self.ast_address_index()?;
+        self.validate_ast_reference_targets_with_max_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate AST references against a global index built with an explicit
+    /// maximum nesting depth.
+    pub fn validate_ast_reference_targets_with_max_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
+        let index = self.ast_address_index_with_max_depth(max_depth)?;
         for reference in self.ast_references()? {
             self.validate_ast_address("AST reference", i64::from(reference.reference.address))?;
             if index.resolve_node(reference.reference).is_none() {
@@ -702,6 +722,20 @@ mod tests {
 
         assert!(matches!(
             file.ast_address_index_with_max_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_file_validation() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert!(matches!(
+            file.validate_with_max_ast_index_depth(0),
             Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
                 limit: 0,
                 ..
