@@ -117,6 +117,26 @@ fn all_tasty_fixtures_have_a_valid_name_table() {
 }
 
 #[test]
+fn all_tasty_fixtures_iterate_name_entries_with_resolvable_references() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        for (reference, entry) in file.names().iter() {
+            assert_eq!(
+                file.name(reference),
+                Some(entry),
+                "fixture {} produced an invalid iterated name reference {}",
+                path.display(),
+                reference
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_have_a_valid_section_table() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

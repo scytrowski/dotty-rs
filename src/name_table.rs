@@ -569,6 +569,22 @@ impl NameTable {
         &self.entries
     }
 
+    /// Iterates over name entries together with their one-based references.
+    ///
+    /// The order is the original wire order. This avoids requiring callers
+    /// to derive a `NameRef` from a zero-based slice index themselves.
+    pub fn iter(&self) -> impl Iterator<Item = (NameRef, &RawName)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                index
+                    .checked_add(1)
+                    .and_then(|value| NameRef::try_from(value).ok())
+                    .map(|reference| (reference, entry))
+            })
+    }
+
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         let mut table = Writer::new();
         for entry in &self.entries {
@@ -1926,6 +1942,30 @@ mod tests {
 
         assert_eq!(names.len(), 2);
         assert_eq!(names.get(2), Some(&names.entries()[1]));
+    }
+
+    #[test]
+    fn iterates_name_entries_with_one_based_references() {
+        let names = NameTable::from_entries(vec![
+            RawName::Utf8("foo".to_owned()),
+            RawName::Utf8("bar".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|(reference, entry)| (reference, entry.as_utf8().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![(1, "foo"), (2, "bar")]
+        );
+    }
+
+    #[test]
+    fn iterates_no_entries_for_an_empty_name_table() {
+        let names = NameTable::from_entries(Vec::new()).unwrap();
+
+        assert_eq!(names.iter().count(), 0);
     }
 
     #[test]

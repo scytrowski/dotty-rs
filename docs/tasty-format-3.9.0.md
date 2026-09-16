@@ -539,6 +539,9 @@ signature references.
 `TastyFile::render_name()` and `TastyFile::render_signed_name()` provide the
 same operations directly against a parsed file's name table, without requiring
 callers to extract that table first.
+`NameTable::iter()` visits entries in wire order and pairs each borrowed raw
+entry with its one-based `NameRef`, which is safer for callers than deriving
+references from zero-based slice indexes.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns
