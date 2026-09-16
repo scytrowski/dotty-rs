@@ -736,6 +736,40 @@ fn all_tasty_fixture_position_sections_resolve_without_overflow() {
 }
 
 #[test]
+fn all_tasty_fixture_position_associations_have_resolved_coordinates() {
+    let mut association_count = 0;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        if let Some(positions) = file.positions().unwrap_or_else(|error| {
+            panic!("failed to decode positions in {}: {error}", path.display())
+        }) {
+            let associations = positions.resolved_associations().unwrap_or_else(|error| {
+                panic!(
+                    "failed to resolve position associations in {}: {error}",
+                    path.display()
+                )
+            });
+            association_count += associations.len();
+            assert!(
+                associations.len() <= positions.entries.len(),
+                "fixture {} has more resolved associations than raw entries",
+                path.display()
+            );
+        }
+    }
+
+    assert!(
+        association_count > 0,
+        "fixtures contain no position associations"
+    );
+}
+
+#[test]
 fn all_tasty_fixture_signed_names_have_typed_views() {
     let mut signed_name_count = 0;
 

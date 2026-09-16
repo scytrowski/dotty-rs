@@ -102,6 +102,15 @@ pub enum ResolvedPositionEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPosition {
+    pub source: Option<NameRef>,
+    pub address: i64,
+    pub start: i64,
+    pub end: i64,
+    pub point: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
     pub line_sizes: Vec<u32>,
     pub entries: Vec<PositionEntry>,
@@ -265,6 +274,37 @@ impl PositionSection {
         }
 
         Ok(resolved)
+    }
+
+    /// Resolves position deltas and returns only associations with their
+    /// currently active source reference.
+    ///
+    /// An association before the first `SOURCE` event has `source = None`.
+    /// Source-change events are omitted from this derived view; use
+    /// [`Self::resolved_entries`] when their ordering must be preserved.
+    pub fn resolved_associations(&self) -> Result<Vec<ResolvedPosition>, SectionError> {
+        let mut source = None;
+        let mut associations = Vec::new();
+
+        for entry in self.resolved_entries()? {
+            match entry {
+                ResolvedPositionEntry::Source(reference) => source = Some(reference),
+                ResolvedPositionEntry::Association {
+                    address,
+                    start,
+                    end,
+                    point,
+                } => associations.push(ResolvedPosition {
+                    source,
+                    address,
+                    start,
+                    end,
+                    point,
+                }),
+            }
+        }
+
+        Ok(associations)
     }
 }
 
@@ -703,7 +743,7 @@ impl<'a> SectionTable<'a> {
 mod tests {
     use super::{
         Attribute, Comment, EncodedSection, PositionCoordinate, PositionEntry, PositionSection,
-        ResolvedPositionEntry, Section, SectionError, SectionTable,
+        ResolvedPosition, ResolvedPositionEntry, Section, SectionError, SectionTable,
     };
     use crate::ast::{RawNode, RawNodes};
     use crate::reader::{ReadError, Reader};
@@ -852,6 +892,73 @@ mod tests {
                 },
                 ResolvedPositionEntry::Source(8),
             ])
+        );
+    }
+
+    #[test]
+    fn resolves_position_associations_with_the_active_source() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![
+                PositionEntry::Source(4),
+                PositionEntry::Association {
+                    address_delta: 10,
+                    start_delta: Some(2),
+                    end_delta: Some(5),
+                    point_delta: None,
+                },
+                PositionEntry::Source(8),
+                PositionEntry::Association {
+                    address_delta: 3,
+                    start_delta: None,
+                    end_delta: None,
+                    point_delta: Some(7),
+                },
+            ],
+        };
+
+        assert_eq!(
+            positions.resolved_associations(),
+            Ok(vec![
+                ResolvedPosition {
+                    source: Some(4),
+                    address: 10,
+                    start: 2,
+                    end: 5,
+                    point: 0,
+                },
+                ResolvedPosition {
+                    source: Some(8),
+                    address: 13,
+                    start: 2,
+                    end: 5,
+                    point: 7,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn resolves_a_position_association_without_a_source_as_unattributed() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![PositionEntry::Association {
+                address_delta: 1,
+                start_delta: None,
+                end_delta: None,
+                point_delta: None,
+            }],
+        };
+
+        assert_eq!(
+            positions.resolved_associations(),
+            Ok(vec![ResolvedPosition {
+                source: None,
+                address: 1,
+                start: 0,
+                end: 0,
+                point: 0,
+            }])
         );
     }
 

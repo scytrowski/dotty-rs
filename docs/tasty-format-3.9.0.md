@@ -757,6 +757,10 @@ unknown or application-specific sections without requiring a guessed grammar.
 accumulates association deltas into absolute coordinates while retaining
 `SOURCE` events. The raw `PositionEntry` deltas remain authoritative for
 lossless re-encoding.
+`PositionSection::resolved_associations()` provides a smaller derived view
+that omits source-change events and attaches the currently active source
+`NameRef`—or `None` before the first source event—to each association. Use
+`resolved_entries()` when source-event ordering itself is significant.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an
