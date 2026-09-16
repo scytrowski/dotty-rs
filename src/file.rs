@@ -179,14 +179,32 @@ impl TastyFileBuilder {
 
     /// Validate all supported file contents without serializing them.
     pub fn validate(&self) -> Result<(), TastyFileError> {
-        self.build()?.validate()
+        self.validate_with_max_ast_index_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate all supported file contents with an explicit AST nesting
+    /// limit.
+    pub fn validate_with_max_ast_index_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
+        self.build()?.validate_with_max_ast_index_depth(max_depth)
     }
 
     /// Validate the file contents and require the Scala 3.9.0 format version.
     pub fn validate_scala_3_9(&self) -> Result<(), TastyFileError> {
+        self.validate_scala_3_9_with_max_ast_index_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate the Scala 3.9.0 file contents with an explicit AST nesting
+    /// limit.
+    pub fn validate_scala_3_9_with_max_ast_index_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
         let file = self.build()?;
         file.header.validate_scala_3_9()?;
-        file.validate()
+        file.validate_with_max_ast_index_depth(max_depth)
     }
 
     /// Validate the file against a compiler version using TASTy's
@@ -197,8 +215,30 @@ impl TastyFileBuilder {
         compiler_minor: u32,
         compiler_experimental: u32,
     ) -> Result<(), TastyFileError> {
+        self.validate_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate the file against a compiler version and with an explicit AST
+    /// nesting limit.
+    pub fn validate_compatible_with_max_ast_index_depth(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+        max_depth: usize,
+    ) -> Result<(), TastyFileError> {
         let file = self.build()?;
-        file.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)
+        file.validate_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            max_depth,
+        )
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
@@ -899,6 +939,60 @@ mod tests {
         .unwrap();
 
         assert_eq!(file.validate(), Ok(()));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_builder_validation() {
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("value".to_owned()),
+            ])
+            .unwrap(),
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        assert!(matches!(
+            builder.validate_with_max_ast_index_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_builder_compatible_validation() {
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("value".to_owned()),
+            ])
+            .unwrap(),
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        assert!(matches!(
+            builder.validate_compatible_with_max_ast_index_depth(28, 10, 0, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]

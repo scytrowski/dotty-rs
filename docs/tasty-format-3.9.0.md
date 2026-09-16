@@ -721,7 +721,8 @@ top-level node addresses.
 `TastyFileBuilder` owns these encoded sections and produces either a complete
 byte stream or an `EncodedTastyFile` with the allocated AST addresses.
 Its `validate()` and `validate_scala_3_9()` methods allow checking the complete
-owned file before serialization.
+owned file before serialization; corresponding
+`*_with_max_ast_index_depth` methods allow an explicit AST nesting limit.
 For callers that require an eager safety boundary, `TastyFile::encode_validated()`
 and `TastyFile::encode_validated_with_ast_addresses()` validate AST references,
 name references, and supported standard sections before writing; the builder
