@@ -433,6 +433,9 @@ bounded nodes retain the tags represented by their typed payloads.
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
 `encode_self()`, so structural decoding no longer loses the definition name.
+`DefDefBody::header_items` additionally retains the wire order of parameter
+nodes and `EMPTYCLAUSE`/`SPLITCLAUSE` markers, which is required for lossless
+round-trips when clause markers occur between parameter groups.
 
 At file level, `TastyFile::ast_references()` returns the collected edges with
 the owning top-level AST address and the typed target `AstRef`.

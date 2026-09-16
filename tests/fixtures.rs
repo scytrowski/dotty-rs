@@ -551,6 +551,71 @@ fn all_tasty_fixtures_round_trip_top_level_structured_ast_nodes() {
 }
 
 #[test]
+fn all_tasty_fixtures_round_trip_every_indexed_structured_ast_node() {
+    let mut nested_node_count = 0usize;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let top_level_count = file.asts().unwrap().len();
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+        nested_node_count += index.len().saturating_sub(top_level_count);
+
+        for address in index.addresses() {
+            let raw = index.get(address).unwrap_or_else(|| {
+                panic!(
+                    "indexed category-five node at {} is not retrievable in {}",
+                    address,
+                    path.display()
+                )
+            });
+            let structured = raw.decode_structured().unwrap_or_else(|error| {
+                panic!(
+                    "failed to decode indexed node at {} in {}: {error}",
+                    address,
+                    path.display()
+                )
+            });
+            let mut structured_bytes = Writer::new();
+            structured
+                .encode(&mut structured_bytes)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to encode indexed node at {} in {}: {error}",
+                        address,
+                        path.display()
+                    )
+                });
+            let mut raw_bytes = Writer::new();
+            raw.encode(&mut raw_bytes).unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode raw indexed node at {} in {}: {error}",
+                    address,
+                    path.display()
+                )
+            });
+
+            assert_eq!(
+                structured_bytes.as_slice(),
+                raw_bytes.as_slice(),
+                "structured round-trip changed node at {} in {}",
+                address,
+                path.display()
+            );
+        }
+    }
+
+    assert!(
+        nested_node_count > 0,
+        "fixture corpus has no nested AST nodes"
+    );
+}
+
+#[test]
 fn all_tasty_fixture_top_level_nodes_expose_structured_ast_references() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

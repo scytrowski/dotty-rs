@@ -392,10 +392,22 @@ pub enum DefinitionBody<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefDefHeaderItem<'a> {
+    Parameter(ParameterNode<'a>),
+    Clause(u8),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefDefBody<'a> {
     pub name: u32,
     pub parameters: Vec<ParameterNode<'a>>,
     pub clauses: Vec<u8>,
+    /// Original wire order of parameters and clause markers.
+    ///
+    /// `parameters` and `clauses` remain available as convenient grouped
+    /// views. This sequence is used by the encoder when the body came from a
+    /// decoder, because TASTy permits clause markers between parameter nodes.
+    pub header_items: Vec<DefDefHeaderItem<'a>>,
     pub return_type: RawTree<'a>,
     pub rhs: Option<RawTree<'a>>,
     pub tail: Vec<DefinitionTail<'a>>,
@@ -1786,6 +1798,7 @@ impl<'a> RawNode<'a> {
         let name = reader.read_nat()?;
         let mut parameters = Vec::new();
         let mut clauses = Vec::new();
+        let mut header_items = Vec::new();
 
         while !reader.is_at_end() {
             match reader.peek_u8()? {
@@ -1794,9 +1807,14 @@ impl<'a> RawNode<'a> {
                         RawTree::LengthNode(raw) => raw.decode_parameter()?,
                         _ => unreachable!("parameter tags are category-five tags"),
                     };
+                    header_items.push(DefDefHeaderItem::Parameter(parameter.clone()));
                     parameters.push(parameter);
                 }
-                EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG => clauses.push(reader.read_u8()?),
+                EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG => {
+                    let clause = reader.read_u8()?;
+                    header_items.push(DefDefHeaderItem::Clause(clause));
+                    clauses.push(clause);
+                }
                 _ => break,
             }
         }
@@ -1813,6 +1831,7 @@ impl<'a> RawNode<'a> {
             name,
             parameters,
             clauses,
+            header_items,
             return_type,
             rhs,
             tail,
@@ -3281,14 +3300,20 @@ impl<'a> DefDefBody<'a> {
     pub fn encode(&self, name: u32, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(DEFDEF_TAG, writer, |payload| {
             payload.write_nat(name);
-            for parameter in &self.parameters {
-                parameter.encode(payload)?;
-            }
-            for clause in &self.clauses {
-                if !matches!(*clause, EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG) {
-                    return Err(TermEncodeError::InvalidValue { tag: *clause });
+            if self.header_items.is_empty() {
+                for parameter in &self.parameters {
+                    parameter.encode(payload)?;
                 }
-                payload.write_u8(*clause);
+                for clause in &self.clauses {
+                    encode_defdef_clause(*clause, payload)?;
+                }
+            } else {
+                for item in &self.header_items {
+                    match item {
+                        DefDefHeaderItem::Parameter(parameter) => parameter.encode(payload)?,
+                        DefDefHeaderItem::Clause(clause) => encode_defdef_clause(*clause, payload)?,
+                    }
+                }
             }
             self.return_type.encode(payload)?;
             if let Some(rhs) = &self.rhs {
@@ -3300,6 +3325,14 @@ impl<'a> DefDefBody<'a> {
             Ok(())
         })
     }
+}
+
+fn encode_defdef_clause(clause: u8, writer: &mut Writer) -> Result<(), TermEncodeError> {
+    if !matches!(clause, EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG) {
+        return Err(TermEncodeError::InvalidValue { tag: clause });
+    }
+    writer.write_u8(clause);
+    Ok(())
 }
 
 impl<'a> TemplateStructure<'a> {
@@ -4890,12 +4923,12 @@ mod tests {
         ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, ANNOTATION_TAG,
         APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstError,
         BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
-        CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionNode, DefinitionTail,
-        ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG,
-        IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG, INLINE_TAG,
-        INLINED_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG,
-        MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG, NEW_TAG,
-        NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
+        CLASSCONST_TAG, DEFDEF_TAG, DefDefBody, DefDefHeaderItem, DefinitionBody, DefinitionNode,
+        DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG, FLEXIBLETYPE_TAG, HOLE_TAG,
+        IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG, IMPORT_TAG, IMPORTED_TAG,
+        INLINE_TAG, INLINED_TAG, ImportExportKind, ImportSelector, LAMBDA_TAG, LAMBDATPT_TAG,
+        MATCH_TAG, MATCHCASETYPE_TAG, MATCHTPT_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, NAMEDARG_TAG,
+        NEW_TAG, NodeCategory, ORTYPE_TAG, PACKAGE_TAG, PARAM_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
         PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG,
         QUOTEPATTERN_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG,
         RETURN_TAG, RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG,
@@ -5763,6 +5796,14 @@ mod tests {
             ParameterNode::TermParam { .. }
         ));
         assert_eq!(body.clauses, vec![SPLITCLAUSE_TAG]);
+        assert!(matches!(
+            body.header_items.as_slice(),
+            [
+                DefDefHeaderItem::Parameter(ParameterNode::TypeParam { .. }),
+                DefDefHeaderItem::Parameter(ParameterNode::TermParam { .. }),
+                DefDefHeaderItem::Clause(SPLITCLAUSE_TAG),
+            ]
+        ));
         assert!(matches!(body.return_type, RawTree::Leaf(_)));
         assert!(matches!(body.rhs, Some(RawTree::Leaf(_))));
         assert!(
