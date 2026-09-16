@@ -18,6 +18,10 @@ fn scala3_library_corpus() -> corpus::Corpus {
     )
 }
 
+fn scala3_library_fixtures() -> &'static [corpus::ParsedFixture] {
+    corpus::parsed_fixtures(&scala3_library_corpus(), 28, 9, 0)
+}
+
 /// Returns canonical structured bytes used as a structural fingerprint.
 ///
 /// Decoding removes wire-level Nat representation details and node offsets;
@@ -77,42 +81,55 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
 
 #[test]
 fn all_scala3_library_fixtures_decode_through_file_model() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
 
-        assert!(!file.names().is_empty(), "fixture {}", path.display());
-        assert!(!file.sections().is_empty(), "fixture {}", path.display());
-        let asts = file
-            .asts()
-            .unwrap_or_else(|error| panic!("failed to decode ASTs in {}: {error}", path.display()));
-        assert!(!asts.is_empty(), "fixture {}", path.display());
+        assert!(
+            !file.names().is_empty(),
+            "fixture {}",
+            fixture.path.display()
+        );
+        assert!(
+            !file.sections().is_empty(),
+            "fixture {}",
+            fixture.path.display()
+        );
+        let asts = file.asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode ASTs in {}: {error}",
+                fixture.path.display()
+            )
+        });
+        assert!(!asts.is_empty(), "fixture {}", fixture.path.display());
     }
 }
 
 #[test]
 fn all_scala3_library_fixtures_round_trip_structurally() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
         let encoded = file
             .encode()
-            .unwrap_or_else(|error| panic!("failed to encode {}: {error}", path.display()));
+            .unwrap_or_else(|error| panic!("failed to encode {}: {error}", fixture.path.display()));
 
         let reparsed = TastyFile::parse_scala_3_9(&encoded).unwrap_or_else(|error| {
-            panic!("failed to reparse encoded {}: {error}", path.display())
+            panic!(
+                "failed to reparse encoded {}: {error}",
+                fixture.path.display()
+            )
         });
         assert_eq!(
             reparsed.header(),
             file.header(),
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
-        assert_eq!(reparsed.names(), file.names(), "fixture {}", path.display());
+        assert_eq!(
+            reparsed.names(),
+            file.names(),
+            "fixture {}",
+            fixture.path.display()
+        );
         let original_sections: Vec<_> = file
             .sections()
             .iter()
@@ -127,7 +144,7 @@ fn all_scala3_library_fixtures_round_trip_structurally() {
             reparsed_sections,
             original_sections,
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
     }
 }
@@ -136,14 +153,14 @@ fn all_scala3_library_fixtures_round_trip_structurally() {
 fn scala3_library_fixtures_have_package_ast_roots() {
     let mut tags = BTreeSet::new();
 
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
-        let nodes = file
-            .asts()
-            .unwrap_or_else(|error| panic!("failed to decode ASTs in {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
+        let nodes = file.asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode ASTs in {}: {error}",
+                fixture.path.display()
+            )
+        });
 
         tags.extend(nodes.iter().map(|node| node.tag));
     }
@@ -156,13 +173,13 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
     let mut files_with_comments = 0;
     let mut comment_count = 0;
 
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
         let Some(comments) = file.comments().unwrap_or_else(|error| {
-            panic!("failed to decode comments in {}: {error}", path.display())
+            panic!(
+                "failed to decode comments in {}: {error}",
+                fixture.path.display()
+            )
         }) else {
             continue;
         };
@@ -179,7 +196,7 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
                 (comment.address as usize) < asts_length,
                 "comment address {} is outside ASTs payload in {}",
                 comment.address,
-                path.display()
+                fixture.path.display()
             );
         }
     }
@@ -190,32 +207,28 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
 
 #[test]
 fn all_scala3_library_ast_indexes_build_with_qualified_modifiers() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index ASTs in {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let index = &fixture.index;
         assert!(
             !index.is_empty(),
             "fixture {} has no indexed AST nodes",
-            path.display()
+            fixture.path.display()
         );
     }
 }
 
 #[test]
 fn all_scala3_library_ast_references_resolve() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
 
         file.validate_ast_reference_targets()
-            .unwrap_or_else(|error| panic!("invalid AST reference in {}: {error}", path.display()));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "invalid AST reference in {}: {error}",
+                    fixture.path.display()
+                )
+            });
     }
 }
 
@@ -225,14 +238,8 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
     let mut byte_exact_count = 0;
     let mut normalized_count = 0;
 
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let index = &fixture.index;
 
         for address in index.addresses() {
             node_count += 1;
@@ -242,7 +249,7 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
             let encoded = normalized_structured_encoding(raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally decode AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
 
@@ -250,19 +257,19 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
             let reparsed_nodes = RawNodes::decode(&mut reparsed_reader).unwrap_or_else(|error| {
                 panic!(
                     "failed to reparse encoded AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
             assert!(
                 reparsed_reader.is_at_end(),
                 "structured encoding left trailing bytes for AST node at address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
             assert_eq!(
                 reparsed_nodes.len(),
                 1,
                 "address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
 
             let reparsed_raw = reparsed_nodes
@@ -271,7 +278,7 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
             let reparsed_normalized = normalized_structured_encoding(reparsed_raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally reparse AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
 
@@ -279,13 +286,13 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
                 encoded.as_slice(),
                 reparsed_normalized.as_slice(),
                 "normalized structured AST changed at address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
             let mut original = Writer::new();
             raw.encode(&mut original).unwrap_or_else(|error| {
                 panic!(
                     "failed to encode raw AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
             if original.as_slice() == encoded.as_slice() {
@@ -302,15 +309,12 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
 
 #[test]
 fn all_scala3_library_structured_files_validate_after_reencoding() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
         let structured = file.structured_asts().unwrap_or_else(|error| {
             panic!(
                 "failed to decode structured ASTs in {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
         let original_ast_section = file
@@ -320,7 +324,7 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to encode structured ASTs in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
 
@@ -336,20 +340,20 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
         builder.validate_scala_3_9().unwrap_or_else(|error| {
             panic!(
                 "structured re-encoding produced invalid references in {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
 
         let encoded = builder.encode().unwrap_or_else(|error| {
             panic!(
                 "failed to encode the structured file {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
         TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap_or_else(|error| {
             panic!(
                 "structured file output is not a valid Scala 3.9.0 TASTy file {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
     }
@@ -357,15 +361,12 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
 
 #[test]
 fn all_scala3_library_structured_relocated_files_validate() {
-    for path in scala3_library_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_scala_3_9(&bytes)
-            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+    for fixture in scala3_library_fixtures() {
+        let file = &fixture.file;
         let structured = file.structured_asts().unwrap_or_else(|error| {
             panic!(
                 "failed to decode structured ASTs in {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
         let encoded = file
@@ -373,13 +374,13 @@ fn all_scala3_library_structured_relocated_files_validate() {
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to re-encode relocated file {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
         TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap_or_else(|error| {
             panic!(
                 "relocated file is not a valid Scala 3.9.0 TASTy file {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
     }

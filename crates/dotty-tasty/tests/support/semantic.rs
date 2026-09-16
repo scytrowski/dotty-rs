@@ -107,18 +107,17 @@ pub fn assert_expectations_cover_selected_fixtures(
             expected.path
         );
         let fixture_path = fixture_root.join(&expected.path);
-        let bytes = fs::read(&fixture_path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture_path.display()));
-        let file = dotty_tasty::tasty::TastyFile::parse_and_validate_compatible_with(
-            &bytes,
+        let fixture = super::corpus::parsed_fixtures(
+            corpus,
             compatible_compiler_version.0,
             compatible_compiler_version.1,
             compatible_compiler_version.2,
         )
-        .unwrap_or_else(|error| panic!("failed to validate {}: {error}", fixture_path.display()));
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index {}: {error}", fixture_path.display()));
+        .iter()
+        .find(|fixture| fixture.path == fixture_path)
+        .unwrap_or_else(|| panic!("missing cached fixture {}", fixture_path.display()));
+        let file = &fixture.file;
+        let index = &fixture.index;
         let mut actual_shapes = BTreeMap::new();
         for node in index.iter_nodes() {
             if let Some(shape) = semantic_shape(node.tag) {

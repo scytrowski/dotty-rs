@@ -1,5 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use dotty_tasty::tasty::{AstAddressIndex, TastyFile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusManifest {
@@ -21,6 +24,17 @@ pub struct Corpus {
     root: PathBuf,
     manifest: CorpusManifest,
 }
+
+pub struct ParsedFixture {
+    pub path: PathBuf,
+    pub file: TastyFile<'static>,
+    pub index: AstAddressIndex<'static>,
+}
+
+// The test cache intentionally keeps fixture buffers alive until process exit.
+// `TastyFile` and its index are zero-copy views, so this avoids changing the
+// production ownership model just to share parsed corpus data between tests.
+static PARSED_FIXTURES: OnceLock<Vec<ParsedFixture>> = OnceLock::new();
 
 impl Corpus {
     pub fn load(root: impl Into<PathBuf>) -> Self {
@@ -142,6 +156,44 @@ impl Corpus {
             .cloned()
             .collect()
     }
+}
+
+pub fn parsed_fixtures(
+    corpus: &Corpus,
+    compiler_major: u32,
+    compiler_minor: u32,
+    compiler_experimental: u32,
+) -> &'static [ParsedFixture] {
+    PARSED_FIXTURES
+        .get_or_init(|| {
+            corpus
+                .fixture_paths()
+                .into_iter()
+                .map(|path| {
+                    let bytes = Box::leak(
+                        fs::read(&path)
+                            .unwrap_or_else(|error| {
+                                panic!("failed to read {}: {error}", path.display())
+                            })
+                            .into_boxed_slice(),
+                    );
+                    let file = TastyFile::parse_and_validate_compatible_with(
+                        bytes,
+                        compiler_major,
+                        compiler_minor,
+                        compiler_experimental,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("failed to validate {}: {error}", path.display())
+                    });
+                    let index = file.ast_address_index().unwrap_or_else(|error| {
+                        panic!("failed to index {}: {error}", path.display())
+                    });
+                    ParsedFixture { path, file, index }
+                })
+                .collect()
+        })
+        .as_slice()
 }
 
 impl CorpusManifest {

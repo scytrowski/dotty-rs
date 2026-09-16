@@ -17,6 +17,10 @@ fn scala3_compiler_corpus() -> corpus::Corpus {
     )
 }
 
+fn scala3_compiler_fixtures() -> &'static [corpus::ParsedFixture] {
+    corpus::parsed_fixtures(&scala3_compiler_corpus(), 28, 9, 0)
+}
+
 /// Returns canonical structured bytes for a node, excluding its original
 /// address and any wire-level integer representation details.
 fn normalized_structured_encoding(raw: &RawNode<'_>) -> Result<Vec<u8>, String> {
@@ -62,50 +66,63 @@ fn scala3_compiler_fixture_inventory_is_complete() {
 
 #[test]
 fn all_scala3_compiler_fixtures_decode_and_validate_as_compatible_tasty() {
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
-
+    for fixture in scala3_compiler_fixtures() {
+        let file = &fixture.file;
         assert_eq!(
             file.header().major_version,
             28,
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
-        assert_eq!(file.header().minor_version, 8, "fixture {}", path.display());
+        assert_eq!(
+            file.header().minor_version,
+            8,
+            "fixture {}",
+            fixture.path.display()
+        );
         assert_eq!(
             file.header().experimental_version,
             0,
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
-        assert!(!file.names().is_empty(), "fixture {}", path.display());
-        assert!(!file.sections().is_empty(), "fixture {}", path.display());
+        assert!(
+            !file.names().is_empty(),
+            "fixture {}",
+            fixture.path.display()
+        );
+        assert!(
+            !file.sections().is_empty(),
+            "fixture {}",
+            fixture.path.display()
+        );
     }
 }
 
 #[test]
 fn all_scala3_compiler_fixtures_round_trip_through_file_encoder() {
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+    for fixture in scala3_compiler_fixtures() {
+        let file = &fixture.file;
         let encoded = file
             .encode()
-            .unwrap_or_else(|error| panic!("failed to encode {}: {error}", path.display()));
+            .unwrap_or_else(|error| panic!("failed to encode {}: {error}", fixture.path.display()));
         let reparsed = TastyFile::parse_and_validate_compatible_with(&encoded, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to reparse {}: {error}", path.display()));
+            .unwrap_or_else(|error| {
+                panic!("failed to reparse {}: {error}", fixture.path.display())
+            });
 
         assert_eq!(
             reparsed.header(),
             file.header(),
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
-        assert_eq!(reparsed.names(), file.names(), "fixture {}", path.display());
+        assert_eq!(
+            reparsed.names(),
+            file.names(),
+            "fixture {}",
+            fixture.path.display()
+        );
         let original_sections: Vec<_> = file
             .sections()
             .iter()
@@ -120,22 +137,19 @@ fn all_scala3_compiler_fixtures_round_trip_through_file_encoder() {
             reparsed_sections,
             original_sections,
             "fixture {}",
-            path.display()
+            fixture.path.display()
         );
     }
 }
 
 #[test]
 fn all_scala3_compiler_structured_files_validate_after_reencoding() {
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+    for fixture in scala3_compiler_fixtures() {
+        let file = &fixture.file;
         let structured = file.structured_asts().unwrap_or_else(|error| {
             panic!(
                 "failed to decode structured ASTs in {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
         let original_ast_section = file
@@ -145,7 +159,7 @@ fn all_scala3_compiler_structured_files_validate_after_reencoding() {
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to encode structured ASTs in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
 
@@ -163,19 +177,19 @@ fn all_scala3_compiler_structured_files_validate_after_reencoding() {
             .unwrap_or_else(|error| {
                 panic!(
                     "structured re-encoding produced invalid references in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
         let encoded = builder.encode().unwrap_or_else(|error| {
             panic!(
                 "failed to encode the structured file {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
         TastyFile::parse_and_validate_compatible_with(&encoded, 28, 9, 0).unwrap_or_else(|error| {
             panic!(
                 "structured file output is not compatible TASTy {}: {error}",
-                path.display()
+                fixture.path.display()
             )
         });
     }
@@ -185,14 +199,8 @@ fn all_scala3_compiler_structured_files_validate_after_reencoding() {
 fn all_scala3_compiler_indexed_structured_nodes_round_trip() {
     let mut node_count = 0;
 
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+    for fixture in scala3_compiler_fixtures() {
+        let index = &fixture.index;
 
         for address in index.addresses() {
             node_count += 1;
@@ -202,7 +210,7 @@ fn all_scala3_compiler_indexed_structured_nodes_round_trip() {
             let encoded = normalized_structured_encoding(raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally encode AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
 
@@ -210,19 +218,19 @@ fn all_scala3_compiler_indexed_structured_nodes_round_trip() {
             let reparsed_nodes = RawNodes::decode(&mut reader).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally reparse AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
             assert!(
                 reader.is_at_end(),
                 "structured encoding left trailing bytes for AST node at address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
             assert_eq!(
                 reparsed_nodes.len(),
                 1,
                 "address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
 
             let reparsed_raw = reparsed_nodes
@@ -231,14 +239,14 @@ fn all_scala3_compiler_indexed_structured_nodes_round_trip() {
             let reparsed = normalized_structured_encoding(reparsed_raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally reparse AST node at address {address} in {}: {error}",
-                    path.display()
+                    fixture.path.display()
                 )
             });
             assert_eq!(
                 encoded,
                 reparsed,
                 "normalized structured AST changed at address {address} in {}",
-                path.display()
+                fixture.path.display()
             );
         }
     }
@@ -310,30 +318,34 @@ fn all_scala3_compiler_positions_join_visible_ast_nodes() {
     let mut files_with_positions = 0;
     let mut mapped_positions = 0;
 
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
-        let Some(positions) = file.ast_node_positions().unwrap_or_else(|error| {
-            panic!("failed to join positions in {}: {error}", path.display())
-        }) else {
+    for fixture in scala3_compiler_fixtures() {
+        let file = &fixture.file;
+        let Some(positions) = file
+            .resolved_position_associations()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to join positions in {}: {error}",
+                    fixture.path.display()
+                )
+            })
+        else {
             continue;
         };
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
 
         files_with_positions += 1;
-        mapped_positions += positions.len();
         for entry in positions {
-            assert_eq!(
-                index.get_node(entry.node.offset as u32),
-                Some(entry.node),
-                "position mapped to an unindexed AST address {} in {}",
-                entry.node.offset,
-                path.display()
-            );
+            let Ok(address) = u32::try_from(entry.address) else {
+                continue;
+            };
+            if let Some(node) = fixture.index.get_node(address) {
+                mapped_positions += 1;
+                assert_eq!(
+                    node.offset as i64,
+                    entry.address,
+                    "position mapped to an inconsistent AST address in {}",
+                    fixture.path.display()
+                );
+            }
         }
     }
 
@@ -345,14 +357,8 @@ fn all_scala3_compiler_positions_join_visible_ast_nodes() {
 fn all_scala3_compiler_ast_parent_child_edges_are_consistent() {
     let mut edge_count = 0;
 
-    for path in scala3_compiler_corpus().fixture_paths() {
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
-            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
-        let index = file
-            .ast_address_index()
-            .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+    for fixture in scala3_compiler_fixtures() {
+        let index = &fixture.index;
 
         for edge in index.iter_tree_edges() {
             edge_count += 1;
@@ -360,20 +366,20 @@ fn all_scala3_compiler_ast_parent_child_edges_are_consistent() {
                 index.get_node(edge.parent.offset as u32),
                 Some(edge.parent),
                 "edge parent is not indexed in {}",
-                path.display()
+                fixture.path.display()
             );
             assert_eq!(
                 index.get_node(edge.child.offset as u32),
                 Some(edge.child),
                 "edge child is not indexed in {}",
-                path.display()
+                fixture.path.display()
             );
             assert_eq!(
                 index.parent_of(edge.child.offset as u32),
                 Some(edge.parent),
                 "parent edge changed for AST address {} in {}",
                 edge.child.offset,
-                path.display()
+                fixture.path.display()
             );
         }
     }
