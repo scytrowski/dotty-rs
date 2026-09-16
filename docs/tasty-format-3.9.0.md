@@ -423,6 +423,10 @@ that address as `AstRefKind::ParamTypeBinder`, so it participates in AST
 reference collection and target validation instead of being treated as an
 untyped integer.
 
+`RETURN` likewise begins with an `ASTRef` target address. It is represented as
+`AstRefKind::ReturnTarget` and is included in AST reference collection and
+target validation.
+
 The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
 `RawTree::ast_ref()`. This distinguishes `SHAREDterm`, `SHAREDtype`,

@@ -520,7 +520,7 @@ pub struct AssignNode<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnNode<'a> {
-    pub target: u32,
+    pub target: AstRef,
     pub expression: Option<RawTree<'a>>,
 }
 
@@ -3347,7 +3347,13 @@ impl<'a> RawNode<'a> {
             Some(RawTree::decode(&mut reader)?)
         };
 
-        Ok(ReturnNode { target, expression })
+        Ok(ReturnNode {
+            target: AstRef {
+                kind: AstRefKind::ReturnTarget,
+                address: target,
+            },
+            expression,
+        })
     }
 
     pub fn decode_while(&self) -> Result<WhileNode<'a>, AstError> {
@@ -3790,7 +3796,7 @@ impl<'a> SelectOuterNode<'a> {
 impl<'a> ReturnNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(RETURN_TAG, writer, |payload| {
-            payload.write_nat(self.target);
+            payload.write_nat(self.target.address);
             if let Some(expression) = &self.expression {
                 expression.encode(payload)?;
             }
@@ -4689,6 +4695,7 @@ fn collect_structured_ast_refs(
             collect_case_defs_ast_refs(&match_node.cases, visitor);
         }
         StructuredNode::Return(return_node) => {
+            visitor(return_node.target);
             if let Some(expression) = &return_node.expression {
                 collect_tree_ast_refs(expression, visitor);
             }
@@ -6817,7 +6824,11 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let return_node = nodes.get(0).unwrap().decode_return().unwrap();
 
-        assert_eq!(return_node.target, 5);
+        assert_eq!(return_node.target.address, 5);
+        assert_eq!(
+            return_node.target.kind,
+            crate::term::AstRefKind::ReturnTarget
+        );
         assert!(matches!(return_node.expression, Some(RawTree::Leaf(_))));
     }
 
@@ -6828,8 +6839,29 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let return_node = nodes.get(0).unwrap().decode_return().unwrap();
 
-        assert_eq!(return_node.target, 5);
+        assert_eq!(return_node.target.address, 5);
+        assert_eq!(
+            return_node.target.kind,
+            crate::term::AstRefKind::ReturnTarget
+        );
         assert!(return_node.expression.is_none());
+    }
+
+    #[test]
+    fn collects_the_return_target_as_an_ast_reference() {
+        let node = RawNode {
+            tag: RETURN_TAG,
+            offset: 0,
+            payload: &[0x85],
+        };
+
+        assert_eq!(
+            node.ast_refs().unwrap(),
+            vec![crate::term::AstRef {
+                kind: crate::term::AstRefKind::ReturnTarget,
+                address: 5,
+            }]
+        );
     }
 
     #[test]
