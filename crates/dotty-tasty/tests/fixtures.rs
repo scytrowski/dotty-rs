@@ -32,6 +32,14 @@ fn tasty_fixture_paths() -> Vec<PathBuf> {
                 .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", path.display()));
 
             if file_type.is_dir() {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "scala3-library")
+                {
+                    // Keep the external Scala library corpus out of the original
+                    // 35-fixture inventory; it has a dedicated integration test.
+                    continue;
+                }
                 directories.push(path);
             } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "tasty") {
                 fixtures.push(path);
