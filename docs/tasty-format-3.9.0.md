@@ -527,7 +527,9 @@ The deep index also records structural `AstTreeEdge` values. Use
 file-level `TastyFile::ast_parent_of()`, `ast_children_of()`, and
 `ast_tree_edges()` methods expose the same view. Shallow indexes created with
 `RawNodes::address_index()` intentionally contain no edges, because they do
-not decode enclosing tree grammars.
+not decode enclosing tree grammars. The file-level navigation helpers also
+provide `_with_max_depth()` variants, which apply the same recursion safety
+bound as `TastyFile::ast_address_index_with_max_depth()`.
 `TastyFile::ast_references_from()` and `TastyFile::ast_references_to()` filter
 the collected AST reference graph by owner or target address while preserving
 wire order. These APIs expose structural edges only; resolving a reference to

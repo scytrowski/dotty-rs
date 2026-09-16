@@ -743,20 +743,51 @@ impl<'a> TastyFile<'a> {
 
     /// Return the structural parent of a visible AST node.
     pub fn ast_parent_of(&self, child_address: u32) -> Result<Option<AstTreeNode>, TastyFileError> {
-        Ok(self.ast_address_index()?.parent_of(child_address))
+        self.ast_parent_of_with_max_depth(child_address, crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Return the structural parent using an explicit AST traversal limit.
+    pub fn ast_parent_of_with_max_depth(
+        &self,
+        child_address: u32,
+        max_depth: usize,
+    ) -> Result<Option<AstTreeNode>, TastyFileError> {
+        Ok(self
+            .ast_address_index_with_max_depth(max_depth)?
+            .parent_of(child_address))
     }
 
     /// Collect the direct children of a visible AST node in wire order.
     pub fn ast_children_of(&self, parent_address: u32) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        self.ast_children_of_with_max_depth(parent_address, crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Collect direct children using an explicit AST traversal limit.
+    pub fn ast_children_of_with_max_depth(
+        &self,
+        parent_address: u32,
+        max_depth: usize,
+    ) -> Result<Vec<AstTreeNode>, TastyFileError> {
         Ok(self
-            .ast_address_index()?
+            .ast_address_index_with_max_depth(max_depth)?
             .children_of(parent_address)
             .collect())
     }
 
     /// Collect all structural AST parent-to-child edges in traversal order.
     pub fn ast_tree_edges(&self) -> Result<Vec<crate::AstTreeEdge>, TastyFileError> {
-        Ok(self.ast_address_index()?.iter_tree_edges().collect())
+        self.ast_tree_edges_with_max_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Collect structural AST edges using an explicit traversal limit.
+    pub fn ast_tree_edges_with_max_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<Vec<crate::AstTreeEdge>, TastyFileError> {
+        Ok(self
+            .ast_address_index_with_max_depth(max_depth)?
+            .iter_tree_edges()
+            .collect())
     }
 
     /// Collect AST references from every top-level node in wire order.
@@ -1111,6 +1142,41 @@ mod tests {
                 .first(),
             Some(&edge.child)
         );
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_ast_parent_queries() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_parent_of_with_max_depth(0, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            file.ast_children_of_with_max_depth(0, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_ast_edge_queries() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_tree_edges_with_max_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]
