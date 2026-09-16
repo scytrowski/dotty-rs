@@ -536,6 +536,9 @@ return `NameRenderError::Unsupported`. Signature-bearing names can instead be
 inspected through `NameTable::render_signed_name()`, which preserves their
 structured fields and uses an iterative structural diagnostic form for nested
 signature references.
+`TastyFile::render_name()` and `TastyFile::render_signed_name()` provide the
+same operations directly against a parsed file's name table, without requiring
+callers to extract that table first.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns

@@ -2,7 +2,9 @@ use crate::ast::{
     AstAddressIndex, AstError, AstReference, NameReference, RawNodes, StructuredNode,
 };
 use crate::header::{Header, HeaderError};
-use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
+use crate::name_table::{
+    NameRef, NameRenderError, NameTable, NameTableError, RawName, RenderedSignedName,
+};
 use crate::reader::Reader;
 use crate::section::{
     Attribute, Comment, EncodedSection, PositionSection, Section, SectionError, SectionTable,
@@ -613,6 +615,25 @@ impl<'a> TastyFile<'a> {
         self.names.get(reference)
     }
 
+    /// Render a non-signature name using the conventional Scala spelling.
+    ///
+    /// This is a convenience delegation to [`NameTable::render`]. Signature
+    /// bearing and unknown names return [`NameRenderError::Unsupported`].
+    pub fn render_name(&self, reference: NameRef) -> Result<String, NameRenderError> {
+        self.names.render(reference)
+    }
+
+    /// Resolve a signature-bearing name through the file's name table.
+    ///
+    /// This is a convenience delegation to [`NameTable::render_signed_name`].
+    /// Non-signature names return `Ok(None)`.
+    pub fn render_signed_name(
+        &self,
+        reference: NameRef,
+    ) -> Result<Option<RenderedSignedName>, NameRenderError> {
+        self.names.render_signed_name(reference)
+    }
+
     pub fn asts(&self) -> Result<RawNodes<'a>, TastyFileError> {
         let section = self
             .section(StandardSection::Asts)
@@ -893,6 +914,26 @@ mod tests {
 
         assert!(!nodes.is_empty());
         assert!(matches!(nodes.first(), Some(StructuredNode::Package(_))));
+    }
+
+    #[test]
+    fn renders_a_fixture_name_through_the_file_api() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let reference = file.names().find_utf8("ASTs").unwrap();
+
+        assert_eq!(file.render_name(reference), Ok("ASTs".to_owned()));
+    }
+
+    #[test]
+    fn propagates_invalid_name_references_from_the_file_api() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert_eq!(
+            file.render_name(0),
+            Err(crate::NameRenderError::InvalidReference { reference: 0 })
+        );
     }
 
     #[test]
