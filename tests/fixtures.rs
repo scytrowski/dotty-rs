@@ -982,6 +982,45 @@ fn all_tasty_fixtures_filter_visible_ast_nodes_by_tag() {
 }
 
 #[test]
+fn all_tasty_fixture_ast_reference_queries_match_the_complete_reference_list() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let references = file.ast_references().unwrap_or_else(|error| {
+            panic!(
+                "failed to collect AST references in {}: {error}",
+                path.display()
+            )
+        });
+
+        for reference in &references {
+            assert!(
+                file.ast_references_from(reference.owner_address)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to query owner in {}: {error}", path.display())
+                    })
+                    .contains(reference),
+                "fixture {} lost reference from owner {}",
+                path.display(),
+                reference.owner_address
+            );
+            assert!(
+                file.ast_references_to(reference.reference.address)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to query target in {}: {error}", path.display())
+                    })
+                    .contains(reference),
+                "fixture {} lost reference to address {}",
+                path.display(),
+                reference.reference.address
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)

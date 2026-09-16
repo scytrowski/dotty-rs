@@ -744,6 +744,31 @@ impl<'a> TastyFile<'a> {
         Ok(references)
     }
 
+    /// Collect AST references owned by the top-level node at `owner_address`.
+    ///
+    /// The returned references retain their original wire order. An address
+    /// without references produces an empty vector.
+    pub fn ast_references_from(
+        &self,
+        owner_address: u32,
+    ) -> Result<Vec<AstReference>, TastyFileError> {
+        Ok(self
+            .ast_references()?
+            .into_iter()
+            .filter(|reference| reference.owner_address == owner_address)
+            .collect())
+    }
+
+    /// Collect AST references targeting `address` in their original wire
+    /// order.
+    pub fn ast_references_to(&self, address: u32) -> Result<Vec<AstReference>, TastyFileError> {
+        Ok(self
+            .ast_references()?
+            .into_iter()
+            .filter(|reference| reference.reference.address == address)
+            .collect())
+    }
+
     /// Collects name-table references from every top-level AST node in wire
     /// order. The owner address identifies the top-level node containing the
     /// reference.
@@ -1745,6 +1770,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn filters_ast_references_by_owner_and_target_address() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
+            0,
+            &[
+                crate::APPLY_TAG,
+                0x84,
+                crate::TERMREFDIRECT_TAG,
+                0x85,
+                crate::SHAREDTYPE_TAG,
+                0x83,
+            ],
+        )]);
+        let file = TastyFile::from_parts(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+        let references = file.ast_references().unwrap();
+
+        assert_eq!(file.ast_references_from(0).unwrap(), references);
+        assert_eq!(file.ast_references_to(5).unwrap(), vec![references[0]]);
+        assert_eq!(file.ast_references_to(99).unwrap(), Vec::new());
     }
 
     #[test]

@@ -518,6 +518,10 @@ Scala semantic meaning to a tag.
 `AstAddressIndex::iter_nodes_in_address_range()` and
 `TastyFile::ast_nodes_in_address_range()` provide the analogous half-open
 address-range query `[start, end)`.
+`TastyFile::ast_references_from()` and `TastyFile::ast_references_to()` filter
+the collected AST reference graph by owner or target address while preserving
+wire order. These APIs expose structural edges only; resolving a reference to
+a visible node or Scala symbol remains a separate operation.
 
 `RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
 name-table references contained in supported structured payloads. At file
