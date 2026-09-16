@@ -1047,6 +1047,55 @@ impl<'a> TastyFile<'a> {
         Ok(Some(mapped))
     }
 
+    /// Find visible AST nodes whose resolved source positions intersect
+    /// `[start, end)`.
+    ///
+    /// Non-empty spans use half-open interval overlap. Point positions use
+    /// their resolved `point` coordinate instead. The result keeps Positions
+    /// wire order. `None` means that the file has no `Positions` section;
+    /// an empty or inverted range returns an empty vector.
+    pub fn ast_nodes_in_source_range(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<Option<Vec<AstTreePosition>>, TastyFileError> {
+        self.ast_nodes_in_source_range_with_max_depth(
+            start,
+            end,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Find visible AST nodes whose resolved source positions intersect
+    /// `[start, end)` using an explicit AST traversal limit.
+    pub fn ast_nodes_in_source_range_with_max_depth(
+        &self,
+        start: i64,
+        end: i64,
+        max_depth: usize,
+    ) -> Result<Option<Vec<AstTreePosition>>, TastyFileError> {
+        if start >= end {
+            return Ok(self.positions()?.map(|_| Vec::new()));
+        }
+
+        let Some(mapped) = self.ast_node_positions_with_max_depth(max_depth)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(
+            mapped
+                .into_iter()
+                .filter(|entry| {
+                    if entry.position.start < entry.position.end {
+                        entry.position.start < end && start < entry.position.end
+                    } else {
+                        entry.position.point >= start && entry.position.point < end
+                    }
+                })
+                .collect(),
+        ))
+    }
+
     fn asts_length(&self) -> usize {
         self.section(StandardSection::Asts)
             .map(|section| section.payload.len())
@@ -1334,6 +1383,61 @@ mod tests {
 
         assert!(matches!(
             file.ast_node_positions_with_max_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn filters_fixture_ast_positions_by_a_half_open_source_range() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let mapped = file.ast_node_positions().unwrap().unwrap();
+        let first = mapped.first().unwrap();
+        let start = first.position.start;
+        let end = first.position.end.max(start + 1);
+
+        let filtered = file.ast_nodes_in_source_range(start, end).unwrap().unwrap();
+
+        assert!(filtered.iter().any(|entry| entry.node == first.node));
+        assert!(filtered.iter().all(|entry| {
+            if entry.position.start < entry.position.end {
+                entry.position.start < end && start < entry.position.end
+            } else {
+                entry.position.point >= start && entry.position.point < end
+            }
+        }));
+    }
+
+    #[test]
+    fn treats_an_empty_source_range_as_empty_without_indexing_asts() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert_eq!(
+            file.ast_nodes_in_source_range_with_max_depth(10, 10, 0)
+                .unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn returns_no_source_range_matches_when_positions_are_absent() {
+        let bytes = compatible_file_bytes();
+        let file = TastyFile::parse(&bytes).unwrap();
+
+        assert_eq!(file.ast_nodes_in_source_range(0, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_source_range_queries() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_nodes_in_source_range_with_max_depth(0, i64::MAX, 0),
             Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
                 limit: 0,
                 ..

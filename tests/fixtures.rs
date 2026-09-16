@@ -849,6 +849,55 @@ fn all_tasty_fixture_position_mappings_target_visible_ast_nodes() {
 }
 
 #[test]
+fn all_tasty_fixture_source_range_queries_return_only_overlapping_positions() {
+    let mut matching_count = 0;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let Some(mapped) = file.ast_node_positions().unwrap_or_else(|error| {
+            panic!("failed to map AST positions in {}: {error}", path.display())
+        }) else {
+            continue;
+        };
+        let Some(first) = mapped.first() else {
+            continue;
+        };
+        let start = first.position.start;
+        let end = first.position.end.max(start + 1);
+        let filtered = file
+            .ast_nodes_in_source_range(start, end)
+            .unwrap_or_else(|error| panic!("failed to query {}: {error}", path.display()))
+            .expect("Positions section was present");
+
+        matching_count += filtered.len();
+        assert!(
+            filtered.iter().all(|entry| {
+                if entry.position.start < entry.position.end {
+                    entry.position.start < end && start < entry.position.end
+                } else {
+                    entry.position.point >= start && entry.position.point < end
+                }
+            }),
+            "source range query returned a non-overlapping position in {}",
+            path.display()
+        );
+        assert!(
+            filtered.iter().any(|entry| entry.node == first.node),
+            "source range query omitted the selected position in {}",
+            path.display()
+        );
+    }
+
+    assert!(
+        matching_count > 0,
+        "fixtures contain no source range matches"
+    );
+}
+
+#[test]
 fn all_tasty_fixture_signed_names_have_typed_views() {
     let mut signed_name_count = 0;
 

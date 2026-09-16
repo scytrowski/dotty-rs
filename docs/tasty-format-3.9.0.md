@@ -796,6 +796,11 @@ wire order. Associations that do not identify a visible AST node are omitted;
 the raw position entries remain available for lossless processing. The
 `ast_node_positions_with_max_depth()` variant applies the same AST traversal
 limit as the other global-index queries.
+`TastyFile::ast_nodes_in_source_range()` filters that mapping by a half-open
+source range `[start, end)`: non-empty spans match when they overlap the query,
+while point positions match when their point lies inside it. Empty or inverted
+ranges return no matches, and the `_with_max_depth()` variant exposes the same
+AST traversal limit as the mapping API.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an
