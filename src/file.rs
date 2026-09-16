@@ -27,6 +27,13 @@ pub struct EncodedTastyFile {
     ast_addresses: Vec<u32>,
 }
 
+/// A visible AST node paired with its resolved source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstTreePosition {
+    pub node: AstTreeNode,
+    pub position: ResolvedPosition,
+}
+
 /// Owns the pieces of a TASTy file while it is being assembled for encoding.
 ///
 /// The parsed [`TastyFile`] type borrows section payloads, which is useful for
@@ -1008,6 +1015,38 @@ impl<'a> TastyFile<'a> {
             .map_err(TastyFileError::from)
     }
 
+    /// Pair resolved source positions with visible AST nodes.
+    ///
+    /// The result keeps the order of the `Positions` associations. An
+    /// association whose address is inside the AST section but does not start
+    /// a visible node is omitted. `None` means that the file has no
+    /// `Positions` section.
+    pub fn ast_node_positions(&self) -> Result<Option<Vec<AstTreePosition>>, TastyFileError> {
+        self.ast_node_positions_with_max_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Pair resolved source positions with visible AST nodes using an
+    /// explicit AST traversal limit.
+    pub fn ast_node_positions_with_max_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<Option<Vec<AstTreePosition>>, TastyFileError> {
+        let Some(positions) = self.positions()? else {
+            return Ok(None);
+        };
+        let index = self.ast_address_index_with_max_depth(max_depth)?;
+        let mut mapped = Vec::new();
+        for position in positions.resolved_associations()? {
+            let Ok(address) = u32::try_from(position.address) else {
+                continue;
+            };
+            if let Some(node) = index.get_node(address) {
+                mapped.push(AstTreePosition { node, position });
+            }
+        }
+        Ok(Some(mapped))
+    }
+
     fn asts_length(&self) -> usize {
         self.section(StandardSection::Asts)
             .map(|section| section.payload.len())
@@ -1262,6 +1301,44 @@ mod tests {
             file.resolved_position_at(expected.address as u32).unwrap(),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn joins_fixture_positions_with_visible_ast_nodes_in_position_order() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let mapped = file.ast_node_positions().unwrap().unwrap();
+
+        assert!(!mapped.is_empty());
+        for entry in mapped {
+            assert_eq!(
+                file.resolved_position_at(entry.node.offset as u32).unwrap(),
+                Some(entry.position.clone())
+            );
+            assert_eq!(entry.position.address, entry.node.offset as i64);
+        }
+    }
+
+    #[test]
+    fn returns_no_ast_position_mapping_when_positions_are_absent() {
+        let bytes = compatible_file_bytes();
+        let file = TastyFile::parse(&bytes).unwrap();
+
+        assert_eq!(file.ast_node_positions().unwrap(), None);
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_ast_position_mapping() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_node_positions_with_max_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]

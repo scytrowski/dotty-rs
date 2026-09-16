@@ -809,6 +809,46 @@ fn all_tasty_fixture_position_associations_have_resolved_coordinates() {
 }
 
 #[test]
+fn all_tasty_fixture_position_mappings_target_visible_ast_nodes() {
+    let mut mapping_count = 0;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+
+        if let Some(mapped) = file.ast_node_positions().unwrap_or_else(|error| {
+            panic!("failed to map AST positions in {}: {error}", path.display())
+        }) {
+            mapping_count += mapped.len();
+            for entry in mapped {
+                assert_eq!(
+                    index.get_node(entry.node.offset as u32),
+                    Some(entry.node),
+                    "position mapping targets a missing node in {}",
+                    path.display()
+                );
+                assert_eq!(
+                    entry.position.address,
+                    entry.node.offset as i64,
+                    "position mapping has a mismatched address in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    assert!(
+        mapping_count > 0,
+        "fixtures contain no position-to-AST mappings"
+    );
+}
+
+#[test]
 fn all_tasty_fixture_signed_names_have_typed_views() {
     let mut signed_name_count = 0;
 

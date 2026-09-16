@@ -790,6 +790,12 @@ from a parsed file and returns `None` when the file has no `Positions` section.
 `PositionSection::resolved_association_at()` and
 `TastyFile::resolved_position_at()` look up the first association for an
 absolute AST address while preserving the resolved source and coordinates.
+`TastyFile::ast_node_positions()` joins these resolved associations with the
+global visible AST index and returns `AstTreePosition` values in `Positions`
+wire order. Associations that do not identify a visible AST node are omitted;
+the raw position entries remain available for lossless processing. The
+`ast_node_positions_with_max_depth()` variant applies the same AST traversal
+limit as the other global-index queries.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an
