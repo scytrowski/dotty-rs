@@ -34,6 +34,14 @@ inventing a tag-to-language-feature mapping.
 Corpus-wide tests remain responsible for file invariants and round-trip
 guarantees. They complement, but do not replace, the named fixture tests.
 
+When a fixture has a stable source-level expectation, add focused value
+assertions in addition to tag coverage. Prefer one test per independent
+expectation (for example, one literal value or one control-flow shape) and
+assert names, constants, parameter lists, branch counts, AST-reference
+targets, and nested node fields where the public model exposes them. Keep
+compiler-generated details such as absolute offsets out of these assertions
+unless the offset itself is the behavior under test.
+
 The full suite is the required pre-commit check:
 
 ```text
