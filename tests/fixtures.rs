@@ -738,6 +738,26 @@ fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
 }
 
 #[test]
+fn all_tasty_fixtures_round_trip_through_the_validated_file_encoder() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let encoded = file.encode_validated().unwrap_or_else(|error| {
+            panic!("failed to validate and encode {}: {error}", path.display())
+        });
+
+        assert_eq!(
+            encoded,
+            bytes,
+            "validated round-trip changed {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_through_the_file_encoder_with_ast_addresses() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
@@ -753,6 +773,41 @@ fn all_tasty_fixtures_round_trip_through_the_file_encoder_with_ast_addresses() {
 
         assert_eq!(encoded.as_slice(), bytes, "fixture {}", path.display());
         let asts = file.asts().unwrap();
+        assert_eq!(
+            encoded.ast_addresses().len(),
+            asts.len(),
+            "fixture {}",
+            path.display()
+        );
+        for (node, address) in asts.iter().zip(encoded.ast_addresses()) {
+            assert_eq!(*address as usize, node.offset, "fixture {}", path.display());
+        }
+    }
+}
+
+#[test]
+fn all_tasty_fixtures_round_trip_through_the_validated_address_encoder() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let encoded = file
+            .encode_validated_with_ast_addresses()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to validate and encode {} with AST addresses: {error}",
+                    path.display()
+                )
+            });
+        let asts = file.asts().unwrap();
+
+        assert_eq!(
+            encoded.as_slice(),
+            bytes,
+            "validated address round-trip changed {}",
+            path.display()
+        );
         assert_eq!(
             encoded.ast_addresses().len(),
             asts.len(),
