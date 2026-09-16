@@ -48,6 +48,9 @@ pub struct AstTreeNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
+    /// A valid category-one tag with no payload, such as a modifier or a
+    /// grammar marker.
+    Tag,
     Unit,
     Boolean(bool),
     Null,
@@ -145,7 +148,7 @@ impl fmt::Display for TermError {
             }
             Self::UnsupportedCategory { tag, offset } => write!(
                 formatter,
-                "term tag {tag} at offset {offset} is not a category-2 leaf"
+                "term tag {tag} at offset {offset} is not a supported category-one or category-two leaf"
             ),
             Self::InvalidConstant { tag, value, offset } => write!(
                 formatter,
@@ -173,22 +176,24 @@ impl SimpleTerm {
     /// Newly constructed terms start at offset zero; offsets are metadata
     /// derived while decoding and are not needed when encoding a new tree.
     pub fn new(tag: u8, value: TermValue) -> Result<Self, TermEncodeError> {
-        if !matches!(tag, 2..=5 | 60..=76) {
+        if !is_assigned_category_one_tag(tag) && !matches!(tag, 60..=76) {
             return Err(TermEncodeError::InvalidTag { tag });
         }
 
-        if !matches!(
-            (&value, tag),
+        let valid = match (&value, tag) {
+            (TermValue::Tag, tag) => is_assigned_category_one_tag(tag),
             (TermValue::Unit, 2)
-                | (TermValue::Boolean(false), 3)
-                | (TermValue::Boolean(true), 4)
-                | (TermValue::Null, 5)
-                | (TermValue::AstRef(_), 60..=63 | 66)
-                | (TermValue::NameRef(_), 64..=65 | 74..=76)
-                | (TermValue::Int(_), 67 | 68 | 70 | 72)
-                | (TermValue::Nat(_), 69)
-                | (TermValue::LongInt(_), 71 | 73)
-        ) {
+            | (TermValue::Boolean(false), 3)
+            | (TermValue::Boolean(true), 4)
+            | (TermValue::Null, 5)
+            | (TermValue::AstRef(_), 60..=63 | 66)
+            | (TermValue::NameRef(_), 64..=65 | 74..=76)
+            | (TermValue::Int(_), 67 | 68 | 70 | 72)
+            | (TermValue::Nat(_), 69)
+            | (TermValue::LongInt(_), 71 | 73) => true,
+            _ => false,
+        };
+        if !valid {
             return Err(TermEncodeError::InvalidValue { tag });
         }
 
@@ -211,6 +216,7 @@ impl SimpleTerm {
             3 => TermValue::Boolean(false),
             4 => TermValue::Boolean(true),
             5 => TermValue::Null,
+            tag if is_assigned_category_one_tag(tag) => TermValue::Tag,
             60..=63 | 66 => TermValue::AstRef(reader.read_nat()?),
             64..=65 | 74..=76 => TermValue::NameRef(reader.read_nat()?),
             67..=68 | 70 | 72 => TermValue::Int(reader.read_int()?),
@@ -326,6 +332,7 @@ impl SimpleTerm {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
+            (TermValue::Tag, tag) if is_assigned_category_one_tag(tag) => {}
             (TermValue::Unit, 2)
             | (TermValue::Boolean(false), 3)
             | (TermValue::Boolean(true), 4)
@@ -339,6 +346,10 @@ impl SimpleTerm {
         }
         Ok(())
     }
+}
+
+fn is_assigned_category_one_tag(tag: u8) -> bool {
+    matches!(tag, 2..=6 | 8..=29 | 31..=49)
 }
 
 impl ConstantValue {
@@ -591,7 +602,13 @@ impl<'a> RawTree<'a> {
         };
 
         match category {
-            1 | 2 => Ok(Self::Leaf(SimpleTerm::decode_tagged(reader, tag, offset)?)),
+            1 | 2 => {
+                let term = SimpleTerm::decode_tagged(reader, tag, offset)?;
+                if matches!(term.value, TermValue::Tag) {
+                    return Err(TermError::UnsupportedCategory { tag, offset });
+                }
+                Ok(Self::Leaf(term))
+            }
             3 => {
                 if !(90..=104).contains(&tag) {
                     return Err(TermError::InvalidTag { tag, offset });
@@ -738,6 +755,52 @@ mod tests {
 
         assert_eq!(term.offset, 0);
         assert_eq!(term.name_ref(), Some(7));
+    }
+
+    #[test]
+    fn decodes_a_category_one_modifier_leaf() {
+        let mut reader = Reader::new(&[37]);
+
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap(),
+            SimpleTerm {
+                tag: 37,
+                offset: 0,
+                value: TermValue::Tag,
+            }
+        );
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn decodes_a_category_one_clause_marker_leaf() {
+        let mut reader = Reader::new(&[45]);
+
+        assert_eq!(
+            SimpleTerm::decode(&mut reader).unwrap().value,
+            TermValue::Tag
+        );
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn encodes_a_category_one_tag_only_leaf() {
+        let term = SimpleTerm::new(49, TermValue::Tag).unwrap();
+        let mut writer = Writer::new();
+
+        term.encode(&mut writer).unwrap();
+
+        assert_eq!(writer.as_slice(), &[49]);
+    }
+
+    #[test]
+    fn rejects_an_unassigned_category_one_tag() {
+        let mut reader = Reader::new(&[30]);
+
+        assert_eq!(
+            SimpleTerm::decode(&mut reader),
+            Err(TermError::UnsupportedCategory { tag: 30, offset: 0 })
+        );
     }
 
     #[test]

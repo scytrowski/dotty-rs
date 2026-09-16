@@ -657,6 +657,13 @@ A tag alone is not enough to determine the payload without knowing its category.
 
 In category 1, many tags are modifiers, such as `PRIVATE`, `FINAL`, `INLINE`, `GIVEN`, `OPAQUE`, `MUTABLE`, `COVARIANT`, and `CONTRAVARIANT`. They are interpreted only in grammar productions that allow `Modifier*`.
 
+The low-level `SimpleTerm` layer preserves every assigned category-1 tag as a
+tag-only leaf. Constants expose their typed values, while modifiers and
+grammar markers are represented as `TermValue::Tag` so that a tag can be
+decoded and encoded without inventing semantic meaning for it. `RawTree`
+accepts only category-1 values that are valid `Term` leaves; context-specific
+modifiers and grammar markers are parsed by the enclosing production instead.
+
 ### 7.1. Complete tag list
 
 #### Category 1: tag only
