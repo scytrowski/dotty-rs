@@ -851,6 +851,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_tag_only_leaf_when_decoding_a_raw_tree() {
+        let mut reader = Reader::new(&[37]);
+
+        assert_eq!(
+            RawTree::decode(&mut reader),
+            Err(TermError::UnsupportedCategory { tag: 37, offset: 0 })
+        );
+    }
+
+    #[test]
     fn rejects_a_mismatched_value_when_constructing_a_simple_term() {
         assert_eq!(
             SimpleTerm::new(70, TermValue::LongInt(1)),

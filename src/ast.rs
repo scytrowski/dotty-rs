@@ -163,6 +163,36 @@ impl NodeCategory {
             0 => None,
         }
     }
+
+    /// Returns whether `tag` is assigned by the Scala 3.9.0 TASTy format.
+    ///
+    /// This is deliberately separate from [`NodeCategory::from_tag`]. The
+    /// category ranges contain reserved gaps, and category-five raw nodes
+    /// may still be preserved even when their tag is not known to this
+    /// version of the library.
+    pub fn is_known_tag(tag: u8) -> bool {
+        matches!(
+            tag,
+            2..=6
+                | 8..=29
+                | 31..=49
+                | 60..=76
+                | 90..=104
+                | 110..=119
+                | 128..=134
+                | 136..=165
+                | 167
+                | 169..=183
+                | 190..=193
+                | 255
+        )
+    }
+
+    /// Returns whether `tag` is both in this category and assigned by the
+    /// Scala 3.9.0 TASTy format.
+    pub fn contains_known_tag(self, tag: u8) -> bool {
+        Self::from_tag(tag) == Some(self) && Self::is_known_tag(tag)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +249,15 @@ impl<'a> RawNode<'a> {
 
     pub fn category(&self) -> NodeCategory {
         NodeCategory::from_tag(self.tag).expect("RawNode tags are validated during decoding")
+    }
+
+    /// Returns whether this node uses a tag assigned by TASTy 3.9.0.
+    ///
+    /// Unknown category-five nodes remain valid raw nodes so that callers can
+    /// preserve newer or application-specific payloads without interpreting
+    /// them.
+    pub fn is_known(&self) -> bool {
+        NodeCategory::is_known_tag(self.tag)
     }
 
     pub fn reader(&self) -> Reader<'a> {
@@ -4258,11 +4297,13 @@ fn encode_trees<'a>(trees: &[RawTree<'a>], writer: &mut Writer) -> Result<(), Te
 impl<'a> RawTree<'a> {
     /// Dispatches this raw tree to its typed representation.
     ///
-    /// Category-1 leaves that are not constants remain available as
-    /// `StructuredTree::Leaf`, because they can be references or modifiers
-    /// whose meaning is supplied by the enclosing grammar. Unknown or
-    /// context-dependent details inside a category-5 payload are preserved
-    /// by the existing `StructuredNode::Raw` variant.
+    /// Category-1/2 leaves that are valid generic term trees remain available
+    /// as `StructuredTree::Leaf`, because their meaning can depend on the
+    /// enclosing grammar. Tag-only category-1 modifiers and markers are
+    /// represented by `SimpleTerm`, but are rejected by `RawTree::decode`:
+    /// they are fields of enclosing productions rather than standalone term
+    /// trees. Unknown or context-dependent details inside a category-5
+    /// payload are preserved by the existing `StructuredNode::Raw` variant.
     pub fn decode_structured(&self) -> Result<StructuredTree<'a>, AstError> {
         match self {
             Self::Leaf(term) => match term.constant_value()? {
@@ -5390,6 +5431,26 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_assigned_tags_from_reserved_category_gaps() {
+        assert!(NodeCategory::is_known_tag(2));
+        assert!(NodeCategory::is_known_tag(76));
+        assert!(NodeCategory::is_known_tag(104));
+        assert!(NodeCategory::is_known_tag(119));
+        assert!(NodeCategory::is_known_tag(255));
+
+        for tag in [
+            0, 1, 7, 30, 77, 89, 105, 109, 120, 127, 135, 166, 168, 184, 189, 194,
+        ] {
+            assert!(!NodeCategory::is_known_tag(tag), "tag {tag} is reserved");
+        }
+
+        assert!(NodeCategory::Category1.contains_known_tag(45));
+        assert!(!NodeCategory::Category1.contains_known_tag(60));
+        assert!(!NodeCategory::Category5.contains_known_tag(135));
+        assert!(NodeCategory::Category5.contains_known_tag(255));
+    }
+
+    #[test]
     fn exposes_the_complete_category_one_tag_matrix() {
         use super::{
             ABSTRACT_TAG, ARTIFACT_TAG, CASE_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG,
@@ -5561,6 +5622,7 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         assert_eq!(nodes.get(0).unwrap().tag, 135);
         assert!(nodes.get(0).unwrap().payload.is_empty());
+        assert!(!nodes.get(0).unwrap().is_known());
         assert!(reader.is_at_end());
     }
 
