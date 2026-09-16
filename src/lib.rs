@@ -41,7 +41,8 @@ pub use header::{
     SCALA_3_9_MINOR_VERSION, TASTY_MAGIC,
 };
 pub use name_table::{
-    NameRef, NameTable, NameTableBuilder, NameTableError, ParamSig, RawName, RawNameKind,
+    NameRef, NameRenderError, NameTable, NameTableBuilder, NameTableError, ParamSig, RawName,
+    RawNameKind,
 };
 pub use reader::{ReadError, Reader};
 pub use section::{

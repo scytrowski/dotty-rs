@@ -513,6 +513,10 @@ assumed separator.
 `RawName::kind()` provides a payload-independent [`RawNameKind`] classification
 for all known and unknown entry variants; the original `RawName` remains
 available for inspecting payloads and preserving lossless data.
+`NameTable::render()` resolves the conventional textual spelling of
+non-signature composite names iteratively. Signature-bearing and unknown names
+return `NameRenderError::Unsupported` so that the library does not guess at
+compiler-specific signature formatting.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns

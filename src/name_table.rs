@@ -157,6 +157,33 @@ impl From<ReadError> for NameTableError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameRenderError {
+    InvalidReference {
+        reference: NameRef,
+    },
+    Unsupported {
+        reference: NameRef,
+        kind: RawNameKind,
+    },
+}
+
+impl fmt::Display for NameRenderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidReference { reference } => {
+                write!(formatter, "invalid name reference {reference}")
+            }
+            Self::Unsupported { reference, kind } => write!(
+                formatter,
+                "cannot render name reference {reference} of kind {kind:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NameRenderError {}
+
 impl NameTable {
     pub fn builder() -> NameTableBuilder {
         NameTableBuilder::new()
@@ -277,6 +304,96 @@ impl NameTable {
         }
 
         Some(order)
+    }
+
+    /// Renders a name entry using the conventional Scala spelling for all
+    /// non-signature name kinds.
+    ///
+    /// Rendering is iterative and therefore safe for deeply chained names.
+    /// `SIGNED`, `TARGETSIGNED`, and unknown entries remain structural raw data
+    /// and return [`NameRenderError::Unsupported`], because their complete
+    /// textual meaning depends on signature-specific compiler semantics.
+    pub fn render(&self, reference: NameRef) -> Result<String, NameRenderError> {
+        let root_index = reference
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| *index < self.entries.len())
+            .ok_or(NameRenderError::InvalidReference { reference })?;
+        let order = self
+            .dependency_order(reference)
+            .ok_or(NameRenderError::InvalidReference { reference })?;
+        let mut rendered = vec![None; self.entries.len()];
+
+        for current in order {
+            let index = (current - 1) as usize;
+            let kind = self.entries[index].kind();
+            let value = match &self.entries[index] {
+                RawName::Utf8(value) => value.clone(),
+                RawName::Qualified { prefix, selector } => format!(
+                    "{}.{}",
+                    rendered_dependency(&rendered, *prefix, current, kind)?,
+                    rendered_dependency(&rendered, *selector, current, kind)?
+                ),
+                RawName::Expanded { prefix, selector } => format!(
+                    "{}$${}",
+                    rendered_dependency(&rendered, *prefix, current, kind)?,
+                    rendered_dependency(&rendered, *selector, current, kind)?
+                ),
+                RawName::ExpandPrefix { prefix, selector } => format!(
+                    "{}${}",
+                    rendered_dependency(&rendered, *prefix, current, kind)?,
+                    rendered_dependency(&rendered, *selector, current, kind)?
+                ),
+                RawName::Unique {
+                    separator,
+                    uniqid,
+                    underlying,
+                } => {
+                    let separator = rendered_dependency(&rendered, *separator, current, kind)?;
+                    let underlying = underlying
+                        .map(|reference| rendered_dependency(&rendered, reference, current, kind))
+                        .transpose()?
+                        .unwrap_or_default();
+                    if underlying.is_empty() && separator == "$" {
+                        format!("${uniqid}$")
+                    } else {
+                        format!("{underlying}{separator}{uniqid}")
+                    }
+                }
+                RawName::DefaultGetter { underlying, index } => format!(
+                    "{}$default${}",
+                    rendered_dependency(&rendered, *underlying, current, kind)?,
+                    u64::from(*index) + 1
+                ),
+                RawName::SuperAccessor { underlying } => format!(
+                    "super${}",
+                    rendered_dependency(&rendered, *underlying, current, kind)?
+                ),
+                RawName::InlineAccessor { underlying } => format!(
+                    "inline${}",
+                    rendered_dependency(&rendered, *underlying, current, kind)?
+                ),
+                RawName::ObjectClass { underlying } => format!(
+                    "{}$",
+                    rendered_dependency(&rendered, *underlying, current, kind)?
+                ),
+                RawName::BodyRetainer { underlying } => format!(
+                    "{}$retainedBody",
+                    rendered_dependency(&rendered, *underlying, current, kind)?
+                ),
+                RawName::Signed { .. } | RawName::TargetSigned { .. } | RawName::Unknown { .. } => {
+                    return Err(NameRenderError::Unsupported {
+                        reference: current,
+                        kind,
+                    });
+                }
+            };
+            rendered[index] = Some(value);
+        }
+
+        rendered[root_index]
+            .clone()
+            .ok_or(NameRenderError::InvalidReference { reference })
     }
 
     pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
@@ -411,6 +528,25 @@ impl NameTable {
 
         Ok(())
     }
+}
+
+fn rendered_dependency(
+    rendered: &[Option<String>],
+    reference: NameRef,
+    owner: NameRef,
+    owner_kind: RawNameKind,
+) -> Result<String, NameRenderError> {
+    let index = reference
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or(NameRenderError::InvalidReference { reference })?;
+    rendered
+        .get(index)
+        .and_then(Clone::clone)
+        .ok_or(NameRenderError::Unsupported {
+            reference: owner,
+            kind: owner_kind,
+        })
 }
 
 fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8]) -> Option<usize> {
@@ -749,7 +885,7 @@ fn read_parameter_signatures(reader: &mut Reader<'_>) -> Result<Vec<ParamSig>, N
 
 #[cfg(test)]
 mod tests {
-    use super::{NameTable, NameTableError, RawName, RawNameKind};
+    use super::{NameRenderError, NameTable, NameTableError, RawName, RawNameKind};
     use crate::reader::{ReadError, Reader};
 
     #[test]
@@ -902,6 +1038,217 @@ mod tests {
             }
             .kind(),
             RawNameKind::Unknown
+        );
+    }
+
+    #[test]
+    fn renders_a_direct_utf8_name() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
+
+        assert_eq!(table.render(1), Ok("name".to_owned()));
+    }
+
+    #[test]
+    fn renders_a_qualified_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(3), Ok("owner.member".to_owned()));
+    }
+
+    #[test]
+    fn renders_an_expanded_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::Expanded {
+                prefix: 1,
+                selector: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(3), Ok("owner$$member".to_owned()));
+    }
+
+    #[test]
+    fn renders_an_expand_prefix_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("member".to_owned()),
+            RawName::ExpandPrefix {
+                prefix: 1,
+                selector: 2,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(3), Ok("owner$member".to_owned()));
+    }
+
+    #[test]
+    fn renders_a_unique_name_with_an_underlying_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("owner".to_owned()),
+            RawName::Utf8("$".to_owned()),
+            RawName::Unique {
+                separator: 2,
+                uniqid: 7,
+                underlying: Some(1),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(3), Ok("owner$7".to_owned()));
+    }
+
+    #[test]
+    fn renders_an_empty_unique_name_with_scala_dollar_delimiters() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("$".to_owned()),
+            RawName::Unique {
+                separator: 1,
+                uniqid: 7,
+                underlying: None,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("$7$".to_owned()));
+    }
+
+    #[test]
+    fn renders_a_default_getter_name_with_a_one_based_index() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::DefaultGetter {
+                underlying: 1,
+                index: 0,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("method$default$1".to_owned()));
+    }
+
+    #[test]
+    fn renders_a_super_accessor_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::SuperAccessor { underlying: 1 },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("super$method".to_owned()));
+    }
+
+    #[test]
+    fn renders_an_inline_accessor_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::InlineAccessor { underlying: 1 },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("inline$method".to_owned()));
+    }
+
+    #[test]
+    fn renders_a_body_retainer_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::BodyRetainer { underlying: 1 },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("method$retainedBody".to_owned()));
+    }
+
+    #[test]
+    fn renders_an_object_class_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("module".to_owned()),
+            RawName::ObjectClass { underlying: 1 },
+        ])
+        .unwrap();
+
+        assert_eq!(table.render(2), Ok("module$".to_owned()));
+    }
+
+    #[test]
+    fn rejects_rendering_a_signed_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Signed {
+                original: 1,
+                result_signature: 1,
+                parameter_signatures: vec![],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render(2),
+            Err(NameRenderError::Unsupported {
+                reference: 2,
+                kind: RawNameKind::Signed,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_rendering_a_target_signed_name() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::TargetSigned {
+                original: 1,
+                target: 1,
+                result_signature: 1,
+                parameter_signatures: vec![],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render(2),
+            Err(NameRenderError::Unsupported {
+                reference: 2,
+                kind: RawNameKind::TargetSigned,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_rendering_an_unknown_name() {
+        let table = NameTable::from_entries(vec![RawName::Unknown {
+            tag: 99,
+            payload: vec![],
+        }])
+        .unwrap();
+
+        assert_eq!(
+            table.render(1),
+            Err(NameRenderError::Unsupported {
+                reference: 1,
+                kind: RawNameKind::Unknown,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_rendering_an_invalid_name_reference() {
+        let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
+
+        assert_eq!(
+            table.render(0),
+            Err(NameRenderError::InvalidReference { reference: 0 })
         );
     }
 
