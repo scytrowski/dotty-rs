@@ -251,7 +251,17 @@ impl TastyFileBuilder {
 
     /// Validate all supported file contents before encoding.
     pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
-        self.build()?.encode_validated()
+        self.encode_validated_with_max_ast_index_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate all supported file contents before encoding with an explicit
+    /// AST nesting limit.
+    pub fn encode_validated_with_max_ast_index_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        let file = self.build()?;
+        file.encode_validated_with_max_ast_index_depth(max_depth)
     }
 
     /// Validate all supported file contents against a compiler version before
@@ -262,14 +272,47 @@ impl TastyFileBuilder {
         compiler_minor: u32,
         compiler_experimental: u32,
     ) -> Result<Vec<u8>, TastyFileError> {
+        self.encode_validated_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate compiler compatibility and file contents before encoding with
+    /// an explicit AST nesting limit.
+    pub fn encode_validated_compatible_with_max_ast_index_depth(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+        max_depth: usize,
+    ) -> Result<Vec<u8>, TastyFileError> {
         let file = self.build()?;
-        file.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)?;
-        file.encode()
+        file.encode_validated_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            max_depth,
+        )
     }
 
     /// Validate all supported file contents before encoding and allocating AST addresses.
     pub fn encode_validated_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
-        self.build()?.encode_validated_with_ast_addresses()
+        self.encode_validated_with_max_ast_index_depth_and_ast_addresses(
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate all supported file contents before encoding and allocating AST
+    /// addresses with an explicit AST nesting limit.
+    pub fn encode_validated_with_max_ast_index_depth_and_ast_addresses(
+        &self,
+        max_depth: usize,
+    ) -> Result<EncodedTastyFile, TastyFileError> {
+        let file = self.build()?;
+        file.encode_validated_with_max_ast_index_depth_and_ast_addresses(max_depth)
     }
 }
 
@@ -459,7 +502,16 @@ impl<'a> TastyFile<'a> {
 
     /// Validate all supported file contents before encoding.
     pub fn encode_validated(&self) -> Result<Vec<u8>, TastyFileError> {
-        self.validate()?;
+        self.encode_validated_with_max_ast_index_depth(crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Validate all supported file contents before encoding with an explicit
+    /// AST nesting limit.
+    pub fn encode_validated_with_max_ast_index_depth(
+        &self,
+        max_depth: usize,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        self.validate_with_max_ast_index_depth(max_depth)?;
         self.encode()
     }
 
@@ -471,7 +523,29 @@ impl<'a> TastyFile<'a> {
         compiler_minor: u32,
         compiler_experimental: u32,
     ) -> Result<Vec<u8>, TastyFileError> {
-        self.validate_compatible_with(compiler_major, compiler_minor, compiler_experimental)?;
+        self.encode_validated_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate compiler compatibility and file contents before encoding with
+    /// an explicit AST nesting limit.
+    pub fn encode_validated_compatible_with_max_ast_index_depth(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+        max_depth: usize,
+    ) -> Result<Vec<u8>, TastyFileError> {
+        self.validate_compatible_with_max_ast_index_depth(
+            compiler_major,
+            compiler_minor,
+            compiler_experimental,
+            max_depth,
+        )?;
         self.encode()
     }
 
@@ -502,7 +576,18 @@ impl<'a> TastyFile<'a> {
 
     /// Validate all supported file contents before encoding and allocating AST addresses.
     pub fn encode_validated_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
-        self.validate()?;
+        self.encode_validated_with_max_ast_index_depth_and_ast_addresses(
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Validate all supported file contents before encoding and allocating AST
+    /// addresses with an explicit AST nesting limit.
+    pub fn encode_validated_with_max_ast_index_depth_and_ast_addresses(
+        &self,
+        max_depth: usize,
+    ) -> Result<EncodedTastyFile, TastyFileError> {
+        self.validate_with_max_ast_index_depth(max_depth)?;
         self.encode_with_ast_addresses()
     }
 
@@ -863,6 +948,61 @@ mod tests {
 
         assert!(matches!(
             TastyFile::parse_and_validate_compatible_with_max_ast_index_depth(bytes, 28, 10, 0, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_validated_encoding() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert!(matches!(
+            file.encode_validated_with_max_ast_index_depth(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_during_address_encoding() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse(bytes).unwrap();
+
+        assert!(matches!(
+            file.encode_validated_with_max_ast_index_depth_and_ast_addresses(0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_builder_encoding() {
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("value".to_owned()),
+            ])
+            .unwrap(),
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        assert!(matches!(
+            builder.encode_validated_with_max_ast_index_depth(0),
             Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
                 limit: 0,
                 ..

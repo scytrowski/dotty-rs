@@ -726,7 +726,9 @@ owned file before serialization; corresponding
 For callers that require an eager safety boundary, `TastyFile::encode_validated()`
 and `TastyFile::encode_validated_with_ast_addresses()` validate AST references,
 name references, and supported standard sections before writing; the builder
-exposes the same two methods.
+exposes the same two methods. Their
+`*_with_max_ast_index_depth` variants apply an explicit AST nesting limit
+atomically during validation and encoding.
 
 ## 10. Comments
 
