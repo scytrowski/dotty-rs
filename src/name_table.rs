@@ -324,20 +324,36 @@ impl NameTable {
 }
 
 fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8]) -> Option<usize> {
-    match states[entry_index] {
-        1 => return Some(entry_index),
-        2 => return None,
-        _ => {}
+    if states[entry_index] != 0 {
+        return (states[entry_index] == 1).then_some(entry_index);
     }
 
+    // Name entries form a graph, and the input is untrusted. Keep the DFS
+    // stack on the heap so a long but valid name chain cannot overflow the
+    // process stack while it is being validated.
+    let mut stack = vec![(entry_index, entries[entry_index].references(), 0usize)];
     states[entry_index] = 1;
-    for reference in entries[entry_index].references() {
-        let target_index = (reference - 1) as usize;
-        if let Some(cycle_entry) = detect_name_cycle(entries, target_index, states) {
-            return Some(cycle_entry);
+
+    while let Some((current, references, next_reference)) = stack.last_mut() {
+        if *next_reference == references.len() {
+            states[*current] = 2;
+            stack.pop();
+            continue;
+        }
+
+        let target_index = (references[*next_reference] - 1) as usize;
+        *next_reference += 1;
+        match states[target_index] {
+            0 => {
+                states[target_index] = 1;
+                stack.push((target_index, entries[target_index].references(), 0));
+            }
+            1 => return Some(target_index),
+            2 => {}
+            _ => unreachable!("name validation states are only 0, 1, or 2"),
         }
     }
-    states[entry_index] = 2;
+
     None
 }
 
@@ -746,6 +762,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn validates_a_long_acyclic_name_chain_without_using_recursion() {
+        const CHAIN_LENGTH: usize = 4096;
+        let mut entries = Vec::with_capacity(CHAIN_LENGTH);
+
+        for index in 0..CHAIN_LENGTH - 1 {
+            let next = u32::try_from(index + 2).unwrap();
+            entries.push(RawName::Qualified {
+                prefix: next,
+                selector: next,
+            });
+        }
+        entries.push(RawName::Utf8("end".to_owned()));
+
+        let names = NameTable::from_entries(entries).unwrap();
+
+        assert_eq!(names.len(), CHAIN_LENGTH);
+        assert_eq!(names.get_utf8(CHAIN_LENGTH as u32), Some("end"));
     }
 
     #[test]
