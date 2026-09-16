@@ -201,6 +201,10 @@ its negation cannot represent the length of a type-parameter section.
 Name references are range-checked, and cyclic name-entry dependencies are
 rejected by the validated name-table model.
 
+Unknown name tags are preserved as raw length-delimited entries. Programmatic
+construction rejects tags already assigned to a known name-entry grammar so
+that an unknown entry cannot change meaning after a decode/encode cycle.
+
 The `SIGNED` and `TARGETSIGNED` codes are intentionally unusual: `TARGETSIGNED=62`, `SIGNED=63`. The source contains a TODO about possibly swapping these values at the next major version.
 
 ## 5. Sections

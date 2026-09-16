@@ -80,6 +80,10 @@ pub enum NameTableError {
         value: ParamSig,
         entry_index: usize,
     },
+    InvalidTag {
+        tag: u8,
+        entry_index: usize,
+    },
     CyclicReference {
         entry_index: usize,
     },
@@ -107,6 +111,10 @@ impl fmt::Display for NameTableError {
             Self::InvalidParamSig { value, entry_index } => write!(
                 formatter,
                 "invalid parameter signature {value} in name entry {entry_index}; expected a non-zero signed value"
+            ),
+            Self::InvalidTag { tag, entry_index } => write!(
+                formatter,
+                "unknown name entry {entry_index} uses reserved name tag {tag}"
             ),
             Self::CyclicReference { entry_index } => write!(
                 formatter,
@@ -278,6 +286,15 @@ impl NameTable {
 
     fn validate_references(&self) -> Result<(), NameTableError> {
         for (entry_index, entry) in self.entries.iter().enumerate() {
+            if let RawName::Unknown { tag, .. } = entry {
+                if is_known_name_tag(*tag) {
+                    return Err(NameTableError::InvalidTag {
+                        tag: *tag,
+                        entry_index,
+                    });
+                }
+            }
+
             let parameter_signatures: &[ParamSig] = match entry {
                 RawName::Signed {
                     parameter_signatures,
@@ -355,6 +372,10 @@ fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8])
     }
 
     None
+}
+
+fn is_known_name_tag(tag: u8) -> bool {
+    matches!(tag, 1 | 2 | 3 | 4 | 10 | 11 | 20..=23 | 62..=63)
 }
 
 impl NameTableBuilder {
@@ -782,6 +803,34 @@ mod tests {
 
         assert_eq!(names.len(), CHAIN_LENGTH);
         assert_eq!(names.get_utf8(CHAIN_LENGTH as u32), Some("end"));
+    }
+
+    #[test]
+    fn rejects_an_unknown_name_entry_that_uses_the_utf8_tag() {
+        assert_eq!(
+            NameTable::from_entries(vec![RawName::Unknown {
+                tag: 1,
+                payload: vec![0x80],
+            }]),
+            Err(NameTableError::InvalidTag {
+                tag: 1,
+                entry_index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_name_entry_that_uses_a_composite_tag() {
+        assert_eq!(
+            NameTable::from_entries(vec![RawName::Unknown {
+                tag: 63,
+                payload: vec![],
+            }]),
+            Err(NameTableError::InvalidTag {
+                tag: 63,
+                entry_index: 0,
+            })
+        );
     }
 
     #[test]
