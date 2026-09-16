@@ -1342,6 +1342,8 @@ impl<'a> AstAddressIndex<'a> {
     }
 
     /// Iterates over all visible nodes in absolute address order.
+    ///
+    /// Each address identifies one visible node start in the AST section.
     pub fn iter_nodes(&self) -> impl Iterator<Item = AstTreeNode> + '_ {
         self.all_nodes.iter().copied()
     }

@@ -1087,8 +1087,8 @@ fn all_tasty_fixtures_iterate_indexed_ast_nodes_in_address_order() {
             path.display()
         );
         assert!(
-            visible_addresses.windows(2).all(|pair| pair[0] <= pair[1]),
-            "visible AST addresses are not ordered in {}",
+            visible_addresses.windows(2).all(|pair| pair[0] < pair[1]),
+            "visible AST addresses are not strictly ordered in {}",
             path.display()
         );
     }
