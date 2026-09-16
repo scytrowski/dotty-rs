@@ -508,6 +508,11 @@ The eager `TastyFile::validate()` path uses the stricter target validation and
 the default index depth. `validate_with_max_ast_index_depth()` and
 `validate_ast_reference_targets_with_max_depth()` expose the same checks with
 an explicit nesting limit.
+`AstAddressIndex::iter_nodes_with_tag()` filters the global visible-node index
+by wire tag while retaining absolute address order. `TastyFile::ast_nodes_with_tag()`
+is the file-level convenience method; it includes nested nodes and returns an
+empty result for an unknown or absent tag. These queries are structural and do
+not assign Scala semantic meaning to a tag.
 
 `RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
 name-table references contained in supported structured payloads. At file

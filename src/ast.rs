@@ -1130,6 +1130,19 @@ impl<'a> AstAddressIndex<'a> {
         self.all_nodes.iter().copied()
     }
 
+    /// Iterates over visible nodes with `tag` in absolute address order.
+    ///
+    /// The query covers category-one through category-five nodes collected by
+    /// the index. An unknown tag simply produces an empty iterator; callers
+    /// that need to distinguish an unknown tag from a tag absent in this
+    /// index can use [`NodeCategory::from_tag`] first.
+    pub fn iter_nodes_with_tag(&self, tag: u8) -> impl Iterator<Item = AstTreeNode> + '_ {
+        self.all_nodes
+            .iter()
+            .copied()
+            .filter(move |node| node.tag == tag)
+    }
+
     pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
         self.all_nodes.iter().map(|node| node.offset as u32)
     }
@@ -8350,6 +8363,49 @@ mod tests {
                 .map(|node| node.offset)
                 .collect::<Vec<_>>(),
             vec![0, 2, 4, 5, 8]
+        );
+    }
+
+    #[test]
+    fn filters_visible_ast_nodes_by_tag_in_address_order() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(
+            index
+                .iter_nodes_with_tag(VALDEF_TAG)
+                .map(|node| node.offset)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+        assert_eq!(
+            index
+                .iter_nodes_with_tag(APPLY_TAG)
+                .map(|node| node.offset)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn returns_no_visible_ast_nodes_for_an_absent_tag() {
+        let nodes = RawNodes::from_entries(vec![RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &[],
+        }])
+        .unwrap();
+        let index = nodes.address_index();
+
+        assert_eq!(
+            index.iter_nodes_with_tag(DEFDEF_TAG).collect::<Vec<_>>(),
+            Vec::new()
         );
     }
 

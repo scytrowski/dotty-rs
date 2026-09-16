@@ -669,6 +669,14 @@ impl<'a> TastyFile<'a> {
         Ok(self.ast_address_index()?.resolve_node(reference))
     }
 
+    /// Collect visible AST nodes with `tag` in absolute address order.
+    ///
+    /// The query includes nested nodes and is independent of the semantic
+    /// Scala model. An unknown tag returns an empty vector.
+    pub fn ast_nodes_with_tag(&self, tag: u8) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        Ok(self.ast_address_index()?.iter_nodes_with_tag(tag).collect())
+    }
+
     /// Collect AST references from every top-level node in wire order.
     ///
     /// The owner address identifies the top-level node containing the
@@ -885,6 +893,31 @@ mod tests {
 
         assert!(!nodes.is_empty());
         assert!(matches!(nodes.first(), Some(StructuredNode::Package(_))));
+    }
+
+    #[test]
+    fn queries_nested_fixture_nodes_by_tag() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let expected = file
+            .ast_address_index()
+            .unwrap()
+            .iter_nodes()
+            .filter(|node| node.tag == crate::DEFDEF_TAG)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            file.ast_nodes_with_tag(crate::DEFDEF_TAG).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn returns_no_fixture_nodes_for_an_unknown_tag() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(file.ast_nodes_with_tag(255).unwrap().is_empty());
     }
 
     #[test]

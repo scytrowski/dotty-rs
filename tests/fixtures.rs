@@ -899,6 +899,35 @@ fn all_tasty_fixtures_iterate_indexed_ast_nodes_in_address_order() {
 }
 
 #[test]
+fn all_tasty_fixtures_filter_visible_ast_nodes_by_tag() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+
+        for tag in [crate::PACKAGE_TAG, crate::VALDEF_TAG, crate::DEFDEF_TAG] {
+            let expected = index
+                .iter_nodes()
+                .filter(|node| node.tag == tag)
+                .collect::<Vec<_>>();
+            let actual = file.ast_nodes_with_tag(tag).unwrap_or_else(|error| {
+                panic!("failed to query tag {tag} in {}: {error}", path.display())
+            });
+            assert_eq!(
+                actual,
+                expected,
+                "tag query disagrees in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
