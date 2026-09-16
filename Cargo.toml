@@ -5,8 +5,9 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["crates/dotty-tasty"]
+members = ["crates/dotty-tasty", "crates/dotty-classfile"]
 resolver = "3"
 
 [dependencies]
 dotty-tasty = { path = "crates/dotty-tasty" }
+dotty-classfile = { path = "crates/dotty-classfile" }

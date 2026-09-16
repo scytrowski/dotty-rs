@@ -6,8 +6,13 @@ version = 4
 name = "dotty"
 version = "0.1.0"
 dependencies = [
+ "dotty-classfile",
  "dotty-tasty",
 ]
+
+[[package]]
+name = "dotty-classfile"
+version = "0.1.0"
 
 [[package]]
 name = "dotty-tasty"
