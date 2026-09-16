@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dotty_tasty::tasty::{PACKAGE_TAG, RawNodes, Reader, StandardSection, TastyFile, Writer};
+use dotty_tasty::tasty::{
+    PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile, Writer,
+};
 
 const EXPECTED_FIXTURE_COUNT: usize = 941;
 const EXPECTED_TASTY_BYTES: u64 = 7_579_936;
@@ -38,6 +40,19 @@ fn scala3_library_fixture_paths() -> Vec<PathBuf> {
 
     fixtures.sort();
     fixtures
+}
+
+/// Returns canonical structured bytes used as a structural fingerprint.
+///
+/// Decoding removes wire-level Nat representation details and node offsets;
+/// structured encoding then writes the same tree in canonical form.
+fn normalized_structured_encoding(raw: &RawNode<'_>) -> Result<Vec<u8>, String> {
+    let structured = raw.decode_structured().map_err(|error| error.to_string())?;
+    let mut writer = Writer::new();
+    structured
+        .encode(&mut writer)
+        .map_err(|error| error.to_string())?;
+    Ok(writer.into_inner())
 }
 
 #[test]
@@ -220,17 +235,9 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
             let raw = index
                 .get(address)
                 .expect("indexed address must resolve to a raw node");
-            let structured = raw.decode_structured().unwrap_or_else(|error| {
+            let encoded = normalized_structured_encoding(raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally decode AST node at address {address} in {}: {error}",
-                    path.display()
-                )
-            });
-
-            let mut encoded = Writer::new();
-            structured.encode(&mut encoded).unwrap_or_else(|error| {
-                panic!(
-                    "failed to encode AST node at address {address} in {}: {error}",
                     path.display()
                 )
             });
@@ -257,26 +264,17 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
             let reparsed_raw = reparsed_nodes
                 .get(0)
                 .expect("one encoded node must be present");
-            let reparsed_structured = reparsed_raw.decode_structured().unwrap_or_else(|error| {
+            let reparsed_normalized = normalized_structured_encoding(reparsed_raw).unwrap_or_else(|error| {
                 panic!(
                     "failed to structurally reparse AST node at address {address} in {}: {error}",
                     path.display()
                 )
             });
-            let mut normalized = Writer::new();
-            reparsed_structured
-                .encode(&mut normalized)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "failed to re-encode AST node at address {address} in {}: {error}",
-                        path.display()
-                    )
-                });
 
             assert_eq!(
                 encoded.as_slice(),
-                normalized.as_slice(),
-                "structured encoding is not stable for AST node at address {address} in {}",
+                reparsed_normalized.as_slice(),
+                "normalized structured AST changed at address {address} in {}",
                 path.display()
             );
             let mut original = Writer::new();
