@@ -80,6 +80,9 @@ pub enum NameTableError {
         value: ParamSig,
         entry_index: usize,
     },
+    CyclicReference {
+        entry_index: usize,
+    },
     TrailingPayload {
         tag: u8,
         remaining: usize,
@@ -104,6 +107,10 @@ impl fmt::Display for NameTableError {
             Self::InvalidParamSig { value, entry_index } => write!(
                 formatter,
                 "invalid parameter signature {value} in name entry {entry_index}; expected a non-zero signed value"
+            ),
+            Self::CyclicReference { entry_index } => write!(
+                formatter,
+                "cyclic name reference involving name entry {entry_index}"
             ),
             Self::TrailingPayload { tag, remaining } => write!(
                 formatter,
@@ -303,8 +310,35 @@ impl NameTable {
             }
         }
 
+        let mut states = vec![0u8; self.entries.len()];
+        for entry_index in 0..self.entries.len() {
+            if let Some(cycle_entry) = detect_name_cycle(&self.entries, entry_index, &mut states) {
+                return Err(NameTableError::CyclicReference {
+                    entry_index: cycle_entry,
+                });
+            }
+        }
+
         Ok(())
     }
+}
+
+fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8]) -> Option<usize> {
+    match states[entry_index] {
+        1 => return Some(entry_index),
+        2 => return None,
+        _ => {}
+    }
+
+    states[entry_index] = 1;
+    for reference in entries[entry_index].references() {
+        let target_index = (reference - 1) as usize;
+        if let Some(cycle_entry) = detect_name_cycle(entries, target_index, states) {
+            return Some(cycle_entry);
+        }
+    }
+    states[entry_index] = 2;
+    None
 }
 
 impl NameTableBuilder {
@@ -648,6 +682,70 @@ mod tests {
                 entry_count: 1,
             })
         );
+    }
+
+    #[test]
+    fn rejects_cyclic_name_references_when_constructing_name_entries() {
+        assert_eq!(
+            NameTable::from_entries(vec![RawName::Qualified {
+                prefix: 1,
+                selector: 1,
+            }]),
+            Err(NameTableError::CyclicReference { entry_index: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_cyclic_name_references_when_decoding() {
+        let mut reader = Reader::new(&[0x84, 2, 0x82, 0x81, 0x81]);
+
+        assert_eq!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::CyclicReference { entry_index: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_multi_entry_name_cycle_when_decoding() {
+        let mut reader = Reader::new(&[0x88, 2, 0x82, 0x82, 0x81, 2, 0x82, 0x81, 0x82]);
+
+        assert_eq!(
+            NameTable::decode(&mut reader),
+            Err(NameTableError::CyclicReference { entry_index: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_cycle_reached_through_a_signed_parameter_reference() {
+        assert_eq!(
+            NameTable::from_entries(vec![
+                RawName::Utf8("owner".to_owned()),
+                RawName::Signed {
+                    original: 1,
+                    result_signature: 1,
+                    parameter_signatures: vec![3],
+                },
+                RawName::Qualified {
+                    prefix: 2,
+                    selector: 2,
+                },
+            ]),
+            Err(NameTableError::CyclicReference { entry_index: 1 })
+        );
+    }
+
+    #[test]
+    fn accepts_an_acyclic_forward_name_reference() {
+        let names = NameTable::from_entries(vec![
+            RawName::Qualified {
+                prefix: 2,
+                selector: 2,
+            },
+            RawName::Utf8("later".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(names.len(), 2);
     }
 
     #[test]
