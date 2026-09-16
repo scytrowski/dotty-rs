@@ -43,9 +43,9 @@ pub use header::{
 pub use name_table::{NameRef, NameTable, NameTableBuilder, NameTableError, ParamSig, RawName};
 pub use reader::{ReadError, Reader};
 pub use section::{
-    Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, EncodedSection, JAVA_ATTR,
-    OUTLINE_ATTR, PositionEntry, PositionSection, SCALA2STANDARDLIBRARY_ATTR, SOURCEFILE_ATTR,
-    Section, SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
+    Attribute, CAPTURECHECKED_ATTR, Comment, EXPLICITNULLS_ATTR, EncodedAstSection, EncodedSection,
+    JAVA_ATTR, OUTLINE_ATTR, PositionEntry, PositionSection, SCALA2STANDARDLIBRARY_ATTR,
+    SOURCEFILE_ATTR, Section, SectionError, SectionTable, StandardSection, WITHPUREFUNS_ATTR,
 };
 pub use term::{
     AstRef, AstRefKind, AstTreeNode, BYTECONST_TAG, CHARCONST_TAG, ConstantValue,

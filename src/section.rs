@@ -30,6 +30,14 @@ pub struct EncodedSection {
     payload: Vec<u8>,
 }
 
+/// Owns an encoded `ASTs` section together with the addresses allocated to its
+/// top-level nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedAstSection {
+    section: EncodedSection,
+    ast_addresses: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardSection {
     Asts,
@@ -431,6 +439,22 @@ impl EncodedSection {
         Ok(Self::raw(name, writer.into_inner()))
     }
 
+    /// Encode raw top-level AST nodes and retain their allocated addresses.
+    pub fn asts_with_addresses(
+        name: NameRef,
+        nodes: &RawNodes<'_>,
+    ) -> Result<EncodedAstSection, WriteError> {
+        EncodedAstSection::from_raw(name, nodes)
+    }
+
+    /// Encode structured top-level AST nodes and retain their allocated addresses.
+    pub fn structured_asts_with_addresses(
+        name: NameRef,
+        nodes: &[StructuredNode<'_>],
+    ) -> Result<EncodedAstSection, TermEncodeError> {
+        EncodedAstSection::from_structured(name, nodes)
+    }
+
     pub fn name(&self) -> NameRef {
         self.name
     }
@@ -446,6 +470,62 @@ impl EncodedSection {
 
     pub fn into_parts(self) -> (NameRef, Vec<u8>) {
         (self.name, self.payload)
+    }
+}
+
+impl EncodedAstSection {
+    fn from_raw(name: NameRef, nodes: &RawNodes<'_>) -> Result<Self, WriteError> {
+        let encoded = nodes.encode_with_addresses()?;
+        Ok(Self {
+            section: EncodedSection::raw(name, encoded.as_slice().to_vec()),
+            ast_addresses: encoded.addresses().to_vec(),
+        })
+    }
+
+    fn from_structured(
+        name: NameRef,
+        nodes: &[StructuredNode<'_>],
+    ) -> Result<Self, TermEncodeError> {
+        let mut writer = Writer::new();
+        let mut ast_addresses = Vec::with_capacity(nodes.len());
+
+        for node in nodes {
+            ast_addresses.push(u32::try_from(writer.position()).map_err(|_| {
+                WriteError::NatOverflow {
+                    value: writer.position() as u64,
+                }
+            })?);
+            node.encode(&mut writer)?;
+        }
+
+        Ok(Self {
+            section: EncodedSection::raw(name, writer.into_inner()),
+            ast_addresses,
+        })
+    }
+
+    pub fn name(&self) -> NameRef {
+        self.section.name()
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        self.section.payload()
+    }
+
+    pub fn ast_addresses(&self) -> &[u32] {
+        &self.ast_addresses
+    }
+
+    pub fn section(&self) -> &EncodedSection {
+        &self.section
+    }
+
+    pub fn into_section(self) -> EncodedSection {
+        self.section
+    }
+
+    pub fn into_parts(self) -> (EncodedSection, Vec<u32>) {
+        (self.section, self.ast_addresses)
     }
 }
 
@@ -679,6 +759,53 @@ mod tests {
             encoded.payload(),
             &[crate::VALDEF_TAG, 0x84, 0x85, 2, 3, 17]
         );
+    }
+
+    #[test]
+    fn builds_an_owned_asts_section_with_raw_node_addresses() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+        ])
+        .unwrap();
+        let encoded = EncodedSection::asts_with_addresses(4, &nodes).unwrap();
+
+        assert_eq!(encoded.name(), 4);
+        assert_eq!(encoded.ast_addresses(), &[0, 6]);
+        assert_eq!(
+            encoded.payload(),
+            &[
+                crate::VALDEF_TAG,
+                0x84,
+                0x85,
+                2,
+                3,
+                17,
+                crate::VALDEF_TAG,
+                0x84,
+                0x85,
+                2,
+                3,
+                17
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_an_owned_asts_section_with_structured_node_addresses() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+        ])
+        .unwrap();
+        let structured = vec![
+            nodes.get(0).unwrap().decode_structured().unwrap(),
+            nodes.get(1).unwrap().decode_structured().unwrap(),
+        ];
+        let encoded = EncodedSection::structured_asts_with_addresses(4, &structured).unwrap();
+
+        assert_eq!(encoded.ast_addresses(), &[0, 6]);
+        assert_eq!(encoded.section().name(), 4);
     }
 
     #[test]

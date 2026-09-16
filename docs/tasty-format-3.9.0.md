@@ -683,6 +683,9 @@ together with the section boundary.
 unknown or application-specific sections without requiring a guessed grammar.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
+The corresponding `*_with_addresses()` constructors return an
+`EncodedAstSection` containing both the owned payload and the allocated
+top-level node addresses.
 `TastyFileBuilder` owns these encoded sections and produces either a complete
 byte stream or an `EncodedTastyFile` with the allocated AST addresses.
 Its `validate()` and `validate_scala_3_9()` methods allow checking the complete
