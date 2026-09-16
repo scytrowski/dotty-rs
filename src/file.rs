@@ -695,7 +695,22 @@ impl<'a> TastyFile<'a> {
     /// The query includes nested nodes and is independent of the semantic
     /// Scala model. An unknown tag returns an empty vector.
     pub fn ast_nodes_with_tag(&self, tag: u8) -> Result<Vec<AstTreeNode>, TastyFileError> {
-        Ok(self.ast_address_index()?.iter_nodes_with_tag(tag).collect())
+        self.ast_nodes_with_tag_with_max_depth(tag, crate::DEFAULT_MAX_AST_INDEX_DEPTH)
+    }
+
+    /// Collect visible AST nodes with `tag` using an explicit nesting limit.
+    ///
+    /// The limit has the same meaning as
+    /// [`TastyFile::ast_address_index_with_max_depth`].
+    pub fn ast_nodes_with_tag_with_max_depth(
+        &self,
+        tag: u8,
+        max_depth: usize,
+    ) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        Ok(self
+            .ast_address_index_with_max_depth(max_depth)?
+            .iter_nodes_with_tag(tag)
+            .collect())
     }
 
     /// Collect AST references from every top-level node in wire order.
@@ -973,6 +988,20 @@ mod tests {
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
         assert!(file.ast_nodes_with_tag(255).unwrap().is_empty());
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_tag_queries() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_nodes_with_tag_with_max_depth(crate::DEFDEF_TAG, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]

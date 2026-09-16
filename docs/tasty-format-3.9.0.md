@@ -511,8 +511,10 @@ an explicit nesting limit.
 `AstAddressIndex::iter_nodes_with_tag()` filters the global visible-node index
 by wire tag while retaining absolute address order. `TastyFile::ast_nodes_with_tag()`
 is the file-level convenience method; it includes nested nodes and returns an
-empty result for an unknown or absent tag. These queries are structural and do
-not assign Scala semantic meaning to a tag.
+empty result for an unknown or absent tag. Its
+`ast_nodes_with_tag_with_max_depth()` variant exposes the same recursion limit
+as the underlying global index. These queries are structural and do not assign
+Scala semantic meaning to a tag.
 
 `RawNode::name_refs()` and `RawNode::visit_name_refs()` expose the
 name-table references contained in supported structured payloads. At file
