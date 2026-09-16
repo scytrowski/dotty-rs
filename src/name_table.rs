@@ -1026,51 +1026,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn round_trips_every_supported_name_entry_variant() {
+    fn assert_round_trips_name_entry(entry: RawName) {
         let names = NameTable::from_entries(vec![
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
-            RawName::Qualified {
-                prefix: 1,
-                selector: 2,
-            },
-            RawName::Expanded {
-                prefix: 1,
-                selector: 2,
-            },
-            RawName::ExpandPrefix {
-                prefix: 2,
-                selector: 1,
-            },
-            RawName::Unique {
-                separator: 1,
-                uniqid: 7,
-                underlying: Some(2),
-            },
-            RawName::DefaultGetter {
-                underlying: 1,
-                index: 2,
-            },
-            RawName::SuperAccessor { underlying: 1 },
-            RawName::InlineAccessor { underlying: 1 },
-            RawName::ObjectClass { underlying: 1 },
-            RawName::BodyRetainer { underlying: 1 },
-            RawName::Signed {
-                original: 1,
-                result_signature: 2,
-                parameter_signatures: vec![3, -1],
-            },
-            RawName::TargetSigned {
-                original: 1,
-                target: 2,
-                result_signature: 3,
-                parameter_signatures: vec![4, -2],
-            },
-            RawName::Unknown {
-                tag: 99,
-                payload: vec![1, 2, 3],
-            },
+            entry,
         ])
         .unwrap();
         let mut writer = crate::Writer::new();
@@ -1079,5 +1039,107 @@ mod tests {
         let mut reader = Reader::new(writer.as_slice());
         assert_eq!(NameTable::decode(&mut reader).unwrap(), names);
         assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn round_trips_a_utf8_name_entry() {
+        assert_round_trips_name_entry(RawName::Utf8("nested".to_owned()));
+    }
+
+    #[test]
+    fn round_trips_a_qualified_name_entry() {
+        assert_round_trips_name_entry(RawName::Qualified {
+            prefix: 1,
+            selector: 2,
+        });
+    }
+
+    #[test]
+    fn round_trips_an_expanded_name_entry() {
+        assert_round_trips_name_entry(RawName::Expanded {
+            prefix: 1,
+            selector: 2,
+        });
+    }
+
+    #[test]
+    fn round_trips_an_expand_prefix_name_entry() {
+        assert_round_trips_name_entry(RawName::ExpandPrefix {
+            prefix: 2,
+            selector: 1,
+        });
+    }
+
+    #[test]
+    fn round_trips_a_unique_name_entry() {
+        assert_round_trips_name_entry(RawName::Unique {
+            separator: 1,
+            uniqid: 7,
+            underlying: Some(2),
+        });
+    }
+
+    #[test]
+    fn round_trips_a_unique_name_entry_without_an_underlying_name() {
+        assert_round_trips_name_entry(RawName::Unique {
+            separator: 1,
+            uniqid: 7,
+            underlying: None,
+        });
+    }
+
+    #[test]
+    fn round_trips_a_default_getter_name_entry() {
+        assert_round_trips_name_entry(RawName::DefaultGetter {
+            underlying: 1,
+            index: 2,
+        });
+    }
+
+    #[test]
+    fn round_trips_a_super_accessor_name_entry() {
+        assert_round_trips_name_entry(RawName::SuperAccessor { underlying: 1 });
+    }
+
+    #[test]
+    fn round_trips_an_inline_accessor_name_entry() {
+        assert_round_trips_name_entry(RawName::InlineAccessor { underlying: 1 });
+    }
+
+    #[test]
+    fn round_trips_an_object_class_name_entry() {
+        assert_round_trips_name_entry(RawName::ObjectClass { underlying: 1 });
+    }
+
+    #[test]
+    fn round_trips_a_body_retainer_name_entry() {
+        assert_round_trips_name_entry(RawName::BodyRetainer { underlying: 1 });
+    }
+
+    #[test]
+    fn round_trips_a_signed_name_entry() {
+        assert_round_trips_name_entry(RawName::Signed {
+            original: 1,
+            result_signature: 2,
+            parameter_signatures: vec![1, -1],
+        });
+    }
+
+    #[test]
+    fn round_trips_a_target_signed_name_entry() {
+        assert_round_trips_name_entry(RawName::TargetSigned {
+            original: 1,
+            target: 2,
+            result_signature: 1,
+            parameter_signatures: vec![2, -2],
+        });
+    }
+
+    #[test]
+    fn round_trips_an_unknown_name_entry() {
+        assert_round_trips_name_entry(RawName::Unknown {
+            tag: 99,
+            payload: vec![1, 2, 3],
+        });
     }
 }
