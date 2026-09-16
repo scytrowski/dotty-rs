@@ -869,6 +869,21 @@ impl<'a> TastyFile<'a> {
             .map_err(TastyFileError::from)
     }
 
+    /// Find the resolved source position associated with an AST address.
+    ///
+    /// `None` means that the file has no `Positions` section or that no
+    /// association uses the requested address.
+    pub fn resolved_position_at(
+        &self,
+        address: u32,
+    ) -> Result<Option<ResolvedPosition>, TastyFileError> {
+        self.positions()?
+            .map(|positions| positions.resolved_association_at(i64::from(address)))
+            .transpose()
+            .map(|position| position.flatten())
+            .map_err(TastyFileError::from)
+    }
+
     fn asts_length(&self) -> usize {
         self.section(StandardSection::Asts)
             .map(|section| section.payload.len())
@@ -1015,6 +1030,24 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn finds_a_fixture_position_by_its_ast_address() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let expected = file
+            .resolved_position_associations()
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(
+            file.resolved_position_at(expected.address as u32).unwrap(),
+            Some(expected)
         );
     }
 

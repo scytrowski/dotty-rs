@@ -765,6 +765,9 @@ that omits source-change events and attaches the currently active source
 `resolved_entries()` when source-event ordering itself is significant.
 `TastyFile::resolved_position_associations()` exposes the same view directly
 from a parsed file and returns `None` when the file has no `Positions` section.
+`PositionSection::resolved_association_at()` and
+`TastyFile::resolved_position_at()` look up the first association for an
+absolute AST address while preserving the resolved source and coordinates.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an

@@ -306,6 +306,18 @@ impl PositionSection {
 
         Ok(associations)
     }
+
+    /// Finds the first resolved position association for an absolute AST
+    /// address.
+    pub fn resolved_association_at(
+        &self,
+        address: i64,
+    ) -> Result<Option<ResolvedPosition>, SectionError> {
+        Ok(self
+            .resolved_associations()?
+            .into_iter()
+            .find(|association| association.address == address))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -960,6 +972,53 @@ mod tests {
                 point: 0,
             }])
         );
+    }
+
+    #[test]
+    fn finds_a_resolved_position_association_by_address() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![
+                PositionEntry::Association {
+                    address_delta: 4,
+                    start_delta: Some(1),
+                    end_delta: Some(3),
+                    point_delta: Some(2),
+                },
+                PositionEntry::Association {
+                    address_delta: 6,
+                    start_delta: Some(4),
+                    end_delta: Some(5),
+                    point_delta: Some(6),
+                },
+            ],
+        };
+
+        assert_eq!(
+            positions.resolved_association_at(10),
+            Ok(Some(ResolvedPosition {
+                source: None,
+                address: 10,
+                start: 5,
+                end: 8,
+                point: 8,
+            }))
+        );
+    }
+
+    #[test]
+    fn returns_no_resolved_position_for_an_absent_address() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![PositionEntry::Association {
+                address_delta: 4,
+                start_delta: None,
+                end_delta: None,
+                point_delta: None,
+            }],
+        };
+
+        assert_eq!(positions.resolved_association_at(5), Ok(None));
     }
 
     #[test]
