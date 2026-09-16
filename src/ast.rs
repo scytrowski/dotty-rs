@@ -1106,6 +1106,11 @@ impl<'a> AstAddressIndex<'a> {
         self.get(reference.address)
     }
 
+    /// Iterates over indexed category-five nodes in absolute address order.
+    pub fn iter(&self) -> impl Iterator<Item = &RawNode<'a>> {
+        self.nodes.iter()
+    }
+
     /// Returns any visible AST node with this address, including category-one
     /// through category-four tree nodes.
     pub fn get_node(&self, address: u32) -> Option<AstTreeNode> {
@@ -1118,6 +1123,11 @@ impl<'a> AstAddressIndex<'a> {
     /// Resolves a reference to any visible AST node.
     pub fn resolve_node(&self, reference: AstRef) -> Option<AstTreeNode> {
         self.get_node(reference.address)
+    }
+
+    /// Iterates over all visible nodes in absolute address order.
+    pub fn iter_nodes(&self) -> impl Iterator<Item = AstTreeNode> + '_ {
+        self.all_nodes.iter().copied()
     }
 
     pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
@@ -8298,6 +8308,17 @@ mod tests {
         assert_eq!(index.addresses().collect::<Vec<_>>(), vec![2, 9]);
         assert_eq!(index.get(2).map(|node| node.tag), Some(VALDEF_TAG));
         assert_eq!(index.get(9).map(|node| node.tag), Some(DEFDEF_TAG));
+        assert_eq!(
+            index.iter().map(|node| node.offset).collect::<Vec<_>>(),
+            vec![2, 9]
+        );
+        assert_eq!(
+            index
+                .iter_nodes()
+                .map(|node| node.offset)
+                .collect::<Vec<_>>(),
+            vec![2, 9]
+        );
     }
 
     #[test]
