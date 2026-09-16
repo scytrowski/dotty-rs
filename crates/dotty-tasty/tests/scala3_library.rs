@@ -51,6 +51,21 @@ fn scala3_library_fixture_inventory_is_complete() {
 }
 
 #[test]
+fn scala3_library_semantic_selection_is_resolved_from_manifest() {
+    let corpus = scala3_library_corpus();
+    let selected = corpus.selected_fixture_paths();
+
+    assert_eq!(selected.len(), 12);
+    assert!(selected.iter().all(|path| path.is_file()));
+    assert!(selected.iter().any(|path| path.ends_with("Option.tasty")));
+    assert!(
+        selected
+            .iter()
+            .any(|path| path.ends_with("collection/immutable/List.tasty"))
+    );
+}
+
+#[test]
 fn all_scala3_library_fixtures_decode_through_file_model() {
     for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)

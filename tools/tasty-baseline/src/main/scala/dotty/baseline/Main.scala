@@ -13,6 +13,7 @@ import scala.tasty.inspector.*
 
 object Main:
   private final case class Input(path: String, tastyPath: Path)
+  private final case class Selection(paths: Set[String])
 
   def main(args: Array[String]): Unit =
     if args.length < 2 then
@@ -25,8 +26,29 @@ object Main:
       .filter(_.startsWith("--classpath="))
       .flatMap(_.stripPrefix("--classpath=").split(File.pathSeparatorChar).toList)
       .map(Paths.get(_))
-    val inputArguments = args.tail.filterNot(_.startsWith("--classpath="))
-    val inputs = materialize(inputArguments.toList)
+    val selectionArguments = args.tail.filter(_.startsWith("--select="))
+    if selectionArguments.size > 1 then
+      throw IllegalArgumentException("only one --select option is supported")
+    val selection = selectionArguments.headOption.map { argument =>
+      Selection(readSelection(Paths.get(argument.stripPrefix("--select="))))
+    }
+    val unsupportedOptions = args.tail.filter(_.startsWith("--")).filterNot(argument =>
+      argument.startsWith("--classpath=") || argument.startsWith("--select=")
+    )
+    if unsupportedOptions.nonEmpty then
+      throw IllegalArgumentException(s"unsupported option: ${unsupportedOptions.head}")
+
+    val inputArguments = args.tail.filterNot(_.startsWith("--"))
+    val materializedInputs = materialize(inputArguments.toList)
+    val inputs = materializedInputs.filter(input => selection.forall(_.paths.contains(input.path)))
+    selection.foreach { selected =>
+      val found = inputs.iterator.map(_.path).toSet
+      val missing = selected.paths.diff(found).toList.sorted
+      if missing.nonEmpty then
+        throw IllegalArgumentException(
+          s"selection names missing .tasty inputs: ${missing.mkString(", ")}"
+        )
+    }
     if inputs.isEmpty then throw IllegalArgumentException("no .tasty files found")
 
     val jarUrls = inputArguments
@@ -84,6 +106,23 @@ object Main:
       else throw IllegalArgumentException(s"unsupported baseline input: $argument")
     }
     inputs
+
+  private def readSelection(path: Path): Set[String] =
+    if !Files.isRegularFile(path) then
+      throw IllegalArgumentException(s"selection file does not exist: $path")
+    val lines = Files.readAllLines(path).asScala
+      .map(_.trim)
+      .filter(line => line.nonEmpty && !line.startsWith("#"))
+      .map(_.replace('\\', '/'))
+      .toList
+    val duplicates = lines.groupBy(identity).collect {
+      case (line, occurrences) if occurrences.size > 1 => line
+    }
+    if duplicates.nonEmpty then
+      throw IllegalArgumentException(
+        s"selection file contains duplicate paths: ${duplicates.toList.sorted.mkString(", ")}"
+      )
+    lines.toSet
 
   private def extractJar(jarPath: Path, output: Path): List[Input] =
     val jar = JarFile(jarPath.toFile)

@@ -10,6 +10,7 @@ pub struct CorpusManifest {
     pub fixture_count: usize,
     pub fixture_bytes: u64,
     pub tasty_root: PathBuf,
+    pub selection_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +79,49 @@ impl Corpus {
         fixtures.sort();
         fixtures
     }
+
+    pub fn selected_fixture_paths(&self) -> Vec<PathBuf> {
+        let fixtures = self.fixture_paths();
+        let Some(selection_file) = &self.manifest.selection_file else {
+            return fixtures;
+        };
+        let selection_path = self.root.join(selection_file);
+        let selection = fs::read_to_string(&selection_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read corpus selection {}: {error}",
+                selection_path.display()
+            )
+        });
+        let tasty_root = self.root.join(&self.manifest.tasty_root);
+        let available: std::collections::BTreeMap<_, _> = fixtures
+            .iter()
+            .map(|path| {
+                (
+                    path.strip_prefix(&tasty_root)
+                        .expect("fixture must be inside corpus tasty root")
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/"),
+                    path,
+                )
+            })
+            .collect();
+
+        selection
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|name| {
+                available.get(name).copied().unwrap_or_else(|| {
+                    panic!(
+                        "corpus selection {} names missing fixture {:?}",
+                        selection_path.display(),
+                        name
+                    )
+                })
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl CorpusManifest {
@@ -114,6 +158,10 @@ impl CorpusManifest {
                     .find_map(|(key, value)| (key == "tasty_root").then_some(value.to_owned()))
                     .unwrap_or_else(|| ".".to_owned()),
             ),
+            selection_file: input
+                .lines()
+                .filter_map(parse_assignment)
+                .find_map(|(key, value)| (key == "selection_file").then_some(PathBuf::from(value))),
         })
     }
 }
@@ -156,6 +204,7 @@ mod tests {
         assert_eq!(manifest.fixture_count, 3);
         assert_eq!(manifest.fixture_bytes, 42);
         assert_eq!(manifest.tasty_root, PathBuf::from("tasty"));
+        assert_eq!(manifest.selection_file, None);
     }
 
     #[test]
@@ -173,5 +222,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(manifest.tasty_root, PathBuf::from("."));
+        assert_eq!(manifest.selection_file, None);
     }
 }

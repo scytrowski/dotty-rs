@@ -1,0 +1,13 @@
+# Small representative subset used for semantic baseline generation.
+scala/Boolean.tasty
+scala/Int.tasty
+scala/Option.tasty
+scala/Predef.tasty
+scala/Tuple.tasty
+scala/collection/immutable/List.tasty
+scala/collection/immutable/Map.tasty
+scala/collection/mutable/ArrayBuffer.tasty
+scala/util/Either.tasty
+scala/util/Try.tasty
+scala/util/Using.tasty
+scala/compiletime/package$package.tasty

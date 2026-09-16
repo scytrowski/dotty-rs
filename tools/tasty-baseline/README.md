@@ -14,6 +14,14 @@ sbt 'run output.json path/to/classes --classpath=path/to/classes'
 sbt 'run output.json path/to/library.jar'
 ```
 
+To inspect only a deterministic subset, pass a newline-delimited selection
+file. Blank lines and lines beginning with `#` are ignored; entries are
+matched against the logical paths exposed by a directory or JAR input:
+
+```text
+sbt 'run output.json --select=semantic-selection.txt path/to/library.jar'
+```
+
 The output contains `schema_version = 1` and `scala_version = 3.9.0`. The
 projection deliberately excludes absolute AST offsets and compiler object
 identities. It is an initial semantic oracle; the Rust baseline runner will
