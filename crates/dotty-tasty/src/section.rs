@@ -1,4 +1,4 @@
-use crate::ast::{RawNodes, StructuredNode};
+use crate::ast::{AstError, DEFAULT_MAX_AST_INDEX_DEPTH, RawNodes, StructuredNode};
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::term::TermEncodeError;
@@ -589,6 +589,11 @@ impl EncodedSection {
     }
 
     /// Encode structured top-level AST nodes and retain ownership of their payload.
+    ///
+    /// The emitted AST section is validated before it is returned. In
+    /// particular, an AST reference that no longer targets a visible node
+    /// after a structural size change is reported as an error instead of
+    /// producing an invalid section.
     pub fn structured_asts(
         name: NameRef,
         nodes: &[StructuredNode<'_>],
@@ -597,6 +602,7 @@ impl EncodedSection {
         for node in nodes {
             node.encode(&mut writer)?;
         }
+        validate_structured_ast_payload(writer.as_slice())?;
         Ok(Self::raw(name, writer.into_inner()))
     }
 
@@ -609,6 +615,10 @@ impl EncodedSection {
     }
 
     /// Encode structured top-level AST nodes and retain their allocated addresses.
+    ///
+    /// The returned addresses describe the newly emitted layout. Existing
+    /// `ASTRef` values in the structured nodes are not inferred or relocated;
+    /// stale references are rejected during encoding.
     pub fn structured_asts_with_addresses(
         name: NameRef,
         nodes: &[StructuredNode<'_>],
@@ -659,6 +669,8 @@ impl EncodedAstSection {
             node.encode(&mut writer)?;
         }
 
+        validate_structured_ast_payload(writer.as_slice())?;
+
         Ok(Self {
             section: EncodedSection::raw(name, writer.into_inner()),
             ast_addresses,
@@ -688,6 +700,26 @@ impl EncodedAstSection {
     pub fn into_parts(self) -> (EncodedSection, Vec<u32>) {
         (self.section, self.ast_addresses)
     }
+}
+
+fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
+    let mut reader = Reader::new(bytes);
+    let nodes = RawNodes::decode(&mut reader).map_err(AstError::from)?;
+    let index =
+        nodes.deep_address_index_with_source_and_max_depth(bytes, DEFAULT_MAX_AST_INDEX_DEPTH)?;
+
+    for node in nodes.iter() {
+        for reference in node.ast_refs()? {
+            if index.resolve_node(reference).is_none() {
+                return Err(AstError::InvalidAstReference {
+                    address: reference.address,
+                }
+                .into());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 impl<'a> SectionTable<'a> {
@@ -775,8 +807,9 @@ mod tests {
         Attribute, Comment, EncodedSection, PositionCoordinate, PositionEntry, PositionSection,
         ResolvedPosition, ResolvedPositionEntry, Section, SectionError, SectionTable,
     };
-    use crate::ast::{RawNode, RawNodes};
+    use crate::ast::{AstError, PackageNode, RawNode, RawNodes, ReturnNode, StructuredNode};
     use crate::reader::{ReadError, Reader};
+    use crate::term::{AstRef, AstRefKind, RawTree, TermEncodeError, TermValue};
     use crate::writer::{WriteError, Writer};
 
     #[test]
@@ -1169,6 +1202,30 @@ mod tests {
 
         assert_eq!(encoded.ast_addresses(), &[0, 6]);
         assert_eq!(encoded.section().name(), 4);
+    }
+
+    #[test]
+    fn rejects_structured_encoding_with_a_stale_ast_reference_after_node_growth() {
+        let mut reader = Reader::new(&[crate::APPLY_TAG, 0x81, crate::UNITCONST_TAG]);
+        let enlarged_expression = RawTree::decode(&mut reader).unwrap();
+        let first = StructuredNode::Return(ReturnNode {
+            target: AstRef {
+                kind: AstRefKind::ReturnTarget,
+                address: 4,
+            },
+            expression: Some(enlarged_expression),
+        });
+        let second = StructuredNode::Package(PackageNode {
+            path: RawTree::leaf(crate::TERMREFPKG_TAG, TermValue::NameRef(1)).unwrap(),
+            stats: RawNodes::from_entries(Vec::new()).unwrap(),
+        });
+
+        assert_eq!(
+            EncodedSection::structured_asts(4, &[first, second]),
+            Err(TermEncodeError::Ast(AstError::InvalidAstReference {
+                address: 4,
+            }))
+        );
     }
 
     #[test]

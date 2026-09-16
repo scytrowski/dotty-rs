@@ -1016,6 +1016,9 @@ pub enum AstError {
         offset: usize,
         limit: usize,
     },
+    InvalidAstReference {
+        address: u32,
+    },
 }
 
 impl fmt::Display for AstError {
@@ -1041,6 +1044,10 @@ impl fmt::Display for AstError {
             Self::RecursionLimit { offset, limit } => write!(
                 formatter,
                 "AST index traversal at offset {offset} exceeds the maximum depth of {limit}"
+            ),
+            Self::InvalidAstReference { address } => write!(
+                formatter,
+                "AST reference address {address} does not identify a visible node"
             ),
         }
     }

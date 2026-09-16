@@ -1,6 +1,7 @@
 use crate::ast::{
-    IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, RawNode, SELECT_TAG, SELECTTPT_TAG,
-    SELFDEF_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREFDIRECT_TAG,
+    AstError, IDENT_TAG, IDENTTPT_TAG, NAMEDARG_TAG, RECTHIS_TAG, RawNode, SELECT_TAG,
+    SELECTTPT_TAG, SELFDEF_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
+    TYPEREFDIRECT_TAG,
 };
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
@@ -116,6 +117,7 @@ pub enum TermError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEncodeError {
     Write(WriteError),
+    Ast(AstError),
     InvalidTag { tag: u8 },
     InvalidValue { tag: u8 },
 }
@@ -124,6 +126,7 @@ impl fmt::Display for TermEncodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Write(error) => error.fmt(formatter),
+            Self::Ast(error) => error.fmt(formatter),
             Self::InvalidTag { tag } => write!(formatter, "invalid term tag {tag} for encoding"),
             Self::InvalidValue { tag } => write!(formatter, "invalid value for term tag {tag}"),
         }
@@ -135,6 +138,12 @@ impl std::error::Error for TermEncodeError {}
 impl From<WriteError> for TermEncodeError {
     fn from(error: WriteError) -> Self {
         Self::Write(error)
+    }
+}
+
+impl From<AstError> for TermEncodeError {
+    fn from(error: AstError) -> Self {
+        Self::Ast(error)
     }
 }
 

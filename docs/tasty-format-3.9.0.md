@@ -489,6 +489,12 @@ and known category-5 payloads through `StructuredTree`.
 `StructuredTree::encode()` re-encodes each of those semantic tree variants.
 Category-1/2 constants use their canonical tags, while leaves, wrappers, and
 bounded nodes retain the tags represented by their typed payloads.
+Structured encoding may therefore canonicalize wire-level integer lengths and
+does not preserve decoded offset metadata. The owned structured AST-section
+builders validate the emitted AST references and reject references that no
+longer target visible nodes after a size change; they do not guess a
+relocation for stale addresses. Use the raw AST-section builders when exact
+bytes and original addresses must be preserved.
 
 Structured definition bodies retain their leading `NameRef`. `DefinitionBody`
 and `DefDefBody` expose it through `name()` and can be re-encoded with
@@ -851,6 +857,10 @@ ranges return no matches, and the `_with_max_depth()` variant exposes the same
 AST traversal limit as the mapping API.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
+The structured variant emits canonical payloads and validates the resulting
+AST reference targets. A caller changing node sizes must provide relocated
+addresses explicitly or use the raw representation; the structured builder
+does not infer that mapping.
 The corresponding `*_with_addresses()` constructors return an
 `EncodedAstSection` containing both the owned payload and the allocated
 top-level node addresses.
