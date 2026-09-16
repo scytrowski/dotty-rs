@@ -22,6 +22,23 @@ matched against the logical paths exposed by a directory or JAR input:
 sbt 'run output.json --select=semantic-selection.txt path/to/library.jar'
 ```
 
+For a checked-in corpus, `generate.sh` regenerates the manifest-declared
+expectation after verifying the pinned artifact checksum. It writes through a
+temporary file, so a failed Scala build does not replace the existing
+expectation:
+
+```text
+tools/tasty-baseline/generate.sh \
+  crates/dotty-tasty/tests/fixtures/scala3-library \
+  path/to/scala-library-3.9.0-bin-SNAPSHOT.jar
+```
+
+The artifact must match `artifact_sha256` in the corpus manifest. Updating a
+baseline therefore requires deliberately updating the artifact, source
+revision, checksum, and generated expectations together. This command is a
+developer-side regeneration step; normal Rust CI consumes the checked-in
+corpus and does not need network access or SBT.
+
 The output contains `schema_version = 3` and `scala_version = 3.9.0`. Each file
 contains a sorted, duplicate-free `declarations` list with simplified
 `TypeDef`, `DefDef`, and `ValDef` identifier names. Operator names are omitted

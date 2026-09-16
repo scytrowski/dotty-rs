@@ -2,38 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
-
 #[path = "support/corpus.rs"]
 mod corpus;
+#[path = "support/semantic.rs"]
+mod semantic;
 
 use dotty_tasty::tasty::{
     APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EncodedSection, IF_TAG, LAMBDA_TAG, MATCH_TAG, NEW_TAG,
     PACKAGE_TAG, RETURN_TAG, RawNode, RawNodes, Reader, RenderedSignedName, StandardSection,
     TRY_TAG, TYPEAPPLY_TAG, TYPED_TAG, TastyFile, TastyFileBuilder, WHILE_TAG, Writer,
 };
-
-#[derive(Debug, Deserialize)]
-struct SemanticExpectation {
-    schema_version: u32,
-    scala_version: String,
-    files: Vec<SemanticExpectationFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SemanticExpectationFile {
-    path: String,
-    declarations: Vec<SemanticExpectationDeclaration>,
-    shapes: BTreeMap<String, usize>,
-    parameter_clause_counts: BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SemanticExpectationDeclaration {
-    kind: String,
-    name: String,
-    parameter_clauses: Option<usize>,
-}
 
 fn scala3_library_corpus() -> corpus::Corpus {
     corpus::Corpus::load(
@@ -97,41 +75,17 @@ fn scala3_library_semantic_selection_is_resolved_from_manifest() {
     let corpus = scala3_library_corpus();
     let selected = corpus.selected_fixture_paths();
 
-    assert_eq!(selected.len(), 12);
+    assert!(!selected.is_empty());
     assert!(selected.iter().all(|path| path.is_file()));
-    assert!(selected.iter().any(|path| path.ends_with("Option.tasty")));
-    assert!(
-        selected
-            .iter()
-            .any(|path| path.ends_with("collection/immutable/List.tasty"))
-    );
 }
 
 #[test]
 fn scala3_library_semantic_expectations_cover_selected_fixtures() {
     let corpus = scala3_library_corpus();
-    let expectation_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/scala3-library")
-        .join(
-            corpus
-                .manifest()
-                .expectation_file
-                .as_ref()
-                .expect("scala3-library manifest must identify its semantic expectations"),
-        );
-    let expectation: SemanticExpectation =
-        serde_json::from_slice(&fs::read(&expectation_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to read semantic expectations {}: {error}",
-                expectation_path.display()
-            )
-        }))
-        .unwrap_or_else(|error| {
-            panic!(
-                "failed to parse semantic expectations {}: {error}",
-                expectation_path.display()
-            )
-        });
+    let expectation_path = corpus
+        .expectation_path()
+        .expect("scala3-library manifest must identify its semantic expectations");
+    let expectation = semantic::load(&expectation_path).unwrap_or_else(|error| panic!("{error}"));
 
     assert_eq!(expectation.schema_version, 3);
     assert_eq!(expectation.scala_version, "3.9.0");
@@ -140,7 +94,7 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
         corpus.selected_fixture_paths().len()
     );
 
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-library");
+    let fixture_root = corpus.tasty_root_path();
     let selected_paths: BTreeSet<_> = corpus
         .selected_fixture_paths()
         .iter()

@@ -50,6 +50,14 @@ checked-in materialized files and remain deterministic and offline. Each
 baseline should record its source revision or artifact checksum before it is
 expanded beyond the initial proof of concept.
 
+The shared test support resolves selection and expectation paths from the
+manifest. Semantic-lite JSON is loaded through the same support module for
+future corpora, rather than defining a separate schema loader in each library
+test. Baseline regeneration is performed with
+`tools/tasty-baseline/generate.sh`, which validates `artifact_sha256` before
+calling the Scala oracle and replaces the expectation only after successful
+generation.
+
 Future semantic expectations belong beside the materialized corpus and must
 record the Scala/compiler version and expectation-schema version. They should
 compare stable structural or semantic facts, not absolute AST offsets, unless

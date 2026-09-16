@@ -43,8 +43,26 @@ impl Corpus {
         &self.manifest
     }
 
+    pub fn selection_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .selection_file
+            .as_ref()
+            .map(|path| self.root.join(path))
+    }
+
+    pub fn expectation_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .expectation_file
+            .as_ref()
+            .map(|path| self.root.join(path))
+    }
+
+    pub fn tasty_root_path(&self) -> PathBuf {
+        self.root.join(&self.manifest.tasty_root)
+    }
+
     pub fn fixture_paths(&self) -> Vec<PathBuf> {
-        let root = self.root.join(&self.manifest.tasty_root);
+        let root = self.tasty_root_path();
         let mut directories = vec![root];
         let mut fixtures = Vec::new();
 
@@ -83,17 +101,16 @@ impl Corpus {
 
     pub fn selected_fixture_paths(&self) -> Vec<PathBuf> {
         let fixtures = self.fixture_paths();
-        let Some(selection_file) = &self.manifest.selection_file else {
+        let Some(selection_path) = self.selection_path() else {
             return fixtures;
         };
-        let selection_path = self.root.join(selection_file);
         let selection = fs::read_to_string(&selection_path).unwrap_or_else(|error| {
             panic!(
                 "failed to read corpus selection {}: {error}",
                 selection_path.display()
             )
         });
-        let tasty_root = self.root.join(&self.manifest.tasty_root);
+        let tasty_root = self.tasty_root_path();
         let available: std::collections::BTreeMap<_, _> = fixtures
             .iter()
             .map(|path| {
@@ -229,5 +246,38 @@ mod tests {
         assert_eq!(manifest.tasty_root, PathBuf::from("."));
         assert_eq!(manifest.selection_file, None);
         assert_eq!(manifest.expectation_file, None);
+    }
+
+    #[test]
+    fn resolves_optional_manifest_files_relative_to_the_corpus_root() {
+        let corpus = super::Corpus {
+            root: PathBuf::from("/tmp/example-corpus"),
+            manifest: CorpusManifest {
+                id: "example-1.0".to_owned(),
+                source_kind: "jar".to_owned(),
+                scala_version: "3.9.0".to_owned(),
+                tasty_format: "28.9.0".to_owned(),
+                fixture_count: 0,
+                fixture_bytes: 0,
+                tasty_root: PathBuf::from("."),
+                selection_file: Some(PathBuf::from("selection.txt")),
+                expectation_file: Some(PathBuf::from("expectations/semantic.json")),
+            },
+        };
+
+        assert_eq!(
+            corpus.selection_path(),
+            Some(PathBuf::from("/tmp/example-corpus/selection.txt"))
+        );
+        assert_eq!(
+            corpus.expectation_path(),
+            Some(PathBuf::from(
+                "/tmp/example-corpus/expectations/semantic.json"
+            ))
+        );
+        assert_eq!(
+            corpus.tasty_root_path(),
+            PathBuf::from("/tmp/example-corpus/./")
+        );
     }
 }
