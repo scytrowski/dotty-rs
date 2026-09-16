@@ -247,8 +247,14 @@ impl<'a> RawNode<'a> {
         })
     }
 
-    pub fn category(&self) -> NodeCategory {
-        NodeCategory::from_tag(self.tag).expect("RawNode tags are validated during decoding")
+    /// Return the category implied by this node's tag.
+    ///
+    /// Nodes returned by the decoder and [`RawNode::new`] always have a
+    /// category-five tag. Since the node fields are public, callers can also
+    /// construct an invalid value directly; in that case this method returns
+    /// `None` instead of panicking.
+    pub fn category(&self) -> Option<NodeCategory> {
+        NodeCategory::from_tag(self.tag)
     }
 
     /// Returns whether this node uses a tag assigned by TASTy 3.9.0.
@@ -5567,6 +5573,24 @@ mod tests {
 
         assert_eq!(node.offset, 0);
         assert_eq!(writer.as_slice(), &[VALDEF_TAG, 0x82, 1, 2]);
+    }
+
+    #[test]
+    fn returns_the_category_for_a_valid_raw_node_tag() {
+        let node = RawNode::new(VALDEF_TAG, &[]).unwrap();
+
+        assert_eq!(node.category(), Some(NodeCategory::Category5));
+    }
+
+    #[test]
+    fn returns_none_for_an_invalid_raw_node_tag_instead_of_panicking() {
+        let node = RawNode {
+            tag: 0,
+            offset: 0,
+            payload: &[],
+        };
+
+        assert_eq!(node.category(), None);
     }
 
     #[test]
