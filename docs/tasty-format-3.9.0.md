@@ -517,7 +517,9 @@ as the underlying global index. These queries are structural and do not assign
 Scala semantic meaning to a tag.
 `AstAddressIndex::iter_nodes_in_address_range()` and
 `TastyFile::ast_nodes_in_address_range()` provide the analogous half-open
-address-range query `[start, end)`.
+address-range query `[start, end)`. The file-level
+`ast_nodes_in_address_range_with_max_depth()` variant exposes the same
+configurable traversal limit as the global index.
 `TastyFile::ast_references_from()` and `TastyFile::ast_references_to()` filter
 the collected AST reference graph by owner or target address while preserving
 wire order. These APIs expose structural edges only; resolving a reference to

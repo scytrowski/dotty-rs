@@ -720,8 +720,23 @@ impl<'a> TastyFile<'a> {
         start: u32,
         end: u32,
     ) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        self.ast_nodes_in_address_range_with_max_depth(
+            start,
+            end,
+            crate::DEFAULT_MAX_AST_INDEX_DEPTH,
+        )
+    }
+
+    /// Collect visible AST nodes in `[start, end)` using an explicit nesting
+    /// limit.
+    pub fn ast_nodes_in_address_range_with_max_depth(
+        &self,
+        start: u32,
+        end: u32,
+        max_depth: usize,
+    ) -> Result<Vec<AstTreeNode>, TastyFileError> {
         Ok(self
-            .ast_address_index()?
+            .ast_address_index_with_max_depth(max_depth)?
             .iter_nodes_in_address_range(start, end)
             .collect())
     }
@@ -1094,6 +1109,20 @@ mod tests {
             file.ast_nodes_in_address_range(0, end).unwrap().len(),
             all_nodes.len()
         );
+    }
+
+    #[test]
+    fn applies_a_configured_depth_limit_to_address_range_queries() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+
+        assert!(matches!(
+            file.ast_nodes_in_address_range_with_max_depth(0, u32::MAX, 0),
+            Err(TastyFileError::Asts(crate::AstError::RecursionLimit {
+                limit: 0,
+                ..
+            }))
+        ));
     }
 
     #[test]
