@@ -780,7 +780,7 @@ pub struct ParamTypeNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeName {
-    pub type_or_bounds: u32,
+    pub type_or_bounds: AstRef,
     pub name: u32,
 }
 
@@ -3162,7 +3162,10 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::new();
         while !reader.is_at_end() {
             type_names.push(TypeName {
-                type_or_bounds: reader.read_nat()?,
+                type_or_bounds: AstRef {
+                    kind: AstRefKind::TypeNameBounds,
+                    address: reader.read_nat()?,
+                },
                 name: reader.read_nat()?,
             });
         }
@@ -3188,7 +3191,10 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::new();
         while !reader.is_at_end() && !is_modifier_tag(reader.peek_u8()?) {
             type_names.push(TypeName {
-                type_or_bounds: reader.read_nat()?,
+                type_or_bounds: AstRef {
+                    kind: AstRefKind::TypeNameBounds,
+                    address: reader.read_nat()?,
+                },
                 name: reader.read_nat()?,
             });
         }
@@ -3235,7 +3241,10 @@ impl<'a> RawNode<'a> {
         let mut type_names = Vec::with_capacity(type_name_count);
         for _ in 0..type_name_count {
             type_names.push(TypeName {
-                type_or_bounds: reader.read_nat()?,
+                type_or_bounds: AstRef {
+                    kind: AstRefKind::TypeNameBounds,
+                    address: reader.read_nat()?,
+                },
                 name: reader.read_nat()?,
             });
         }
@@ -3991,7 +4000,7 @@ impl<'a> PolyTypeNode<'a> {
         encode_length_node(self.tag, writer, |payload| {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
-                payload.write_nat(type_name.type_or_bounds);
+                payload.write_nat(type_name.type_or_bounds.address);
                 payload.write_nat(type_name.name);
             }
             Ok(())
@@ -4004,7 +4013,7 @@ impl<'a> MethodTypeNode<'a> {
         encode_length_node(METHODTYPE_TAG, writer, |payload| {
             self.result_type.encode(payload)?;
             for type_name in &self.type_names {
-                payload.write_nat(type_name.type_or_bounds);
+                payload.write_nat(type_name.type_or_bounds.address);
                 payload.write_nat(type_name.name);
             }
             for modifier in &self.modifiers {
@@ -4796,9 +4805,19 @@ fn collect_structured_ast_refs(
             collect_parameters_ast_refs(&lambda.type_params, visitor)?;
             collect_tree_ast_refs(&lambda.body, visitor);
         }
-        StructuredNode::PolyType(poly) => collect_tree_ast_refs(&poly.result_type, visitor),
+        StructuredNode::PolyType(poly) => {
+            collect_tree_ast_refs(&poly.result_type, visitor);
+            for type_name in &poly.type_names {
+                visitor(type_name.type_or_bounds);
+            }
+        }
         StructuredNode::ParamType(param_type) => visitor(param_type.binder),
-        StructuredNode::MethodType(method) => collect_tree_ast_refs(&method.result_type, visitor),
+        StructuredNode::MethodType(method) => {
+            collect_tree_ast_refs(&method.result_type, visitor);
+            for type_name in &method.type_names {
+                visitor(type_name.type_or_bounds);
+            }
+        }
         StructuredNode::ApplySigPoly(apply) => {
             collect_tree_ast_refs(&apply.function, visitor);
             collect_tree_ast_refs(&apply.type_tree, visitor);
@@ -6676,11 +6695,17 @@ mod tests {
                 node.type_names,
                 vec![
                     super::TypeName {
-                        type_or_bounds: 5,
+                        type_or_bounds: crate::term::AstRef {
+                            kind: crate::term::AstRefKind::TypeNameBounds,
+                            address: 5,
+                        },
                         name: 6,
                     },
                     super::TypeName {
-                        type_or_bounds: 7,
+                        type_or_bounds: crate::term::AstRef {
+                            kind: crate::term::AstRefKind::TypeNameBounds,
+                            address: 7,
+                        },
                         name: 8,
                     },
                 ]
@@ -6697,6 +6722,29 @@ mod tests {
         };
 
         assert!(node.decode_poly_type().unwrap().type_names.is_empty());
+    }
+
+    #[test]
+    fn collects_poly_type_name_bounds_as_ast_references() {
+        let node = RawNode {
+            tag: POLYTYPE_TAG,
+            offset: 0,
+            payload: &[2, 0x85, 0x86, 0x87, 0x88],
+        };
+
+        assert_eq!(
+            node.ast_refs().unwrap(),
+            vec![
+                crate::term::AstRef {
+                    kind: crate::term::AstRefKind::TypeNameBounds,
+                    address: 5,
+                },
+                crate::term::AstRef {
+                    kind: crate::term::AstRefKind::TypeNameBounds,
+                    address: 7,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -6723,6 +6771,23 @@ mod tests {
     }
 
     #[test]
+    fn collects_method_type_name_bounds_as_ast_references() {
+        let node = RawNode {
+            tag: METHODTYPE_TAG,
+            offset: 0,
+            payload: &[2, 0x85, 0x86],
+        };
+
+        assert_eq!(
+            node.ast_refs().unwrap(),
+            vec![crate::term::AstRef {
+                kind: crate::term::AstRefKind::TypeNameBounds,
+                address: 5,
+            }]
+        );
+    }
+
+    #[test]
     fn decodes_a_method_type_with_an_ambiguous_type_name_using_context() {
         let node = RawNode {
             tag: METHODTYPE_TAG,
@@ -6735,7 +6800,10 @@ mod tests {
         assert_eq!(
             node.type_names,
             vec![TypeName {
-                type_or_bounds: INLINE_TAG as u32,
+                type_or_bounds: crate::term::AstRef {
+                    kind: crate::term::AstRefKind::TypeNameBounds,
+                    address: INLINE_TAG as u32,
+                },
                 name: 5,
             }]
         );

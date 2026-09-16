@@ -427,6 +427,11 @@ untyped integer.
 `AstRefKind::ReturnTarget` and is included in AST reference collection and
 target validation.
 
+Each `TypeName` in `POLYtype`, `METHODtype`, and `TYPELAMBDAtype` begins with
+an `ASTRef` to its type or bounds tree. The Rust model represents this as
+`AstRefKind::TypeNameBounds` and includes it in reference collection and
+target validation.
+
 The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
 `RawTree::ast_ref()`. This distinguishes `SHAREDterm`, `SHAREDtype`,
