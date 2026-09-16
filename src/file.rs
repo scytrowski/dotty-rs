@@ -482,12 +482,6 @@ impl<'a> TastyFile<'a> {
             .map(|section| section.decode_comments().map_err(TastyFileError::Sections))
             .transpose()?;
 
-        if let Some(comments) = &comments {
-            for comment in comments {
-                self.validate_ast_address("comment", i64::from(comment.address))?;
-            }
-        }
-
         Ok(comments)
     }
 
@@ -645,7 +639,6 @@ mod tests {
         let mut comments = crate::Writer::new();
         crate::Comment::encode_all(
             &[crate::Comment {
-                address: 0,
                 text: "example".to_owned(),
                 coordinates: 0,
             }],
@@ -714,7 +707,6 @@ mod tests {
             EncodedSection::comments(
                 2,
                 &[crate::Comment {
-                    address: 0,
                     text: "example".to_owned(),
                     coordinates: 0,
                 }],
@@ -901,40 +893,6 @@ mod tests {
             Err(TastyFileError::InvalidNameReference {
                 context: "SOURCE position",
                 reference: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_a_comment_address_outside_the_asts_payload() {
-        let names = crate::NameTable::from_entries(vec![
-            crate::RawName::Utf8("ASTs".to_owned()),
-            crate::RawName::Utf8("Comments".to_owned()),
-        ])
-        .unwrap();
-        let sections = crate::SectionTable::from_sections(vec![
-            crate::Section::new(0, &[crate::VALDEF_TAG, 0x80]),
-            crate::Section::new(1, &[0x85, 0x80, 0x80]),
-        ]);
-        let file = TastyFile::from_parts(
-            crate::Header {
-                major_version: 28,
-                minor_version: 9,
-                experimental_version: 0,
-                tooling_version: "Scala 3.9.0".to_owned(),
-                uuid: [0; 16],
-            },
-            names,
-            sections,
-        )
-        .unwrap();
-
-        assert_eq!(
-            file.comments(),
-            Err(TastyFileError::InvalidAstAddress {
-                context: "comment",
-                address: 5,
-                asts_length: 2,
             })
         );
     }

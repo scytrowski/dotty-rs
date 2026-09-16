@@ -703,12 +703,12 @@ exposes the same two methods.
 The `Comments` section contains entries of the form:
 
 ```text
-Comment = ASTRef Utf8 LongInt
+Comment = Utf8 LongInt
 ```
 
-The first element is the address of the AST node to which the comment is
-attached. The comment text is encoded as UTF-8, and the final element contains
-the comment coordinates.
+The comment text is encoded as UTF-8, and the final element contains the
+comment coordinates. Comments do not carry AST addresses in the TASTy wire
+format.
 
 ## 11. Attributes
 

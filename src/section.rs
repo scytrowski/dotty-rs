@@ -67,7 +67,6 @@ pub enum Attribute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
-    pub address: u32,
     pub text: String,
     pub coordinates: i64,
 }
@@ -136,7 +135,6 @@ impl Attribute {
 impl Comment {
     pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         for comment in comments {
-            writer.write_nat(comment.address);
             writer.write_utf8(&comment.text)?;
             writer.write_long_int(comment.coordinates);
         }
@@ -319,7 +317,6 @@ impl<'a> Section<'a> {
 
         while !reader.is_at_end() {
             comments.push(Comment {
-                address: reader.read_nat()?,
                 text: reader.read_utf8()?,
                 coordinates: reader.read_long_int()?,
             });
@@ -672,12 +669,10 @@ mod tests {
     fn encodes_comments_with_unicode_and_signed_coordinates() {
         let comments = vec![
             Comment {
-                address: 12,
                 text: "zażółć".to_owned(),
                 coordinates: -129,
             },
             Comment {
-                address: 24,
                 text: "ok".to_owned(),
                 coordinates: 16_384,
             },
@@ -697,7 +692,6 @@ mod tests {
     #[test]
     fn builds_an_owned_comments_section() {
         let comments = [Comment {
-            address: 4,
             text: "comment".to_owned(),
             coordinates: -1,
         }];
@@ -1014,13 +1008,12 @@ mod tests {
             name: 0,
             offset: 0,
             length: 0,
-            payload: &[0x81, 0x82, b'h', b'i', 0x83],
+            payload: &[0x82, b'h', b'i', 0x83],
         };
 
         assert_eq!(
             section.decode_comments().unwrap(),
             vec![Comment {
-                address: 1,
                 text: "hi".to_owned(),
                 coordinates: 3,
             }]
@@ -1033,13 +1026,13 @@ mod tests {
             name: 0,
             offset: 0,
             length: 0,
-            payload: &[0x81, 0x81, b'x'],
+            payload: &[0x81, b'x'],
         };
 
         assert_eq!(
             section.decode_comments(),
             Err(SectionError::Read(ReadError::UnexpectedEof {
-                offset: 3,
+                offset: 2,
                 needed: 1,
                 remaining: 0,
             }))
