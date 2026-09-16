@@ -106,6 +106,26 @@ impl Header {
             && self.experimental_version == SCALA_3_9_EXPERIMENTAL_VERSION
     }
 
+    /// Returns whether this file version is compatible with a compiler
+    /// version according to the TASTy compatibility relation.
+    ///
+    /// A file is compatible when all version components match exactly, or
+    /// when it has the same major version, an older minor version, and no
+    /// experimental component.
+    pub fn is_compatible_with(
+        &self,
+        compiler_major: u32,
+        compiler_minor: u32,
+        compiler_experimental: u32,
+    ) -> bool {
+        (self.major_version == compiler_major
+            && self.minor_version == compiler_minor
+            && self.experimental_version == compiler_experimental)
+            || (self.major_version == compiler_major
+                && self.minor_version < compiler_minor
+                && self.experimental_version == 0)
+    }
+
     pub fn validate_scala_3_9(&self) -> Result<(), HeaderError> {
         if self.is_scala_3_9() {
             Ok(())
@@ -179,6 +199,58 @@ mod tests {
 
         assert!(header.is_scala_3_9());
         assert_eq!(header.validate_scala_3_9(), Ok(()));
+    }
+
+    #[test]
+    fn accepts_an_exactly_matching_compiler_version() {
+        let header = Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 1,
+            tooling_version: String::new(),
+            uuid: [0; 16],
+        };
+
+        assert!(header.is_compatible_with(28, 9, 1));
+    }
+
+    #[test]
+    fn accepts_an_older_stable_minor_version() {
+        let header = Header {
+            major_version: 28,
+            minor_version: 8,
+            experimental_version: 0,
+            tooling_version: String::new(),
+            uuid: [0; 16],
+        };
+
+        assert!(header.is_compatible_with(28, 9, 0));
+    }
+
+    #[test]
+    fn rejects_a_different_experimental_version_for_the_same_minor() {
+        let header = Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 1,
+            tooling_version: String::new(),
+            uuid: [0; 16],
+        };
+
+        assert!(!header.is_compatible_with(28, 9, 0));
+    }
+
+    #[test]
+    fn rejects_a_different_major_version() {
+        let header = Header {
+            major_version: 27,
+            minor_version: 9,
+            experimental_version: 0,
+            tooling_version: String::new(),
+            uuid: [0; 16],
+        };
+
+        assert!(!header.is_compatible_with(28, 9, 0));
     }
 
     #[test]

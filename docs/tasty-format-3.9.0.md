@@ -143,6 +143,11 @@ A library can expose two modes:
 1. strict: accept only `28.9.0`;
 2. compatible: apply the relation above and preserve the file version in the decoded result.
 
+The Rust header API exposes this second relation through
+`Header::is_compatible_with(compiler_major, compiler_minor,
+compiler_experimental)`. `TastyFile::parse_scala_3_9` remains the strict
+entry point for this repository's current compatibility target.
+
 ## 4. Name table
 
 ### 4.1. References
