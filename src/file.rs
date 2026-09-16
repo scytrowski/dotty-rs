@@ -785,6 +785,28 @@ impl<'a> TastyFile<'a> {
         Ok(references)
     }
 
+    /// Collect name-table references owned by the top-level node at
+    /// `owner_address`, preserving wire order.
+    pub fn name_references_from(
+        &self,
+        owner_address: u32,
+    ) -> Result<Vec<NameReference>, TastyFileError> {
+        Ok(self
+            .name_references()?
+            .into_iter()
+            .filter(|reference| reference.owner_address == owner_address)
+            .collect())
+    }
+
+    /// Collect name-table references to `name`, preserving wire order.
+    pub fn name_references_to(&self, name: NameRef) -> Result<Vec<NameReference>, TastyFileError> {
+        Ok(self
+            .name_references()?
+            .into_iter()
+            .filter(|reference| reference.reference == name)
+            .collect())
+    }
+
     /// Validate that every collected AST reference points inside the ASTs
     /// section payload.
     ///
@@ -1804,6 +1826,41 @@ mod tests {
         assert_eq!(file.ast_references_from(0).unwrap(), references);
         assert_eq!(file.ast_references_to(5).unwrap(), vec![references[0]]);
         assert_eq!(file.ast_references_to(99).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn filters_name_references_by_owner_address() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let references = file.name_references().unwrap();
+        let owner = references.first().unwrap().owner_address;
+
+        assert_eq!(
+            file.name_references_from(owner).unwrap(),
+            references
+                .iter()
+                .copied()
+                .filter(|reference| reference.owner_address == owner)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn filters_name_references_by_name_reference() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let references = file.name_references().unwrap();
+        let name = references.first().unwrap().reference;
+
+        assert_eq!(
+            file.name_references_to(name).unwrap(),
+            references
+                .iter()
+                .copied()
+                .filter(|reference| reference.reference == name)
+                .collect::<Vec<_>>()
+        );
+        assert!(file.name_references_to(u32::MAX).unwrap().is_empty());
     }
 
     #[test]

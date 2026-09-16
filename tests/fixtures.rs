@@ -707,6 +707,45 @@ fn all_tasty_fixture_name_references_resolve_in_the_name_table() {
 }
 
 #[test]
+fn all_tasty_fixture_name_reference_queries_match_the_complete_reference_list() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let references = file.name_references().unwrap_or_else(|error| {
+            panic!(
+                "failed to collect name references in {}: {error}",
+                path.display()
+            )
+        });
+
+        for reference in &references {
+            assert!(
+                file.name_references_from(reference.owner_address)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to query name owner in {}: {error}", path.display())
+                    })
+                    .contains(reference),
+                "fixture {} lost name reference from owner {}",
+                path.display(),
+                reference.owner_address
+            );
+            assert!(
+                file.name_references_to(reference.reference)
+                    .unwrap_or_else(|error| {
+                        panic!("failed to query name target in {}: {error}", path.display())
+                    })
+                    .contains(reference),
+                "fixture {} lost name reference to {}",
+                path.display(),
+                reference.reference
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixture_position_sections_resolve_without_overflow() {
     let mut section_count = 0;
 

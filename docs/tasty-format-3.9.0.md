@@ -530,6 +530,9 @@ with the owning top-level AST address, which lets callers resolve them through
 the file's `NameTable`.
 `TastyFile::validate_name_references()` applies this check eagerly, and the
 general `TastyFile::validate()` path includes it.
+`TastyFile::name_references_from()` and `TastyFile::name_references_to()`
+filter those collected name-table edges by their owning AST address or target
+`NameRef`, again without assigning semantic meaning to the referenced name.
 
 `NameTable::get_utf8()` and `RawName::as_utf8()` provide a checked shortcut
 for direct UTF-8 entries. `NameTable::find_utf8()` provides the inverse lookup
