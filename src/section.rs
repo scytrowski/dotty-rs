@@ -82,6 +82,25 @@ pub enum PositionEntry {
     Source(NameRef),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionCoordinate {
+    Address,
+    Start,
+    End,
+    Point,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedPositionEntry {
+    Source(NameRef),
+    Association {
+        address: i64,
+        start: i64,
+        end: i64,
+        point: i64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
     pub line_sizes: Vec<u32>,
@@ -199,6 +218,54 @@ impl PositionSection {
         }
         Ok(())
     }
+
+    /// Resolves position deltas into absolute coordinates while retaining
+    /// source-change events in their original order.
+    ///
+    /// The raw [`PositionEntry`] values remain available through `entries`;
+    /// this derived view is intended for consumers that need coordinates
+    /// rather than the lossless wire representation.
+    pub fn resolved_entries(&self) -> Result<Vec<ResolvedPositionEntry>, SectionError> {
+        let mut address = 0;
+        let mut start = 0;
+        let mut end = 0;
+        let mut point = 0;
+        let mut resolved = Vec::with_capacity(self.entries.len());
+
+        for entry in &self.entries {
+            match entry {
+                PositionEntry::Source(reference) => {
+                    resolved.push(ResolvedPositionEntry::Source(*reference));
+                }
+                PositionEntry::Association {
+                    address_delta,
+                    start_delta,
+                    end_delta,
+                    point_delta,
+                } => {
+                    address =
+                        add_position_delta(address, *address_delta, PositionCoordinate::Address)?;
+                    if let Some(delta) = start_delta {
+                        start = add_position_delta(start, *delta, PositionCoordinate::Start)?;
+                    }
+                    if let Some(delta) = end_delta {
+                        end = add_position_delta(end, *delta, PositionCoordinate::End)?;
+                    }
+                    if let Some(delta) = point_delta {
+                        point = add_position_delta(point, *delta, PositionCoordinate::Point)?;
+                    }
+                    resolved.push(ResolvedPositionEntry::Association {
+                        address,
+                        start,
+                        end,
+                        point,
+                    });
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +287,11 @@ pub enum SectionError {
     },
     NegativePositionSource {
         value: i32,
+    },
+    PositionOverflow {
+        coordinate: PositionCoordinate,
+        previous: i64,
+        delta: i64,
     },
 }
 
@@ -252,6 +324,14 @@ impl fmt::Display for SectionError {
                     "negative source name reference {value} in a TASTy position entry"
                 )
             }
+            Self::PositionOverflow {
+                coordinate,
+                previous,
+                delta,
+            } => write!(
+                formatter,
+                "position {coordinate:?} overflows when adding delta {delta} to {previous}"
+            ),
         }
     }
 }
@@ -262,6 +342,20 @@ impl From<ReadError> for SectionError {
     fn from(error: ReadError) -> Self {
         Self::Read(error)
     }
+}
+
+fn add_position_delta(
+    previous: i64,
+    delta: i64,
+    coordinate: PositionCoordinate,
+) -> Result<i64, SectionError> {
+    previous
+        .checked_add(delta)
+        .ok_or(SectionError::PositionOverflow {
+            coordinate,
+            previous,
+            delta,
+        })
 }
 
 impl<'a> Section<'a> {
@@ -608,8 +702,8 @@ impl<'a> SectionTable<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Attribute, Comment, EncodedSection, PositionEntry, PositionSection, Section, SectionError,
-        SectionTable,
+        Attribute, Comment, EncodedSection, PositionCoordinate, PositionEntry, PositionSection,
+        ResolvedPositionEntry, Section, SectionError, SectionTable,
     };
     use crate::ast::{RawNode, RawNodes};
     use crate::reader::{ReadError, Reader};
@@ -716,6 +810,79 @@ mod tests {
 
         assert_eq!(encoded.name(), 1);
         assert_eq!(encoded.section().decode_positions().unwrap(), positions);
+    }
+
+    #[test]
+    fn resolves_position_deltas_and_keeps_source_events_in_order() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![
+                PositionEntry::Source(4),
+                PositionEntry::Association {
+                    address_delta: 10,
+                    start_delta: Some(2),
+                    end_delta: Some(5),
+                    point_delta: None,
+                },
+                PositionEntry::Association {
+                    address_delta: 3,
+                    start_delta: None,
+                    end_delta: Some(-1),
+                    point_delta: Some(7),
+                },
+                PositionEntry::Source(8),
+            ],
+        };
+
+        assert_eq!(
+            positions.resolved_entries(),
+            Ok(vec![
+                ResolvedPositionEntry::Source(4),
+                ResolvedPositionEntry::Association {
+                    address: 10,
+                    start: 2,
+                    end: 5,
+                    point: 0,
+                },
+                ResolvedPositionEntry::Association {
+                    address: 13,
+                    start: 2,
+                    end: 4,
+                    point: 7,
+                },
+                ResolvedPositionEntry::Source(8),
+            ])
+        );
+    }
+
+    #[test]
+    fn reports_position_coordinate_overflow_when_resolving_deltas() {
+        let positions = PositionSection {
+            line_sizes: vec![],
+            entries: vec![
+                PositionEntry::Association {
+                    address_delta: i64::MAX,
+                    start_delta: None,
+                    end_delta: None,
+                    point_delta: None,
+                },
+                PositionEntry::Association {
+                    address_delta: 1,
+                    start_delta: None,
+                    end_delta: None,
+                    point_delta: None,
+                },
+            ],
+        };
+
+        assert_eq!(
+            positions.resolved_entries(),
+            Err(SectionError::PositionOverflow {
+                coordinate: PositionCoordinate::Address,
+                previous: i64::MAX,
+                delta: 1,
+            })
+        );
     }
 
     #[test]

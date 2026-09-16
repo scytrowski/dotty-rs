@@ -742,6 +742,10 @@ together with the section boundary.
 `EncodedSection::positions()` own typed section payloads and expose a borrowed
 `Section` view for assembling a `SectionTable`. `EncodedSection::raw()` covers
 unknown or application-specific sections without requiring a guessed grammar.
+`PositionSection::resolved_entries()` provides an ordered derived view that
+accumulates association deltas into absolute coordinates while retaining
+`SOURCE` events. The raw `PositionEntry` deltas remain authoritative for
+lossless re-encoding.
 `EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
 same ownership boundary for raw or structured top-level AST nodes.
 The corresponding `*_with_addresses()` constructors return an

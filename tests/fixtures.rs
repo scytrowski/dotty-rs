@@ -687,6 +687,35 @@ fn all_tasty_fixture_name_references_resolve_in_the_name_table() {
 }
 
 #[test]
+fn all_tasty_fixture_position_sections_resolve_without_overflow() {
+    let mut section_count = 0;
+
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+
+        if let Some(positions) = file.positions().unwrap_or_else(|error| {
+            panic!("failed to decode positions in {}: {error}", path.display())
+        }) {
+            section_count += 1;
+            let resolved = positions.resolved_entries().unwrap_or_else(|error| {
+                panic!("failed to resolve positions in {}: {error}", path.display())
+            });
+            assert_eq!(
+                resolved.len(),
+                positions.entries.len(),
+                "fixture {} changed position-entry cardinality",
+                path.display()
+            );
+        }
+    }
+
+    assert!(section_count > 0, "fixtures contain no Positions section");
+}
+
+#[test]
 fn all_tasty_fixture_signed_names_have_typed_views() {
     let mut signed_name_count = 0;
 
