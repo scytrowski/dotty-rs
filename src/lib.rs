@@ -35,7 +35,7 @@ pub use ast::{
     TYPEREFSYMBOL_TAG, TemplateNode, TemplateStructure, TypeApplyNode, TypeBoundsNode, TypedNode,
     UNAPPLY_TAG, UnapplyNode, VALDEF_TAG, WhileNode,
 };
-pub use file::{EncodedTastyFile, TastyFile, TastyFileError};
+pub use file::{EncodedTastyFile, TastyFile, TastyFileBuilder, TastyFileError};
 pub use header::{
     Header, HeaderError, SCALA_3_9_EXPERIMENTAL_VERSION, SCALA_3_9_MAJOR_VERSION,
     SCALA_3_9_MINOR_VERSION, TASTY_MAGIC,

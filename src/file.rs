@@ -5,7 +5,8 @@ use crate::header::{Header, HeaderError};
 use crate::name_table::{NameRef, NameTable, NameTableError, RawName};
 use crate::reader::Reader;
 use crate::section::{
-    Attribute, Comment, PositionSection, Section, SectionError, SectionTable, StandardSection,
+    Attribute, Comment, EncodedSection, PositionSection, Section, SectionError, SectionTable,
+    StandardSection,
 };
 use crate::term::{AstRef, AstTreeNode};
 use crate::writer::{WriteError, Writer};
@@ -22,6 +23,19 @@ pub struct TastyFile<'a> {
 pub struct EncodedTastyFile {
     bytes: Vec<u8>,
     ast_addresses: Vec<u32>,
+}
+
+/// Owns the pieces of a TASTy file while it is being assembled for encoding.
+///
+/// The parsed [`TastyFile`] type borrows section payloads, which is useful for
+/// zero-copy decoding but awkward for programmatic construction. This builder
+/// keeps encoded sections owned and creates a short-lived borrowed view only
+/// while validating or serializing the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TastyFileBuilder {
+    header: Header,
+    names: NameTable,
+    sections: Vec<EncodedSection>,
 }
 
 impl EncodedTastyFile {
@@ -121,6 +135,54 @@ impl From<AstError> for TastyFileError {
 impl From<WriteError> for TastyFileError {
     fn from(error: WriteError) -> Self {
         Self::Write(error)
+    }
+}
+
+impl TastyFileBuilder {
+    pub fn new(header: Header, names: NameTable) -> Self {
+        Self {
+            header,
+            names,
+            sections: Vec::new(),
+        }
+    }
+
+    /// Add a section and return the builder for fluent construction.
+    pub fn with_section(mut self, section: EncodedSection) -> Self {
+        self.sections.push(section);
+        self
+    }
+
+    pub fn push_section(&mut self, section: EncodedSection) {
+        self.sections.push(section);
+    }
+
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    pub fn names(&self) -> &NameTable {
+        &self.names
+    }
+
+    pub fn sections(&self) -> &[EncodedSection] {
+        &self.sections
+    }
+
+    /// Build a borrowed file view after validating section-name references.
+    pub fn build(&self) -> Result<TastyFile<'_>, TastyFileError> {
+        let sections = SectionTable::from_sections(
+            self.sections.iter().map(EncodedSection::section).collect(),
+        );
+        TastyFile::from_parts(self.header.clone(), self.names.clone(), sections)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
+        self.build()?.encode()
+    }
+
+    pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
+        self.build()?.encode_with_ast_addresses()
     }
 }
 
@@ -458,7 +520,7 @@ impl<'a> TastyFile<'a> {
 mod tests {
     use super::{TastyFile, TastyFileError};
     use crate::ast::StructuredNode;
-    use crate::section::StandardSection;
+    use crate::section::{EncodedSection, PositionEntry, PositionSection, StandardSection};
 
     #[test]
     fn decodes_a_complete_scala_3_9_fixture_as_one_file_model() {
@@ -590,6 +652,115 @@ mod tests {
         assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
         assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
+    }
+
+    #[test]
+    fn builds_and_reparses_a_file_from_owned_sections() {
+        let names = crate::NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("Attributes".to_owned()),
+            crate::RawName::Utf8("Comments".to_owned()),
+            crate::RawName::Utf8("Positions".to_owned()),
+            crate::RawName::Utf8("Example.scala".to_owned()),
+        ])
+        .unwrap();
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [8; 16],
+            },
+            names,
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]))
+        .with_section(EncodedSection::attributes(1, &[crate::Attribute::SourceFile(5)]).unwrap())
+        .with_section(
+            EncodedSection::comments(
+                2,
+                &[crate::Comment {
+                    address: 0,
+                    text: "example".to_owned(),
+                    coordinates: 0,
+                }],
+            )
+            .unwrap(),
+        )
+        .with_section(
+            EncodedSection::positions(
+                3,
+                &PositionSection {
+                    line_sizes: vec![7],
+                    entries: vec![PositionEntry::Source(5)],
+                },
+            )
+            .unwrap(),
+        );
+
+        let bytes = builder.encode().unwrap();
+        let reparsed = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(reparsed.header().uuid, [8; 16]);
+        assert_eq!(reparsed.asts().unwrap().len(), 1);
+        assert_eq!(reparsed.attributes().unwrap().unwrap().len(), 1);
+        assert_eq!(reparsed.comments().unwrap().unwrap().len(), 1);
+        assert_eq!(reparsed.positions().unwrap().unwrap().line_sizes, vec![7]);
+    }
+
+    #[test]
+    fn exposes_ast_addresses_when_encoding_from_owned_sections() {
+        let names =
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap();
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        let encoded = builder.encode_with_ast_addresses().unwrap();
+
+        assert_eq!(encoded.ast_addresses(), &[0]);
+        assert_eq!(
+            TastyFile::parse(encoded.as_slice())
+                .unwrap()
+                .asts()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_section_names_when_encoding_from_owned_sections() {
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![crate::RawName::Utf8("ASTs".to_owned())]).unwrap(),
+        )
+        .with_section(EncodedSection::raw(1, []));
+
+        assert!(matches!(
+            builder.encode(),
+            Err(TastyFileError::Sections(
+                crate::SectionError::InvalidNameReference {
+                    reference: 1,
+                    name_count: 1,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]
