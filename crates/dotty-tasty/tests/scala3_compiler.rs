@@ -6,7 +6,7 @@ mod corpus;
 #[path = "support/semantic.rs"]
 mod semantic;
 
-use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::tasty::{EncodedSection, StandardSection, TastyFile, TastyFileBuilder};
 
 fn scala3_compiler_corpus() -> corpus::Corpus {
     corpus::Corpus::load(
@@ -69,6 +69,101 @@ fn all_scala3_compiler_fixtures_decode_and_validate_as_compatible_tasty() {
         );
         assert!(!file.names().is_empty(), "fixture {}", path.display());
         assert!(!file.sections().is_empty(), "fixture {}", path.display());
+    }
+}
+
+#[test]
+fn all_scala3_compiler_fixtures_round_trip_through_file_encoder() {
+    for path in scala3_compiler_corpus().fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+        let encoded = file
+            .encode()
+            .unwrap_or_else(|error| panic!("failed to encode {}: {error}", path.display()));
+        let reparsed = TastyFile::parse_and_validate_compatible_with(&encoded, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to reparse {}: {error}", path.display()));
+
+        assert_eq!(
+            reparsed.header(),
+            file.header(),
+            "fixture {}",
+            path.display()
+        );
+        assert_eq!(reparsed.names(), file.names(), "fixture {}", path.display());
+        let original_sections: Vec<_> = file
+            .sections()
+            .iter()
+            .map(|section| (section.name, section.length, section.payload))
+            .collect();
+        let reparsed_sections: Vec<_> = reparsed
+            .sections()
+            .iter()
+            .map(|section| (section.name, section.length, section.payload))
+            .collect();
+        assert_eq!(
+            reparsed_sections,
+            original_sections,
+            "fixture {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn all_scala3_compiler_structured_files_validate_after_reencoding() {
+    for path in scala3_compiler_corpus().fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+        let structured = file.structured_asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode structured ASTs in {}: {error}",
+                path.display()
+            )
+        });
+        let original_ast_section = file
+            .section(StandardSection::Asts)
+            .expect("Scala compiler fixture must have an ASTs section");
+        let ast_section = EncodedSection::structured_asts(original_ast_section.name, &structured)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode structured ASTs in {}: {error}",
+                    path.display()
+                )
+            });
+
+        let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+        for section in file.sections().iter() {
+            if section.standard_kind(file.names()) == Some(StandardSection::Asts) {
+                builder.push_section(ast_section.clone());
+            } else {
+                builder.push_section(EncodedSection::raw(section.name, section.payload));
+            }
+        }
+
+        builder
+            .validate_compatible_with(28, 9, 0)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "structured re-encoding produced invalid references in {}: {error}",
+                    path.display()
+                )
+            });
+        let encoded = builder.encode().unwrap_or_else(|error| {
+            panic!(
+                "failed to encode the structured file {}: {error}",
+                path.display()
+            )
+        });
+        TastyFile::parse_and_validate_compatible_with(&encoded, 28, 9, 0).unwrap_or_else(|error| {
+            panic!(
+                "structured file output is not compatible TASTy {}: {error}",
+                path.display()
+            )
+        });
     }
 }
 
