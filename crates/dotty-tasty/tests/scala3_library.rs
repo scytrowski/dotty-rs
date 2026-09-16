@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dotty_tasty::tasty::{
-    PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile, Writer,
+    EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile,
+    TastyFileBuilder, Writer,
 };
 
 const EXPECTED_FIXTURE_COUNT: usize = 941;
@@ -294,4 +295,60 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
 
     assert!(node_count > 0);
     assert_eq!(node_count, byte_exact_count + normalized_count);
+}
+
+#[test]
+fn all_scala3_library_structured_files_validate_after_reencoding() {
+    for path in scala3_library_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let structured = file.structured_asts().unwrap_or_else(|error| {
+            panic!(
+                "failed to decode structured ASTs in {}: {error}",
+                path.display()
+            )
+        });
+        let ast_name = file
+            .section(StandardSection::Asts)
+            .expect("Scala library fixture must have an ASTs section")
+            .name;
+        let ast_section =
+            EncodedSection::structured_asts(ast_name, &structured).unwrap_or_else(|error| {
+                panic!(
+                    "failed to encode structured ASTs in {}: {error}",
+                    path.display()
+                )
+            });
+
+        let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+        for section in file.sections().iter() {
+            if section.standard_kind(file.names()) == Some(StandardSection::Asts) {
+                builder.push_section(ast_section.clone());
+            } else {
+                builder.push_section(EncodedSection::raw(section.name, section.payload));
+            }
+        }
+
+        builder.validate_scala_3_9().unwrap_or_else(|error| {
+            panic!(
+                "structured re-encoding produced invalid references in {}: {error}",
+                path.display()
+            )
+        });
+
+        let encoded = builder.encode().unwrap_or_else(|error| {
+            panic!(
+                "failed to encode the structured file {}: {error}",
+                path.display()
+            )
+        });
+        TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap_or_else(|error| {
+            panic!(
+                "structured file output is not a valid Scala 3.9.0 TASTy file {}: {error}",
+                path.display()
+            )
+        });
+    }
 }
