@@ -58,6 +58,10 @@ test. Baseline regeneration is performed with
 calling the Scala oracle and replaces the expectation only after successful
 generation.
 
+JAR-based manifests may declare `artifact` and `artifact_sha256` together. The
+shared manifest parser validates that the pair is complete and that the
+checksum is a 64-character hexadecimal SHA-256 digest.
+
 Future semantic expectations belong beside the materialized corpus and must
 record the Scala/compiler version and expectation-schema version. They should
 compare stable structural or semantic facts, not absolute AST offsets, unless

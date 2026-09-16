@@ -57,6 +57,14 @@ fn scala3_library_fixture_inventory_is_complete() {
     assert_eq!(corpus.manifest().source_kind, "jar");
     assert_eq!(corpus.manifest().scala_version, "3.9.0");
     assert_eq!(corpus.manifest().tasty_format, "28.9.0");
+    assert_eq!(
+        corpus.manifest().artifact.as_deref(),
+        Some("scala-library-3.9.0-bin-SNAPSHOT.jar")
+    );
+    assert_eq!(
+        corpus.manifest().artifact_sha256.as_deref(),
+        Some("8f4881ef32c90de03487555cf13a893e7f94e9f70361d000d5b8848842beecc7")
+    );
     let total_bytes: u64 = fixtures
         .iter()
         .map(|path| {

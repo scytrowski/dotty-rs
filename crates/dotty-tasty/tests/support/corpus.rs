@@ -12,6 +12,8 @@ pub struct CorpusManifest {
     pub tasty_root: PathBuf,
     pub selection_file: Option<PathBuf>,
     pub expectation_file: Option<PathBuf>,
+    pub artifact: Option<String>,
+    pub artifact_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,8 +185,45 @@ impl CorpusManifest {
             expectation_file: input.lines().filter_map(parse_assignment).find_map(
                 |(key, value)| (key == "expectation_file").then_some(PathBuf::from(value)),
             ),
+            artifact: input
+                .lines()
+                .filter_map(parse_assignment)
+                .find_map(|(key, value)| (key == "artifact").then_some(value.to_owned())),
+            artifact_sha256: optional_artifact_checksum(input)?,
         })
     }
+}
+
+fn optional_artifact_checksum(input: &str) -> Result<Option<String>, String> {
+    let artifact = input
+        .lines()
+        .filter_map(parse_assignment)
+        .find_map(|(key, value)| (key == "artifact").then_some(value));
+    let checksum = input
+        .lines()
+        .filter_map(parse_assignment)
+        .find_map(|(key, value)| (key == "artifact_sha256").then_some(value));
+
+    if artifact.is_some() != checksum.is_some() {
+        return Err(
+            "manifest fields \"artifact\" and \"artifact_sha256\" must be specified together"
+                .to_owned(),
+        );
+    }
+    if let Some(checksum) = checksum {
+        if checksum.len() != 64
+            || !checksum
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(
+                "manifest field \"artifact_sha256\" must contain 64 hexadecimal characters"
+                    .to_owned(),
+            );
+        }
+        return Ok(Some(checksum.to_owned()));
+    }
+    Ok(None)
 }
 
 fn parse_assignment(line: &str) -> Option<(&str, &str)> {
@@ -227,6 +266,8 @@ mod tests {
         assert_eq!(manifest.tasty_root, PathBuf::from("tasty"));
         assert_eq!(manifest.selection_file, None);
         assert_eq!(manifest.expectation_file, None);
+        assert_eq!(manifest.artifact, None);
+        assert_eq!(manifest.artifact_sha256, None);
     }
 
     #[test]
@@ -246,6 +287,8 @@ mod tests {
         assert_eq!(manifest.tasty_root, PathBuf::from("."));
         assert_eq!(manifest.selection_file, None);
         assert_eq!(manifest.expectation_file, None);
+        assert_eq!(manifest.artifact, None);
+        assert_eq!(manifest.artifact_sha256, None);
     }
 
     #[test]
@@ -262,6 +305,8 @@ mod tests {
                 tasty_root: PathBuf::from("."),
                 selection_file: Some(PathBuf::from("selection.txt")),
                 expectation_file: Some(PathBuf::from("expectations/semantic.json")),
+                artifact: None,
+                artifact_sha256: None,
             },
         };
 
@@ -278,6 +323,55 @@ mod tests {
         assert_eq!(
             corpus.tasty_root_path(),
             PathBuf::from("/tmp/example-corpus/./")
+        );
+    }
+
+    #[test]
+    fn parses_a_pinned_artifact_and_its_checksum() {
+        let checksum = "a".repeat(64);
+        let manifest = CorpusManifest::parse(&format!(
+            r#"
+            id = "example-1.0"
+            source_kind = "jar"
+            scala_version = "3.9.0"
+            tasty_format = "28.9.0"
+            artifact = "example.jar"
+            artifact_sha256 = "{checksum}"
+            fixture_count = 0
+            fixture_bytes = 0
+            "#
+        ))
+        .unwrap();
+
+        assert_eq!(manifest.artifact.as_deref(), Some("example.jar"));
+        assert_eq!(manifest.artifact_sha256.as_deref(), Some(checksum.as_str()));
+    }
+
+    #[test]
+    fn rejects_an_incomplete_or_malformed_artifact_checksum() {
+        let base = r#"
+            id = "example-1.0"
+            source_kind = "jar"
+            scala_version = "3.9.0"
+            tasty_format = "28.9.0"
+            fixture_count = 0
+            fixture_bytes = 0
+        "#;
+        let missing_checksum = format!("{base}\n artifact = \"example.jar\"");
+        let malformed_checksum = format!(
+            "{base}\n artifact = \"example.jar\"\n artifact_sha256 = \"{}\"",
+            "z".repeat(64)
+        );
+
+        assert!(
+            CorpusManifest::parse(&missing_checksum)
+                .unwrap_err()
+                .contains("must be specified together")
+        );
+        assert!(
+            CorpusManifest::parse(&malformed_checksum)
+                .unwrap_err()
+                .contains("64 hexadecimal characters")
         );
     }
 }
