@@ -11,6 +11,11 @@ The current compatibility target is Scala 3.9.0 and TASTy format version
 the specification, compatibility policy, and fixtures first. Version-dependent
 behavior must be documented explicitly.
 
+The workspace is named `dotty-rs`. The current package is `dotty-tasty` and
+the Rust library crate is `dotty`; public TASTy APIs should be exposed and
+tested through `dotty::tasty` so future compiler components can use sibling
+namespaces.
+
 Keep the binary, raw AST, structured AST, and file-level APIs deliberately
 separated. Prefer lossless raw representations when a semantic interpretation
 is incomplete or uncertain.

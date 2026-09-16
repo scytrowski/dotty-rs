@@ -7,6 +7,30 @@ pub mod section;
 pub mod term;
 pub mod writer;
 
+/// Scala 3 compiler libraries exposed under the `dotty` crate namespace.
+///
+/// The first public module is [`tasty`], which contains the TASTy wire and
+/// structural APIs. Keeping this namespace at the crate root leaves room for
+/// future compiler components without mixing them into the TASTy API.
+pub mod tasty {
+    pub use super::ast;
+    pub use super::ast::*;
+    pub use super::file;
+    pub use super::file::*;
+    pub use super::header;
+    pub use super::header::*;
+    pub use super::name_table;
+    pub use super::name_table::*;
+    pub use super::reader;
+    pub use super::reader::*;
+    pub use super::section;
+    pub use super::section::*;
+    pub use super::term;
+    pub use super::term::*;
+    pub use super::writer;
+    pub use super::writer::*;
+}
+
 pub use ast::{
     ABSTRACT_TAG, ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG,
     ANNOTATION_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ARTIFACT_TAG,
