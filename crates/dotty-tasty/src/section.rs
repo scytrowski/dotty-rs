@@ -953,7 +953,7 @@ fn top_level_nodes<'a>(bytes: &'a [u8]) -> Result<RawNodes<'a>, TermEncodeError>
 
 fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> {
     let mut reader = Reader::new(bytes);
-    let nodes = RawNodes::decode(&mut reader).map_err(AstError::from)?;
+    let nodes = RawNodes::decode(&mut reader)?;
     let index =
         nodes.deep_address_index_with_source_and_max_depth(bytes, DEFAULT_MAX_AST_INDEX_DEPTH)?;
 
