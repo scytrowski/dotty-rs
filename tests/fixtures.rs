@@ -258,109 +258,101 @@ fn all_tasty_fixtures_have_a_valid_section_table() {
                     type_or_template: tasty_rs::RawTree::LengthNode(template),
                     ..
                 } = body
+                    && template.tag == tasty_rs::TEMPLATE_TAG
                 {
-                    if template.tag == tasty_rs::TEMPLATE_TAG {
-                        let structure =
-                            template
-                                .decode_template_structure()
-                                .unwrap_or_else(|error| {
-                                    panic!(
-                                        "failed to parse template in {}: {error}",
-                                        path.display()
-                                    )
-                                });
-                        for parameter in structure
-                            .type_params
-                            .iter()
-                            .chain(structure.term_params.iter())
+                    let structure = template
+                        .decode_template_structure()
+                        .unwrap_or_else(|error| {
+                            panic!("failed to parse template in {}: {error}", path.display())
+                        });
+                    for parameter in structure
+                        .type_params
+                        .iter()
+                        .chain(structure.term_params.iter())
+                    {
+                        parameter.decode_body().unwrap_or_else(|error| {
+                            panic!(
+                                "failed to parse parameter body in {}: {error}",
+                                path.display()
+                            )
+                        });
+                    }
+                    if let Some(self_def) = structure.self_def.as_ref() {
+                        self_def.decode_self_def().unwrap_or_else(|error| {
+                            panic!(
+                                "failed to parse self definition in {}: {error}",
+                                path.display()
+                            )
+                        });
+                    }
+                    for parent in &structure.parents {
+                        if let tasty_rs::RawTree::Ast { tag, .. } = parent
+                            && matches!(
+                                *tag,
+                                tasty_rs::THIS_TAG
+                                    | tasty_rs::NEW_TAG
+                                    | tasty_rs::THROW_TAG
+                                    | tasty_rs::ELIDED_TAG
+                            )
                         {
-                            parameter.decode_body().unwrap_or_else(|error| {
+                            parent.decode_ast_child(*tag).unwrap_or_else(|error| {
                                 panic!(
-                                    "failed to parse parameter body in {}: {error}",
+                                    "failed to parse category-three tree in {}: {error}",
                                     path.display()
                                 )
                             });
                         }
-                        if let Some(self_def) = structure.self_def.as_ref() {
-                            self_def.decode_self_def().unwrap_or_else(|error| {
-                                panic!(
-                                    "failed to parse self definition in {}: {error}",
-                                    path.display()
-                                )
-                            });
-                        }
-                        for parent in &structure.parents {
-                            if let tasty_rs::RawTree::Ast { tag, .. } = parent {
-                                if matches!(
-                                    *tag,
-                                    tasty_rs::THIS_TAG
-                                        | tasty_rs::NEW_TAG
-                                        | tasty_rs::THROW_TAG
-                                        | tasty_rs::ELIDED_TAG
-                                ) {
-                                    parent.decode_ast_child(*tag).unwrap_or_else(|error| {
+                        if let tasty_rs::RawTree::LengthNode(raw) = parent {
+                            match raw.tag {
+                                tasty_rs::APPLY_TAG => {
+                                    raw.decode_apply().unwrap_or_else(|error| {
                                         panic!(
-                                            "failed to parse category-three tree in {}: {error}",
+                                            "failed to parse apply in {}: {error}",
                                             path.display()
                                         )
                                     });
                                 }
-                            }
-                            if let tasty_rs::RawTree::LengthNode(raw) = parent {
-                                match raw.tag {
-                                    tasty_rs::APPLY_TAG => {
-                                        raw.decode_apply().unwrap_or_else(|error| {
-                                            panic!(
-                                                "failed to parse apply in {}: {error}",
-                                                path.display()
-                                            )
-                                        });
-                                    }
-                                    tasty_rs::BLOCK_TAG => {
-                                        raw.decode_block().unwrap_or_else(|error| {
-                                            panic!(
-                                                "failed to parse block in {}: {error}",
-                                                path.display()
-                                            )
-                                        });
-                                    }
-                                    tasty_rs::TYPEAPPLY_TAG => {
-                                        raw.decode_type_apply().unwrap_or_else(|error| {
-                                            panic!(
-                                                "failed to parse type apply in {}: {error}",
-                                                path.display()
-                                            )
-                                        });
-                                    }
-                                    tasty_rs::TYPED_TAG => {
-                                        raw.decode_typed().unwrap_or_else(|error| {
-                                            panic!(
-                                                "failed to parse typed tree in {}: {error}",
-                                                path.display()
-                                            )
-                                        });
-                                    }
-                                    _ => {}
+                                tasty_rs::BLOCK_TAG => {
+                                    raw.decode_block().unwrap_or_else(|error| {
+                                        panic!(
+                                            "failed to parse block in {}: {error}",
+                                            path.display()
+                                        )
+                                    });
                                 }
+                                tasty_rs::TYPEAPPLY_TAG => {
+                                    raw.decode_type_apply().unwrap_or_else(|error| {
+                                        panic!(
+                                            "failed to parse type apply in {}: {error}",
+                                            path.display()
+                                        )
+                                    });
+                                }
+                                tasty_rs::TYPED_TAG => {
+                                    raw.decode_typed().unwrap_or_else(|error| {
+                                        panic!(
+                                            "failed to parse typed tree in {}: {error}",
+                                            path.display()
+                                        )
+                                    });
+                                }
+                                _ => {}
                             }
                         }
-                        for nested in structure.stats.iter() {
-                            if matches!(nested.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
-                                nested.decode_import_export().unwrap_or_else(|error| {
-                                    panic!(
-                                        "failed to parse nested import/export in {}: {error}",
-                                        path.display()
-                                    )
-                                });
-                            }
-                            if nested.tag == tasty_rs::DEFDEF_TAG {
-                                nested.decode_defdef_body().unwrap_or_else(|error| {
-                                    panic!(
-                                        "failed to parse defdef body in {}: {error}",
-                                        path.display()
-                                    )
-                                });
-                            }
+                    }
+                    for nested in structure.stats.iter() {
+                        if matches!(nested.tag, tasty_rs::IMPORT_TAG | tasty_rs::EXPORT_TAG) {
+                            nested.decode_import_export().unwrap_or_else(|error| {
+                                panic!(
+                                    "failed to parse nested import/export in {}: {error}",
+                                    path.display()
+                                )
+                            });
+                        }
+                        if nested.tag == tasty_rs::DEFDEF_TAG {
+                            nested.decode_defdef_body().unwrap_or_else(|error| {
+                                panic!("failed to parse defdef body in {}: {error}", path.display())
+                            });
                         }
                     }
                 }
@@ -385,8 +377,8 @@ fn all_tasty_fixtures_decode_through_the_complete_file_model() {
             "fixture {}",
             path.display()
         );
-        assert!(file.names().len() > 0, "fixture {}", path.display());
-        assert!(file.sections().len() > 0, "fixture {}", path.display());
+        assert!(!file.names().is_empty(), "fixture {}", path.display());
+        assert!(!file.sections().is_empty(), "fixture {}", path.display());
         let mut name_builder = NameTable::builder();
         for entry in file.names().entries() {
             name_builder.intern(entry.clone()).unwrap_or_else(|error| {

@@ -286,13 +286,13 @@ impl NameTable {
 
     fn validate_references(&self) -> Result<(), NameTableError> {
         for (entry_index, entry) in self.entries.iter().enumerate() {
-            if let RawName::Unknown { tag, .. } = entry {
-                if is_known_name_tag(*tag) {
-                    return Err(NameTableError::InvalidTag {
-                        tag: *tag,
-                        entry_index,
-                    });
-                }
+            if let RawName::Unknown { tag, .. } = entry
+                && is_known_name_tag(*tag)
+            {
+                return Err(NameTableError::InvalidTag {
+                    tag: *tag,
+                    entry_index,
+                });
             }
 
             let parameter_signatures: &[ParamSig] = match entry {
@@ -409,6 +409,10 @@ impl NameTableBuilder {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -908,10 +912,12 @@ mod tests {
     #[test]
     fn builder_interns_duplicates_and_preserves_first_seen_order() {
         let mut builder = NameTable::builder();
+        assert!(builder.is_empty());
         assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
         assert_eq!(builder.intern(RawName::Utf8("member".to_owned())), Ok(2));
         assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
         assert_eq!(builder.len(), 2);
+        assert!(!builder.is_empty());
 
         let names = builder.finish().unwrap();
         assert_eq!(

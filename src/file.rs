@@ -549,13 +549,13 @@ impl<'a> TastyFile<'a> {
 
         if let Some(attributes) = &attributes {
             for attribute in attributes {
-                if let Attribute::SourceFile(reference) = attribute {
-                    if self.name(*reference).is_none() {
-                        return Err(TastyFileError::InvalidNameReference {
-                            context: "SOURCEFILE attribute",
-                            reference: *reference,
-                        });
-                    }
+                if let Attribute::SourceFile(reference) = attribute
+                    && self.name(*reference).is_none()
+                {
+                    return Err(TastyFileError::InvalidNameReference {
+                        context: "SOURCEFILE attribute",
+                        reference: *reference,
+                    });
                 }
             }
         }

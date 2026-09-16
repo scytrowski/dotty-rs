@@ -1161,7 +1161,6 @@ mod tests {
             super::RawTree::NatAst {
                 tag: 112,
                 value: 5,
-                child: _,
                 ..
             }
         ));
