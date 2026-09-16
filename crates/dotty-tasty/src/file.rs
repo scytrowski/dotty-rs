@@ -1994,6 +1994,7 @@ mod tests {
         let mut comments = crate::Writer::new();
         crate::Comment::encode_all(
             &[crate::Comment {
+                address: 1,
                 text: "example".to_owned(),
                 coordinates: 0,
             }],
@@ -2062,6 +2063,7 @@ mod tests {
             EncodedSection::comments(
                 2,
                 &[crate::Comment {
+                    address: 1,
                     text: "example".to_owned(),
                     coordinates: 0,
                 }],

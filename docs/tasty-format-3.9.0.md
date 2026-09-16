@@ -865,12 +865,13 @@ atomically during validation and encoding.
 The `Comments` section contains entries of the form:
 
 ```text
-Comment = Utf8 LongInt
+Comment = ASTAddress Utf8 LongInt
+ASTAddress = Nat
 ```
 
-The comment text is encoded as UTF-8, and the final element contains the
-comment coordinates. Comments do not carry AST addresses in the TASTy wire
-format.
+The first element identifies the AST definition carrying the comment. The
+comment text is encoded as UTF-8, and the final element contains the comment
+coordinates.
 
 ## 11. Attributes
 
