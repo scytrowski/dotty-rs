@@ -4,6 +4,8 @@ use std::path::Path;
 #[path = "support/corpus.rs"]
 mod corpus;
 
+use dotty_tasty::tasty::TastyFile;
+
 fn scala3_compiler_corpus() -> corpus::Corpus {
     corpus::Corpus::load(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-compiler"),
@@ -38,4 +40,30 @@ fn scala3_compiler_fixture_inventory_is_complete() {
     );
     assert_eq!(fixtures.len(), corpus.manifest().fixture_count);
     assert_eq!(total_bytes, corpus.manifest().fixture_bytes);
+}
+
+#[test]
+fn all_scala3_compiler_fixtures_decode_and_validate_as_compatible_tasty() {
+    for path in scala3_compiler_corpus().fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_and_validate_compatible_with(&bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+
+        assert_eq!(
+            file.header().major_version,
+            28,
+            "fixture {}",
+            path.display()
+        );
+        assert_eq!(file.header().minor_version, 8, "fixture {}", path.display());
+        assert_eq!(
+            file.header().experimental_version,
+            0,
+            "fixture {}",
+            path.display()
+        );
+        assert!(!file.names().is_empty(), "fixture {}", path.display());
+        assert!(!file.sections().is_empty(), "fixture {}", path.display());
+    }
 }
