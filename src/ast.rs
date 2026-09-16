@@ -4,7 +4,7 @@ use crate::term::{
     AstRef, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
 };
 use crate::writer::{WriteError, Writer};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 
 pub const DEFAULT_MAX_AST_INDEX_DEPTH: usize = 1024;
@@ -149,6 +149,17 @@ pub struct NameReference {
     pub reference: NameRef,
 }
 
+/// A structural parent-to-child edge in the global AST index.
+///
+/// The edge is derived from the enclosing TASTy tree grammar. Its `child`
+/// order is the order in which child trees occur on the wire; it is not
+/// necessarily sorted by absolute address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstTreeEdge {
+    pub parent: AstTreeNode,
+    pub child: AstTreeNode,
+}
+
 impl<'a> RawNode<'a> {
     /// Construct a category-five AST node ready for encoding.
     ///
@@ -187,6 +198,8 @@ pub struct RawNodes<'a> {
 pub struct AstAddressIndex<'a> {
     nodes: Vec<RawNode<'a>>,
     all_nodes: Vec<AstTreeNode>,
+    edges: Vec<AstTreeEdge>,
+    edges_by_child: Vec<AstTreeEdge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +534,7 @@ pub struct WhileNode<'a> {
 pub struct AstChildNode<'a> {
     pub tag: u8,
     pub child: RawTree<'a>,
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +590,8 @@ pub struct CaseDefNode<'a> {
     pub pattern: RawTree<'a>,
     pub body: RawTree<'a>,
     pub guard: Option<RawTree<'a>>,
+    pub payload: &'a [u8],
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,8 +806,16 @@ pub enum DefinitionTail<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParameterNode<'a> {
-    TypeParam { name: u32, body: &'a [u8] },
-    TermParam { name: u32, body: &'a [u8] },
+    TypeParam {
+        name: u32,
+        body: &'a [u8],
+        offset: usize,
+    },
+    TermParam {
+        name: u32,
+        body: &'a [u8],
+        offset: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,6 +825,19 @@ pub struct ParameterBody<'a> {
 }
 
 impl<'a> ParameterNode<'a> {
+    pub fn tag(&self) -> u8 {
+        match self {
+            Self::TypeParam { .. } => TYPEPARAM_TAG,
+            Self::TermParam { .. } => PARAM_TAG,
+        }
+    }
+
+    pub fn offset(&self) -> usize {
+        match self {
+            Self::TypeParam { offset, .. } | Self::TermParam { offset, .. } => *offset,
+        }
+    }
+
     pub fn name(&self) -> u32 {
         match self {
             Self::TypeParam { name, .. } | Self::TermParam { name, .. } => *name,
@@ -1010,7 +1047,12 @@ impl<'a> RawNodes<'a> {
             })
             .collect::<Vec<_>>();
         all_nodes.sort_unstable_by_key(|node| node.offset);
-        AstAddressIndex { nodes, all_nodes }
+        AstAddressIndex {
+            nodes,
+            all_nodes,
+            edges: Vec::new(),
+            edges_by_child: Vec::new(),
+        }
     }
 
     pub(crate) fn deep_address_index_with_source_and_max_depth(
@@ -1024,7 +1066,15 @@ impl<'a> RawNodes<'a> {
         collect_raw_nodes_deep(self, source, 0, &context, &mut nodes, &mut all_nodes)?;
         nodes.sort_unstable_by_key(|node| node.offset);
         all_nodes.sort_unstable_by_key(|node| node.offset);
-        Ok(AstAddressIndex { nodes, all_nodes })
+        let edges = context.into_edges();
+        let mut edges_by_child = edges.clone();
+        edges_by_child.sort_unstable_by_key(|edge| edge.child.offset);
+        Ok(AstAddressIndex {
+            nodes,
+            all_nodes,
+            edges,
+            edges_by_child,
+        })
     }
 
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
@@ -1057,6 +1107,8 @@ impl<'a> RawNodes<'a> {
 struct AstIndexContext {
     depth: Cell<usize>,
     max_depth: usize,
+    parent: Cell<Option<AstTreeNode>>,
+    edges: RefCell<Vec<AstTreeEdge>>,
 }
 
 impl AstIndexContext {
@@ -1064,7 +1116,33 @@ impl AstIndexContext {
         Self {
             depth: Cell::new(0),
             max_depth,
+            parent: Cell::new(None),
+            edges: RefCell::new(Vec::new()),
         }
+    }
+
+    fn record_node(&self, node: AstTreeNode) {
+        if let Some(parent) = self.parent.get() {
+            self.edges.borrow_mut().push(AstTreeEdge {
+                parent,
+                child: node,
+            });
+        }
+    }
+
+    fn with_parent<T>(
+        &self,
+        parent: Option<AstTreeNode>,
+        action: impl FnOnce() -> Result<T, AstError>,
+    ) -> Result<T, AstError> {
+        let previous = self.parent.replace(parent);
+        let result = action();
+        self.parent.set(previous);
+        result
+    }
+
+    fn into_edges(self) -> Vec<AstTreeEdge> {
+        self.edges.into_inner()
     }
 
     fn enter(&self, offset: usize) -> Result<AstIndexDepth<'_>, AstError> {
@@ -1156,6 +1234,34 @@ impl<'a> AstAddressIndex<'a> {
         })
     }
 
+    /// Returns the structural parent of a visible node.
+    ///
+    /// Top-level nodes and indexes created with [`RawNodes::address_index`]
+    /// have no parent. The lookup is address-based and returns `None` both
+    /// for an unknown address and for a root node.
+    pub fn parent_of(&self, child_address: u32) -> Option<AstTreeNode> {
+        self.edges_by_child
+            .binary_search_by_key(&child_address, |edge| edge.child.offset as u32)
+            .ok()
+            .map(|index| self.edges_by_child[index].parent)
+    }
+
+    /// Iterates over the direct children of a visible node in wire order.
+    ///
+    /// The result is empty for an unknown address, a leaf node, or a shallow
+    /// index created with [`RawNodes::address_index`].
+    pub fn children_of(&self, parent_address: u32) -> impl Iterator<Item = AstTreeNode> + '_ {
+        self.edges
+            .iter()
+            .filter(move |edge| edge.parent.offset as u64 == u64::from(parent_address))
+            .map(|edge| edge.child)
+    }
+
+    /// Iterates over all parent-to-child edges in traversal order.
+    pub fn iter_tree_edges(&self) -> impl Iterator<Item = AstTreeEdge> + '_ {
+        self.edges.iter().copied()
+    }
+
     pub fn node_addresses(&self) -> impl Iterator<Item = u32> + '_ {
         self.all_nodes.iter().map(|node| node.offset as u32)
     }
@@ -1230,23 +1336,27 @@ fn collect_raw_node_deep<'a>(
     let mut located = node.clone();
     located.offset = absolute_offset;
     output.push(located);
-    all_output.push(AstTreeNode {
+    let visible = AstTreeNode {
         tag: node.tag,
         offset: absolute_offset,
-    });
+    };
+    context.record_node(visible);
+    all_output.push(visible);
 
     let payload_base = raw_payload_base(source, node, base);
     let Ok(structured) = node.decode_structured() else {
         return Ok(());
     };
-    collect_structured_nodes(
-        &structured,
-        node.payload,
-        payload_base,
-        context,
-        output,
-        all_output,
-    )
+    context.with_parent(Some(visible), || {
+        collect_structured_nodes(
+            &structured,
+            node.payload,
+            payload_base,
+            context,
+            output,
+            all_output,
+        )
+    })
 }
 
 fn collect_tree_nodes<'a>(
@@ -1265,43 +1375,53 @@ fn collect_tree_nodes<'a>(
     let _depth = context.enter(base.saturating_add(offset))?;
     match tree {
         RawTree::Leaf(term) => {
-            all_output.push(AstTreeNode {
+            let visible = AstTreeNode {
                 tag: term.tag,
                 offset: base.saturating_add(term.offset),
-            });
+            };
+            context.record_node(visible);
+            all_output.push(visible);
         }
         RawTree::Ast { tag, offset, child }
         | RawTree::NatAst {
             tag, offset, child, ..
         } => {
-            all_output.push(AstTreeNode {
+            let visible = AstTreeNode {
                 tag: *tag,
                 offset: base.saturating_add(*offset),
-            });
-            collect_tree_nodes(child, source, base, context, output, all_output)?;
+            };
+            context.record_node(visible);
+            all_output.push(visible);
+            context.with_parent(Some(visible), || {
+                collect_tree_nodes(child, source, base, context, output, all_output)
+            })?;
         }
         RawTree::LengthNode(node) => {
             let absolute_offset = base.saturating_add(node.offset);
             let mut located = node.clone();
             located.offset = absolute_offset;
             output.push(located);
-            all_output.push(AstTreeNode {
+            let visible = AstTreeNode {
                 tag: node.tag,
                 offset: absolute_offset,
-            });
+            };
+            context.record_node(visible);
+            all_output.push(visible);
 
             let payload_base = raw_payload_base(source, node, base);
             let Ok(structured) = node.decode_structured() else {
                 return Ok(());
             };
-            collect_structured_nodes(
-                &structured,
-                node.payload,
-                payload_base,
-                context,
-                output,
-                all_output,
-            )?;
+            context.with_parent(Some(visible), || {
+                collect_structured_nodes(
+                    &structured,
+                    node.payload,
+                    payload_base,
+                    context,
+                    output,
+                    all_output,
+                )
+            })?;
         }
     }
     Ok(())
@@ -1381,7 +1501,7 @@ fn collect_definition_body_nodes<'a>(
     Ok(())
 }
 
-fn collect_parameter_nodes<'a>(
+fn collect_parameter_body_nodes<'a>(
     parameter: &ParameterNode<'a>,
     source: &[u8],
     base: usize,
@@ -1420,7 +1540,23 @@ fn collect_parameters_nodes<'a>(
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for parameter in parameters {
-        collect_parameter_nodes(parameter, source, base, context, output, all_output)?;
+        let absolute_offset = base.saturating_add(parameter.offset());
+        let raw = RawNode {
+            tag: parameter.tag(),
+            offset: absolute_offset,
+            payload: parameter.body(),
+        };
+        let tag = raw.tag;
+        output.push(raw);
+        let visible = AstTreeNode {
+            tag,
+            offset: absolute_offset,
+        };
+        context.record_node(visible);
+        all_output.push(visible);
+        context.with_parent(Some(visible), || {
+            collect_parameter_body_nodes(parameter, source, base, context, output, all_output)
+        })?;
     }
     Ok(())
 }
@@ -1441,6 +1577,42 @@ fn collect_case_def_nodes<'a>(
     Ok(())
 }
 
+fn collect_embedded_case_def_node<'a>(
+    case_def: &CaseDefNode<'a>,
+    source: &[u8],
+    base: usize,
+    context: &AstIndexContext,
+    output: &mut Vec<RawNode<'a>>,
+    all_output: &mut Vec<AstTreeNode>,
+) -> Result<(), AstError> {
+    let absolute_offset = base.saturating_add(case_def.offset);
+    let raw = RawNode {
+        tag: CASEDEF_TAG,
+        offset: case_def.offset,
+        payload: case_def.payload,
+    };
+    let mut located = raw.clone();
+    located.offset = absolute_offset;
+    output.push(located);
+    let visible = AstTreeNode {
+        tag: CASEDEF_TAG,
+        offset: absolute_offset,
+    };
+    context.record_node(visible);
+    all_output.push(visible);
+    let payload_base = raw_payload_base(source, &raw, base);
+    context.with_parent(Some(visible), || {
+        collect_case_def_nodes(
+            case_def,
+            case_def.payload,
+            payload_base,
+            context,
+            output,
+            all_output,
+        )
+    })
+}
+
 fn collect_case_defs_nodes<'a>(
     case_defs: &[CaseDefNode<'a>],
     source: &[u8],
@@ -1450,7 +1622,7 @@ fn collect_case_defs_nodes<'a>(
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for case_def in case_defs {
-        collect_case_def_nodes(case_def, source, base, context, output, all_output)?;
+        collect_embedded_case_def_node(case_def, source, base, context, output, all_output)?;
     }
     Ok(())
 }
@@ -1519,7 +1691,7 @@ fn collect_structured_nodes<'a>(
             }
         }
         StructuredNode::Parameter(parameter) => {
-            collect_parameter_nodes(parameter, source, base, context, output, all_output)?;
+            collect_parameter_body_nodes(parameter, source, base, context, output, all_output)?;
         }
         StructuredNode::Apply(apply) => {
             tree!(&apply.function);
@@ -1599,7 +1771,23 @@ fn collect_structured_nodes<'a>(
         StructuredNode::Unapply(unapply) => {
             tree!(&unapply.function);
             for implicit_arg in &unapply.implicit_args {
-                tree!(&implicit_arg.child);
+                let absolute_offset = base.saturating_add(implicit_arg.offset);
+                let visible = AstTreeNode {
+                    tag: implicit_arg.tag,
+                    offset: absolute_offset,
+                };
+                context.record_node(visible);
+                all_output.push(visible);
+                context.with_parent(Some(visible), || {
+                    collect_tree_nodes(
+                        &implicit_arg.child,
+                        source,
+                        base.saturating_add(implicit_arg.offset).saturating_add(1),
+                        context,
+                        output,
+                        all_output,
+                    )
+                })?;
             }
             tree!(&unapply.type_tree);
             trees!(&unapply.patterns);
@@ -2111,6 +2299,8 @@ impl<'a> RawNode<'a> {
             pattern,
             body,
             guard,
+            payload: self.payload,
+            offset: self.offset,
         })
     }
 
@@ -3185,8 +3375,16 @@ impl<'a> RawNode<'a> {
         let body = reader.read_bytes(reader.remaining())?;
 
         match self.tag {
-            TYPEPARAM_TAG => Ok(ParameterNode::TypeParam { name, body }),
-            PARAM_TAG => Ok(ParameterNode::TermParam { name, body }),
+            TYPEPARAM_TAG => Ok(ParameterNode::TypeParam {
+                name,
+                body,
+                offset: self.offset,
+            }),
+            PARAM_TAG => Ok(ParameterNode::TermParam {
+                name,
+                body,
+                offset: self.offset,
+            }),
             _ => Err(AstError::UnexpectedTag {
                 expected: TYPEPARAM_TAG,
                 actual: self.tag,
@@ -4050,9 +4248,10 @@ impl<'a> RawTree<'a> {
 
     pub fn decode_ast_child(&self, expected: u8) -> Result<AstChildNode<'a>, AstError> {
         match self {
-            RawTree::Ast { tag, child, .. } if *tag == expected => Ok(AstChildNode {
+            RawTree::Ast { tag, offset, child } if *tag == expected => Ok(AstChildNode {
                 tag: *tag,
                 child: (**child).clone(),
+                offset: *offset,
             }),
             tree => {
                 let (actual, offset) = raw_tree_tag_offset(tree);
@@ -5051,7 +5250,7 @@ mod tests {
     use super::{
         ALTERNATIVE_TAG, ANDTYPE_TAG, ANNOTATEDTPT_TAG, ANNOTATEDTYPE_TAG, ANNOTATION_TAG,
         APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, APPLYSIGPOLY_TAG, ASSIGN_TAG, AstError,
-        BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
+        AstTreeEdge, BIND_TAG, BLOCK_TAG, BOUNDED_TAG, BYNAMETPT_TAG, BYNAMETYPE_TAG, CASEDEF_TAG,
         CLASSCONST_TAG, DEFAULT_MAX_AST_INDEX_DEPTH, DEFDEF_TAG, DefDefBody, DefDefHeaderItem,
         DefinitionBody, DefinitionNode, DefinitionTail, ELIDED_TAG, EXPLICITTPT_TAG, EXPORT_TAG,
         FLEXIBLETYPE_TAG, HOLE_TAG, IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPLICIT_TAG, IMPLICITARG_TAG,
@@ -5070,7 +5269,7 @@ mod tests {
         VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
-    use crate::term::TermEncodeError;
+    use crate::term::{AstTreeNode, TermEncodeError};
     use crate::writer::{WriteError, Writer};
 
     #[test]
@@ -6664,6 +6863,8 @@ mod tests {
         assert!(matches!(case_def.pattern, RawTree::Leaf(_)));
         assert!(matches!(case_def.body, RawTree::Leaf(_)));
         assert!(matches!(case_def.guard, Some(RawTree::Leaf(_))));
+        assert_eq!(case_def.offset, 0);
+        assert_eq!(case_def.payload, &bytes[2..]);
     }
 
     #[test]
@@ -6760,6 +6961,7 @@ mod tests {
         assert!(matches!(unapply.function, RawTree::Leaf(_)));
         assert_eq!(unapply.implicit_args.len(), 1);
         assert_eq!(unapply.implicit_args[0].tag, IMPLICITARG_TAG);
+        assert_eq!(unapply.implicit_args[0].offset, 2);
         assert!(matches!(unapply.type_tree, RawTree::Leaf(_)));
         assert_eq!(unapply.patterns.len(), 1);
     }
@@ -8440,6 +8642,107 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 4, 5]
         );
+    }
+
+    #[test]
+    fn records_direct_ast_parent_child_edges_in_wire_order() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(
+            index.iter_tree_edges().collect::<Vec<_>>(),
+            vec![
+                AstTreeEdge {
+                    parent: AstTreeNode {
+                        tag: APPLY_TAG,
+                        offset: 0,
+                    },
+                    child: AstTreeNode {
+                        tag: BLOCK_TAG,
+                        offset: 2,
+                    },
+                },
+                AstTreeEdge {
+                    parent: AstTreeNode {
+                        tag: BLOCK_TAG,
+                        offset: 2,
+                    },
+                    child: AstTreeNode { tag: 2, offset: 4 },
+                },
+                AstTreeEdge {
+                    parent: AstTreeNode {
+                        tag: BLOCK_TAG,
+                        offset: 2,
+                    },
+                    child: AstTreeNode {
+                        tag: VALDEF_TAG,
+                        offset: 5,
+                    },
+                },
+                AstTreeEdge {
+                    parent: AstTreeNode {
+                        tag: VALDEF_TAG,
+                        offset: 5,
+                    },
+                    child: AstTreeNode { tag: 2, offset: 8 },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn looks_up_ast_parents_and_children_without_losing_child_order() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
+        assert_eq!(index.parent_of(0), None);
+        assert_eq!(
+            index.parent_of(8),
+            Some(AstTreeNode {
+                tag: VALDEF_TAG,
+                offset: 5,
+            })
+        );
+        assert_eq!(
+            index.children_of(2).collect::<Vec<_>>(),
+            vec![
+                AstTreeNode { tag: 2, offset: 4 },
+                AstTreeNode {
+                    tag: VALDEF_TAG,
+                    offset: 5,
+                },
+            ]
+        );
+        assert!(index.children_of(4).next().is_none());
+        assert!(index.parent_of(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn shallow_ast_indexes_have_no_structural_edges() {
+        let nodes = RawNodes::from_entries(vec![RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &[],
+        }])
+        .unwrap();
+
+        let index = nodes.address_index();
+
+        assert!(index.iter_tree_edges().next().is_none());
+        assert!(index.children_of(0).next().is_none());
+        assert!(index.parent_of(0).is_none());
     }
 
     #[test]

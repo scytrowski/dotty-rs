@@ -741,6 +741,24 @@ impl<'a> TastyFile<'a> {
             .collect())
     }
 
+    /// Return the structural parent of a visible AST node.
+    pub fn ast_parent_of(&self, child_address: u32) -> Result<Option<AstTreeNode>, TastyFileError> {
+        Ok(self.ast_address_index()?.parent_of(child_address))
+    }
+
+    /// Collect the direct children of a visible AST node in wire order.
+    pub fn ast_children_of(&self, parent_address: u32) -> Result<Vec<AstTreeNode>, TastyFileError> {
+        Ok(self
+            .ast_address_index()?
+            .children_of(parent_address)
+            .collect())
+    }
+
+    /// Collect all structural AST parent-to-child edges in traversal order.
+    pub fn ast_tree_edges(&self) -> Result<Vec<crate::AstTreeEdge>, TastyFileError> {
+        Ok(self.ast_address_index()?.iter_tree_edges().collect())
+    }
+
     /// Collect AST references from every top-level node in wire order.
     ///
     /// The owner address identifies the top-level node containing the
@@ -1069,6 +1087,29 @@ mod tests {
         assert_eq!(
             file.ast_nodes_with_tag(crate::DEFDEF_TAG).unwrap(),
             expected
+        );
+    }
+
+    #[test]
+    fn exposes_fixture_ast_parent_and_children_through_the_file_api() {
+        let bytes = include_bytes!("../tests/fixtures/simple_def/SimpleDef.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let edge = file
+            .ast_tree_edges()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("fixture should contain a nested AST tree");
+
+        assert_eq!(
+            file.ast_parent_of(edge.child.offset as u32).unwrap(),
+            Some(edge.parent)
+        );
+        assert_eq!(
+            file.ast_children_of(edge.parent.offset as u32)
+                .unwrap()
+                .first(),
+            Some(&edge.child)
         );
     }
 

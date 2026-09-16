@@ -520,6 +520,14 @@ Scala semantic meaning to a tag.
 address-range query `[start, end)`. The file-level
 `ast_nodes_in_address_range_with_max_depth()` variant exposes the same
 configurable traversal limit as the global index.
+The deep index also records structural `AstTreeEdge` values. Use
+`AstAddressIndex::parent_of()` for a direct parent lookup,
+`AstAddressIndex::children_of()` for direct children in payload order, or
+`AstAddressIndex::iter_tree_edges()` to inspect the complete traversal. The
+file-level `TastyFile::ast_parent_of()`, `ast_children_of()`, and
+`ast_tree_edges()` methods expose the same view. Shallow indexes created with
+`RawNodes::address_index()` intentionally contain no edges, because they do
+not decode enclosing tree grammars.
 `TastyFile::ast_references_from()` and `TastyFile::ast_references_to()` filter
 the collected AST reference graph by owner or target address while preserving
 wire order. These APIs expose structural edges only; resolving a reference to

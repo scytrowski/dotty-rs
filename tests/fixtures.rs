@@ -992,6 +992,57 @@ fn all_tasty_fixtures_iterate_indexed_ast_nodes_in_address_order() {
 }
 
 #[test]
+fn all_tasty_fixtures_preserve_ast_parent_child_relationships() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+        let edges = index.iter_tree_edges().collect::<Vec<_>>();
+
+        for edge in &edges {
+            assert_eq!(
+                index.get_node(edge.parent.offset as u32),
+                Some(edge.parent),
+                "edge parent is not indexed in {}",
+                path.display()
+            );
+            assert_eq!(
+                index.get_node(edge.child.offset as u32),
+                Some(edge.child),
+                "edge child is not indexed in {}",
+                path.display()
+            );
+            assert_eq!(
+                index.parent_of(edge.child.offset as u32),
+                Some(edge.parent),
+                "parent lookup disagrees in {}",
+                path.display()
+            );
+        }
+
+        for parent in index.iter_nodes() {
+            let expected = edges
+                .iter()
+                .filter(|edge| edge.parent == parent)
+                .map(|edge| edge.child)
+                .collect::<Vec<_>>();
+            let actual = index.children_of(parent.offset as u32).collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                expected,
+                "children lookup disagrees for address {} in {}",
+                parent.offset,
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_filter_visible_ast_nodes_by_tag() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
