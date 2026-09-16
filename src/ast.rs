@@ -8308,16 +8308,48 @@ mod tests {
         assert_eq!(index.addresses().collect::<Vec<_>>(), vec![2, 9]);
         assert_eq!(index.get(2).map(|node| node.tag), Some(VALDEF_TAG));
         assert_eq!(index.get(9).map(|node| node.tag), Some(DEFDEF_TAG));
+    }
+
+    #[test]
+    fn iterates_indexed_category_five_nodes_in_address_order() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode {
+                tag: DEFDEF_TAG,
+                offset: 9,
+                payload: &[],
+            },
+            RawNode {
+                tag: VALDEF_TAG,
+                offset: 2,
+                payload: &[],
+            },
+        ])
+        .unwrap();
+        let index = nodes.address_index();
+
         assert_eq!(
             index.iter().map(|node| node.offset).collect::<Vec<_>>(),
             vec![2, 9]
         );
+    }
+
+    #[test]
+    fn iterates_all_visible_ast_nodes_in_address_order() {
+        let bytes = [
+            APPLY_TAG, 0x87, BLOCK_TAG, 0x85, 2, VALDEF_TAG, 0x82, 0x81, 2,
+        ];
+        let mut reader = Reader::new(&bytes);
+        let nodes = RawNodes::decode(&mut reader).unwrap();
+        let index = nodes
+            .deep_address_index_with_source_and_max_depth(&bytes, DEFAULT_MAX_AST_INDEX_DEPTH)
+            .unwrap();
+
         assert_eq!(
             index
                 .iter_nodes()
                 .map(|node| node.offset)
                 .collect::<Vec<_>>(),
-            vec![2, 9]
+            vec![0, 2, 4, 5, 8]
         );
     }
 

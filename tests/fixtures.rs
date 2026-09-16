@@ -733,6 +733,48 @@ fn all_tasty_fixture_ast_references_resolve_in_the_global_ast_index() {
 }
 
 #[test]
+fn all_tasty_fixtures_iterate_indexed_ast_nodes_in_address_order() {
+    for path in tasty_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file.ast_address_index().unwrap_or_else(|error| {
+            panic!("failed to index AST nodes in {}: {error}", path.display())
+        });
+
+        let category_five_addresses = index.addresses().collect::<Vec<_>>();
+        let iterated_category_five_addresses = index
+            .iter()
+            .map(|node| node.offset as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            iterated_category_five_addresses,
+            category_five_addresses,
+            "category-five iterator disagrees with addresses in {}",
+            path.display()
+        );
+
+        let visible_addresses = index.node_addresses().collect::<Vec<_>>();
+        let iterated_visible_addresses = index
+            .iter_nodes()
+            .map(|node| node.offset as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            iterated_visible_addresses,
+            visible_addresses,
+            "visible-node iterator disagrees with node_addresses in {}",
+            path.display()
+        );
+        assert!(
+            visible_addresses.windows(2).all(|pair| pair[0] <= pair[1]),
+            "visible AST addresses are not ordered in {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn all_tasty_fixtures_round_trip_byte_for_byte_through_the_raw_encoder() {
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
