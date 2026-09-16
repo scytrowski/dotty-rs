@@ -34,6 +34,27 @@ inventing a tag-to-language-feature mapping.
 Corpus-wide tests remain responsible for file invariants and round-trip
 guarantees. They complement, but do not replace, the named fixture tests.
 
+## Baseline corpora
+
+External-library compatibility suites use a corpus directory with a
+`manifest.toml` file. The manifest is the source of truth for the baseline
+identifier, Scala and TASTy versions, fixture root, and expected inventory
+count and byte size. Tests discover `.tasty` files from the manifest-defined
+root rather than embedding a library-specific directory walker or inventory
+constants in Rust code.
+
+The baseline format is intended to support corpora materialized from a local
+directory, a JAR, or a pinned source repository. Regeneration may perform
+builds or network access, but ordinary CI verification should operate on the
+checked-in materialized files and remain deterministic and offline. Each
+baseline should record its source revision or artifact checksum before it is
+expanded beyond the initial proof of concept.
+
+Future semantic expectations belong beside the materialized corpus and must
+record the Scala/compiler version and expectation-schema version. They should
+compare stable structural or semantic facts, not absolute AST offsets, unless
+the offset itself is the behavior under test.
+
 When a fixture has a stable source-level expectation, add focused value
 assertions in addition to tag coverage. Prefer one test per independent
 expectation (for example, one literal value or one control-flow shape) and

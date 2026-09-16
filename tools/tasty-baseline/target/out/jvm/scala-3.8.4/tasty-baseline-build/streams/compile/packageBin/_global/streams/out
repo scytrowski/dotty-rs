@@ -1,0 +1,5 @@
+[debug] Packaging /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.8.4/tasty-baseline-build/tasty-baseline-build_sbt2_3-0.1.0-SNAPSHOT.jar ...
+[debug] Input file mappings:
+[debug] 	
+[debug] Done packaging.
+[debug] wrote ${OUT}/jvm/scala-3.8.4/tasty-baseline-build/tasty-baseline-build_sbt2_3-0.1.0-SNAPSHOT.jar

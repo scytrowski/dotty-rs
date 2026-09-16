@@ -1,46 +1,19 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[path = "support/corpus.rs"]
+mod corpus;
 
 use dotty_tasty::tasty::{
     EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile,
     TastyFileBuilder, Writer,
 };
 
-const EXPECTED_FIXTURE_COUNT: usize = 941;
-const EXPECTED_TASTY_BYTES: u64 = 7_579_936;
-
-fn scala3_library_fixture_paths() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-library");
-    let mut directories = vec![root];
-    let mut fixtures = Vec::new();
-
-    while let Some(directory) = directories.pop() {
-        let entries = fs::read_dir(&directory)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
-
-        for entry in entries {
-            let entry = entry.unwrap_or_else(|error| {
-                panic!(
-                    "failed to read an entry in {}: {error}",
-                    directory.display()
-                )
-            });
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", path.display()));
-
-            if file_type.is_dir() {
-                directories.push(path);
-            } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "tasty") {
-                fixtures.push(path);
-            }
-        }
-    }
-
-    fixtures.sort();
-    fixtures
+fn scala3_library_corpus() -> corpus::Corpus {
+    corpus::Corpus::load(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-library"),
+    )
 }
 
 /// Returns canonical structured bytes used as a structural fingerprint.
@@ -58,7 +31,12 @@ fn normalized_structured_encoding(raw: &RawNode<'_>) -> Result<Vec<u8>, String> 
 
 #[test]
 fn scala3_library_fixture_inventory_is_complete() {
-    let fixtures = scala3_library_fixture_paths();
+    let corpus = scala3_library_corpus();
+    let fixtures = corpus.fixture_paths();
+    assert_eq!(corpus.manifest().id, "scala3-library-3.9.0");
+    assert_eq!(corpus.manifest().source_kind, "jar");
+    assert_eq!(corpus.manifest().scala_version, "3.9.0");
+    assert_eq!(corpus.manifest().tasty_format, "28.9.0");
     let total_bytes: u64 = fixtures
         .iter()
         .map(|path| {
@@ -68,13 +46,13 @@ fn scala3_library_fixture_inventory_is_complete() {
         })
         .sum();
 
-    assert_eq!(fixtures.len(), EXPECTED_FIXTURE_COUNT);
-    assert_eq!(total_bytes, EXPECTED_TASTY_BYTES);
+    assert_eq!(fixtures.len(), corpus.manifest().fixture_count);
+    assert_eq!(total_bytes, corpus.manifest().fixture_bytes);
 }
 
 #[test]
 fn all_scala3_library_fixtures_decode_through_file_model() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -91,7 +69,7 @@ fn all_scala3_library_fixtures_decode_through_file_model() {
 
 #[test]
 fn all_scala3_library_fixtures_round_trip_structurally() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -133,7 +111,7 @@ fn all_scala3_library_fixtures_round_trip_structurally() {
 fn scala3_library_fixtures_have_package_ast_roots() {
     let mut tags = BTreeSet::new();
 
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -153,7 +131,7 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
     let mut files_with_comments = 0;
     let mut comment_count = 0;
 
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -187,7 +165,7 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
 
 #[test]
 fn all_scala3_library_ast_indexes_build_with_qualified_modifiers() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -205,7 +183,7 @@ fn all_scala3_library_ast_indexes_build_with_qualified_modifiers() {
 
 #[test]
 fn all_scala3_library_ast_references_resolve() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -222,7 +200,7 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
     let mut byte_exact_count = 0;
     let mut normalized_count = 0;
 
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -299,7 +277,7 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
 
 #[test]
 fn all_scala3_library_structured_files_validate_after_reencoding() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)
@@ -354,7 +332,7 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
 
 #[test]
 fn all_scala3_library_structured_relocated_files_validate() {
-    for path in scala3_library_fixture_paths() {
+    for path in scala3_library_corpus().fixture_paths() {
         let bytes = fs::read(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let file = TastyFile::parse_scala_3_9(&bytes)

@@ -1,7 +1,10 @@
 # Generated from the Scala 3.9.0 source tree at tag 3.9.0.
 # The fixture files are the TASTy entries from the built scala-library JAR.
+id = "scala3-library-3.9.0"
+source_kind = "jar"
 scala_version = "3.9.0"
 tasty_format = "28.9.0"
+tasty_root = "."
 source_repository = "https://github.com/scala/scala3"
 source_tag = "3.9.0"
 source_commit = "777528f19a58e794c9954a42f433373472ec57f8"

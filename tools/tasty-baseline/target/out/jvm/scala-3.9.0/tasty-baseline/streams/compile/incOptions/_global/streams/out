@@ -1,0 +1,41 @@
+[debug] Created transactional ClassFileManager with tempDir = /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.9.0/tasty-baseline/classes.bak
+[debug] About to delete class files:
+[debug] 	Main$$anon$1.class
+[debug] 	Main$Collector$1.class
+[debug] 	Main.class
+[debug] 	Main$Input.class
+[debug] 	Main$Input$.class
+[debug] 	Main$.class
+[debug] 	Main$$anon$1.tasty
+[debug] 	Main$Collector$1.tasty
+[debug] 	Main.tasty
+[debug] 	Main$Input.tasty
+[debug] 	Main$Input$.tasty
+[debug] 	Main$.tasty
+[debug] We backup class files:
+[debug] 	Main$$anon$1.class
+[debug] 	Main$Collector$1.class
+[debug] 	Main.class
+[debug] 	Main$Input.class
+[debug] 	Main$Input$.class
+[debug] 	Main$.class
+[debug] 	Main$$anon$1.tasty
+[debug] 	Main$Collector$1.tasty
+[debug] 	Main.tasty
+[debug] 	Main$Input.tasty
+[debug] 	Main$Input$.tasty
+[debug] 	Main$.tasty
+[debug] Registering generated classes:
+[debug] 	Main$$anon$1.class
+[debug] 	Main$Collector$1.class
+[debug] 	Main.class
+[debug] 	Main$Input.class
+[debug] 	Main$Input$.class
+[debug] 	Main$.class
+[debug] 	Main$$anon$1.tasty
+[debug] 	Main$Collector$1.tasty
+[debug] 	Main.tasty
+[debug] 	Main$Input.tasty
+[debug] 	Main$Input$.tasty
+[debug] 	Main$.tasty
+[debug] Removing the temporary directory used for backing up class files: /home/vdrake6/dotty-rs/tools/tasty-baseline/target/out/jvm/scala-3.9.0/tasty-baseline/classes.bak
