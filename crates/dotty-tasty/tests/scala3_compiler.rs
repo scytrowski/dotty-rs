@@ -3,6 +3,8 @@ use std::path::Path;
 
 #[path = "support/corpus.rs"]
 mod corpus;
+#[path = "support/semantic.rs"]
+mod semantic;
 
 use dotty_tasty::tasty::TastyFile;
 
@@ -16,7 +18,9 @@ fn scala3_compiler_corpus() -> corpus::Corpus {
 fn scala3_compiler_fixture_inventory_is_complete() {
     let corpus = scala3_compiler_corpus();
     let fixtures = corpus.fixture_paths();
-    assert_eq!(corpus.selected_fixture_paths(), fixtures);
+    let selected = corpus.selected_fixture_paths();
+    assert!(!selected.is_empty());
+    assert!(selected.iter().all(|path| path.is_file()));
     let total_bytes: u64 = fixtures
         .iter()
         .map(|path| {
@@ -66,4 +70,11 @@ fn all_scala3_compiler_fixtures_decode_and_validate_as_compatible_tasty() {
         assert!(!file.names().is_empty(), "fixture {}", path.display());
         assert!(!file.sections().is_empty(), "fixture {}", path.display());
     }
+}
+
+#[test]
+fn scala3_compiler_semantic_expectations_cover_selected_fixtures() {
+    let corpus = scala3_compiler_corpus();
+
+    semantic::assert_expectations_cover_selected_fixtures(&corpus, 3, "3.9.0", (28, 9, 0));
 }

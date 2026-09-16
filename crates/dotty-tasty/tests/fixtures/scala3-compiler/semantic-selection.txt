@@ -1,0 +1,22 @@
+# Representative Scala 3.9.0 compiler implementation files.
+dotty/tools/dotc/Compiler.tasty
+dotty/tools/dotc/ast/Trees.tasty
+dotty/tools/dotc/ast/tpd.tasty
+dotty/tools/dotc/ast/untpd.tasty
+dotty/tools/dotc/config/CommandLineParser.tasty
+dotty/tools/dotc/core/Contexts.tasty
+dotty/tools/dotc/core/Definitions.tasty
+dotty/tools/dotc/core/Denotations.tasty
+dotty/tools/dotc/core/Names.tasty
+dotty/tools/dotc/core/Symbols.tasty
+dotty/tools/dotc/core/Types.tasty
+dotty/tools/dotc/core/tasty/DottyUnpickler.tasty
+dotty/tools/dotc/parsing/Parsers.tasty
+dotty/tools/dotc/quoted/PickledQuotes.tasty
+dotty/tools/dotc/transform/Erasure.tasty
+dotty/tools/dotc/transform/Inlining.tasty
+dotty/tools/dotc/transform/PatternMatcher.tasty
+dotty/tools/dotc/typer/Applications.tasty
+dotty/tools/dotc/typer/Typer.tasty
+dotty/tools/backend/jvm/GenBCode.tasty
+scala/quoted/runtime/impl/QuotesImpl.tasty
