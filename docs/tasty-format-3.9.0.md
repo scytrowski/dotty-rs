@@ -466,8 +466,9 @@ untrusted or unusually deep input can use
 permissive limit. Exceeding the limit returns `AstError::RecursionLimit`.
 `AstAddressIndex::resolve_node()` and
 `TastyFile::resolve_ast_reference()` resolve a target address to its tag and
-absolute AST-section offset. `AstAddressIndex::get()` remains the payload
-lookup for category-5 nodes.
+absolute AST-section offset. The index keeps visible nodes sorted by absolute
+address, so `get()` and `get_node()` use logarithmic address lookup.
+`AstAddressIndex::get()` remains the payload lookup for category-5 nodes.
 
 `RawNodes::address_index()` and `TastyFile::ast_at()` index top-level
 category-5 nodes. The file-level global index preserves absolute AST-section

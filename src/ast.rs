@@ -1000,17 +1000,17 @@ impl<'a> RawNodes<'a> {
     }
 
     pub fn address_index(&self) -> AstAddressIndex<'a> {
-        AstAddressIndex {
-            nodes: self.nodes.clone(),
-            all_nodes: self
-                .nodes
-                .iter()
-                .map(|node| AstTreeNode {
-                    tag: node.tag,
-                    offset: node.offset,
-                })
-                .collect(),
-        }
+        let mut nodes = self.nodes.clone();
+        nodes.sort_unstable_by_key(|node| node.offset);
+        let mut all_nodes = nodes
+            .iter()
+            .map(|node| AstTreeNode {
+                tag: node.tag,
+                offset: node.offset,
+            })
+            .collect::<Vec<_>>();
+        all_nodes.sort_unstable_by_key(|node| node.offset);
+        AstAddressIndex { nodes, all_nodes }
     }
 
     pub(crate) fn deep_address_index_with_source_and_max_depth(
@@ -1096,8 +1096,9 @@ impl<'a> AstAddressIndex<'a> {
     /// Returns the category-five node with this AST address, if present.
     pub fn get(&self, address: u32) -> Option<&RawNode<'a>> {
         self.nodes
-            .iter()
-            .find(|node| node.offset == address as usize)
+            .binary_search_by_key(&(address as usize), |node| node.offset)
+            .ok()
+            .map(|index| &self.nodes[index])
     }
 
     /// Resolves a reference when its target is a category-five node.
@@ -1109,9 +1110,9 @@ impl<'a> AstAddressIndex<'a> {
     /// through category-four tree nodes.
     pub fn get_node(&self, address: u32) -> Option<AstTreeNode> {
         self.all_nodes
-            .iter()
-            .find(|node| node.offset == address as usize)
-            .copied()
+            .binary_search_by_key(&(address as usize), |node| node.offset)
+            .ok()
+            .map(|index| self.all_nodes[index])
     }
 
     /// Resolves a reference to any visible AST node.
@@ -8275,6 +8276,28 @@ mod tests {
         assert_eq!(index.addresses().collect::<Vec<_>>(), vec![0, 4]);
         assert_eq!(index.get(4).unwrap().tag, DEFDEF_TAG);
         assert!(index.get(1).is_none());
+    }
+
+    #[test]
+    fn sorts_programmatic_ast_addresses_before_index_lookup() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode {
+                tag: DEFDEF_TAG,
+                offset: 9,
+                payload: &[],
+            },
+            RawNode {
+                tag: VALDEF_TAG,
+                offset: 2,
+                payload: &[],
+            },
+        ])
+        .unwrap();
+        let index = nodes.address_index();
+
+        assert_eq!(index.addresses().collect::<Vec<_>>(), vec![2, 9]);
+        assert_eq!(index.get(2).map(|node| node.tag), Some(VALDEF_TAG));
+        assert_eq!(index.get(9).map(|node| node.tag), Some(DEFDEF_TAG));
     }
 
     #[test]
