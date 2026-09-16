@@ -77,6 +77,11 @@ pub enum TastyFileError {
         reference: NameRef,
         kind: RawNameKind,
     },
+    DuplicateStandardSection {
+        section: StandardSection,
+        first_index: usize,
+        duplicate_index: usize,
+    },
     InvalidAstAddress {
         context: &'static str,
         address: i64,
@@ -106,6 +111,15 @@ impl fmt::Display for TastyFileError {
             Self::InvalidSourceFileName { reference, kind } => write!(
                 formatter,
                 "SOURCEFILE attribute reference {reference} resolves to {kind:?}, expected a UTF-8 name"
+            ),
+            Self::DuplicateStandardSection {
+                section,
+                first_index,
+                duplicate_index,
+            } => write!(
+                formatter,
+                "standard {} section occurs more than once (sections {first_index} and {duplicate_index})",
+                section.as_str()
             ),
             Self::InvalidAstAddress {
                 context,
@@ -455,6 +469,7 @@ impl<'a> TastyFile<'a> {
         &self,
         max_depth: usize,
     ) -> Result<(), TastyFileError> {
+        self.validate_unique_standard_sections()?;
         self.validate_name_references()?;
         self.validate_ast_reference_targets_with_max_depth(max_depth)?;
         self.attributes()?;
@@ -1139,6 +1154,33 @@ impl<'a> TastyFile<'a> {
         }
     }
 
+    fn validate_unique_standard_sections(&self) -> Result<(), TastyFileError> {
+        let mut first_indices = [None; 4];
+
+        for (index, section) in self.sections.iter().enumerate() {
+            let Some(kind) = section.standard_kind(&self.names) else {
+                continue;
+            };
+
+            let slot = match kind {
+                StandardSection::Asts => 0,
+                StandardSection::Positions => 1,
+                StandardSection::Comments => 2,
+                StandardSection::Attributes => 3,
+            };
+            if let Some(first_index) = first_indices[slot] {
+                return Err(TastyFileError::DuplicateStandardSection {
+                    section: kind,
+                    first_index,
+                    duplicate_index: index,
+                });
+            }
+            first_indices[slot] = Some(index);
+        }
+
+        Ok(())
+    }
+
     fn validate_ast_address(
         &self,
         context: &'static str,
@@ -1312,6 +1354,92 @@ mod tests {
             Err(TastyFileError::InvalidSourceFileName {
                 reference: 1,
                 kind: crate::RawNameKind::Qualified,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_standard_sections_during_validation() {
+        let cases = [
+            (StandardSection::Asts, 0),
+            (StandardSection::Positions, 1),
+            (StandardSection::Comments, 2),
+            (StandardSection::Attributes, 3),
+        ];
+
+        for (kind, name) in cases {
+            let names = NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("Positions".to_owned()),
+                crate::RawName::Utf8("Comments".to_owned()),
+                crate::RawName::Utf8("Attributes".to_owned()),
+            ])
+            .unwrap();
+            let sections = crate::SectionTable::from_sections(vec![
+                Section::new(name, &[]),
+                Section::new(name, &[]),
+            ]);
+            let file = TastyFile::from_parts(
+                Header {
+                    major_version: 28,
+                    minor_version: 9,
+                    experimental_version: 0,
+                    tooling_version: "Scala 3.9.0".to_owned(),
+                    uuid: [0; 16],
+                },
+                names,
+                sections,
+            )
+            .unwrap();
+
+            assert_eq!(
+                file.validate(),
+                Err(TastyFileError::DuplicateStandardSection {
+                    section: kind,
+                    first_index: 0,
+                    duplicate_index: 1,
+                }),
+                "duplicate {} section was accepted",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_duplicate_standard_sections_until_validation() {
+        let names = NameTable::from_entries(vec![
+            crate::RawName::Utf8("ASTs".to_owned()),
+            crate::RawName::Utf8("Attributes".to_owned()),
+        ])
+        .unwrap();
+        let sections = crate::SectionTable::from_sections(vec![
+            Section::new(0, &[]),
+            Section::new(1, &[]),
+            Section::new(1, &[]),
+        ]);
+        let file = TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            sections,
+        )
+        .unwrap();
+        let bytes = file.encode().unwrap();
+        let reparsed = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(reparsed.sections().len(), 3);
+        assert_eq!(reparsed.encode().unwrap(), bytes);
+        assert_eq!(
+            reparsed.validate(),
+            Err(TastyFileError::DuplicateStandardSection {
+                section: StandardSection::Attributes,
+                first_index: 1,
+                duplicate_index: 2,
             })
         );
     }

@@ -262,6 +262,12 @@ Attributes
 
 The section name is an index into the `NameTable`, not inline text. The Scala 3.9.0 compiler emits this section index as zero-based (`ASTs` is `0`, followed by the later standard-section names). This is distinct from the one-based `NameRef` convention used by names referenced from AST nodes and composite name entries. Unknown sections can be skipped using their length, provided that bounds are validated correctly.
 
+There may be at most one section for each standard name (`ASTs`, `Positions`,
+`Comments`, and `Attributes`). Low-level parsing retains duplicate sections in
+wire order, but eager file validation rejects them before any standard-section
+API can silently use only the first occurrence. Unknown sections remain
+preserved and may occur more than once.
+
 ## 6. AST grammar
 
 ### 6.1. Top-level statements and definitions
