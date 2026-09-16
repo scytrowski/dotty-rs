@@ -7,7 +7,7 @@ use dotty_tasty::tasty::{
     Writer,
 };
 
-const EXPECTED_FIXTURE_COUNT: usize = 33;
+const EXPECTED_FIXTURE_COUNT: usize = 35;
 const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
 
 fn tasty_fixture_paths() -> Vec<PathBuf> {

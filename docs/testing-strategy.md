@@ -18,6 +18,22 @@ Generic raw decoding should have a tag-matrix test for every tag range that the
 raw layer accepts. Semantic decoding may be introduced incrementally, but a
 newly supported semantic tag must not be added without its own focused test.
 
+## Fixture-specific coverage
+
+The supplied Scala 3.9.0 fixtures are a compatibility corpus, not only a
+collection of smoke-test inputs. Each fixture must have a named integration
+test that checks its intended AST surface. At minimum, that test must verify
+that all indexed category-five nodes decode to a known structured node and
+that the fixture's characteristic tags are present.
+
+Some Scala constructs are encoded through a combination of definition tails,
+type trees, and generated nodes rather than one unique category-five tag. Such
+fixtures should assert the relevant combination explicitly instead of
+inventing a tag-to-language-feature mapping.
+
+Corpus-wide tests remain responsible for file invariants and round-trip
+guarantees. They complement, but do not replace, the named fixture tests.
+
 The full suite is the required pre-commit check:
 
 ```text
