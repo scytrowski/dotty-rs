@@ -706,6 +706,18 @@ fn all_tasty_fixture_signed_names_have_typed_views() {
                     path.display(),
                     reference
                 );
+                assert!(
+                    file.names()
+                        .render_signed_name(reference)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "fixture {} cannot render typed signature at name {}: {error}",
+                                path.display(),
+                                reference
+                            )
+                        })
+                        .is_some()
+                );
             }
         }
     }

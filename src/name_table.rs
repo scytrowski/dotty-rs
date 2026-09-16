@@ -379,6 +379,14 @@ impl NameTable {
     /// and return [`NameRenderError::Unsupported`], because their complete
     /// textual meaning depends on signature-specific compiler semantics.
     pub fn render(&self, reference: NameRef) -> Result<String, NameRenderError> {
+        self.render_text(reference, false)
+    }
+
+    fn render_text(
+        &self,
+        reference: NameRef,
+        include_signature_entries: bool,
+    ) -> Result<String, NameRenderError> {
         let root_index = reference
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
@@ -446,6 +454,38 @@ impl NameTable {
                     "{}$retainedBody",
                     rendered_dependency(&rendered, *underlying, current, kind)?
                 ),
+                RawName::Signed {
+                    original,
+                    result_signature,
+                    parameter_signatures,
+                } if include_signature_entries => {
+                    let original = rendered_dependency(&rendered, *original, current, kind)?;
+                    let signature = rendered_signature_text(
+                        &rendered,
+                        *result_signature,
+                        parameter_signatures,
+                        current,
+                        kind,
+                    )?;
+                    format!("{original}[with sig {signature}]")
+                }
+                RawName::TargetSigned {
+                    original,
+                    target,
+                    result_signature,
+                    parameter_signatures,
+                } if include_signature_entries => {
+                    let original = rendered_dependency(&rendered, *original, current, kind)?;
+                    let target = rendered_dependency(&rendered, *target, current, kind)?;
+                    let signature = rendered_signature_text(
+                        &rendered,
+                        *result_signature,
+                        parameter_signatures,
+                        current,
+                        kind,
+                    )?;
+                    format!("{original}[with sig {signature} @ {target}]")
+                }
                 RawName::Signed { .. } | RawName::TargetSigned { .. } | RawName::Unknown { .. } => {
                     return Err(NameRenderError::Unsupported {
                         reference: current,
@@ -480,17 +520,17 @@ impl NameTable {
                 original,
                 signature,
             } => RenderedSignedName::Signed {
-                original: self.render(original)?,
-                signature: self.render_name_signature(signature)?,
+                original: self.render_text(original, true)?,
+                signature: self.render_name_signature(signature, true)?,
             },
             SignedName::TargetSigned {
                 original,
                 target,
                 signature,
             } => RenderedSignedName::TargetSigned {
-                original: self.render(original)?,
-                target: self.render(target)?,
-                signature: self.render_name_signature(signature)?,
+                original: self.render_text(original, true)?,
+                target: self.render_text(target, true)?,
+                signature: self.render_name_signature(signature, true)?,
             },
         };
 
@@ -500,6 +540,7 @@ impl NameTable {
     fn render_name_signature(
         &self,
         signature: NameSignature,
+        include_signature_entries: bool,
     ) -> Result<RenderedNameSignature, NameRenderError> {
         let parameters = signature
             .parameters
@@ -508,14 +549,14 @@ impl NameTable {
                 ParamSigValue::TypeParameterSectionLength(length) => {
                     Ok(RenderedParamSig::TypeParameterSectionLength(length))
                 }
-                ParamSigValue::TermParameter(reference) => {
-                    Ok(RenderedParamSig::TermParameter(self.render(reference)?))
-                }
+                ParamSigValue::TermParameter(reference) => Ok(RenderedParamSig::TermParameter(
+                    self.render_text(reference, include_signature_entries)?,
+                )),
             })
             .collect::<Result<Vec<_>, NameRenderError>>()?;
 
         Ok(RenderedNameSignature {
-            result: self.render(signature.result)?,
+            result: self.render_text(signature.result, include_signature_entries)?,
             parameters,
         })
     }
@@ -671,6 +712,46 @@ fn rendered_dependency(
             reference: owner,
             kind: owner_kind,
         })
+}
+
+fn rendered_signature_text(
+    rendered: &[Option<String>],
+    result: NameRef,
+    parameters: &[ParamSig],
+    owner: NameRef,
+    owner_kind: RawNameKind,
+) -> Result<String, NameRenderError> {
+    let result = rendered_dependency(rendered, result, owner, owner_kind)?;
+    let mut text = result;
+    text.push('(');
+
+    for (index, parameter) in parameters.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+        }
+
+        match interpret_param_sig(*parameter) {
+            Some(ParamSigValue::TypeParameterSectionLength(length)) => {
+                text.push_str("type-params(");
+                text.push_str(&length.to_string());
+                text.push(')');
+            }
+            Some(ParamSigValue::TermParameter(reference)) => {
+                text.push_str(&rendered_dependency(
+                    rendered, reference, owner, owner_kind,
+                )?);
+            }
+            None => {
+                return Err(NameRenderError::Unsupported {
+                    reference: owner,
+                    kind: owner_kind,
+                });
+            }
+        }
+    }
+
+    text.push(')');
+    Ok(text)
 }
 
 fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8]) -> Option<usize> {
@@ -1393,6 +1474,97 @@ mod tests {
                 },
             }))
         );
+    }
+
+    #[test]
+    fn renders_a_signed_name_with_a_signed_original() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Utf8("result".to_owned()),
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: vec![],
+            },
+            RawName::Signed {
+                original: 3,
+                result_signature: 2,
+                parameter_signatures: vec![],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render_signed_name(4),
+            Ok(Some(RenderedSignedName::Signed {
+                original: "method[with sig result()]".to_owned(),
+                signature: RenderedNameSignature {
+                    result: "result".to_owned(),
+                    parameters: vec![],
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn renders_a_target_signed_name_with_a_signed_target() {
+        let table = NameTable::from_entries(vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Utf8("target".to_owned()),
+            RawName::Utf8("result".to_owned()),
+            RawName::Signed {
+                original: 1,
+                result_signature: 3,
+                parameter_signatures: vec![],
+            },
+            RawName::TargetSigned {
+                original: 1,
+                target: 4,
+                result_signature: 3,
+                parameter_signatures: vec![],
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            table.render_signed_name(5),
+            Ok(Some(RenderedSignedName::TargetSigned {
+                original: "method".to_owned(),
+                target: "method[with sig result()]".to_owned(),
+                signature: RenderedNameSignature {
+                    result: "result".to_owned(),
+                    parameters: vec![],
+                },
+            }))
+        );
+    }
+
+    #[test]
+    fn renders_a_deep_signed_name_chain_without_recursion() {
+        let depth = 256;
+        let mut entries = vec![
+            RawName::Utf8("method".to_owned()),
+            RawName::Utf8("result".to_owned()),
+        ];
+
+        let mut root = 1;
+        for _ in 0..depth {
+            let reference = entries.len() as u32 + 1;
+            entries.push(RawName::Signed {
+                original: root,
+                result_signature: 2,
+                parameter_signatures: vec![],
+            });
+            root = reference;
+        }
+
+        let table = NameTable::from_entries(entries).unwrap();
+        let rendered = table.render_signed_name(root).unwrap().unwrap();
+
+        let RenderedSignedName::Signed { original, .. } = rendered else {
+            panic!("expected a signed rendered name");
+        };
+        assert_eq!(original.matches("[with sig result()]").count(), depth - 1);
     }
 
     #[test]

@@ -217,7 +217,10 @@ wire order of interpreted parameters. It returns no view for non-signature,
 unknown, or malformed raw entries.
 `NameTable::render_signed_name()` resolves that view to
 `RenderedSignedName`, including rendered result and term-parameter names while
-keeping type-parameter section lengths explicit.
+keeping type-parameter section lengths explicit. Nested `SIGNED` and
+`TARGETSIGNED` references are rendered iteratively in a structural diagnostic
+form such as `name[with sig result()]`; this form is intended for inspection,
+not as a replacement for the raw signature fields.
 
 Name references are range-checked, and cyclic name-entry dependencies are
 rejected by the validated name-table model.
@@ -524,8 +527,10 @@ for all known and unknown entry variants; the original `RawName` remains
 available for inspecting payloads and preserving lossless data.
 `NameTable::render()` resolves the conventional textual spelling of
 non-signature composite names iteratively. Signature-bearing and unknown names
-return `NameRenderError::Unsupported` so that the library does not guess at
-compiler-specific signature formatting.
+return `NameRenderError::Unsupported`. Signature-bearing names can instead be
+inspected through `NameTable::render_signed_name()`, which preserves their
+structured fields and uses an iterative structural diagnostic form for nested
+signature references.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns
