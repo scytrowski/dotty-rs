@@ -337,7 +337,11 @@ back to the descriptor when no `Signature` attribute is present.
 ### 6.3. Signatures (generics)
 
 Carried by the `Signature` attribute (§7.9) on classes, fields, methods, and
-record components (class file ≥ 49.0, Java 5). Grammar (JVMS §4.7.9.1):
+record components (class file ≥ 49.0, Java 5). A compiler only emits this
+attribute when the declaration actually uses a type variable or
+parameterized type; otherwise the plain descriptor (§6.1/§6.2) is the only
+type information available. Grammar (JVMS §4.7.9.1, transcribed verbatim
+from the spec's own `[x]` optional / `{x}` repeated notation into `x?`/`x*`):
 
 ```text
 ClassSignature       = TypeParameters? SuperclassSignature SuperinterfaceSignature*
@@ -373,15 +377,30 @@ FieldSignature  = ReferenceTypeSignature
 
 Notes for the loader:
 
+- `Identifier` here is stricter than an ordinary unqualified name (§8): it
+  must additionally exclude `<`, `>`, and `:` (on top of `.`, `;`, `[`, `/`),
+  since those characters are themselves signature grammar punctuation.
 - `ClassTypeSignatureSuffix` (the `.` form) encodes a generic *inner* class
   qualified by an enclosing generic instantiation, e.g.
-  `Outer<T>.Inner<U>` → `LOuter<TT;>.Inner<TU;>;`.
+  `Outer<T>.Inner<U>` → `LOuter<TT;>.Inner<TU;>;`. Per the spec, a
+  `ClassTypeSignature` must be formulated so that erasing all type arguments
+  and converting each `.` to `$` reproduces the class's internal-form binary
+  name — i.e. `.` here is the *nested-class* separator, not a package
+  separator (packages only ever appear via `PackageSpecifier`'s `/`).
 - `TypeArgument = '*'` is the unbounded wildcard `?`; `+`/`-` are the
   upper/lower bound wildcard forms (`? extends`/`? super`).
 - A missing `ClassBound` type (`:` immediately followed by another `:` or
   the parameter's end) means the bound is implicitly `Object`.
 - `Result` reuses `V` for `void`, matching `VoidDescriptor` in plain
   descriptors.
+- A `MethodSignature`'s formal parameter count is **not guaranteed to match**
+  the method descriptor's parameter count (§6.2): some compiler-synthesized
+  constructor parameters — e.g. an inner class's implicit outer-instance
+  reference — get a descriptor entry but may be omitted from the signature.
+  A loader must line up signature parameters with descriptor parameters
+  positionally from one end, not assume a 1:1 index correspondence, and must
+  be able to fall back to the descriptor alone when a `Signature` attribute
+  is absent or its arity looks inconsistent.
 
 ## 7. Attributes
 
