@@ -112,7 +112,7 @@ fn scala3_library_semantic_expectations_cover_selected_fixtures() {
             )
         });
 
-    assert_eq!(expectation.schema_version, 1);
+    assert_eq!(expectation.schema_version, 2);
     assert_eq!(expectation.scala_version, "3.9.0");
     assert_eq!(
         expectation.files.len(),

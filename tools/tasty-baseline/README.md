@@ -22,7 +22,7 @@ matched against the logical paths exposed by a directory or JAR input:
 sbt 'run output.json --select=semantic-selection.txt path/to/library.jar'
 ```
 
-The output contains `schema_version = 1` and `scala_version = 3.9.0`. Each file
+The output contains `schema_version = 2` and `scala_version = 3.9.0`. Each file
 contains a sorted, duplicate-free `declarations` list with simplified
 `TypeDef`, `DefDef`, and `ValDef` identifier names. Operator names are omitted
 in this first version. The projection deliberately excludes absolute AST

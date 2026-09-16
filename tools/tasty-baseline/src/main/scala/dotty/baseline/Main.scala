@@ -79,7 +79,7 @@ object Main:
       )
     Files.writeString(
       output,
-      s"{\"schema_version\":1,\"scala_version\":\"3.9.0\",\"files\":[${result.mkString(",")}]}\n"
+      s"{\"schema_version\":2,\"scala_version\":\"3.9.0\",\"files\":[${result.mkString(",")}]}\n"
     )
 
   private def materialize(arguments: List[String]): List[Input] =
