@@ -883,6 +883,11 @@ pub struct MethodTypeNode<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionTail<'a> {
     Modifier(u8),
+    /// A `private[qualifier]` or `protected[qualifier]` modifier.
+    ///
+    /// The qualifier is an AST tree rather than a category-one modifier, so
+    /// it must remain available to reference collection and AST indexing.
+    QualifiedModifier(AstChildNode<'a>),
     Annotation(RawNode<'a>),
 }
 
@@ -1543,8 +1548,19 @@ fn collect_definition_tail_nodes<'a>(
     all_output: &mut Vec<AstTreeNode>,
 ) -> Result<(), AstError> {
     for entry in tail {
-        if let DefinitionTail::Annotation(node) = entry {
-            collect_raw_node_deep(node, source, base, context, output, all_output)?;
+        match entry {
+            DefinitionTail::QualifiedModifier(modifier) => {
+                let tree = RawTree::Ast {
+                    tag: modifier.tag,
+                    offset: modifier.offset,
+                    child: Box::new(modifier.child.clone()),
+                };
+                collect_tree_nodes(&tree, source, base, context, output, all_output)?;
+            }
+            DefinitionTail::Annotation(node) => {
+                collect_raw_node_deep(node, source, base, context, output, all_output)?;
+            }
+            DefinitionTail::Modifier(_) => {}
         }
     }
     Ok(())
@@ -2062,7 +2078,7 @@ impl<'a> RawNode<'a> {
     /// Returns AST references contained in the supported structured payload
     /// of this node, in wire order.
     ///
-    /// Unknown category-5 nodes and currently opaque definition tails are
+    /// Unknown category-5 nodes and unsupported definition-tail forms are
     /// skipped. This method therefore never assigns a guessed grammar to a
     /// future tag; callers that need lossless handling can use
     /// [`RawNode::decode_structured`] and inspect the `Raw` variant.
@@ -3671,6 +3687,7 @@ impl<'a> DefinitionTail<'a> {
                 }
                 writer.write_u8(*tag);
             }
+            Self::QualifiedModifier(modifier) => modifier.encode(writer)?,
             Self::Annotation(annotation) => {
                 annotation.encode(writer).map_err(TermEncodeError::from)?
             }
@@ -4670,8 +4687,14 @@ fn collect_definition_tail_ast_refs(
     visitor: &mut impl FnMut(AstRef),
 ) -> Result<(), AstError> {
     for entry in tail {
-        if let DefinitionTail::Annotation(node) = entry {
-            node.visit_ast_refs(visitor)?;
+        match entry {
+            DefinitionTail::QualifiedModifier(modifier) => {
+                modifier.child.visit_ast_refs(visitor);
+            }
+            DefinitionTail::Annotation(node) => {
+                node.visit_ast_refs(visitor)?;
+            }
+            DefinitionTail::Modifier(_) => {}
         }
     }
     Ok(())
@@ -4987,8 +5010,14 @@ fn collect_definition_tail_name_refs(
     visitor: &mut impl FnMut(NameRef),
 ) -> Result<(), AstError> {
     for entry in tail {
-        if let DefinitionTail::Annotation(node) = entry {
-            collect_raw_node_name_refs(node, visitor)?;
+        match entry {
+            DefinitionTail::QualifiedModifier(modifier) => {
+                modifier.child.visit_name_refs(visitor);
+            }
+            DefinitionTail::Annotation(node) => {
+                collect_raw_node_name_refs(node, visitor)?;
+            }
+            DefinitionTail::Modifier(_) => {}
         }
     }
     Ok(())
@@ -5371,7 +5400,7 @@ fn is_modifier_tag(tag: u8) -> bool {
 }
 
 fn is_tail_tag(tag: u8) -> bool {
-    is_modifier_tag(tag) || tag == 173
+    is_modifier_tag(tag) || matches!(tag, PRIVATEQUALIFIED_TAG | PROTECTEDQUALIFIED_TAG | 173)
 }
 
 fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTail<'a>>, AstError> {
@@ -5381,6 +5410,13 @@ fn read_definition_tail<'a>(reader: &mut Reader<'a>) -> Result<Vec<DefinitionTai
         let tag = reader.read_u8()?;
         if is_modifier_tag(tag) {
             tail.push(DefinitionTail::Modifier(tag));
+        } else if matches!(tag, PRIVATEQUALIFIED_TAG | PROTECTEDQUALIFIED_TAG) {
+            let child = RawTree::decode(reader)?;
+            tail.push(DefinitionTail::QualifiedModifier(AstChildNode {
+                tag,
+                child,
+                offset,
+            }));
         } else if tag == 173 {
             let length = reader.read_nat()? as usize;
             let payload = reader.read_bytes(length)?;
@@ -5428,15 +5464,15 @@ mod tests {
         PROTECTEDQUALIFIED_TAG, ParameterNode, QUALTHIS_TAG, QUOTE_TAG, QUOTEPATTERN_TAG,
         RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG, RENAMED_TAG, REPEATED_TAG, RETURN_TAG,
         RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
-        SELFDEF_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG, SPLITCLAUSE_TAG,
-        SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree, TEMPLATE_TAG,
-        TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG,
-        TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
-        TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG, TYPEREFSYMBOL_TAG,
-        TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        SELFDEF_TAG, SHAREDTYPE_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
+        SPLITCLAUSE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree,
+        TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+        THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG,
+        TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFIN_TAG,
+        TYPEREFSYMBOL_TAG, TypeApplyNode, TypeName, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
     };
     use crate::reader::{ReadError, Reader};
-    use crate::term::{AstTreeNode, TermEncodeError};
+    use crate::term::{AstRef, AstTreeNode, TermEncodeError};
     use crate::writer::{WriteError, Writer};
 
     #[test]
@@ -6352,6 +6388,107 @@ mod tests {
 
         assert!(matches!(body.type_tree, RawTree::Leaf(_)));
         assert!(body.tail.is_empty());
+    }
+
+    fn assert_qualified_modifier_in_definition_tail(tag: u8) {
+        let payload = [0x81, 2, tag, TERMREFPKG_TAG, 0x81];
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &payload,
+        };
+        let body = node.decode_definition_body().unwrap();
+        let DefinitionBody::ValDef { tail, .. } = &body else {
+            panic!("expected a valdef body");
+        };
+
+        assert!(matches!(
+            tail.as_slice(),
+            [DefinitionTail::QualifiedModifier(modifier)]
+                if modifier.tag == tag
+                    && modifier.offset == 2
+                    && matches!(
+                        &modifier.child,
+                        RawTree::Leaf(term)
+                            if term.tag == TERMREFPKG_TAG
+                                && term.value == crate::term::TermValue::NameRef(1)
+                    )
+        ));
+
+        let mut writer = Writer::new();
+        body.encode_self(&mut writer).unwrap();
+        assert_eq!(
+            writer.as_slice(),
+            &[VALDEF_TAG, 0x85, 0x81, 2, tag, TERMREFPKG_TAG, 0x81]
+        );
+    }
+
+    #[test]
+    fn decodes_and_round_trips_a_private_qualified_definition_modifier() {
+        assert_qualified_modifier_in_definition_tail(PRIVATEQUALIFIED_TAG);
+    }
+
+    #[test]
+    fn decodes_and_round_trips_a_protected_qualified_definition_modifier() {
+        assert_qualified_modifier_in_definition_tail(PROTECTEDQUALIFIED_TAG);
+    }
+
+    #[test]
+    fn collects_ast_references_from_a_qualified_definition_modifier() {
+        let payload = [0x81, 2, PRIVATEQUALIFIED_TAG, SHAREDTYPE_TAG, 0x81];
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &payload,
+        };
+
+        assert_eq!(
+            node.ast_refs().unwrap(),
+            vec![AstRef {
+                kind: crate::term::AstRefKind::SharedType,
+                address: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn collects_name_references_from_a_qualified_definition_modifier() {
+        let payload = [
+            0x81,
+            TERMREFPKG_TAG,
+            0x82,
+            PRIVATEQUALIFIED_TAG,
+            TERMREFPKG_TAG,
+            0x83,
+        ];
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &payload,
+        };
+
+        assert_eq!(node.name_refs().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn rejects_a_truncated_qualified_definition_modifier() {
+        let payload = [0x81, TERMREFPKG_TAG, 0x82, PRIVATEQUALIFIED_TAG];
+        let node = RawNode {
+            tag: VALDEF_TAG,
+            offset: 0,
+            payload: &payload,
+        };
+
+        assert_eq!(
+            node.decode_definition_body(),
+            Err(AstError::Term(crate::term::TermError::Read(
+                ReadError::UnexpectedEof {
+                    offset: 4,
+                    needed: 1,
+                    remaining: 0,
+                }
+            )))
+        );
     }
 
     #[test]

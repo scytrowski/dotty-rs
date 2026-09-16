@@ -168,3 +168,21 @@ fn all_scala3_library_comment_sections_decode_with_ast_addresses() {
     assert!(files_with_comments > 0);
     assert!(comment_count > 0);
 }
+
+#[test]
+fn all_scala3_library_ast_indexes_build_with_qualified_modifiers() {
+    for path in scala3_library_fixture_paths() {
+        let bytes = fs::read(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let file = TastyFile::parse_scala_3_9(&bytes)
+            .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
+        let index = file
+            .ast_address_index()
+            .unwrap_or_else(|error| panic!("failed to index ASTs in {}: {error}", path.display()));
+        assert!(
+            !index.is_empty(),
+            "fixture {} has no indexed AST nodes",
+            path.display()
+        );
+    }
+}
