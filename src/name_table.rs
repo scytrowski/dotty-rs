@@ -573,51 +573,71 @@ impl RawName {
         }
     }
 
-    fn references(&self) -> Vec<NameRef> {
+    /// Visits name-table references contained in this entry in wire order.
+    ///
+    /// This is useful for dependency inspection without allocating a
+    /// temporary collection. Positive `ParamSig` values are included because
+    /// they are name references; negative values encode type-parameter
+    /// section lengths and are therefore omitted.
+    pub fn visit_references(&self, visitor: &mut impl FnMut(NameRef)) {
         match self {
-            Self::Utf8(_) | Self::Unknown { .. } => Vec::new(),
+            Self::Utf8(_) | Self::Unknown { .. } => {}
             Self::Qualified { prefix, selector }
             | Self::Expanded { prefix, selector }
-            | Self::ExpandPrefix { prefix, selector } => vec![*prefix, *selector],
+            | Self::ExpandPrefix { prefix, selector } => {
+                visitor(*prefix);
+                visitor(*selector);
+            }
             Self::Unique {
                 separator,
                 underlying,
                 ..
-            } => underlying.iter().copied().chain([*separator]).collect(),
+            } => {
+                if let Some(underlying) = underlying {
+                    visitor(*underlying);
+                }
+                visitor(*separator);
+            }
             Self::DefaultGetter { underlying, .. }
             | Self::SuperAccessor { underlying }
             | Self::InlineAccessor { underlying }
             | Self::ObjectClass { underlying }
-            | Self::BodyRetainer { underlying } => vec![*underlying],
+            | Self::BodyRetainer { underlying } => visitor(*underlying),
             Self::Signed {
                 original,
                 result_signature,
                 parameter_signatures,
-            } => std::iter::once(*original)
-                .chain(std::iter::once(*result_signature))
-                .chain(
-                    parameter_signatures
-                        .iter()
-                        .filter(|signature| **signature > 0)
-                        .map(|signature| *signature as NameRef),
-                )
-                .collect(),
+            } => {
+                visitor(*original);
+                visitor(*result_signature);
+                for signature in parameter_signatures {
+                    if *signature > 0 {
+                        visitor(*signature as NameRef);
+                    }
+                }
+            }
             Self::TargetSigned {
                 original,
                 target,
                 result_signature,
                 parameter_signatures,
-            } => std::iter::once(*original)
-                .chain(std::iter::once(*target))
-                .chain(std::iter::once(*result_signature))
-                .chain(
-                    parameter_signatures
-                        .iter()
-                        .filter(|signature| **signature > 0)
-                        .map(|signature| *signature as NameRef),
-                )
-                .collect(),
+            } => {
+                visitor(*original);
+                visitor(*target);
+                visitor(*result_signature);
+                for signature in parameter_signatures {
+                    if *signature > 0 {
+                        visitor(*signature as NameRef);
+                    }
+                }
+            }
         }
+    }
+
+    fn references(&self) -> Vec<NameRef> {
+        let mut references = Vec::new();
+        self.visit_references(&mut |reference| references.push(reference));
+        references
     }
 }
 
@@ -688,6 +708,29 @@ mod tests {
         assert_eq!(table.get_utf8(1), Some("member"));
         assert_eq!(table.get_utf8(0), None);
         assert_eq!(table.get_utf8(2), None);
+    }
+
+    #[test]
+    fn visits_qualified_name_references_in_wire_order_without_allocating() {
+        let name = RawName::Qualified {
+            prefix: 7,
+            selector: 3,
+        };
+        let mut references = Vec::new();
+
+        name.visit_references(&mut |reference| references.push(reference));
+
+        assert_eq!(references, vec![7, 3]);
+    }
+
+    #[test]
+    fn visits_no_references_for_a_direct_utf8_name() {
+        let name = RawName::Utf8("member".to_owned());
+        let mut visited = false;
+
+        name.visit_references(&mut |_| visited = true);
+
+        assert!(!visited);
     }
 
     #[test]
