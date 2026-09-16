@@ -177,6 +177,18 @@ impl TastyFileBuilder {
         TastyFile::from_parts(self.header.clone(), self.names.clone(), sections)
     }
 
+    /// Validate all supported file contents without serializing them.
+    pub fn validate(&self) -> Result<(), TastyFileError> {
+        self.build()?.validate()
+    }
+
+    /// Validate the file contents and require the Scala 3.9.0 format version.
+    pub fn validate_scala_3_9(&self) -> Result<(), TastyFileError> {
+        let file = self.build()?;
+        file.header.validate_scala_3_9()?;
+        file.validate()
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
         self.build()?.encode()
     }
@@ -720,6 +732,7 @@ mod tests {
             .unwrap(),
         );
 
+        assert_eq!(builder.validate(), Ok(()));
         let bytes = builder.encode_validated().unwrap();
         let reparsed = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
 
@@ -786,6 +799,36 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn rejects_a_non_scala_3_9_version_during_builder_validation() {
+        let builder = super::TastyFileBuilder::new(
+            crate::Header {
+                major_version: 29,
+                minor_version: 0,
+                experimental_version: 0,
+                tooling_version: "future compiler".to_owned(),
+                uuid: [0; 16],
+            },
+            crate::NameTable::from_entries(vec![
+                crate::RawName::Utf8("ASTs".to_owned()),
+                crate::RawName::Utf8("value".to_owned()),
+            ])
+            .unwrap(),
+        )
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+
+        assert_eq!(
+            builder.validate_scala_3_9(),
+            Err(TastyFileError::Header(
+                crate::HeaderError::UnsupportedVersion {
+                    major: 29,
+                    minor: 0,
+                    experimental: 0,
+                }
+            ))
+        );
     }
 
     #[test]
