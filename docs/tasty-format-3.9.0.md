@@ -418,6 +418,11 @@ ASTRef = Nat
 
 `TERMREFdirect` and `TYPEREFdirect` point to a local symbol, normally its definition node. `SHAREDterm` and `SHAREDtype` refer to previously serialized trees.
 
+`PARAMtype` also begins with an `ASTRef` binder address. The Rust model keeps
+that address as `AstRefKind::ParamTypeBinder`, so it participates in AST
+reference collection and target validation instead of being treated as an
+untyped integer.
+
 The Rust decoder keeps the numeric value as `TermValue::AstRef` and exposes
 `AstRef { kind, address }` through `SimpleTerm::ast_ref()` and
 `RawTree::ast_ref()`. This distinguishes `SHAREDterm`, `SHAREDtype`,

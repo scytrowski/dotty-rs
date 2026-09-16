@@ -1,7 +1,7 @@
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::term::{
-    AstRef, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
+    AstRef, AstRefKind, AstTreeNode, ConstantValue, RawTree, SimpleTerm, TermEncodeError, TermError,
 };
 use crate::writer::{WriteError, Writer};
 use std::cell::{Cell, RefCell};
@@ -774,7 +774,7 @@ pub struct AnnotationNode<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamTypeNode {
-    pub binder: u32,
+    pub binder: AstRef,
     pub parameter_number: u32,
 }
 
@@ -3140,7 +3140,10 @@ impl<'a> RawNode<'a> {
         }
 
         Ok(ParamTypeNode {
-            binder,
+            binder: AstRef {
+                kind: AstRefKind::ParamTypeBinder,
+                address: binder,
+            },
             parameter_number,
         })
     }
@@ -3967,7 +3970,7 @@ impl<'a> AnnotationNode<'a> {
 impl ParamTypeNode {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         encode_length_node(PARAMTYPE_TAG, writer, |payload| {
-            payload.write_nat(self.binder);
+            payload.write_nat(self.binder.address);
             payload.write_nat(self.parameter_number);
             Ok(())
         })
@@ -4787,7 +4790,7 @@ fn collect_structured_ast_refs(
             collect_tree_ast_refs(&lambda.body, visitor);
         }
         StructuredNode::PolyType(poly) => collect_tree_ast_refs(&poly.result_type, visitor),
-        StructuredNode::ParamType(_) => {}
+        StructuredNode::ParamType(param_type) => visitor(param_type.binder),
         StructuredNode::MethodType(method) => collect_tree_ast_refs(&method.result_type, visitor),
         StructuredNode::ApplySigPoly(apply) => {
             collect_tree_ast_refs(&apply.function, visitor);
@@ -6619,8 +6622,26 @@ mod tests {
         let nodes = RawNodes::decode(&mut reader).unwrap();
         let node = nodes.get(0).unwrap().decode_param_type().unwrap();
 
-        assert_eq!(node.binder, 5);
+        assert_eq!(node.binder.address, 5);
+        assert_eq!(node.binder.kind, crate::term::AstRefKind::ParamTypeBinder);
         assert_eq!(node.parameter_number, 3);
+    }
+
+    #[test]
+    fn collects_the_param_type_binder_as_an_ast_reference() {
+        let node = RawNode {
+            tag: PARAMTYPE_TAG,
+            offset: 0,
+            payload: &[0x85, 0x83],
+        };
+
+        assert_eq!(
+            node.ast_refs().unwrap(),
+            vec![crate::term::AstRef {
+                kind: crate::term::AstRefKind::ParamTypeBinder,
+                address: 5,
+            }]
+        );
     }
 
     #[test]
