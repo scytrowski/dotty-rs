@@ -681,6 +681,8 @@ together with the section boundary.
 `EncodedSection::positions()` own typed section payloads and expose a borrowed
 `Section` view for assembling a `SectionTable`. `EncodedSection::raw()` covers
 unknown or application-specific sections without requiring a guessed grammar.
+`EncodedSection::asts()` and `EncodedSection::structured_asts()` provide the
+same ownership boundary for raw or structured top-level AST nodes.
 `TastyFileBuilder` owns these encoded sections and produces either a complete
 byte stream or an `EncodedTastyFile` with the allocated AST addresses.
 Its `validate()` and `validate_scala_3_9()` methods allow checking the complete

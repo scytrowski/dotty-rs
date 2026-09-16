@@ -1,5 +1,7 @@
+use crate::ast::{RawNodes, StructuredNode};
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
+use crate::term::TermEncodeError;
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
@@ -410,6 +412,25 @@ impl EncodedSection {
         Ok(Self::raw(name, writer.into_inner()))
     }
 
+    /// Encode a raw top-level AST list and retain ownership of its payload.
+    pub fn asts(name: NameRef, nodes: &RawNodes<'_>) -> Result<Self, WriteError> {
+        let mut writer = Writer::new();
+        nodes.encode(&mut writer)?;
+        Ok(Self::raw(name, writer.into_inner()))
+    }
+
+    /// Encode structured top-level AST nodes and retain ownership of their payload.
+    pub fn structured_asts(
+        name: NameRef,
+        nodes: &[StructuredNode<'_>],
+    ) -> Result<Self, TermEncodeError> {
+        let mut writer = Writer::new();
+        for node in nodes {
+            node.encode(&mut writer)?;
+        }
+        Ok(Self::raw(name, writer.into_inner()))
+    }
+
     pub fn name(&self) -> NameRef {
         self.name
     }
@@ -513,6 +534,7 @@ mod tests {
         Attribute, Comment, EncodedSection, PositionEntry, PositionSection, Section, SectionError,
         SectionTable,
     };
+    use crate::ast::{RawNode, RawNodes};
     use crate::reader::{ReadError, Reader};
     use crate::writer::{WriteError, Writer};
 
@@ -627,6 +649,36 @@ mod tests {
         let encoded = EncodedSection::raw(9, vec![1, 2, 3]);
 
         assert_eq!(encoded.into_parts(), (9, vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn builds_an_owned_asts_section_from_raw_nodes() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+        ])
+        .unwrap();
+        let encoded = EncodedSection::asts(4, &nodes).unwrap();
+
+        assert_eq!(encoded.name(), 4);
+        assert_eq!(
+            encoded.payload(),
+            &[crate::VALDEF_TAG, 0x84, 0x85, 2, 3, 17]
+        );
+    }
+
+    #[test]
+    fn builds_an_owned_asts_section_from_structured_nodes() {
+        let nodes = RawNodes::from_entries(vec![
+            RawNode::new(crate::VALDEF_TAG, &[0x85, 2, 3, 17]).unwrap(),
+        ])
+        .unwrap();
+        let structured = vec![nodes.get(0).unwrap().decode_structured().unwrap()];
+        let encoded = EncodedSection::structured_asts(4, &structured).unwrap();
+
+        assert_eq!(
+            encoded.payload(),
+            &[crate::VALDEF_TAG, 0x84, 0x85, 2, 3, 17]
+        );
     }
 
     #[test]
