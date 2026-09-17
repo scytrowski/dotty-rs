@@ -1,4 +1,6 @@
-use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex, read_index};
+use crate::constant_pool::{
+    ConstantPool, ConstantPoolEntry, ConstantPoolIndex, PoolRefError, read_index,
+};
 use crate::reader::{ReadError, Reader};
 use std::fmt;
 
@@ -276,6 +278,101 @@ fn read_record_components<'a>(
         });
     }
     Ok(components)
+}
+
+/// Validates the constant pool references inside a single attribute (JVMS
+/// §4.7), recursing into nested attribute lists (`Record`, `Code`).
+///
+/// Not yet called outside tests — wired into `FieldInfo`/`MethodInfo`/
+/// `ClassFile` in the next increment.
+#[allow(dead_code)]
+fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    match attribute {
+        Attribute::ConstantValue(index) => pool.check_constant_value(*index),
+        Attribute::Signature(index) | Attribute::SourceFile(index) => pool.utf8(*index).map(|_| ()),
+        Attribute::Exceptions(indices)
+        | Attribute::NestMembers(indices)
+        | Attribute::PermittedSubclasses(indices) => {
+            for index in indices {
+                pool.class_name(*index)?;
+            }
+            Ok(())
+        }
+        Attribute::InnerClasses(entries) => {
+            for entry in entries {
+                pool.class_name(entry.inner_class_info_index)?;
+                if let Some(outer_class_info_index) = entry.outer_class_info_index {
+                    pool.class_name(outer_class_info_index)?;
+                }
+                if let Some(inner_name_index) = entry.inner_name_index {
+                    pool.utf8(inner_name_index)?;
+                }
+            }
+            Ok(())
+        }
+        Attribute::EnclosingMethod {
+            class_index,
+            method_index,
+        } => {
+            pool.class_name(*class_index)?;
+            if let Some(method_index) = method_index {
+                pool.name_and_type(*method_index)?;
+            }
+            Ok(())
+        }
+        Attribute::Deprecated => Ok(()),
+        Attribute::NestHost(index) => pool.class_name(*index).map(|_| ()),
+        Attribute::Record(components) => {
+            for component in components {
+                pool.utf8(component.name_index)?;
+                pool.utf8(component.descriptor_index)?;
+                validate_attributes(&component.attributes, pool)?;
+            }
+            Ok(())
+        }
+        Attribute::Code(code) => {
+            for entry in &code.exception_table {
+                if let Some(catch_type) = entry.catch_type {
+                    pool.class_name(catch_type)?;
+                }
+            }
+            validate_attributes(&code.attributes, pool)
+        }
+        Attribute::BootstrapMethods(methods) => {
+            for method in methods {
+                pool.method_handle(method.method_ref)?;
+                for argument in &method.arguments {
+                    pool.check_loadable(*argument)?;
+                }
+            }
+            Ok(())
+        }
+        Attribute::MethodParameters(parameters) => {
+            for parameter in parameters {
+                if let Some(name_index) = parameter.name_index {
+                    pool.utf8(name_index)?;
+                }
+            }
+            Ok(())
+        }
+        Attribute::Other(_) => Ok(()),
+    }
+}
+
+/// Validates the constant pool references of every attribute in `attributes`
+/// (JVMS §4.7), stopping at the first bad reference.
+///
+/// Not yet called outside tests — wired into `FieldInfo`/`MethodInfo`/
+/// `ClassFile` in the next increment.
+#[allow(dead_code)]
+pub(crate) fn validate_attributes(
+    attributes: &[Attribute<'_>],
+    pool: &ConstantPool,
+) -> Result<(), PoolRefError> {
+    for attribute in attributes {
+        validate_attribute(attribute, pool)?;
+    }
+    Ok(())
 }
 
 impl<'a> Attribute<'a> {
@@ -869,6 +966,432 @@ mod tests {
                 needed: 2,
                 remaining: 0,
             }))
+        );
+    }
+
+    #[test]
+    fn validate_attributes_accepts_an_empty_list() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(validate_attributes(&[], &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_constant_value_accepts_a_matching_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        let attribute = Attribute::ConstantValue(ConstantPoolIndex(1));
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_constant_value_rejects_a_bad_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Class {
+            name_index: ConstantPoolIndex(1),
+        })]);
+        let attribute = Attribute::ConstantValue(ConstantPoolIndex(1));
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::ConstantValue,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_signature_and_source_file_accept_utf8() {
+        let pool =
+            ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8("LFoo;".to_owned()))]);
+
+        assert_eq!(
+            validate_attribute(&Attribute::Signature(ConstantPoolIndex(1)), &pool),
+            Ok(())
+        );
+        assert_eq!(
+            validate_attribute(&Attribute::SourceFile(ConstantPoolIndex(1)), &pool),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_source_file_rejects_a_non_utf8_index() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            validate_attribute(&Attribute::SourceFile(ConstantPoolIndex(1)), &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    fn class_pool_with_one_class() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("java/lang/Exception".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+        ])
+    }
+
+    #[test]
+    fn validate_exceptions_nest_members_and_permitted_subclasses_accept_class_indices() {
+        let pool = class_pool_with_one_class();
+
+        assert_eq!(
+            validate_attribute(&Attribute::Exceptions(vec![ConstantPoolIndex(2)]), &pool),
+            Ok(())
+        );
+        assert_eq!(
+            validate_attribute(&Attribute::NestMembers(vec![ConstantPoolIndex(2)]), &pool),
+            Ok(())
+        );
+        assert_eq!(
+            validate_attribute(
+                &Attribute::PermittedSubclasses(vec![ConstantPoolIndex(2)]),
+                &pool
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_exceptions_rejects_a_non_class_index() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            validate_attribute(&Attribute::Exceptions(vec![ConstantPoolIndex(1)]), &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_inner_classes_accepts_valid_references() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Outer$Inner".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8("Outer".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(3),
+            }),
+            Some(ConstantPoolEntry::Utf8("Inner".to_owned())),
+        ]);
+        let attribute = Attribute::InnerClasses(vec![InnerClassEntry {
+            inner_class_info_index: ConstantPoolIndex(2),
+            outer_class_info_index: Some(ConstantPoolIndex(4)),
+            inner_name_index: Some(ConstantPoolIndex(5)),
+            inner_class_access_flags: 0x0009,
+        }]);
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_inner_classes_rejects_a_bad_outer_class_info_index() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Outer$Inner".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Integer(1)),
+        ]);
+        let attribute = Attribute::InnerClasses(vec![InnerClassEntry {
+            inner_class_info_index: ConstantPoolIndex(2),
+            outer_class_info_index: Some(ConstantPoolIndex(3)),
+            inner_name_index: None,
+            inner_class_access_flags: 0,
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_enclosing_method_accepts_a_class_and_name_and_type() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Outer".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(4),
+            }),
+        ]);
+        let attribute = Attribute::EnclosingMethod {
+            class_index: ConstantPoolIndex(2),
+            method_index: Some(ConstantPoolIndex(5)),
+        };
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_enclosing_method_rejects_a_method_index_that_is_not_name_and_type() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Outer".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+        ]);
+        let attribute = Attribute::EnclosingMethod {
+            class_index: ConstantPoolIndex(2),
+            method_index: Some(ConstantPoolIndex(3)),
+        };
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::NameAndType,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_deprecated_and_other_are_always_ok() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(validate_attribute(&Attribute::Deprecated, &pool), Ok(()));
+        assert_eq!(
+            validate_attribute(
+                &Attribute::Other(RawAttribute {
+                    name_index: ConstantPoolIndex(1),
+                    bytes: &[0xFF],
+                }),
+                &pool
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_nest_host_accepts_and_rejects() {
+        let good_pool = class_pool_with_one_class();
+        assert_eq!(
+            validate_attribute(&Attribute::NestHost(ConstantPoolIndex(2)), &good_pool),
+            Ok(())
+        );
+
+        let bad_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        assert_eq!(
+            validate_attribute(&Attribute::NestHost(ConstantPoolIndex(1)), &bad_pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_record_accepts_valid_components_and_recurses_into_nested_attributes() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("radius".to_owned())),
+            Some(ConstantPoolEntry::Utf8("D".to_owned())),
+        ]);
+        let attribute = Attribute::Record(vec![RecordComponentInfo {
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(2),
+            attributes: vec![Attribute::Signature(ConstantPoolIndex(2))],
+        }]);
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_record_propagates_a_bad_reference_in_a_nested_attribute() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("radius".to_owned())),
+            Some(ConstantPoolEntry::Utf8("D".to_owned())),
+        ]);
+        let attribute = Attribute::Record(vec![RecordComponentInfo {
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(2),
+            attributes: vec![Attribute::ConstantValue(ConstantPoolIndex(1))],
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::ConstantValue,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_code_accepts_a_valid_catch_type_and_recurses_into_nested_attributes() {
+        let pool = class_pool_with_one_class();
+        let attribute = Attribute::Code(CodeAttribute {
+            max_stack: 1,
+            max_locals: 1,
+            code: &[],
+            exception_table: vec![ExceptionTableEntry {
+                start_pc: 0,
+                end_pc: 1,
+                handler_pc: 2,
+                catch_type: Some(ConstantPoolIndex(2)),
+            }],
+            attributes: vec![],
+        });
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_code_rejects_a_bad_catch_type() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        let attribute = Attribute::Code(CodeAttribute {
+            max_stack: 0,
+            max_locals: 0,
+            code: &[],
+            exception_table: vec![ExceptionTableEntry {
+                start_pc: 0,
+                end_pc: 1,
+                handler_pc: 2,
+                catch_type: Some(ConstantPoolIndex(1)),
+            }],
+            attributes: vec![],
+        });
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_code_propagates_a_bad_reference_in_a_nested_attribute() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        let attribute = Attribute::Code(CodeAttribute {
+            max_stack: 0,
+            max_locals: 0,
+            code: &[],
+            exception_table: vec![],
+            attributes: vec![Attribute::SourceFile(ConstantPoolIndex(1))],
+        });
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_bootstrap_methods_accepts_a_method_handle_and_loadable_arguments() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("value".to_owned())),
+            Some(method_handle_entry()),
+            Some(ConstantPoolEntry::Integer(1)),
+        ]);
+        let attribute = Attribute::BootstrapMethods(vec![BootstrapMethodEntry {
+            method_ref: ConstantPoolIndex(2),
+            arguments: vec![ConstantPoolIndex(3)],
+        }]);
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_bootstrap_methods_rejects_a_method_ref_that_is_not_a_method_handle() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        let attribute = Attribute::BootstrapMethods(vec![BootstrapMethodEntry {
+            method_ref: ConstantPoolIndex(1),
+            arguments: vec![],
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::MethodHandle,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_bootstrap_methods_rejects_a_non_loadable_argument() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(method_handle_entry()),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(1),
+                descriptor_index: ConstantPoolIndex(1),
+            }),
+        ]);
+        let attribute = Attribute::BootstrapMethods(vec![BootstrapMethodEntry {
+            method_ref: ConstantPoolIndex(1),
+            arguments: vec![ConstantPoolIndex(2)],
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: crate::constant_pool::EntryKind::Loadable,
+            })
+        );
+    }
+
+    fn method_handle_entry() -> ConstantPoolEntry {
+        ConstantPoolEntry::MethodHandle {
+            reference_kind: crate::constant_pool::MethodHandleKind::InvokeStatic,
+            reference_index: ConstantPoolIndex(1),
+        }
+    }
+
+    #[test]
+    fn validate_method_parameters_accepts_a_named_and_an_unnamed_parameter() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8("a".to_owned()))]);
+        let attribute = Attribute::MethodParameters(vec![
+            MethodParameterEntry {
+                name_index: Some(ConstantPoolIndex(1)),
+                access_flags: 0,
+            },
+            MethodParameterEntry {
+                name_index: None,
+                access_flags: 0,
+            },
+        ]);
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_method_parameters_rejects_a_non_utf8_name_index() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        let attribute = Attribute::MethodParameters(vec![MethodParameterEntry {
+            name_index: Some(ConstantPoolIndex(1)),
+            access_flags: 0,
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
         );
     }
 
