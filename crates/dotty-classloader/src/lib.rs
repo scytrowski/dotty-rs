@@ -14,6 +14,7 @@ mod class_path;
 pub mod classloader {
     pub use crate::binary_name::BinaryName;
     pub use crate::class_path::{
-        ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, DirectoryClassPath,
+        ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, CompositeClassPath,
+        DirectoryClassPath,
     };
 }

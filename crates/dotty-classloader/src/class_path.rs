@@ -120,6 +120,33 @@ impl ClassPathEntry for DirectoryClassPath {
     }
 }
 
+/// An ordered, first-match-wins composite of [`ClassPathEntry`]s: entries
+/// are searched in order, and the first one that returns `Ok(Some(_))`
+/// wins. An entry returning `Ok(None)` falls through to the next entry; an
+/// entry returning `Err` stops the search immediately and propagates that
+/// error.
+pub struct CompositeClassPath {
+    entries: Vec<Box<dyn ClassPathEntry>>,
+}
+
+impl CompositeClassPath {
+    pub fn new(entries: Vec<Box<dyn ClassPathEntry>>) -> Self {
+        Self { entries }
+    }
+}
+
+impl ClassPathEntry for CompositeClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        for entry in &self.entries {
+            if let Some(resource) = entry.find_class(name)? {
+                return Ok(Some(resource));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +172,78 @@ mod tests {
 
         assert_eq!(resource.bytes(), &[0xCA, 0xFE]);
         assert_eq!(resource.origin(), &origin);
+    }
+
+    struct FixedEntry(Result<Option<ClassResource>, ()>);
+
+    impl ClassPathEntry for FixedEntry {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            match &self.0 {
+                Ok(resource) => Ok(resource.clone()),
+                Err(()) => Err(ClassPathError::from(io::Error::other("boom"))),
+            }
+        }
+    }
+
+    fn found(marker: u8) -> Result<Option<ClassResource>, ()> {
+        Ok(Some(ClassResource::new(
+            vec![marker],
+            ClassOrigin::Directory(PathBuf::from("/irrelevant")),
+        )))
+    }
+
+    #[test]
+    fn composite_returns_the_first_entry_that_finds_the_class() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(FixedEntry(found(1))),
+            Box::new(FixedEntry(found(2))),
+        ]);
+
+        let resource = composite
+            .find_class(&BinaryName::from_internal("Anything"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resource.bytes(), &[1]);
+    }
+
+    #[test]
+    fn composite_falls_through_to_the_next_entry_on_a_miss() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(FixedEntry(Ok(None))),
+            Box::new(FixedEntry(found(2))),
+        ]);
+
+        let resource = composite
+            .find_class(&BinaryName::from_internal("Anything"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resource.bytes(), &[2]);
+    }
+
+    #[test]
+    fn composite_returns_none_when_no_entry_has_the_class() {
+        let composite = CompositeClassPath::new(vec![Box::new(FixedEntry(Ok(None)))]);
+
+        let resource = composite
+            .find_class(&BinaryName::from_internal("Anything"))
+            .unwrap();
+
+        assert!(resource.is_none());
+    }
+
+    #[test]
+    fn composite_propagates_an_entrys_error_without_trying_later_entries() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(FixedEntry(Err(()))),
+            Box::new(FixedEntry(found(2))),
+        ]);
+
+        let error = composite
+            .find_class(&BinaryName::from_internal("Anything"))
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "classpath I/O error: boom");
     }
 }
