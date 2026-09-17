@@ -70,6 +70,11 @@ The projection deliberately excludes absolute AST offsets, types,
 overload-resolution details, and compiler-generated symbols.
 It is a semantic-lite oracle, not a Rust semantic model.
 
+Rust integration coverage discovers every corpus directory below
+`crates/dotty-tasty/tests/fixtures` that contains a `manifest.toml`. A new
+corpus therefore gets inventory, semantic-baseline, and wire-baseline checks
+without adding another Rust test target.
+
 ## Wire-aligned Rust baseline
 
 The root Rust package also provides `tasty-wire-baseline`. It reads a

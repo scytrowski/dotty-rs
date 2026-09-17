@@ -7,10 +7,6 @@ use std::path::Path;
 mod category_five;
 #[path = "support/corpus.rs"]
 mod corpus;
-#[path = "support/semantic.rs"]
-mod semantic;
-#[path = "support/wire.rs"]
-mod wire;
 
 use dotty_tasty::tasty::{
     EncodedSection, NodeCategory, RawNode, RawNodes, Reader, StandardSection, TastyFile,
@@ -25,11 +21,6 @@ fn scala3_compiler_corpus() -> corpus::Corpus {
 
 fn scala3_compiler_fixtures() -> &'static [corpus::ParsedFixture] {
     corpus::parsed_fixtures(&scala3_compiler_corpus(), 28, 9, 0)
-}
-
-#[test]
-fn scala3_compiler_wire_expectations_match_selected_fixtures() {
-    wire::assert_expectations_match_selected_fixtures(&scala3_compiler_corpus(), 1, (28, 9, 0));
 }
 
 fn scala3_library_corpus() -> corpus::Corpus {
@@ -476,11 +467,4 @@ fn next_random(state: &mut u64) -> u64 {
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1);
     *state
-}
-
-#[test]
-fn scala3_compiler_semantic_expectations_cover_selected_fixtures() {
-    let corpus = scala3_compiler_corpus();
-
-    semantic::assert_expectations_cover_selected_fixtures(&corpus, 3, "3.9.0", (28, 9, 0));
 }

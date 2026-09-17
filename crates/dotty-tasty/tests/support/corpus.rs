@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use dotty_tasty::tasty::{AstAddressIndex, RawNodes, StructuredNode, TastyFile};
 
@@ -30,6 +32,7 @@ pub struct ParsedFixture {
     pub path: PathBuf,
     pub file: TastyFile<'static>,
     pub index: AstAddressIndex<'static>,
+    #[allow(dead_code)]
     asts: OnceLock<RawNodes<'static>>,
     structured_asts: OnceLock<Vec<StructuredNode<'static>>>,
 }
@@ -37,9 +40,13 @@ pub struct ParsedFixture {
 // The test cache intentionally keeps fixture buffers alive until process exit.
 // `TastyFile` and its index are zero-copy views, so this avoids changing the
 // production ownership model just to share parsed corpus data between tests.
-static PARSED_FIXTURES: OnceLock<Vec<ParsedFixture>> = OnceLock::new();
+// Entries are keyed by root because one integration test can cover several
+// manifest-discovered corpora.
+static PARSED_FIXTURES: OnceLock<Mutex<BTreeMap<PathBuf, &'static [ParsedFixture]>>> =
+    OnceLock::new();
 
 impl ParsedFixture {
+    #[allow(dead_code)]
     pub fn asts(&self) -> &RawNodes<'static> {
         self.asts.get_or_init(|| {
             self.file.asts().unwrap_or_else(|error| {
@@ -146,6 +153,39 @@ impl Corpus {
         fixtures
     }
 
+    #[allow(dead_code)]
+    pub fn discover(root: &Path) -> Vec<Self> {
+        let mut directories = vec![root.to_path_buf()];
+        let mut corpus_roots = Vec::new();
+        while let Some(directory) = directories.pop() {
+            let entries = fs::read_dir(&directory).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read corpus directory {}: {error}",
+                    directory.display()
+                )
+            });
+            for entry in entries {
+                let entry = entry.unwrap_or_else(|error| {
+                    panic!(
+                        "failed to inspect an entry in {}: {error}",
+                        directory.display()
+                    )
+                });
+                let path = entry.path();
+                if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                    continue;
+                }
+                if path.join("manifest.toml").is_file() {
+                    corpus_roots.push(path);
+                } else {
+                    directories.push(path);
+                }
+            }
+        }
+        corpus_roots.sort();
+        corpus_roots.into_iter().map(Self::load).collect()
+    }
+
     pub fn selected_fixture_paths(&self) -> Vec<PathBuf> {
         let fixtures = self.fixture_paths();
         let Some(selection_path) = self.selection_path() else {
@@ -195,42 +235,46 @@ pub fn parsed_fixtures(
     compiler_minor: u32,
     compiler_experimental: u32,
 ) -> &'static [ParsedFixture] {
-    PARSED_FIXTURES
-        .get_or_init(|| {
-            corpus
-                .fixture_paths()
-                .into_iter()
-                .map(|path| {
-                    let bytes = Box::leak(
-                        fs::read(&path)
-                            .unwrap_or_else(|error| {
-                                panic!("failed to read {}: {error}", path.display())
-                            })
-                            .into_boxed_slice(),
-                    );
-                    let file = TastyFile::parse_and_validate_compatible_with(
-                        bytes,
-                        compiler_major,
-                        compiler_minor,
-                        compiler_experimental,
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("failed to validate {}: {error}", path.display())
-                    });
-                    let index = file.ast_address_index().unwrap_or_else(|error| {
-                        panic!("failed to index {}: {error}", path.display())
-                    });
-                    ParsedFixture {
-                        path,
-                        file,
-                        index,
-                        asts: OnceLock::new(),
-                        structured_asts: OnceLock::new(),
-                    }
-                })
-                .collect()
+    let cache = PARSED_FIXTURES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let key = corpus.tasty_root_path();
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(fixtures) = cache.get(&key) {
+        return fixtures;
+    }
+
+    let fixtures = corpus
+        .fixture_paths()
+        .into_iter()
+        .map(|path| {
+            let bytes = Box::leak(
+                fs::read(&path)
+                    .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+                    .into_boxed_slice(),
+            );
+            let file = TastyFile::parse_and_validate_compatible_with(
+                bytes,
+                compiler_major,
+                compiler_minor,
+                compiler_experimental,
+            )
+            .unwrap_or_else(|error| panic!("failed to validate {}: {error}", path.display()));
+            let index = file
+                .ast_address_index()
+                .unwrap_or_else(|error| panic!("failed to index {}: {error}", path.display()));
+            ParsedFixture {
+                path,
+                file,
+                index,
+                asts: OnceLock::new(),
+                structured_asts: OnceLock::new(),
+            }
         })
-        .as_slice()
+        .collect::<Vec<_>>();
+    let fixtures = Box::leak(fixtures.into_boxed_slice());
+    cache.insert(key, fixtures);
+    fixtures
 }
 
 impl CorpusManifest {

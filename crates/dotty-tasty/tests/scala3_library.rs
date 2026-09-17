@@ -24,11 +24,6 @@ fn scala3_library_fixtures() -> &'static [corpus::ParsedFixture] {
     corpus::parsed_fixtures(&scala3_library_corpus(), 28, 9, 0)
 }
 
-#[test]
-fn scala3_library_wire_expectations_match_selected_fixtures() {
-    wire::assert_expectations_match_selected_fixtures(&scala3_library_corpus(), 1, (28, 9, 0));
-}
-
 /// Returns canonical structured bytes used as a structural fingerprint.
 ///
 /// Decoding removes wire-level Nat representation details and node offsets;
@@ -40,6 +35,66 @@ fn normalized_structured_encoding(raw: &RawNode<'_>) -> Result<Vec<u8>, String> 
         .encode(&mut writer)
         .map_err(|error| error.to_string())?;
     Ok(writer.into_inner())
+}
+
+fn manifest_corpora() -> Vec<corpus::Corpus> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    corpus::Corpus::discover(&root)
+}
+
+#[test]
+fn all_manifest_corpora_have_consistent_fixture_inventories() {
+    let corpora = manifest_corpora();
+    assert!(!corpora.is_empty());
+
+    for corpus in corpora {
+        let fixtures = corpus.fixture_paths();
+        let total_bytes: u64 = fixtures
+            .iter()
+            .map(|path| {
+                fs::metadata(path)
+                    .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", path.display()))
+                    .len()
+            })
+            .sum();
+        let selected = corpus.selected_fixture_paths();
+
+        assert_eq!(
+            fixtures.len(),
+            corpus.manifest().fixture_count,
+            "{}",
+            corpus.manifest().id
+        );
+        assert_eq!(
+            total_bytes,
+            corpus.manifest().fixture_bytes,
+            "{}",
+            corpus.manifest().id
+        );
+        assert!(
+            !selected.is_empty(),
+            "{} has no selected fixtures",
+            corpus.manifest().id
+        );
+        assert!(
+            selected.iter().all(|path| path.is_file()),
+            "{} has a missing selected fixture",
+            corpus.manifest().id
+        );
+    }
+}
+
+#[test]
+fn all_manifest_corpora_match_their_semantic_and_wire_baselines() {
+    for corpus in manifest_corpora() {
+        semantic::assert_expectations_cover_selected_fixtures(
+            &corpus,
+            3,
+            &corpus.manifest().scala_version,
+            (28, 9, 0),
+        );
+        wire::assert_expectations_match_selected_fixtures(&corpus, 1, (28, 9, 0));
+    }
 }
 
 #[test]
@@ -69,21 +124,6 @@ fn scala3_library_fixture_inventory_is_complete() {
 
     assert_eq!(fixtures.len(), corpus.manifest().fixture_count);
     assert_eq!(total_bytes, corpus.manifest().fixture_bytes);
-}
-
-#[test]
-fn scala3_library_semantic_selection_is_resolved_from_manifest() {
-    let corpus = scala3_library_corpus();
-    let selected = corpus.selected_fixture_paths();
-
-    assert!(!selected.is_empty());
-    assert!(selected.iter().all(|path| path.is_file()));
-}
-
-#[test]
-fn scala3_library_semantic_expectations_cover_selected_fixtures() {
-    let corpus = scala3_library_corpus();
-    semantic::assert_expectations_cover_selected_fixtures(&corpus, 3, "3.9.0", (28, 9, 0));
 }
 
 #[test]
