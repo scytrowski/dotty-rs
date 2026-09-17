@@ -4,3 +4,4 @@ val upperFloat = 1F
 val upperDouble = 1D
 val exponentSeparator = 1.0e1_0
 val card 🂡 value = 1
+val copyright © value = 2

@@ -1294,6 +1294,29 @@ mod tests {
     }
 
     #[test]
+    fn emits_a_non_ascii_symbol_as_an_operator() {
+        let (items, diagnostics) = scan("left © right");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn preserves_spaces_tabs_and_physical_newlines() {
         let (items, diagnostics) = scan("a \t\r\nb");
 
