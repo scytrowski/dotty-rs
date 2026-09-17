@@ -1165,6 +1165,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_combining_marks_in_identifier_parts() {
+        let source = "val a\u{0301} = 1";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Keyword(HardKeyword::Val), 0, 3),
+                trivia(TriviaKind::Spaces, 3, 4),
+                token(RawTokenKind::Identifier, 4, 7),
+                trivia(TriviaKind::Spaces, 7, 8),
+                token(RawTokenKind::Operator, 8, 9),
+                trivia(TriviaKind::Spaces, 9, 10),
+                token(RawTokenKind::IntegerLiteral, 10, 11),
+                token(RawTokenKind::Eof, 11, 11),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn keeps_soft_keywords_as_identifiers() {
         let (items, diagnostics) = scan("using inline extension end");
         let kinds: Vec<_> = items

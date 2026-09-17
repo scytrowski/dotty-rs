@@ -7,3 +7,4 @@ edition = "2024"
 dotty-diagnostics = { path = "../dotty-diagnostics" }
 dotty-source = { path = "../dotty-source" }
 dotty-token = { path = "../dotty-token" }
+unicode-ident = "1.0"

@@ -28,6 +28,7 @@ dependencies = [
  "dotty-diagnostics",
  "dotty-source",
  "dotty-token",
+ "unicode-ident",
 ]
 
 [[package]]
