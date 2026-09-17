@@ -72,6 +72,7 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
     let mut previous_kind = None;
+    let mut previous_opens_indentation = false;
     let mut previous_end = 0;
     let mut indentation_stack = vec![String::new()];
     let mut paren_depth = 0u32;
@@ -88,20 +89,18 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                 let layout_enabled = paren_depth == 0 && bracket_depth == 0;
 
                 if has_line_break && layout_enabled {
-                    let dedented = if brace_depth == 0 {
+                    if brace_depth == 0 {
                         adjust_indentation(
                             &mut tokens,
                             &mut indentation_stack,
                             &indentation,
                             previous_kind,
+                            previous_opens_indentation,
                             raw.span.start(),
-                        )?
-                    } else {
-                        false
-                    };
+                        )?;
+                    }
 
-                    if !dedented
-                        && can_end_statement(previous_kind)
+                    if can_end_statement(previous_kind)
                         && can_start_statement(raw.kind)
                         && !matches!(raw.kind, RawTokenKind::Operator)
                     {
@@ -125,6 +124,13 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                     &mut brace_depth,
                 );
                 previous_kind = Some(token.kind);
+                previous_opens_indentation = opens_indentation(
+                    Some(token.kind),
+                    is_layout_operator(
+                        token.kind,
+                        &source[raw.span.start() as usize..raw.span.end() as usize],
+                    ),
+                );
                 previous_end = raw.span.end();
                 tokens.push(token);
                 trivia.clear();
@@ -153,23 +159,25 @@ fn adjust_indentation(
     stack: &mut Vec<String>,
     indentation: &str,
     previous_kind: Option<TokenKind>,
+    previous_opens_indentation: bool,
     offset: u32,
-) -> Result<bool, TextRangeError> {
+) -> Result<(), TextRangeError> {
     let current = stack.last().map(String::as_str).unwrap_or("");
     if current == indentation {
-        return Ok(false);
+        return Ok(());
     }
 
-    if is_prefix(current, indentation) && opens_indentation(previous_kind) {
+    if is_prefix(current, indentation)
+        && opens_indentation(previous_kind, previous_opens_indentation)
+    {
         stack.push(indentation.to_owned());
         tokens.push(Token::new(
             TokenKind::Indent,
             TextRange::new(offset, offset)?,
         ));
-        return Ok(false);
+        return Ok(());
     }
 
-    let mut dedented = false;
     while stack.len() > 1 {
         let current = stack.last().map(String::as_str).unwrap_or("");
         if is_prefix(current, indentation) {
@@ -180,13 +188,15 @@ fn adjust_indentation(
             TokenKind::Outdent,
             TextRange::new(offset, offset)?,
         ));
-        dedented = true;
     }
 
-    Ok(dedented)
+    Ok(())
 }
 
-fn opens_indentation(kind: Option<TokenKind>) -> bool {
+fn opens_indentation(kind: Option<TokenKind>, operator: bool) -> bool {
+    if operator {
+        return true;
+    }
     matches!(
         kind,
         Some(TokenKind::Keyword(
@@ -203,6 +213,10 @@ fn opens_indentation(kind: Option<TokenKind>) -> bool {
                 | HardKeyword::Yield
         ))
     )
+}
+
+fn is_layout_operator(kind: TokenKind, spelling: &str) -> bool {
+    matches!(kind, TokenKind::Operator) && matches!(spelling, "=" | "=>" | "<-")
 }
 
 fn can_end_statement(kind: Option<TokenKind>) -> bool {
@@ -401,6 +415,7 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Outdent,
+                TokenKind::Newline,
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
@@ -463,6 +478,37 @@ mod tests {
         assert!(token_kinds.contains(&TokenKind::Newline));
         assert!(!token_kinds.contains(&TokenKind::Indent));
         assert!(!token_kinds.contains(&TokenKind::Outdent));
+    }
+
+    #[test]
+    fn opens_nested_case_bodies_after_match_and_arrow_tokens() {
+        assert_eq!(
+            kinds("value match\n  case 1 =>\n    one()\n  case _ =>\n    other()"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::IntegerLiteral,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
