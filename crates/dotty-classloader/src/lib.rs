@@ -14,6 +14,7 @@ mod error;
 mod loader;
 mod repository;
 mod symbol;
+mod zip_archive;
 mod zip_reader;
 
 /// Classpath loading APIs.
