@@ -23,3 +23,12 @@ fn resolves_source_files_through_the_public_tasty_facade() {
         ))
     );
 }
+
+#[test]
+fn validates_and_reencodes_a_file_through_the_public_facade() {
+    let bytes = include_bytes!("../crates/dotty-tasty/tests/fixtures/simple_def/SimpleDef.tasty");
+    let file = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+
+    assert!(!file.asts().unwrap().is_empty());
+    assert_eq!(file.encode().unwrap(), bytes);
+}

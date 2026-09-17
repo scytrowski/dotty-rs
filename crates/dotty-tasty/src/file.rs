@@ -14,6 +14,12 @@ use crate::term::{AstRef, AstTreeNode, TermEncodeError};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+/// A zero-copy view of a TASTy file.
+///
+/// The view borrows the original byte slice. Parsing does not copy section
+/// payloads, while structured queries allocate only the requested views. Use
+/// [`TastyFile::parse_and_validate_scala_3_9`] when the input should be
+/// checked before inspection.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TastyFile<'a> {
     header: Header,
@@ -21,6 +27,10 @@ pub struct TastyFile<'a> {
     sections: SectionTable<'a>,
 }
 
+/// Owned bytes produced by a TASTy encoder together with allocated AST addresses.
+///
+/// The address list is populated by the address-aware encoding methods and is
+/// empty for encodings that do not request address allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedTastyFile {
     bytes: Vec<u8>,
