@@ -1,6 +1,9 @@
+use crate::annotation::SemanticAnnotation;
 use crate::binary_name::BinaryName;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
+use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
+use crate::record_component::RecordComponentSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::signature::ClassSignature;
 use std::cell::RefCell;
@@ -52,6 +55,14 @@ pub enum ClassRef {
 /// two `ClassSymbol`s can genuinely reference each other through
 /// `Rc<ClassSymbol>` — a derived, field-recursing `Debug` would recurse
 /// forever printing such a pair.
+///
+/// `nest_host`/`nest_members`/`permitted_subclasses`/`inner_classes`/
+/// `enclosing_method`/`record_components`/`annotations` are
+/// `docs/classloader.md` §9's Milestone 7: the remaining class-level
+/// attributes `dotty-classfile` already decodes but this crate didn't
+/// yet consume. `record_components` is `None` unless the class carries
+/// a `Record` attribute at all (`Some(vec![])` is a real, distinct
+/// state: a record with zero components), matching JVMS §4.7.30.
 #[derive(Clone)]
 pub struct ClassSymbol {
     name: BinaryName,
@@ -61,6 +72,13 @@ pub struct ClassSymbol {
     fields: RefCell<Vec<FieldSymbol>>,
     methods: RefCell<Vec<MethodSymbol>>,
     signature: RefCell<Option<ClassSignature>>,
+    nest_host: RefCell<Option<ClassRef>>,
+    nest_members: RefCell<Vec<ClassRef>>,
+    permitted_subclasses: RefCell<Vec<ClassRef>>,
+    inner_classes: RefCell<Vec<InnerClassEntry>>,
+    enclosing_method: RefCell<Option<EnclosingMethodRef>>,
+    record_components: RefCell<Option<Vec<RecordComponentSymbol>>>,
+    annotations: RefCell<Vec<SemanticAnnotation>>,
 }
 
 impl fmt::Debug for ClassSymbol {
@@ -70,6 +88,7 @@ impl fmt::Debug for ClassSymbol {
 }
 
 impl ClassSymbol {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: BinaryName,
         flags: ClassAccessFlags,
@@ -78,9 +97,29 @@ impl ClassSymbol {
         fields: Vec<FieldSymbol>,
         methods: Vec<MethodSymbol>,
         signature: Option<ClassSignature>,
+        nest_host: Option<ClassRef>,
+        nest_members: Vec<ClassRef>,
+        permitted_subclasses: Vec<ClassRef>,
+        inner_classes: Vec<InnerClassEntry>,
+        enclosing_method: Option<EnclosingMethodRef>,
+        record_components: Option<Vec<RecordComponentSymbol>>,
+        annotations: Vec<SemanticAnnotation>,
     ) -> Self {
         let symbol = Self::new_shell(name, flags);
-        symbol.complete(super_class, interfaces, fields, methods, signature);
+        symbol.complete(
+            super_class,
+            interfaces,
+            fields,
+            methods,
+            signature,
+            nest_host,
+            nest_members,
+            permitted_subclasses,
+            inner_classes,
+            enclosing_method,
+            record_components,
+            annotations,
+        );
         symbol
     }
 
@@ -97,11 +136,19 @@ impl ClassSymbol {
             fields: RefCell::new(Vec::new()),
             methods: RefCell::new(Vec::new()),
             signature: RefCell::new(None),
+            nest_host: RefCell::new(None),
+            nest_members: RefCell::new(Vec::new()),
+            permitted_subclasses: RefCell::new(Vec::new()),
+            inner_classes: RefCell::new(Vec::new()),
+            enclosing_method: RefCell::new(None),
+            record_components: RefCell::new(None),
+            annotations: RefCell::new(Vec::new()),
         }
     }
 
     /// Fills in a shell's resolved data in place. Called exactly once,
     /// after everything it needs has itself been resolved.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn complete(
         &self,
         super_class: Option<ClassRef>,
@@ -109,12 +156,26 @@ impl ClassSymbol {
         fields: Vec<FieldSymbol>,
         methods: Vec<MethodSymbol>,
         signature: Option<ClassSignature>,
+        nest_host: Option<ClassRef>,
+        nest_members: Vec<ClassRef>,
+        permitted_subclasses: Vec<ClassRef>,
+        inner_classes: Vec<InnerClassEntry>,
+        enclosing_method: Option<EnclosingMethodRef>,
+        record_components: Option<Vec<RecordComponentSymbol>>,
+        annotations: Vec<SemanticAnnotation>,
     ) {
         *self.super_class.borrow_mut() = super_class;
         *self.interfaces.borrow_mut() = interfaces;
         *self.fields.borrow_mut() = fields;
         *self.methods.borrow_mut() = methods;
         *self.signature.borrow_mut() = signature;
+        *self.nest_host.borrow_mut() = nest_host;
+        *self.nest_members.borrow_mut() = nest_members;
+        *self.permitted_subclasses.borrow_mut() = permitted_subclasses;
+        *self.inner_classes.borrow_mut() = inner_classes;
+        *self.enclosing_method.borrow_mut() = enclosing_method;
+        *self.record_components.borrow_mut() = record_components;
+        *self.annotations.borrow_mut() = annotations;
     }
 
     pub fn name(&self) -> &BinaryName {
@@ -144,6 +205,34 @@ impl ClassSymbol {
     pub fn signature(&self) -> Option<ClassSignature> {
         self.signature.borrow().clone()
     }
+
+    pub fn nest_host(&self) -> Option<ClassRef> {
+        self.nest_host.borrow().clone()
+    }
+
+    pub fn nest_members(&self) -> Vec<ClassRef> {
+        self.nest_members.borrow().clone()
+    }
+
+    pub fn permitted_subclasses(&self) -> Vec<ClassRef> {
+        self.permitted_subclasses.borrow().clone()
+    }
+
+    pub fn inner_classes(&self) -> Vec<InnerClassEntry> {
+        self.inner_classes.borrow().clone()
+    }
+
+    pub fn enclosing_method(&self) -> Option<EnclosingMethodRef> {
+        self.enclosing_method.borrow().clone()
+    }
+
+    pub fn record_components(&self) -> Option<Vec<RecordComponentSymbol>> {
+        self.record_components.borrow().clone()
+    }
+
+    pub fn annotations(&self) -> Vec<SemanticAnnotation> {
+        self.annotations.borrow().clone()
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +249,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         ));
         let runnable_ref = ClassRef::Unresolved(BinaryName::from_internal("java/lang/Runnable"));
 
@@ -171,6 +267,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert_eq!(symbol.name().as_internal(), "PoolSample");
@@ -195,6 +298,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert!(symbol.super_class().is_none());
@@ -221,6 +331,13 @@ mod tests {
             vec![field],
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert!(matches!(symbol.fields().as_slice(), [only] if only.name() == "ANSWER"));
@@ -252,6 +369,13 @@ mod tests {
             Vec::new(),
             vec![method],
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert!(matches!(symbol.methods().as_slice(), [only] if only.name() == "run"));
@@ -279,6 +403,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Some(signature.clone()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert_eq!(symbol.signature(), Some(signature));
@@ -294,6 +425,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert_eq!(symbol.signature(), None);
@@ -317,6 +455,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
 
         assert!(matches!(

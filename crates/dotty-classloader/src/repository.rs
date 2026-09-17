@@ -101,6 +101,13 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         ));
 
         repository.mark_loaded(name.clone(), symbol.clone());

@@ -170,7 +170,20 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             ClassSignature::parse,
         )?;
 
-        shell.complete(super_class, interfaces, fields, methods, signature);
+        shell.complete(
+            super_class,
+            interfaces,
+            fields,
+            methods,
+            signature,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        );
         Ok(shell)
     }
 

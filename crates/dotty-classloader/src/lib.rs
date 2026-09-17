@@ -7,6 +7,7 @@
 //! to load classpath dependencies. Implementation is not yet started; this
 //! crate is scaffolding built on top of `dotty-tasty` and `dotty-classfile`.
 
+mod annotation;
 mod binary_name;
 mod class_path;
 mod crc32;
@@ -18,6 +19,8 @@ mod jdk_class_path;
 mod jmod_class_path;
 mod loader;
 mod method_symbol;
+mod nesting;
+mod record_component;
 mod repository;
 mod semantic_type;
 mod symbol;
@@ -26,6 +29,7 @@ mod zip_reader;
 
 /// Classpath loading APIs.
 pub mod classloader {
+    pub use crate::annotation::{AnnotationValue, SemanticAnnotation};
     pub use crate::binary_name::BinaryName;
     pub use crate::class_path::{
         ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, CompositeClassPath,
@@ -38,6 +42,8 @@ pub mod classloader {
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::ClassLoader;
     pub use crate::method_symbol::MethodSymbol;
+    pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
+    pub use crate::record_component::RecordComponentSymbol;
     pub use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }
