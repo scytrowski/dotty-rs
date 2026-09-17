@@ -187,6 +187,11 @@ fn decode_modified_utf8(bytes: &[u8], base_offset: usize) -> Result<String, Read
             }
 
             let value = (u32::from(lead & 0x1F) << 6) | u32::from(continuation & 0x3F);
+            // JVMS §4.4.7: the 2-byte form encodes 0x0000 (the special NUL
+            // case) or 0x0080-0x07FF; 0x0001-0x007F must use the 1-byte form.
+            if (1..0x80).contains(&value) {
+                return Err(invalid_at(base_offset + index));
+            }
             result.push(char::from_u32(value).ok_or_else(|| invalid_at(base_offset + index))?);
             index += 2;
         } else if lead & 0xF0 == 0xE0 {
@@ -205,6 +210,11 @@ fn decode_modified_utf8(bytes: &[u8], base_offset: usize) -> Result<String, Read
             } else if (0xDC00..=0xDFFF).contains(&value) {
                 return Err(invalid_at(base_offset + index));
             } else {
+                // JVMS §4.4.7: the plain 3-byte form encodes 0x0800-0xFFFF;
+                // anything below 0x0800 must use the 1- or 2-byte form.
+                if value < 0x800 {
+                    return Err(invalid_at(base_offset + index));
+                }
                 result.push(char::from_u32(value).ok_or_else(|| invalid_at(base_offset + index))?);
                 index += 3;
             }
@@ -376,6 +386,30 @@ mod tests {
         assert_eq!(
             reader.read_modified_utf8(2),
             Err(ReadError::InvalidModifiedUtf8 { offset: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_an_overlong_two_byte_encoding_of_an_ascii_character() {
+        // 0xC1 0x81 encodes 'A' (0x41) via the 2-byte form; JVMS §4.4.7
+        // requires 0x0001-0x007F to use the 1-byte form.
+        let mut reader = Reader::new(&[0xC1, 0x81]);
+
+        assert_eq!(
+            reader.read_modified_utf8(2),
+            Err(ReadError::InvalidModifiedUtf8 { offset: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_an_overlong_three_byte_encoding_of_an_ascii_character() {
+        // 0xE0 0x81 0x81 encodes 'A' (0x41) via the 3-byte form; JVMS
+        // §4.4.7 requires 0x0000-0x07FF to use the 1- or 2-byte form.
+        let mut reader = Reader::new(&[0xE0, 0x81, 0x81]);
+
+        assert_eq!(
+            reader.read_modified_utf8(3),
+            Err(ReadError::InvalidModifiedUtf8 { offset: 0 })
         );
     }
 
