@@ -1,6 +1,7 @@
 use crate::access_flags::MethodAccessFlags;
 use crate::attribute::{Attribute, AttributeError, decode_attributes};
 use crate::constant_pool::{ConstantPool, ConstantPoolIndex, read_index};
+use crate::descriptor::{MethodDescriptor, ResolveDescriptorError, resolve_method_descriptor};
 use crate::reader::Reader;
 
 /// A `method_info` structure (JVMS §4.6).
@@ -28,6 +29,14 @@ impl<'a> MethodInfo<'a> {
             descriptor_index,
             attributes,
         })
+    }
+
+    /// Resolves and parses this method's descriptor (JVMS §4.3.3).
+    pub fn descriptor(
+        &self,
+        constant_pool: &ConstantPool,
+    ) -> Result<MethodDescriptor, ResolveDescriptorError> {
+        resolve_method_descriptor(constant_pool, self.descriptor_index)
     }
 }
 
@@ -104,6 +113,61 @@ mod tests {
                 needed: 2,
                 remaining: 1,
             }))
+        );
+    }
+
+    fn method_with_descriptor(descriptor: ConstantPoolIndex) -> MethodInfo<'static> {
+        MethodInfo {
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+            name_index: ConstantPoolIndex(2),
+            descriptor_index: descriptor,
+            attributes: vec![],
+        }
+    }
+
+    #[test]
+    fn resolves_and_parses_a_method_descriptor() {
+        let pool = ConstantPool::from_entries(vec![
+            None,
+            None,
+            Some(ConstantPoolEntry::Utf8("()I".to_owned())),
+        ]);
+
+        assert_eq!(
+            method_with_descriptor(ConstantPoolIndex(3)).descriptor(&pool),
+            Ok(MethodDescriptor {
+                parameters: vec![],
+                return_type: Some(crate::descriptor::FieldType::Int),
+            })
+        );
+    }
+
+    #[test]
+    fn reports_a_method_descriptor_that_does_not_resolve_to_utf8() {
+        let pool =
+            ConstantPool::from_entries(vec![None, None, Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            method_with_descriptor(ConstantPoolIndex(3)).descriptor(&pool),
+            Err(ResolveDescriptorError::NotUtf8 {
+                index: ConstantPoolIndex(3)
+            })
+        );
+    }
+
+    #[test]
+    fn reports_a_method_descriptor_that_fails_to_parse() {
+        let pool = ConstantPool::from_entries(vec![
+            None,
+            None,
+            Some(ConstantPoolEntry::Utf8("I)V".to_owned())),
+        ]);
+
+        assert_eq!(
+            method_with_descriptor(ConstantPoolIndex(3)).descriptor(&pool),
+            Err(ResolveDescriptorError::Parse(
+                crate::descriptor::DescriptorError::MissingOpenParen { offset: 0 }
+            ))
         );
     }
 }

@@ -1,6 +1,7 @@
 use crate::access_flags::FieldAccessFlags;
 use crate::attribute::{Attribute, AttributeError, decode_attributes};
 use crate::constant_pool::{ConstantPool, ConstantPoolIndex, read_index};
+use crate::descriptor::{FieldType, ResolveDescriptorError, resolve_field_type};
 use crate::reader::Reader;
 
 /// A `field_info` structure (JVMS §4.5).
@@ -28,6 +29,14 @@ impl<'a> FieldInfo<'a> {
             descriptor_index,
             attributes,
         })
+    }
+
+    /// Resolves and parses this field's descriptor (JVMS §4.3.2).
+    pub fn field_type(
+        &self,
+        constant_pool: &ConstantPool,
+    ) -> Result<FieldType, ResolveDescriptorError> {
+        resolve_field_type(constant_pool, self.descriptor_index)
     }
 }
 
@@ -104,6 +113,61 @@ mod tests {
                 needed: 2,
                 remaining: 1,
             }))
+        );
+    }
+
+    fn field_with_descriptor(descriptor: ConstantPoolIndex) -> FieldInfo<'static> {
+        FieldInfo {
+            access_flags: FieldAccessFlags(ACC_PUBLIC),
+            name_index: ConstantPoolIndex(2),
+            descriptor_index: descriptor,
+            attributes: vec![],
+        }
+    }
+
+    #[test]
+    fn resolves_and_parses_a_field_type() {
+        let pool = ConstantPool::from_entries(vec![
+            None,
+            None,
+            Some(ConstantPoolEntry::Utf8("I".to_owned())),
+        ]);
+
+        assert_eq!(
+            field_with_descriptor(ConstantPoolIndex(3)).field_type(&pool),
+            Ok(FieldType::Int)
+        );
+    }
+
+    #[test]
+    fn reports_a_field_descriptor_that_does_not_resolve_to_utf8() {
+        let pool =
+            ConstantPool::from_entries(vec![None, None, Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            field_with_descriptor(ConstantPoolIndex(3)).field_type(&pool),
+            Err(ResolveDescriptorError::NotUtf8 {
+                index: ConstantPoolIndex(3)
+            })
+        );
+    }
+
+    #[test]
+    fn reports_a_field_descriptor_that_fails_to_parse() {
+        let pool = ConstantPool::from_entries(vec![
+            None,
+            None,
+            Some(ConstantPoolEntry::Utf8("X".to_owned())),
+        ]);
+
+        assert_eq!(
+            field_with_descriptor(ConstantPoolIndex(3)).field_type(&pool),
+            Err(ResolveDescriptorError::Parse(
+                crate::descriptor::DescriptorError::UnknownTypeChar {
+                    offset: 0,
+                    found: 'X',
+                }
+            ))
         );
     }
 }

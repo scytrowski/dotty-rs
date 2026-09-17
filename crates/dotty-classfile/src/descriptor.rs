@@ -1,3 +1,4 @@
+use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
 use std::fmt;
 
 /// A hard JVMS constraint (§4.3.2): an array type has at most 255
@@ -224,6 +225,57 @@ impl MethodDescriptor {
             parameters,
             return_type,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveDescriptorError {
+    NotUtf8 { index: ConstantPoolIndex },
+    Parse(DescriptorError),
+}
+
+impl fmt::Display for ResolveDescriptorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotUtf8 { index } => write!(
+                formatter,
+                "descriptor index {} does not resolve to a Utf8 entry",
+                index.0
+            ),
+            Self::Parse(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ResolveDescriptorError {}
+
+impl From<DescriptorError> for ResolveDescriptorError {
+    fn from(error: DescriptorError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+/// Resolves `index` through `constant_pool` to a `Utf8` entry and parses it
+/// as a field descriptor.
+pub fn resolve_field_type(
+    constant_pool: &ConstantPool,
+    index: ConstantPoolIndex,
+) -> Result<FieldType, ResolveDescriptorError> {
+    match constant_pool.get(index) {
+        Some(ConstantPoolEntry::Utf8(text)) => Ok(FieldType::parse(text)?),
+        _ => Err(ResolveDescriptorError::NotUtf8 { index }),
+    }
+}
+
+/// Resolves `index` through `constant_pool` to a `Utf8` entry and parses it
+/// as a method descriptor.
+pub fn resolve_method_descriptor(
+    constant_pool: &ConstantPool,
+    index: ConstantPoolIndex,
+) -> Result<MethodDescriptor, ResolveDescriptorError> {
+    match constant_pool.get(index) {
+        Some(ConstantPoolEntry::Utf8(text)) => Ok(MethodDescriptor::parse(text)?),
+        _ => Err(ResolveDescriptorError::NotUtf8 { index }),
     }
 }
 
