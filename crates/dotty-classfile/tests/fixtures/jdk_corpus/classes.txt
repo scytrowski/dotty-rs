@@ -1,0 +1,17 @@
+# Internal binary names (JVMS §4.2.1) of the corpus's real JDK classes,
+# one per line. Source of truth for corpus membership: generate.sh builds
+# its `jimage extract --include` glob list from this file, and
+# tests/jdk_corpus.rs discovers fixtures from it rather than hardcoding
+# the list in Rust. Picked for variety, not exhaustiveness:
+#   - java/lang/String        a large real class (171 methods, 5 interfaces)
+#   - java/util/ArrayList     real InnerClasses (Itr, ListItr, ...), 4 interfaces
+#   - java/util/List          an interface with a generic `extends`
+#   - java/lang/constant/ConstantDesc  a real sealed interface (PermittedSubclasses)
+#   - java/time/DayOfWeek     a real enum (ACC_ENUM)
+#   - java/util/stream/Stream an interface with heavy generic signatures
+java/lang/String
+java/util/ArrayList
+java/util/List
+java/lang/constant/ConstantDesc
+java/time/DayOfWeek
+java/util/stream/Stream
