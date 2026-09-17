@@ -187,7 +187,7 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
     let mut previous_kind = None;
     let mut previous_opens_indentation = false;
     let mut previous_end = 0;
-    let mut indentation_stack = vec![String::new()];
+    let mut indentation_stack = vec![LayoutRegion::root()];
     let mut paren_depth = 0u32;
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
@@ -254,6 +254,15 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                 );
                 previous_end = raw.span.end();
                 tokens.push(token);
+
+                if has_line_break && is_closing_delimiter(raw.kind) {
+                    close_regions_after_delimiter(
+                        &mut tokens,
+                        &mut indentation_stack,
+                        &indentation,
+                        raw.span.end(),
+                    )?;
+                }
                 trivia.clear();
 
                 if raw.kind == RawTokenKind::Eof {
@@ -278,15 +287,46 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
     Ok(tokens)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutRegionOwner {
+    Root,
+    Implicit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutRegion {
+    indentation: String,
+    owner: LayoutRegionOwner,
+}
+
+impl LayoutRegion {
+    fn root() -> Self {
+        Self {
+            indentation: String::new(),
+            owner: LayoutRegionOwner::Root,
+        }
+    }
+
+    fn implicit(indentation: &str) -> Self {
+        Self {
+            indentation: indentation.to_owned(),
+            owner: LayoutRegionOwner::Implicit,
+        }
+    }
+}
+
 fn adjust_indentation(
     tokens: &mut Vec<Token>,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<LayoutRegion>,
     indentation: &str,
     previous_kind: Option<TokenKind>,
     previous_opens_indentation: bool,
     offset: u32,
 ) -> Result<(), TextRangeError> {
-    let current = stack.last().map(String::as_str).unwrap_or("");
+    let current = stack
+        .last()
+        .map(|region| region.indentation.as_str())
+        .unwrap_or("");
     if current == indentation {
         return Ok(());
     }
@@ -294,7 +334,7 @@ fn adjust_indentation(
     if is_prefix(current, indentation)
         && opens_indentation(previous_kind, previous_opens_indentation)
     {
-        stack.push(indentation.to_owned());
+        stack.push(LayoutRegion::implicit(indentation));
         tokens.push(Token::new(
             TokenKind::Indent,
             TextRange::new(offset, offset)?,
@@ -303,7 +343,10 @@ fn adjust_indentation(
     }
 
     while stack.len() > 1 {
-        let current = stack.last().map(String::as_str).unwrap_or("");
+        let current = stack
+            .last()
+            .map(|region| region.indentation.as_str())
+            .unwrap_or("");
         if is_prefix(current, indentation) {
             break;
         }
@@ -314,6 +357,30 @@ fn adjust_indentation(
         ));
     }
 
+    Ok(())
+}
+
+fn close_regions_after_delimiter(
+    tokens: &mut Vec<Token>,
+    stack: &mut Vec<LayoutRegion>,
+    indentation: &str,
+    offset: u32,
+) -> Result<(), TextRangeError> {
+    while stack.len() > 1 {
+        let Some(region) = stack.last() else {
+            break;
+        };
+        if region.owner != LayoutRegionOwner::Implicit
+            || is_prefix(&region.indentation, indentation)
+        {
+            break;
+        }
+        stack.pop();
+        tokens.push(Token::new(
+            TokenKind::Outdent,
+            TextRange::new(offset, offset)?,
+        ));
+    }
     Ok(())
 }
 
@@ -565,6 +632,15 @@ fn update_delimiters(kind: RawTokenKind, parens: &mut u32, brackets: &mut u32, b
         RawTokenKind::Punctuation(Punctuation::RightBrace) => *braces = braces.saturating_sub(1),
         _ => {}
     }
+}
+
+fn is_closing_delimiter(kind: RawTokenKind) -> bool {
+    matches!(
+        kind,
+        RawTokenKind::Punctuation(
+            Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
+        )
+    )
 }
 
 fn trivia_has_line_break(source: &str, trivia: &[&Trivia]) -> bool {
@@ -835,6 +911,48 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_an_indentation_region_after_a_dedented_parenthesis() {
+        assert_eq!(
+            kinds("if ready then\n  call(\n    value\n)\nnext"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_an_indentation_region_open_before_an_aligned_parenthesis() {
+        assert_eq!(
+            kinds("if ready then\n  call(\n    value\n  )\n  next"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
                 TokenKind::Eof,
             ]
         );

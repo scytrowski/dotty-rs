@@ -285,8 +285,9 @@ The raw lexer does not decide:
 
 Hard keywords are classified after scanning a complete identifier/operator
 lexeme. Soft keywords remain identifiers in the raw layer, including `as`,
-`derives`, `end`, `extension`, `infix`, `inline`, `opaque`, `open`,
-`transparent`, and `using`.
+`derives`, `extension`, `infix`, `inline`, `opaque`, `open`, `transparent`,
+and `using`. `end` is retained as a hard keyword because the contextual
+scanner needs to recognize end-marker candidates.
 
 Operators are greedy, except that `/` must stop before `//` and `/*` so that
 comments are not absorbed into an operator lexeme.
@@ -473,7 +474,8 @@ remain next.
 
 Implement contextual `END`, `CASECLASS`, `CASEOBJECT`, grammar-driven region
 closures, and exact EOF behavior. The current increment covers token fusion,
-basic end-marker recognition, and non-panicking EOF classification; region
+basic end-marker recognition, non-panicking EOF classification, and closure of
+implicit regions after dedented closing delimiters. More precise region
 ownership and grammar-driven closures remain to be refined.
 
 ### Increment 9 — Quotes, legacy syntax, and XML
