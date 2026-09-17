@@ -171,6 +171,24 @@ fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethod
     Ok(methods)
 }
 
+fn read_inner_classes(reader: &mut Reader<'_>) -> Result<Vec<InnerClassEntry>, ReadError> {
+    let count = reader.read_u16()?;
+    let mut classes = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let inner_class_info_index = read_index(reader)?;
+        let outer_class_info_index = read_optional_index(reader)?;
+        let inner_name_index = read_optional_index(reader)?;
+        let inner_class_access_flags = reader.read_u16()?;
+        classes.push(InnerClassEntry {
+            inner_class_info_index,
+            outer_class_info_index,
+            inner_name_index,
+            inner_class_access_flags,
+        });
+    }
+    Ok(classes)
+}
+
 fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameterEntry>, ReadError> {
     let count = reader.read_u8()?;
     let mut parameters = Vec::with_capacity(usize::from(count));
@@ -218,6 +236,15 @@ impl<'a> Attribute<'a> {
             }
             "MethodParameters" => {
                 Attribute::MethodParameters(read_method_parameters(&mut sub_reader)?)
+            }
+            "InnerClasses" => Attribute::InnerClasses(read_inner_classes(&mut sub_reader)?),
+            "EnclosingMethod" => {
+                let class_index = read_index(&mut sub_reader)?;
+                let method_index = read_optional_index(&mut sub_reader)?;
+                Attribute::EnclosingMethod {
+                    class_index,
+                    method_index,
+                }
             }
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
@@ -482,6 +509,88 @@ mod tests {
                     access_flags: 0x8000,
                 },
             ]))
+        );
+    }
+
+    #[test]
+    fn decodes_an_inner_classes_attribute() {
+        let pool = pool_with_utf8_name("InnerClasses");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // number_of_classes = 1
+                0x00, 0x02, // inner_class_info_index = #2
+                0x00, 0x00, // outer_class_info_index = 0 (anonymous)
+                0x00, 0x00, // inner_name_index = 0 (anonymous)
+                0x00, 0x19, // inner_class_access_flags = PUBLIC|STATIC|FINAL
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::InnerClasses(vec![InnerClassEntry {
+                inner_class_info_index: ConstantPoolIndex(2),
+                outer_class_info_index: None,
+                inner_name_index: None,
+                inner_class_access_flags: 0x0019,
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_an_inner_classes_attribute_with_a_named_member_class() {
+        let pool = pool_with_utf8_name("InnerClasses");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // number_of_classes = 1
+                0x00, 0x02, // inner_class_info_index = #2
+                0x00, 0x03, // outer_class_info_index = #3
+                0x00, 0x04, // inner_name_index = #4
+                0x00, 0x09, // inner_class_access_flags = PUBLIC|STATIC
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::InnerClasses(vec![InnerClassEntry {
+                inner_class_info_index: ConstantPoolIndex(2),
+                outer_class_info_index: Some(ConstantPoolIndex(3)),
+                inner_name_index: Some(ConstantPoolIndex(4)),
+                inner_class_access_flags: 0x0009,
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_an_enclosing_method_attribute_with_a_method() {
+        let pool = pool_with_utf8_name("EnclosingMethod");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x02, 0x00, 0x03]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::EnclosingMethod {
+                class_index: ConstantPoolIndex(2),
+                method_index: Some(ConstantPoolIndex(3)),
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_an_enclosing_method_attribute_without_a_method() {
+        let pool = pool_with_utf8_name("EnclosingMethod");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x02, 0x00, 0x00]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::EnclosingMethod {
+                class_index: ConstantPoolIndex(2),
+                method_index: None,
+            })
         );
     }
 
