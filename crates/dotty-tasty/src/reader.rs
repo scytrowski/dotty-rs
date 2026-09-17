@@ -1,5 +1,9 @@
 use std::fmt;
 
+/// Borrowed, bounded reader for TASTy primitive values.
+///
+/// A reader never reads beyond its configured range and retains absolute
+/// offsets for diagnostics from nested payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reader<'a> {
     bytes: &'a [u8],
@@ -7,25 +11,40 @@ pub struct Reader<'a> {
     limit: usize,
 }
 
+/// Errors returned while reading bounded TASTy values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadError {
+    /// The requested reader range is not inside the input slice.
     InvalidRange {
+        /// First byte of the requested range.
         start: usize,
+        /// Exclusive end of the requested range.
         end: usize,
+        /// Total input length.
         len: usize,
     },
+    /// The input ended before a complete value was available.
     UnexpectedEof {
+        /// Offset at which bytes were expected.
         offset: usize,
+        /// Number of bytes that were required.
         needed: usize,
+        /// Number of bytes that were still available.
         remaining: usize,
     },
+    /// A variable-length integer ended without a terminating byte.
     UnterminatedInteger {
+        /// Offset at which decoding started.
         offset: usize,
     },
+    /// A variable-length integer cannot be represented by its target type.
     IntegerOverflow {
+        /// Offset at which decoding started.
         offset: usize,
     },
+    /// A length-delimited value is not valid UTF-8.
     InvalidUtf8 {
+        /// Offset of the invalid string payload.
         offset: usize,
     },
 }
@@ -66,6 +85,7 @@ impl fmt::Display for ReadError {
 impl std::error::Error for ReadError {}
 
 impl<'a> Reader<'a> {
+    /// Creates a reader covering the complete input slice.
     pub fn new(bytes: &'a [u8]) -> Self {
         Self {
             bytes,
@@ -74,6 +94,10 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Creates a reader covering the half-open range `start..end`.
+    ///
+    /// Nested readers retain absolute offsets, which makes errors from
+    /// bounded sections useful to callers.
     pub fn with_range(bytes: &'a [u8], start: usize, end: usize) -> Result<Self, ReadError> {
         if start > end || end > bytes.len() {
             return Err(ReadError::InvalidRange {
@@ -90,18 +114,22 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Returns the absolute offset of the next unread byte.
     pub fn position(&self) -> usize {
         self.offset
     }
 
+    /// Returns the number of unread bytes in this bounded reader.
     pub fn remaining(&self) -> usize {
         self.limit - self.offset
     }
 
+    /// Returns whether the bounded reader has consumed its complete range.
     pub fn is_at_end(&self) -> bool {
         self.offset == self.limit
     }
 
+    /// Reads one byte and advances the reader by one position.
     pub fn read_u8(&mut self) -> Result<u8, ReadError> {
         if self.is_at_end() {
             return Err(ReadError::UnexpectedEof {
@@ -116,6 +144,7 @@ impl<'a> Reader<'a> {
         Ok(byte)
     }
 
+    /// Returns the next byte without advancing the reader.
     pub fn peek_u8(&self) -> Result<u8, ReadError> {
         if self.is_at_end() {
             return Err(ReadError::UnexpectedEof {
@@ -128,6 +157,7 @@ impl<'a> Reader<'a> {
         Ok(self.bytes[self.offset])
     }
 
+    /// Reads exactly `length` bytes from the current bounded range.
     pub fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], ReadError> {
         let end = self
             .offset
@@ -151,6 +181,7 @@ impl<'a> Reader<'a> {
         Ok(bytes)
     }
 
+    /// Splits off a bounded sub-reader of exactly `length` bytes.
     pub fn read_sub_reader(&mut self, length: usize) -> Result<Reader<'a>, ReadError> {
         let start = self.offset;
         let end = start.checked_add(length).ok_or(ReadError::UnexpectedEof {
@@ -175,6 +206,7 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Reads a TASTy natural number encoded in base 128.
     pub fn read_nat(&mut self) -> Result<u32, ReadError> {
         let (value, _) = self.read_base128()?;
         u32::try_from(value).map_err(|_| ReadError::IntegerOverflow {
@@ -182,6 +214,7 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Reads a 64-bit TASTy natural number.
     pub fn read_long_nat(&mut self) -> Result<u64, ReadError> {
         let (value, _) = self.read_base128()?;
         u64::try_from(value).map_err(|_| ReadError::IntegerOverflow {
@@ -189,6 +222,7 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Reads a signed TASTy integer.
     pub fn read_int(&mut self) -> Result<i32, ReadError> {
         let value = self.read_signed()?;
         i32::try_from(value).map_err(|_| ReadError::IntegerOverflow {
@@ -196,10 +230,12 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Reads a signed 64-bit TASTy integer.
     pub fn read_long_int(&mut self) -> Result<i64, ReadError> {
         self.read_signed()
     }
 
+    /// Reads a length-prefixed UTF-8 string.
     pub fn read_utf8(&mut self) -> Result<String, ReadError> {
         let start = self.offset;
         let length = usize::try_from(self.read_nat()?)

@@ -1,14 +1,43 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Errors returned while encoding TASTy values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
-    LengthOverflow { length: usize },
-    NatOverflow { value: u64 },
-    IntOverflow { value: i64 },
-    InvalidTag { tag: u8 },
-    AttributeOrder { previous: u8, current: u8 },
-    PositionHeaderCollision { address_delta: i64, flags: u8 },
+    /// A length-prefixed payload is too large for the TASTy length encoding.
+    LengthOverflow {
+        /// Length that cannot be represented on the wire.
+        length: usize,
+    },
+    /// A natural number is too large for the selected wire representation.
+    NatOverflow {
+        /// Value that cannot be represented as a TASTy natural number.
+        value: u64,
+    },
+    /// A signed integer is outside the supported wire range.
+    IntOverflow {
+        /// Value that cannot be represented as a TASTy integer.
+        value: i64,
+    },
+    /// The caller supplied a tag that is not encodable in the current context.
+    InvalidTag {
+        /// Invalid tag.
+        tag: u8,
+    },
+    /// Attributes must be emitted in nondecreasing tag order.
+    AttributeOrder {
+        /// Previous attribute tag.
+        previous: u8,
+        /// Current attribute tag.
+        current: u8,
+    },
+    /// A position header would be ambiguous with an AST address delta.
+    PositionHeaderCollision {
+        /// Address delta used by the association.
+        address_delta: i64,
+        /// Coordinate-presence flags.
+        flags: u8,
+    },
 }
 
 impl fmt::Display for WriteError {
@@ -41,6 +70,7 @@ impl fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
+/// Growable output buffer for TASTy wire values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Writer {
     bytes: Vec<u8>,
@@ -48,10 +78,12 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// Creates an empty writer.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates an empty writer with room for at least `capacity` bytes.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             bytes: Vec::with_capacity(capacity),
@@ -85,18 +117,22 @@ impl Writer {
             .unwrap_or(value)
     }
 
+    /// Returns the number of bytes currently written.
     pub fn position(&self) -> usize {
         self.bytes.len()
     }
 
+    /// Appends one byte to the output.
     pub fn write_u8(&mut self, value: u8) {
         self.bytes.push(value);
     }
 
+    /// Appends bytes to the output without adding a length prefix.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
     }
 
+    /// Writes a TASTy natural number.
     pub fn write_nat(&mut self, value: u32) {
         write_unsigned(&mut self.bytes, u64::from(value));
     }
@@ -105,22 +141,27 @@ impl Writer {
         self.write_nat(self.relocated_ast_ref(value));
     }
 
+    /// Writes a 64-bit TASTy natural number.
     pub fn write_long_nat(&mut self, value: u64) {
         write_unsigned(&mut self.bytes, value);
     }
 
+    /// Writes a signed TASTy integer.
     pub fn write_int(&mut self, value: i32) {
         write_signed(&mut self.bytes, i64::from(value));
     }
 
+    /// Writes a signed 64-bit TASTy integer.
     pub fn write_long_int(&mut self, value: i64) {
         write_signed(&mut self.bytes, value);
     }
 
+    /// Writes a length-prefixed UTF-8 string.
     pub fn write_utf8(&mut self, value: &str) -> Result<(), WriteError> {
         self.write_length_prefixed_bytes(value.as_bytes())
     }
 
+    /// Writes a length-prefixed opaque byte payload.
     pub fn write_length_prefixed_bytes(&mut self, bytes: &[u8]) -> Result<(), WriteError> {
         let length = u32::try_from(bytes.len()).map_err(|_| WriteError::LengthOverflow {
             length: bytes.len(),
@@ -130,10 +171,12 @@ impl Writer {
         Ok(())
     }
 
+    /// Returns the owned encoded bytes and consumes the writer.
     pub fn into_inner(self) -> Vec<u8> {
         self.bytes
     }
 
+    /// Borrows the encoded bytes written so far.
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }

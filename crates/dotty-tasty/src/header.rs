@@ -2,37 +2,62 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+/// Four-byte magic prefix of every TASTy file.
 pub const TASTY_MAGIC: [u8; 4] = [0x5c, 0xa1, 0xab, 0x1f];
+/// Major component of the Scala 3.9.0 TASTy format version.
 pub const SCALA_3_9_MAJOR_VERSION: u32 = 28;
+/// Minor component of the Scala 3.9.0 TASTy format version.
 pub const SCALA_3_9_MINOR_VERSION: u32 = 9;
+/// Experimental component of the Scala 3.9.0 TASTy format version.
 pub const SCALA_3_9_EXPERIMENTAL_VERSION: u32 = 0;
 
+/// The TASTy file header and its format version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
+    /// Major TASTy format version.
     pub major_version: u32,
+    /// Minor TASTy format version.
     pub minor_version: u32,
+    /// Experimental TASTy format version component.
     pub experimental_version: u32,
+    /// Compiler tooling version recorded in the file.
     pub tooling_version: String,
+    /// Compiler-generated file identifier.
     pub uuid: [u8; 16],
 }
 
+/// Errors raised while decoding or validating a TASTy header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderError {
+    /// A bounded binary read failed.
     Read(ReadError),
+    /// The four-byte TASTy magic value did not match.
     InvalidMagic {
+        /// Bytes found at the beginning of the input.
         actual: [u8; 4],
     },
+    /// The file uses a format version unsupported by this codec.
     UnsupportedVersion {
+        /// File major version.
         major: u32,
+        /// File minor version.
         minor: u32,
+        /// File experimental version.
         experimental: u32,
     },
+    /// The file version is not compatible with the requested compiler version.
     IncompatibleVersion {
+        /// File major version.
         major: u32,
+        /// File minor version.
         minor: u32,
+        /// File experimental version.
         experimental: u32,
+        /// Requested compiler major version.
         compiler_major: u32,
+        /// Requested compiler minor version.
         compiler_minor: u32,
+        /// Requested compiler experimental version.
         compiler_experimental: u32,
     },
 }
@@ -78,11 +103,13 @@ impl From<ReadError> for HeaderError {
 }
 
 impl Header {
+    /// Parses a header from the beginning of a byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, HeaderError> {
         let mut reader = Reader::new(bytes);
         Self::decode(&mut reader)
     }
 
+    /// Decodes a header from the reader's current position.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, HeaderError> {
         let magic_bytes = reader.read_bytes(TASTY_MAGIC.len())?;
         let mut actual = [0u8; TASTY_MAGIC.len()];
@@ -109,6 +136,7 @@ impl Header {
         })
     }
 
+    /// Encodes this header at the writer's current position.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         writer.write_bytes(&TASTY_MAGIC);
         writer.write_nat(self.major_version);
@@ -119,6 +147,7 @@ impl Header {
         Ok(())
     }
 
+    /// Returns whether this header is exactly the Scala 3.9.0 format.
     pub fn is_scala_3_9(&self) -> bool {
         self.major_version == SCALA_3_9_MAJOR_VERSION
             && self.minor_version == SCALA_3_9_MINOR_VERSION
@@ -167,6 +196,7 @@ impl Header {
         }
     }
 
+    /// Validates that this header is exactly Scala 3.9.0 / format 28.9.0.
     pub fn validate_scala_3_9(&self) -> Result<(), HeaderError> {
         if self.is_scala_3_9() {
             Ok(())

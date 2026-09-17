@@ -2,12 +2,17 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+/// One-based reference into a TASTy name table.
 pub type NameRef = u32;
+/// Raw signed parameter-signature value stored in a `SIGNED` name.
 pub type ParamSig = i32;
 
+/// Interpreted form of a raw parameter-signature value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamSigValue {
+    /// Number of type-parameter sections in the signature.
     TypeParameterSectionLength(u32),
+    /// Reference to the name of a term parameter.
     TermParameter(NameRef),
 }
 
@@ -26,154 +31,255 @@ pub fn interpret_param_sig(value: ParamSig) -> Option<ParamSigValue> {
     }
 }
 
+/// The resolved structure of a signature attached to a name entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameSignature {
+    /// Name reference containing the result type or result name.
     pub result: NameRef,
+    /// Ordered type-section and term-parameter signature entries.
     pub parameters: Vec<ParamSigValue>,
 }
 
+/// A signature-bearing raw name with references still unresolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignedName {
+    /// A `SIGNED` name.
     Signed {
+        /// Original name reference.
         original: NameRef,
+        /// Attached signature.
         signature: NameSignature,
     },
+    /// A `TARGETSIGNED` name.
     TargetSigned {
+        /// Original name reference.
         original: NameRef,
+        /// Target name reference.
         target: NameRef,
+        /// Attached signature.
         signature: NameSignature,
     },
 }
 
+/// Signature entry after name references have been rendered as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderedParamSig {
+    /// Number of type-parameter sections in the signature.
     TypeParameterSectionLength(u32),
+    /// Rendered term-parameter name.
     TermParameter(String),
 }
 
+/// A rendered name signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedNameSignature {
+    /// Rendered result name.
     pub result: String,
+    /// Rendered signature parameters in wire order.
     pub parameters: Vec<RenderedParamSig>,
 }
 
+/// A rendered signature-bearing name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderedSignedName {
+    /// Rendered `SIGNED` name.
     Signed {
+        /// Rendered original name.
         original: String,
+        /// Rendered signature.
         signature: RenderedNameSignature,
     },
+    /// Rendered `TARGETSIGNED` name.
     TargetSigned {
+        /// Rendered original name.
         original: String,
+        /// Rendered target name.
         target: String,
+        /// Rendered signature.
         signature: RenderedNameSignature,
     },
 }
 
+/// Discriminant describing the wire representation of a raw name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawNameKind {
+    /// Direct UTF-8 text.
     Utf8,
+    /// Qualified name.
     Qualified,
+    /// Private-name expansion.
     Expanded,
+    /// Expansion prefix.
     ExpandPrefix,
+    /// Unique name.
     Unique,
+    /// Default getter name.
     DefaultGetter,
+    /// Super accessor name.
     SuperAccessor,
+    /// Inline accessor name.
     InlineAccessor,
+    /// Object-class name.
     ObjectClass,
+    /// Retained-body name.
     BodyRetainer,
+    /// Signed name.
     Signed,
+    /// Target-signed name.
     TargetSigned,
+    /// Unknown or future name tag.
     Unknown,
 }
 
+/// Lossless name-table entry.
+///
+/// References use the TASTy one-based [`NameRef`] convention. Unknown entries
+/// retain their tag and bounded payload for forward-compatible round-trips.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawName {
+    /// Direct UTF-8 text.
     Utf8(String),
+    /// A qualified name made from a prefix and selector.
     Qualified {
+        /// Prefix name reference.
         prefix: NameRef,
+        /// Selector name reference.
         selector: NameRef,
     },
+    /// A private-name expansion.
     Expanded {
+        /// Prefix name reference.
         prefix: NameRef,
+        /// Selector name reference.
         selector: NameRef,
     },
+    /// An expansion prefix.
     ExpandPrefix {
+        /// Prefix name reference.
         prefix: NameRef,
+        /// Selector name reference.
         selector: NameRef,
     },
+    /// A unique name with an optional underlying name.
     Unique {
+        /// Separator name reference.
         separator: NameRef,
+        /// Numeric unique identifier.
         uniqid: u32,
+        /// Optional underlying name reference.
         underlying: Option<NameRef>,
     },
+    /// A default-getter name.
     DefaultGetter {
+        /// Underlying method or value name.
         underlying: NameRef,
+        /// Zero-based default parameter index.
         index: u32,
     },
+    /// A super-accessor name.
     SuperAccessor {
+        /// Underlying name reference.
         underlying: NameRef,
     },
+    /// An inline-accessor name.
     InlineAccessor {
+        /// Underlying name reference.
         underlying: NameRef,
     },
+    /// An object-class name.
     ObjectClass {
+        /// Underlying name reference.
         underlying: NameRef,
     },
+    /// A retained-body name.
     BodyRetainer {
+        /// Underlying name reference.
         underlying: NameRef,
     },
+    /// A signed name with raw parameter-signature values.
     Signed {
+        /// Original name reference.
         original: NameRef,
+        /// Result-signature name reference.
         result_signature: NameRef,
+        /// Raw signature parameters.
         parameter_signatures: Vec<ParamSig>,
     },
+    /// A target-signed name with raw parameter-signature values.
     TargetSigned {
+        /// Original name reference.
         original: NameRef,
+        /// Target name reference.
         target: NameRef,
+        /// Result-signature name reference.
         result_signature: NameRef,
+        /// Raw signature parameters.
         parameter_signatures: Vec<ParamSig>,
     },
+    /// An unknown name tag and its bounded raw payload.
     Unknown {
+        /// Name-entry tag.
         tag: u8,
+        /// Payload bytes following the tag and length prefix.
         payload: Vec<u8>,
     },
 }
 
+/// Decoded one-based TASTy name table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTable {
     entries: Vec<RawName>,
 }
 
+/// Owned builder for a decoded or programmatically assembled name table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NameTableBuilder {
     entries: Vec<RawName>,
 }
 
+/// Errors returned while decoding or validating a name table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameTableError {
+    /// A bounded binary read failed.
     Read(ReadError),
+    /// A composite entry references a missing name.
     InvalidReference {
+        /// Invalid one-based reference.
         reference: NameRef,
+        /// Zero-based entry containing the reference.
         entry_index: usize,
+        /// Number of entries in the table.
         entry_count: usize,
     },
+    /// A signed-name parameter has an invalid raw value.
     InvalidParamSig {
+        /// Invalid raw parameter-signature value.
         value: ParamSig,
+        /// Zero-based entry containing the value.
         entry_index: usize,
     },
+    /// A reserved name tag was used as an unknown entry.
     InvalidTag {
+        /// Invalid name-entry tag.
         tag: u8,
+        /// Zero-based entry containing the tag.
         entry_index: usize,
     },
+    /// Name entries form a reference cycle.
     CyclicReference {
+        /// Entry where the cycle was detected.
         entry_index: usize,
     },
+    /// A known composite entry left bytes unconsumed.
     TrailingPayload {
+        /// Name-entry tag.
         tag: u8,
+        /// Number of unconsumed payload bytes.
         remaining: usize,
     },
+    /// The table exceeded the one-based `NameRef` range.
     EntryOverflow {
+        /// Number of entries already present.
         entry_count: usize,
     },
 }
@@ -222,13 +328,19 @@ impl From<ReadError> for NameTableError {
     }
 }
 
+/// Errors returned when rendering a name reference as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameRenderError {
+    /// The requested one-based reference does not exist.
     InvalidReference {
+        /// Missing name reference.
         reference: NameRef,
     },
+    /// The entry is structurally valid but has no supported textual rendering.
     Unsupported {
+        /// Name reference that could not be rendered.
         reference: NameRef,
+        /// Wire kind of the unsupported entry.
         kind: RawNameKind,
     },
 }
@@ -250,16 +362,19 @@ impl fmt::Display for NameRenderError {
 impl std::error::Error for NameRenderError {}
 
 impl NameTable {
+    /// Creates an empty name-table builder.
     pub fn builder() -> NameTableBuilder {
         NameTableBuilder::new()
     }
 
+    /// Creates and validates a name table from owned entries.
     pub fn from_entries(entries: Vec<RawName>) -> Result<Self, NameTableError> {
         let table = Self { entries };
         table.validate_references()?;
         Ok(table)
     }
 
+    /// Decodes a length-delimited name table from the reader.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, NameTableError> {
         let table_length = reader.read_nat()? as usize;
         let mut table_reader = reader.read_sub_reader(table_length)?;
@@ -292,14 +407,17 @@ impl NameTable {
         Ok(table)
     }
 
+    /// Returns the number of entries in the table.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Returns whether the table contains no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Resolves a one-based name reference.
     pub fn get(&self, reference: NameRef) -> Option<&RawName> {
         reference
             .checked_sub(1)
@@ -565,6 +683,7 @@ impl NameTable {
         self.entries.get(index as usize)
     }
 
+    /// Returns the number of entries in wire order.
     pub fn entries(&self) -> &[RawName] {
         &self.entries
     }
@@ -585,6 +704,7 @@ impl NameTable {
             })
     }
 
+    /// Encodes the complete name table as a length-delimited payload.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         let mut table = Writer::new();
         for entry in &self.entries {
@@ -809,10 +929,14 @@ fn is_known_name_tag(tag: u8) -> bool {
 }
 
 impl NameTableBuilder {
+    /// Creates an empty name-table builder.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Interns an entry and returns its one-based reference.
+    ///
+    /// An entry equal to an existing entry reuses that entry's reference.
     pub fn intern(&mut self, entry: RawName) -> Result<NameRef, NameTableError> {
         if let Some(index) = self
             .entries
@@ -833,14 +957,17 @@ impl NameTableBuilder {
         Ok(reference)
     }
 
+    /// Validates the entries and returns the completed table.
     pub fn finish(self) -> Result<NameTable, NameTableError> {
         NameTable::from_entries(self.entries)
     }
 
+    /// Returns the number of entries currently interned.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Returns whether no entries have been interned yet.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

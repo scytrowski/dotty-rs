@@ -8,14 +8,20 @@ use crate::writer::{WriteError, Writer};
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// A borrowed section payload and its file-level location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section<'a> {
+    /// Zero-based name-table index naming the section.
     pub name: NameRef,
+    /// Absolute offset of the payload in the source file.
     pub offset: usize,
+    /// Payload length in bytes.
     pub length: usize,
+    /// Borrowed section payload.
     pub payload: &'a [u8],
 }
 
+/// Borrowed collection of sections in their original wire order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionTable<'a> {
     sections: Vec<Section<'a>>,
@@ -42,88 +48,139 @@ pub struct EncodedAstSection {
     ast_address_map: BTreeMap<u32, u32>,
 }
 
+/// Identifies one of the standard TASTy sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardSection {
+    /// The top-level AST section.
     Asts,
+    /// Source-position section.
     Positions,
+    /// Comment section.
     Comments,
+    /// File-attributes section.
     Attributes,
 }
 
+/// Attribute tag for the Scala 2 standard library marker.
 pub const SCALA2STANDARDLIBRARY_ATTR: u8 = 1;
+/// Attribute tag for explicit-nulls mode.
 pub const EXPLICITNULLS_ATTR: u8 = 2;
+/// Attribute tag for capture checking.
 pub const CAPTURECHECKED_ATTR: u8 = 3;
+/// Attribute tag for pure-function checking.
 pub const WITHPUREFUNS_ATTR: u8 = 4;
+/// Attribute tag for Java-defined sources.
 pub const JAVA_ATTR: u8 = 5;
+/// Attribute tag for outline files.
 pub const OUTLINE_ATTR: u8 = 6;
+/// Attribute tag for the source-file name reference.
 pub const SOURCEFILE_ATTR: u8 = 129;
 
+/// Decoded standard TASTy file attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attribute {
+    /// The file uses the Scala 2 standard library.
     Scala2StandardLibrary,
+    /// The file was compiled with explicit nulls enabled.
     ExplicitNulls,
+    /// The file was compiled with capture checking enabled.
     CaptureChecked,
+    /// The file was compiled with pure-function checking enabled.
     WithPureFuns,
+    /// The source originated from Java.
     Java,
+    /// The file is an outline.
     Outline,
     /// Raw zero-based name-table index emitted by Scala's `SOURCEFILEattr`.
     SourceFile(NameRef),
 }
 
+/// A source comment associated with an AST address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
     /// Absolute AST address of the definition carrying this comment.
     pub address: u32,
+    /// Comment text.
     pub text: String,
+    /// Encoded source coordinate associated with the comment.
     pub coordinates: i64,
 }
 
+/// Lossless position-section event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PositionEntry {
+    /// A delta-encoded AST/source position association.
     Association {
+        /// Delta from the previous AST address.
         address_delta: i64,
+        /// Optional delta for the start coordinate.
         start_delta: Option<i64>,
+        /// Optional delta for the end coordinate.
         end_delta: Option<i64>,
+        /// Optional delta for the point coordinate.
         point_delta: Option<i64>,
     },
+    /// Changes the active source-file name reference.
     Source(NameRef),
 }
 
+/// Coordinate affected by a position delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionCoordinate {
+    /// AST address coordinate.
     Address,
+    /// Source start coordinate.
     Start,
+    /// Source end coordinate.
     End,
+    /// Source point coordinate.
     Point,
 }
 
+/// Position event after address and coordinate deltas are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedPositionEntry {
+    /// Changes the active source-file name reference.
     Source(NameRef),
+    /// Absolute position association.
     Association {
+        /// Absolute AST address.
         address: i64,
+        /// Absolute source start coordinate.
         start: i64,
+        /// Absolute source end coordinate.
         end: i64,
+        /// Absolute source point coordinate.
         point: i64,
     },
 }
 
+/// A resolved source position with the active source-file reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPosition {
+    /// Active source-file name reference, if a source event preceded it.
     pub source: Option<NameRef>,
+    /// Absolute AST address.
     pub address: i64,
+    /// Absolute source start coordinate.
     pub start: i64,
+    /// Absolute source end coordinate.
     pub end: i64,
+    /// Absolute source point coordinate.
     pub point: i64,
 }
 
+/// Decoded source-position section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionSection {
+    /// Size of each source line in bytes.
     pub line_sizes: Vec<u32>,
+    /// Position events in wire order.
     pub entries: Vec<PositionEntry>,
 }
 
 impl StandardSection {
+    /// Returns the canonical section name used by TASTy.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Asts => "ASTs",
@@ -135,6 +192,7 @@ impl StandardSection {
 }
 
 impl Attribute {
+    /// Encodes attributes in the required strictly increasing tag order.
     pub fn encode_all(attributes: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         let mut previous = None;
         for attribute in attributes {
@@ -168,6 +226,7 @@ impl Attribute {
 }
 
 impl Comment {
+    /// Encodes comments in their supplied order.
     pub fn encode_all(comments: &[Self], writer: &mut Writer) -> Result<(), WriteError> {
         for comment in comments {
             writer.write_nat(comment.address);
@@ -196,6 +255,7 @@ impl Comment {
 }
 
 impl PositionSection {
+    /// Encodes line sizes and position events in TASTy wire format.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         writer.write_nat(u32::try_from(self.line_sizes.len()).map_err(|_| {
             WriteError::LengthOverflow {
@@ -406,32 +466,53 @@ impl PositionSection {
     }
 }
 
+/// Errors returned while decoding or resolving a section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionError {
+    /// A bounded binary read failed.
     Read(ReadError),
+    /// A section name reference is outside the name table.
     InvalidNameReference {
+        /// Invalid zero-based name index.
         reference: NameRef,
+        /// Number of available name entries.
         name_count: usize,
+        /// Offset where the reference was read.
         offset: usize,
     },
+    /// An attribute tag is not supported by this format version.
     InvalidAttributeTag {
+        /// Invalid tag.
         tag: u8,
+        /// Offset where the tag was read.
         offset: usize,
     },
+    /// Attribute tags were not strictly increasing.
     AttributesNotOrdered {
+        /// Previous attribute tag.
         previous: u8,
+        /// Current attribute tag.
         current: u8,
+        /// Offset of the current tag.
         offset: usize,
     },
+    /// A source event used a negative name reference.
     NegativePositionSource {
+        /// Invalid signed reference value.
         value: i32,
     },
+    /// A position delta overflowed its coordinate.
     PositionOverflow {
+        /// Coordinate that overflowed.
         coordinate: PositionCoordinate,
+        /// Previous absolute value.
         previous: i64,
+        /// Delta that could not be added.
         delta: i64,
     },
+    /// An AST address could not be represented as an unsigned address.
     InvalidAstAddress {
+        /// Invalid absolute address.
         address: i64,
     },
 }
@@ -506,6 +587,7 @@ fn add_position_delta(
 }
 
 impl<'a> Section<'a> {
+    /// Creates a section view over an already bounded payload.
     pub fn new(name: NameRef, payload: &'a [u8]) -> Self {
         Self {
             name,
@@ -515,10 +597,12 @@ impl<'a> Section<'a> {
         }
     }
 
+    /// Creates a reader over this section's payload.
     pub fn reader(&self) -> Reader<'a> {
         Reader::new(self.payload)
     }
 
+    /// Decodes an `Attributes` section.
     pub fn decode_attributes(&self) -> Result<Vec<Attribute>, SectionError> {
         let mut reader = self.reader();
         let mut attributes = Vec::new();
@@ -552,6 +636,7 @@ impl<'a> Section<'a> {
         Ok(attributes)
     }
 
+    /// Decodes a `Comments` section.
     pub fn decode_comments(&self) -> Result<Vec<Comment>, SectionError> {
         let mut reader = self.reader();
         let mut comments = Vec::new();
@@ -567,6 +652,7 @@ impl<'a> Section<'a> {
         Ok(comments)
     }
 
+    /// Decodes a `Positions` section.
     pub fn decode_positions(&self) -> Result<PositionSection, SectionError> {
         let mut reader = self.reader();
         let line_count = reader.read_nat()? as usize;
@@ -626,6 +712,7 @@ impl<'a> Section<'a> {
         })
     }
 
+    /// Resolves this section's zero-based name index to a standard section.
     pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
         let name = match names.get_zero_based(self.name)? {
             crate::name_table::RawName::Utf8(name) => name.as_str(),
@@ -734,10 +821,12 @@ impl EncodedSection {
         EncodedAstSection::from_structured_relocated(name, original_payload, nodes)
     }
 
+    /// Returns the zero-based section name index.
     pub fn name(&self) -> NameRef {
         self.name
     }
 
+    /// Borrows the serialized section payload.
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
@@ -747,6 +836,7 @@ impl EncodedSection {
         Section::new(self.name, &self.payload)
     }
 
+    /// Consumes the section and returns its name index and payload.
     pub fn into_parts(self) -> (NameRef, Vec<u8>) {
         (self.name, self.payload)
     }
@@ -877,14 +967,17 @@ impl EncodedAstSection {
         unreachable!("AST relocation loop always returns or reaches its limit")
     }
 
+    /// Returns the zero-based section name index.
     pub fn name(&self) -> NameRef {
         self.section.name()
     }
 
+    /// Borrows the serialized AST payload.
     pub fn payload(&self) -> &[u8] {
         self.section.payload()
     }
 
+    /// Returns addresses of the emitted top-level AST nodes.
     pub fn ast_addresses(&self) -> &[u32] {
         &self.ast_addresses
     }
@@ -893,14 +986,17 @@ impl EncodedAstSection {
         &self.ast_address_map
     }
 
+    /// Borrows the owned section representation.
     pub fn section(&self) -> &EncodedSection {
         &self.section
     }
 
+    /// Consumes the address-aware section and drops its address map.
     pub fn into_section(self) -> EncodedSection {
         self.section
     }
 
+    /// Consumes the section and returns its payload owner and node addresses.
     pub fn into_parts(self) -> (EncodedSection, Vec<u32>) {
         (self.section, self.ast_addresses)
     }
@@ -972,10 +1068,12 @@ fn validate_structured_ast_payload(bytes: &[u8]) -> Result<(), TermEncodeError> 
 }
 
 impl<'a> SectionTable<'a> {
+    /// Creates a section table from sections already decoded or constructed.
     pub fn from_sections(sections: Vec<Section<'a>>) -> Self {
         Self { sections }
     }
 
+    /// Decodes all sections remaining in the reader.
     pub fn decode(reader: &mut Reader<'a>, name_count: usize) -> Result<Self, SectionError> {
         let mut sections = Vec::new();
 
@@ -1008,22 +1106,27 @@ impl<'a> SectionTable<'a> {
         Ok(Self { sections })
     }
 
+    /// Returns the number of sections.
     pub fn len(&self) -> usize {
         self.sections.len()
     }
 
+    /// Returns whether the table contains no sections.
     pub fn is_empty(&self) -> bool {
         self.sections.is_empty()
     }
 
+    /// Returns a section by its zero-based table index.
     pub fn get(&self, index: usize) -> Option<&Section<'a>> {
         self.sections.get(index)
     }
 
+    /// Iterates over sections in wire order.
     pub fn iter(&self) -> impl Iterator<Item = &Section<'a>> {
         self.sections.iter()
     }
 
+    /// Borrows all sections in wire order.
     pub fn entries(&self) -> &[Section<'a>] {
         &self.sections
     }
@@ -1041,6 +1144,7 @@ impl<'a> SectionTable<'a> {
         Ok(())
     }
 
+    /// Encodes all sections in their current order.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), WriteError> {
         for section in &self.sections {
             writer.write_nat(section.name);
