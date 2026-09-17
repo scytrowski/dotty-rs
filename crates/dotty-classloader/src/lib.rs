@@ -11,6 +11,7 @@ mod binary_name;
 mod class_path;
 mod crc32;
 mod error;
+mod inflate;
 mod jar_class_path;
 mod loader;
 mod repository;
