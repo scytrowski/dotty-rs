@@ -7,5 +7,9 @@
 //! to load classpath dependencies. Implementation is not yet started; this
 //! crate is scaffolding built on top of `dotty-tasty` and `dotty-classfile`.
 
+mod binary_name;
+
 /// Classpath loading APIs.
-pub mod classloader {}
+pub mod classloader {
+    pub use crate::binary_name::BinaryName;
+}
