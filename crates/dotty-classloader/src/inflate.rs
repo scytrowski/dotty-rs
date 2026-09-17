@@ -473,7 +473,7 @@ mod tests {
         writer.write_huffman_code(0b0011_0000, 8); // symbol 0: first 8-bit code
         writer.write_huffman_code(0b0011_0000 + 65, 8); // symbol 65 ('A')
         writer.write_huffman_code(0b1011_1111, 8); // symbol 143: last 8-bit code in this group
-        writer.write_huffman_code(0b0000_000, 7); // symbol 256: end-of-block
+        writer.write_huffman_code(0b000_0000, 7); // symbol 256: end-of-block
         writer.write_huffman_code(0b1100_0000, 8); // symbol 280: first code in the last group
         let bytes = writer.finish();
 
