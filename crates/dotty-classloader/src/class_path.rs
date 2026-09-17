@@ -6,9 +6,9 @@ use std::path::PathBuf;
 /// Where a [`ClassResource`]'s bytes came from, kept for diagnostics and
 /// duplicate-class detection.
 ///
-/// `#[non_exhaustive]`: JMOD-backed origins are still planned (see
-/// `docs/classloader.md` §3) and will be added as a further variant
-/// without breaking existing matches on this type.
+/// `#[non_exhaustive]`: further classpath sources (see
+/// `docs/classloader.md` §3) may still add variants without breaking
+/// existing matches on this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClassOrigin {
@@ -16,6 +16,9 @@ pub enum ClassOrigin {
     Directory(PathBuf),
     /// The resource was read from an entry inside this JAR file.
     Jar(PathBuf),
+    /// The resource was read from a `classes/` entry inside this JMOD
+    /// file.
+    Jmod(PathBuf),
 }
 
 /// A decoded-but-not-yet-parsed classpath entry: the raw bytes of a class
