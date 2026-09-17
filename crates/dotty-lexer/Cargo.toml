@@ -1,0 +1,9 @@
+[package]
+name = "dotty-lexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotty-diagnostics = { path = "../dotty-diagnostics" }
+dotty-source = { path = "../dotty-source" }
+dotty-token = { path = "../dotty-token" }
