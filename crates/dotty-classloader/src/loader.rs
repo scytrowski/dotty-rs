@@ -172,6 +172,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
 
         let nest_host = self.resolve_optional_nest_host(name, &class_file)?;
         let nest_members = self.resolve_nest_members(name, &class_file)?;
+        let permitted_subclasses = self.resolve_permitted_subclasses(name, &class_file)?;
 
         shell.complete(
             super_class,
@@ -181,7 +182,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             signature,
             nest_host,
             nest_members,
-            Vec::new(),
+            permitted_subclasses,
             Vec::new(),
             None,
             None,
@@ -237,6 +238,36 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             .iter()
             .find_map(|attribute| match attribute {
                 Attribute::NestMembers(indices) => Some(indices.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        indices
+            .into_iter()
+            .map(|index| {
+                self.resolve_name(owner, class_file, index)
+                    .map(ClassRef::Unresolved)
+            })
+            .collect()
+    }
+
+    /// Looks for a `PermittedSubclasses` attribute (JVMS §4.7.31) —
+    /// present only on a `sealed` class/interface, listing the classes
+    /// permitted to extend/implement it. Kept `Unresolved`, for the
+    /// same reason as [`Self::resolve_optional_nest_host`]: a sealed
+    /// type's permitted subclasses are exactly the kind of "class
+    /// mentions its own not-yet-loaded implementors" shape that made
+    /// eager `NestMembers` resolution collide with cycle detection.
+    fn resolve_permitted_subclasses(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Vec<ClassRef>, ClassLoadError> {
+        let indices = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::PermittedSubclasses(indices) => Some(indices.clone()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -1589,5 +1620,44 @@ mod tests {
             symbol.nest_host(),
             Some(ClassRef::Unresolved(name)) if name.as_internal() == "NestedSample"
         ));
+    }
+
+    /// `sealed_record_sample/Shape.class` (real `javac` output) is a
+    /// `sealed interface Shape permits Circle, Square` — this confirms
+    /// `PermittedSubclasses` (JVMS §4.7.31) names both real permitted
+    /// subclasses, without loading them (deliberately: see
+    /// `resolve_permitted_subclasses`'s doc comment for why that would
+    /// collide with cycle detection here, since both are records
+    /// implementing `Shape` itself).
+    #[test]
+    fn resolves_the_permitted_subclasses_of_a_real_sealed_interface() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Shape"),
+            fixture_bytes("sealed_record_sample/Shape.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("Shape"))
+            .expect("Shape should load");
+
+        let mut permitted_names: Vec<String> = symbol
+            .permitted_subclasses()
+            .into_iter()
+            .map(|permitted| match permitted {
+                ClassRef::Unresolved(name) => name.as_internal().to_owned(),
+                unexpected => {
+                    panic!("expected an unresolved permitted-subclass ref, got {unexpected:?}")
+                }
+            })
+            .collect();
+        permitted_names.sort_unstable();
+
+        assert_eq!(permitted_names, vec!["Shape$Circle", "Shape$Square"]);
     }
 }
