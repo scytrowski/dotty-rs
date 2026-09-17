@@ -71,6 +71,49 @@ pub struct MethodParameterEntry {
     pub access_flags: u16,
 }
 
+/// An `annotation` structure (JVMS §4.7.16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Annotation {
+    /// A `Utf8` entry holding the annotation interface's field descriptor
+    /// (e.g. `Ljava/lang/Deprecated;`).
+    pub type_index: ConstantPoolIndex,
+    pub element_value_pairs: Vec<(ConstantPoolIndex, ElementValue)>,
+}
+
+/// An `element_value` structure (JVMS §4.7.16.1). One variant per `tag`
+/// byte, rather than collapsing the primitive/string tags into one shape,
+/// since each tag mandates a distinct constant pool entry kind — most
+/// notably `String`/`Class`, which point at a `Utf8` entry directly rather
+/// than a `CONSTANT_String`/`CONSTANT_Class` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElementValue {
+    Byte(ConstantPoolIndex),
+    Char(ConstantPoolIndex),
+    Double(ConstantPoolIndex),
+    Float(ConstantPoolIndex),
+    Int(ConstantPoolIndex),
+    Long(ConstantPoolIndex),
+    Short(ConstantPoolIndex),
+    Boolean(ConstantPoolIndex),
+    /// Points at a `Utf8` entry directly (JVMS §4.7.16.1), not a
+    /// `CONSTANT_String`.
+    String(ConstantPoolIndex),
+    Enum {
+        type_name_index: ConstantPoolIndex,
+        const_name_index: ConstantPoolIndex,
+    },
+    /// Points at a `Utf8` entry holding a return descriptor (JVMS
+    /// §4.7.16.1), not a `CONSTANT_Class`.
+    Class(ConstantPoolIndex),
+    Annotation(Box<Annotation>),
+    Array(Vec<ElementValue>),
+}
+
+/// Bounds recursive `element_value` decode (via the `annotation` and
+/// `array` tags) against adversarial nesting — implementation-defined,
+/// like `signature::DEFAULT_MAX_SIGNATURE_DEPTH`.
+pub const DEFAULT_MAX_ANNOTATION_DEPTH: usize = 128;
+
 /// A structured attribute, resolved one level above [`RawAttribute`].
 ///
 /// Covers the attributes needed for symbol-level semantic analysis
@@ -100,6 +143,8 @@ pub enum Attribute<'a> {
     Code(CodeAttribute<'a>),
     BootstrapMethods(Vec<BootstrapMethodEntry>),
     MethodParameters(Vec<MethodParameterEntry>),
+    RuntimeVisibleAnnotations(Vec<Annotation>),
+    RuntimeInvisibleAnnotations(Vec<Annotation>),
     /// An attribute name not (yet) modeled above, kept as raw bytes.
     Other(RawAttribute<'a>),
 }
@@ -117,6 +162,14 @@ pub enum AttributeError {
         name: String,
         unread: usize,
     },
+    /// An `element_value`'s `tag` byte (JVMS §4.7.16.1) wasn't one of the
+    /// twelve recognized tags.
+    UnknownElementValueTag {
+        tag: u8,
+    },
+    /// An `element_value` nested (via `annotation`/`array`) past
+    /// [`DEFAULT_MAX_ANNOTATION_DEPTH`].
+    TooDeeplyNestedAnnotation,
 }
 
 impl fmt::Display for AttributeError {
@@ -131,6 +184,13 @@ impl fmt::Display for AttributeError {
             Self::TrailingBytes { name, unread } => write!(
                 formatter,
                 "{unread} unread trailing byte(s) in attribute {name:?}"
+            ),
+            Self::UnknownElementValueTag { tag } => {
+                write!(formatter, "unknown element_value tag {tag:#04x}")
+            }
+            Self::TooDeeplyNestedAnnotation => write!(
+                formatter,
+                "annotation element_value nested past depth {DEFAULT_MAX_ANNOTATION_DEPTH}"
             ),
         }
     }
@@ -208,6 +268,74 @@ fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameter
         });
     }
     Ok(parameters)
+}
+
+fn read_element_value(
+    reader: &mut Reader<'_>,
+    depth: usize,
+) -> Result<ElementValue, AttributeError> {
+    let tag = reader.read_u8()?;
+    match tag {
+        b'B' => Ok(ElementValue::Byte(read_index(reader)?)),
+        b'C' => Ok(ElementValue::Char(read_index(reader)?)),
+        b'D' => Ok(ElementValue::Double(read_index(reader)?)),
+        b'F' => Ok(ElementValue::Float(read_index(reader)?)),
+        b'I' => Ok(ElementValue::Int(read_index(reader)?)),
+        b'J' => Ok(ElementValue::Long(read_index(reader)?)),
+        b'S' => Ok(ElementValue::Short(read_index(reader)?)),
+        b'Z' => Ok(ElementValue::Boolean(read_index(reader)?)),
+        b's' => Ok(ElementValue::String(read_index(reader)?)),
+        b'e' => Ok(ElementValue::Enum {
+            type_name_index: read_index(reader)?,
+            const_name_index: read_index(reader)?,
+        }),
+        b'c' => Ok(ElementValue::Class(read_index(reader)?)),
+        b'@' => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(AttributeError::TooDeeplyNestedAnnotation);
+            }
+            Ok(ElementValue::Annotation(Box::new(read_annotation(
+                reader,
+                depth + 1,
+            )?)))
+        }
+        b'[' => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(AttributeError::TooDeeplyNestedAnnotation);
+            }
+            let count = reader.read_u16()?;
+            let mut values = Vec::with_capacity(usize::from(count));
+            for _ in 0..count {
+                values.push(read_element_value(reader, depth + 1)?);
+            }
+            Ok(ElementValue::Array(values))
+        }
+        _ => Err(AttributeError::UnknownElementValueTag { tag }),
+    }
+}
+
+fn read_annotation(reader: &mut Reader<'_>, depth: usize) -> Result<Annotation, AttributeError> {
+    let type_index = read_index(reader)?;
+    let count = reader.read_u16()?;
+    let mut element_value_pairs = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let element_name_index = read_index(reader)?;
+        let value = read_element_value(reader, depth)?;
+        element_value_pairs.push((element_name_index, value));
+    }
+    Ok(Annotation {
+        type_index,
+        element_value_pairs,
+    })
+}
+
+fn read_annotations(reader: &mut Reader<'_>) -> Result<Vec<Annotation>, AttributeError> {
+    let count = reader.read_u16()?;
+    let mut annotations = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        annotations.push(read_annotation(reader, 0)?);
+    }
+    Ok(annotations)
 }
 
 fn read_exception_table(reader: &mut Reader<'_>) -> Result<Vec<ExceptionTableEntry>, ReadError> {
@@ -318,6 +446,11 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
             Ok(())
         }
         Attribute::Deprecated | Attribute::Synthetic => Ok(()),
+        // Reference validation for annotation element values lands in the
+        // next increment (needs new ConstantPool checkers).
+        Attribute::RuntimeVisibleAnnotations(_) | Attribute::RuntimeInvisibleAnnotations(_) => {
+            Ok(())
+        }
         Attribute::NestHost(index) => pool.class_name(*index).map(|_| ()),
         Attribute::Record(components) => {
             for component in components {
@@ -411,6 +544,12 @@ impl<'a> Attribute<'a> {
                     class_index,
                     method_index,
                 }
+            }
+            "RuntimeVisibleAnnotations" => {
+                Attribute::RuntimeVisibleAnnotations(read_annotations(&mut sub_reader)?)
+            }
+            "RuntimeInvisibleAnnotations" => {
+                Attribute::RuntimeInvisibleAnnotations(read_annotations(&mut sub_reader)?)
             }
             "Record" => Attribute::Record(read_record_components(&mut sub_reader, constant_pool)?),
             "Code" => Attribute::Code(read_code(&mut sub_reader, constant_pool)?),
@@ -524,6 +663,166 @@ mod tests {
         let pool = ConstantPool::from_entries(vec![]);
 
         assert_eq!(validate_attribute(&Attribute::Synthetic, &pool), Ok(()));
+    }
+
+    fn element_value_bytes(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn reads_every_primitive_and_string_element_value_tag() {
+        let cases: &[(u8, ElementValue)] = &[
+            (b'B', ElementValue::Byte(ConstantPoolIndex(1))),
+            (b'C', ElementValue::Char(ConstantPoolIndex(1))),
+            (b'D', ElementValue::Double(ConstantPoolIndex(1))),
+            (b'F', ElementValue::Float(ConstantPoolIndex(1))),
+            (b'I', ElementValue::Int(ConstantPoolIndex(1))),
+            (b'J', ElementValue::Long(ConstantPoolIndex(1))),
+            (b'S', ElementValue::Short(ConstantPoolIndex(1))),
+            (b'Z', ElementValue::Boolean(ConstantPoolIndex(1))),
+            (b's', ElementValue::String(ConstantPoolIndex(1))),
+            (b'c', ElementValue::Class(ConstantPoolIndex(1))),
+        ];
+
+        for (tag, expected) in cases {
+            let bytes = element_value_bytes(*tag, &[0x00, 0x01]);
+            let mut reader = Reader::new(&bytes);
+
+            assert_eq!(
+                read_element_value(&mut reader, 0),
+                Ok(expected.clone()),
+                "tag {tag:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_an_enum_element_value() {
+        let bytes = element_value_bytes(b'e', &[0x00, 0x01, 0x00, 0x02]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, 0),
+            Ok(ElementValue::Enum {
+                type_name_index: ConstantPoolIndex(1),
+                const_name_index: ConstantPoolIndex(2),
+            })
+        );
+    }
+
+    #[test]
+    fn reads_a_nested_annotation_element_value() {
+        let bytes = element_value_bytes(
+            b'@',
+            &[
+                0x00, 0x01, // type_index = #1
+                0x00, 0x00, // num_element_value_pairs = 0
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, 0),
+            Ok(ElementValue::Annotation(Box::new(Annotation {
+                type_index: ConstantPoolIndex(1),
+                element_value_pairs: vec![],
+            })))
+        );
+    }
+
+    #[test]
+    fn reads_an_array_element_value() {
+        let bytes = element_value_bytes(
+            b'[',
+            &[
+                0x00, 0x02, // num_values = 2
+                b'I', 0x00, 0x01, // Int(#1)
+                b'I', 0x00, 0x02, // Int(#2)
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, 0),
+            Ok(ElementValue::Array(vec![
+                ElementValue::Int(ConstantPoolIndex(1)),
+                ElementValue::Int(ConstantPoolIndex(2)),
+            ]))
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_element_value_tag() {
+        let bytes = element_value_bytes(b'?', &[]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, 0),
+            Err(AttributeError::UnknownElementValueTag { tag: b'?' })
+        );
+    }
+
+    #[test]
+    fn rejects_annotation_nesting_past_the_depth_guard() {
+        let bytes = element_value_bytes(b'@', &[0x00, 0x01, 0x00, 0x00]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, DEFAULT_MAX_ANNOTATION_DEPTH),
+            Err(AttributeError::TooDeeplyNestedAnnotation)
+        );
+    }
+
+    #[test]
+    fn rejects_array_nesting_past_the_depth_guard() {
+        let bytes = element_value_bytes(b'[', &[0x00, 0x00]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            read_element_value(&mut reader, DEFAULT_MAX_ANNOTATION_DEPTH),
+            Err(AttributeError::TooDeeplyNestedAnnotation)
+        );
+    }
+
+    #[test]
+    fn decodes_a_runtime_visible_annotations_attribute() {
+        let pool = pool_with_utf8_name("RuntimeVisibleAnnotations");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // num_annotations = 1
+                0x00, 0x02, // type_index = #2
+                0x00, 0x01, // num_element_value_pairs = 1
+                0x00, 0x03, // element_name_index = #3
+                b's', 0x00, 0x04, // String(#4)
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+                type_index: ConstantPoolIndex(2),
+                element_value_pairs: vec![(
+                    ConstantPoolIndex(3),
+                    ElementValue::String(ConstantPoolIndex(4))
+                )],
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_runtime_invisible_annotations_attribute_with_no_annotations() {
+        let pool = pool_with_utf8_name("RuntimeInvisibleAnnotations");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x00]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::RuntimeInvisibleAnnotations(vec![]))
+        );
     }
 
     #[test]
