@@ -483,6 +483,7 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
         kind,
         RawTokenKind::Eof
             | RawTokenKind::Error
+            | RawTokenKind::Keyword(HardKeyword::Do)
             | RawTokenKind::Operator
             | RawTokenKind::Punctuation(
                 Punctuation::Comma
@@ -1585,6 +1586,26 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_do_as_a_continuation_before_its_body() {
+        assert_eq!(
+            kinds("value\n\ndo\n  body()\nwhile condition"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Do),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::While),
+                TokenKind::Identifier,
                 TokenKind::Eof,
             ]
         );

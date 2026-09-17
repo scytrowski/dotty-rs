@@ -29,3 +29,15 @@ catch
 finally
   cleanup()
 after_try()
+
+value match
+  case first =>
+    one()
+  case second =>
+    two()
+after_match()
+
+do
+  body()
+while condition
+after_do()
