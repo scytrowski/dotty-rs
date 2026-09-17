@@ -2,6 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
+use dotty_classfile::signature::ClassSignature;
 use std::rc::Rc;
 
 /// A reference to a class/interface from within another class's symbol,
@@ -19,11 +20,18 @@ pub enum ClassRef {
 }
 
 /// A loaded class or interface's symbol: its name, access flags, its
-/// direct superclass/interfaces, its fields, and its methods.
+/// direct superclass/interfaces, its fields, its methods, and its
+/// optional generic signature.
 ///
 /// Owns its data — it never borrows from the decode buffer that produced
 /// it, matching the borrowed/owned separation `AGENTS.md` requires between
 /// decoder and higher-level representations.
+///
+/// `signature` is `None` unless the class carries a `Signature`
+/// attribute (JVMS §4.7.9.1) — the common case for a non-generic class.
+/// It is the raw parsed grammar tree from `dotty-classfile`, verbatim:
+/// no resolution of the class names it mentions, no semantic type model
+/// built from it (`docs/classloader.md` §3/§9).
 #[derive(Debug, Clone)]
 pub struct ClassSymbol {
     name: BinaryName,
@@ -32,6 +40,7 @@ pub struct ClassSymbol {
     interfaces: Vec<ClassRef>,
     fields: Vec<FieldSymbol>,
     methods: Vec<MethodSymbol>,
+    signature: Option<ClassSignature>,
 }
 
 impl ClassSymbol {
@@ -42,6 +51,7 @@ impl ClassSymbol {
         interfaces: Vec<ClassRef>,
         fields: Vec<FieldSymbol>,
         methods: Vec<MethodSymbol>,
+        signature: Option<ClassSignature>,
     ) -> Self {
         Self {
             name,
@@ -50,6 +60,7 @@ impl ClassSymbol {
             interfaces,
             fields,
             methods,
+            signature,
         }
     }
 
@@ -76,6 +87,10 @@ impl ClassSymbol {
     pub fn methods(&self) -> &[MethodSymbol] {
         &self.methods
     }
+
+    pub fn signature(&self) -> Option<&ClassSignature> {
+        self.signature.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +106,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         ));
         let runnable_ref = ClassRef::Unresolved(BinaryName::from_internal("java/lang/Runnable"));
 
@@ -101,6 +117,7 @@ mod tests {
             vec![runnable_ref],
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert_eq!(symbol.name().as_internal(), "PoolSample");
@@ -124,6 +141,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
         );
 
         assert!(symbol.super_class().is_none());
@@ -148,6 +166,7 @@ mod tests {
             Vec::new(),
             vec![field],
             Vec::new(),
+            None,
         );
 
         assert!(matches!(symbol.fields(), [only] if only.name() == "ANSWER"));
@@ -174,8 +193,51 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![method],
+            None,
         );
 
         assert!(matches!(symbol.methods(), [only] if only.name() == "run"));
+    }
+
+    #[test]
+    fn exposes_its_generic_signature_when_present() {
+        use dotty_classfile::signature::ClassTypeSignature;
+
+        let signature = ClassSignature {
+            type_parameters: vec![],
+            superclass: ClassTypeSignature {
+                package: vec!["java".to_owned(), "lang".to_owned()],
+                simple_name: "Object".to_owned(),
+                type_arguments: vec![],
+                suffix: vec![],
+            },
+            superinterfaces: vec![],
+        };
+        let symbol = ClassSymbol::new(
+            BinaryName::from_internal("GenericSample"),
+            ClassAccessFlags(0x0021),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(signature.clone()),
+        );
+
+        assert_eq!(symbol.signature(), Some(&signature));
+    }
+
+    #[test]
+    fn has_no_signature_by_default() {
+        let symbol = ClassSymbol::new(
+            BinaryName::from_internal("PoolSample"),
+            ClassAccessFlags(0x0021),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert_eq!(symbol.signature(), None);
     }
 }

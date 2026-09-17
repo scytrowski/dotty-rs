@@ -9,7 +9,7 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
-use dotty_classfile::signature::{FieldSignature, MethodSignature, SignatureError};
+use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -145,6 +145,13 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             ));
         }
 
+        let signature = self.resolve_optional_signature(
+            name,
+            &class_file.attributes,
+            &class_file.constant_pool,
+            ClassSignature::parse,
+        )?;
+
         Ok(Rc::new(ClassSymbol::new(
             name.clone(),
             class_file.access_flags,
@@ -152,6 +159,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             interfaces,
             fields,
             methods,
+            signature,
         )))
     }
 
@@ -564,6 +572,46 @@ mod tests {
         );
     }
 
+    /// `generic_sample/GenericSample.class` has a real class-level
+    /// `Signature` attribute (`<T::Ljava/lang/Comparable<TT;>;>Ljava/lang/Object;`,
+    /// confirmed via `javap -p -v`) since its declaration is generic.
+    #[test]
+    fn loads_a_real_fixtures_class_signature() {
+        use dotty_classfile::signature::{
+            ClassSignature, ClassTypeSignature, ReferenceTypeSignature, TypeArgument, TypeParameter,
+        };
+
+        let loader = ClassLoader::new(InMemoryClassPath(generic_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("GenericSample"))
+            .expect("GenericSample should load");
+
+        assert_eq!(
+            symbol.signature(),
+            Some(&ClassSignature {
+                type_parameters: vec![TypeParameter {
+                    name: "T".to_owned(),
+                    class_bound: None,
+                    interface_bounds: vec![ReferenceTypeSignature::Class(ClassTypeSignature {
+                        package: vec!["java".to_owned(), "lang".to_owned()],
+                        simple_name: "Comparable".to_owned(),
+                        type_arguments: vec![TypeArgument::Exact(
+                            ReferenceTypeSignature::TypeVariable("T".to_owned())
+                        )],
+                        suffix: vec![],
+                    })],
+                }],
+                superclass: ClassTypeSignature {
+                    package: vec!["java".to_owned(), "lang".to_owned()],
+                    simple_name: "Object".to_owned(),
+                    type_arguments: vec![],
+                    suffix: vec![],
+                },
+                superinterfaces: vec![],
+            })
+        );
+    }
+
     /// A hand-built, minimal, synthetic class file with one field whose
     /// descriptor is not a valid field descriptor. `javac` cannot produce
     /// this; it exists purely to exercise `MalformedDescriptor`.
@@ -784,6 +832,59 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("C"),
             synthetic_class_with_malformed_method_signature(),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let error = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::MalformedSignature(name, _) if name.as_internal() == "C"
+        ));
+    }
+
+    /// A hand-built, minimal, synthetic class file whose class-level
+    /// `Signature` attribute is not a valid generic class signature.
+    /// `javac` cannot produce this; it exists purely to exercise
+    /// `MalformedSignature` for a class rather than a member.
+    fn synthetic_class_with_malformed_class_signature() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&[0x00, 0x05]); // constant_pool_count = 5
+        bytes.push(1); // #1 Utf8 "C"
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"C");
+        bytes.push(7); // #2 Class -> #1
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(1); // #3 Utf8 "Signature"
+        bytes.extend_from_slice(&9u16.to_be_bytes());
+        bytes.extend_from_slice(b"Signature");
+        bytes.push(1); // #4 Utf8 "@" (not a valid class signature)
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"@");
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // fields_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // attributes_count = 1
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // attribute_name_index = #3
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // attribute_length = 2
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // signature_index = #4
+        bytes
+    }
+
+    #[test]
+    fn malformed_signature_when_a_class_signature_does_not_parse() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_malformed_class_signature(),
         );
 
         let loader = ClassLoader::new(InMemoryClassPath(classes));
