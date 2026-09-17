@@ -63,6 +63,13 @@ opaque_id!(
 );
 
 opaque_id!(
+    /// Identifies a deferred symbol completion. Opaque in the foundation PR —
+    /// no completer engine exists yet; a future namer/typer mints these and
+    /// resolves them to a `SymbolInfo::Complete`.
+    CompletionId
+);
+
+opaque_id!(
     /// Opaque handle for "which classpath entry a classfile-derived symbol
     /// came from." `dotty-core` does not know what a classfile is; the
     /// classfile semantic adapter that constructs `SymbolOrigin::Classfile`
@@ -172,6 +179,7 @@ mod tests {
         assert_eq!(AnnotationId::new(6).index(), 6);
         assert_eq!(ClassfileOriginId::new(7).index(), 7);
         assert_eq!(TastyOriginId::new(8).index(), 8);
+        assert_eq!(CompletionId::new(9).index(), 9);
     }
 
     #[test]
