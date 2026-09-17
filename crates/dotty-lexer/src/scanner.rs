@@ -693,8 +693,13 @@ fn count_line_breaks(text: &str) -> usize {
 }
 
 fn line_indentation(source: &str, offset: u32) -> String {
-    let line_start = line_start_offset(source, offset) as usize;
-    source[line_start..offset as usize]
+    let requested_offset = (offset as usize).min(source.len());
+    let safe_offset = (0..=requested_offset)
+        .rev()
+        .find(|candidate| source.is_char_boundary(*candidate))
+        .unwrap_or(0);
+    let line_start = line_start_offset(source, safe_offset as u32) as usize;
+    source[line_start..safe_offset]
         .chars()
         .take_while(|character| matches!(character, ' ' | '\t'))
         .collect()
@@ -1181,6 +1186,16 @@ mod tests {
         assert_eq!(
             scanner.diagnostics()[0].message(),
             "incompatible indentation prefixes"
+        );
+    }
+
+    #[test]
+    fn handles_unicode_before_a_trailing_newline() {
+        let scanner = ContextualScanner::new("val café = \"żółw\"\n").expect("source scans");
+
+        assert_eq!(
+            scanner.tokens().last().map(|token| token.kind),
+            Some(TokenKind::Eof)
         );
     }
 }

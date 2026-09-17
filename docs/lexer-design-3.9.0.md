@@ -508,6 +508,11 @@ source snippets. Compare:
 Every discovered mismatch becomes a minimized regression fixture with a note
 if compiler behavior differs from the language specification.
 
+The current developer harness is `bash tools/scala-lexer-oracle/compare.sh`.
+It compares normalized token kinds and source-token starts; synthetic layout
+tokens are compared by kind and order while their exact ranges remain a
+separate scanner test concern.
+
 ### Corpus tests
 
 After the raw lexer is stable, tokenize Scala 3 sources from the compiler,

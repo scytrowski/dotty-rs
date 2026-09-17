@@ -1,3 +1,4 @@
 .bsp/
+__pycache__/
 project/target/
 target/
