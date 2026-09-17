@@ -2,7 +2,7 @@
 # Regenerates this directory's real JAR fixtures, both containing the
 # same entry: the existing PoolSample.class fixture from
 # crates/dotty-classfile/tests/fixtures/pool_sample/. Requires `zip`
-# (Info-Zip) on PATH; no network access.
+# (Info-Zip) and `jar` (JDK) on PATH; no network access.
 #
 # usage: tests/fixtures/pool_sample_jar/generate.sh
 set -euo pipefail
@@ -19,9 +19,22 @@ work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pool-sample-jar.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 cp "$class_file" "$work_dir/PoolSample.class"
 
+# Remove any existing fixtures first: both `zip` and `jar` update an
+# existing archive in place rather than recreating it, which can leave
+# stale entries or non-deterministic byte layout behind.
+rm -f "$fixture_dir/pool_sample_stored.jar" "$fixture_dir/pool_sample_deflate.jar"
+
 # -0: store, no compression. -X: no extra fields (extended timestamps
 # etc.), so the fixture stays minimal and deterministic.
 ( cd "$work_dir" && zip -0 -X "$fixture_dir/pool_sample_stored.jar" PoolSample.class )
 
 echo "regenerated pool_sample_stored.jar"
 unzip -v "$fixture_dir/pool_sample_stored.jar"
+
+# jar's default compression is DEFLATE. This also picks up a
+# META-INF/MANIFEST.MF entry (and a META-INF/ directory entry) that
+# `jar` always adds; tests only look at the PoolSample.class entry.
+( cd "$work_dir" && jar cf "$fixture_dir/pool_sample_deflate.jar" PoolSample.class )
+
+echo "regenerated pool_sample_deflate.jar"
+unzip -v "$fixture_dir/pool_sample_deflate.jar"

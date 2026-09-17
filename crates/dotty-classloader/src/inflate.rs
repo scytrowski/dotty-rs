@@ -10,6 +10,19 @@ pub(crate) enum InflateError {
     /// While decoding a Huffman-coded value, no assigned code matched the
     /// bits read, even after reading the longest assigned code length.
     InvalidHuffmanCode,
+    /// A block header's `BTYPE` was `11` (reserved; RFC 1951 §3.2.3).
+    InvalidBlockType,
+    /// A stored block's `NLEN` was not the one's complement of `LEN`
+    /// (§3.2.4).
+    InvalidStoredBlockLength,
+    /// A dynamic block's Huffman-table description (§3.2.7) was
+    /// malformed: a repeat code appeared with nothing to repeat, a
+    /// repeat ran past the expected number of code lengths, or the
+    /// code-length alphabet decoded an unused symbol.
+    InvalidDynamicHuffmanTable,
+    /// A length/distance back-reference pointed at or before the start
+    /// of the output produced so far.
+    InvalidBackReference,
 }
 
 impl fmt::Display for InflateError {
@@ -17,17 +30,29 @@ impl fmt::Display for InflateError {
         match self {
             Self::UnexpectedEof => write!(formatter, "unexpected end of DEFLATE stream"),
             Self::InvalidHuffmanCode => write!(formatter, "invalid Huffman code in DEFLATE stream"),
+            Self::InvalidBlockType => write!(formatter, "reserved DEFLATE block type (BTYPE 11)"),
+            Self::InvalidStoredBlockLength => write!(
+                formatter,
+                "stored block's NLEN is not the one's complement of LEN"
+            ),
+            Self::InvalidDynamicHuffmanTable => {
+                write!(formatter, "malformed dynamic Huffman table description")
+            }
+            Self::InvalidBackReference => write!(
+                formatter,
+                "back-reference distance points before the start of the output"
+            ),
         }
     }
 }
 
 impl std::error::Error for InflateError {}
 
-/// A bit reader over a DEFLATE stream. Per RFC 1951 §3.1.1, non-Huffman
-/// fields are packed least-significant-bit first within each byte;
-/// [`BitReader::read_huffman_bit`] exists separately because Huffman
-/// codes themselves are packed most-significant-bit first (§3.2.2) even
-/// though the underlying bit order within each byte is unchanged.
+/// A bit reader over a DEFLATE stream. Per RFC 1951 §3.1.1, every field
+/// is packed least-significant-bit first within each byte; Huffman codes
+/// are the one exception where the *value* built from consecutively read
+/// bits is interpreted most-significant-bit first (§3.2.2) — that
+/// distinction lives in [`HuffmanTable::decode`], not here.
 pub(crate) struct BitReader<'a> {
     bytes: &'a [u8],
     byte_pos: usize,
@@ -68,6 +93,34 @@ impl<'a> BitReader<'a> {
             value |= self.read_bit()? << i;
         }
         Ok(value)
+    }
+
+    /// Discards any unread bits in the current byte, so the next read
+    /// starts at a byte boundary (RFC 1951 §3.2.4, before a stored
+    /// block's `LEN`/`NLEN`/data).
+    pub(crate) fn align_to_byte(&mut self) {
+        if self.bit_pos != 0 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+    }
+
+    /// Reads `count` raw bytes directly, without going through
+    /// [`Self::read_bits`] (which is limited to 32 bits per call). Only
+    /// meaningful once byte-aligned; callers call [`Self::align_to_byte`]
+    /// first.
+    pub(crate) fn read_aligned_bytes(&mut self, count: usize) -> Result<&'a [u8], InflateError> {
+        let end = self
+            .byte_pos
+            .checked_add(count)
+            .ok_or(InflateError::UnexpectedEof)?;
+        if end > self.bytes.len() {
+            return Err(InflateError::UnexpectedEof);
+        }
+
+        let bytes = &self.bytes[self.byte_pos..end];
+        self.byte_pos = end;
+        Ok(bytes)
     }
 }
 
@@ -159,6 +212,188 @@ pub(crate) fn fixed_distance_code_lengths() -> [u8; 32] {
     [5u8; 32]
 }
 
+/// Base lengths for length codes 257-285 (RFC 1951 §3.2.5, Table 3.2.5).
+const LENGTH_BASE: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+/// Extra bits to read after each length code, added to its base length.
+const LENGTH_EXTRA_BITS: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+/// Base distances for distance codes 0-29 (§3.2.5, Table 3.2.5).
+const DISTANCE_BASE: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+/// Extra bits to read after each distance code, added to its base
+/// distance.
+const DISTANCE_EXTRA_BITS: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+/// The order in which a dynamic block's code-length-alphabet lengths are
+/// transmitted (§3.2.7) — not the order the code-length symbols
+/// themselves are numbered in.
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+/// Decodes a dynamic block's header (§3.2.7): HLIT/HDIST/HCLEN counts,
+/// the code-length alphabet's own Huffman table, then the literal/length
+/// and distance code lengths it describes (with codes 16/17/18 as
+/// run-length repeats), building both real Huffman tables.
+fn decode_dynamic_tables(
+    reader: &mut BitReader<'_>,
+) -> Result<(HuffmanTable, HuffmanTable), InflateError> {
+    let literal_length_count = reader.read_bits(5)? as usize + 257;
+    let distance_count = reader.read_bits(5)? as usize + 1;
+    let code_length_count = reader.read_bits(4)? as usize + 4;
+
+    let mut code_length_lengths = [0u8; 19];
+    for &position in CODE_LENGTH_ORDER.iter().take(code_length_count) {
+        code_length_lengths[position] = reader.read_bits(3)? as u8;
+    }
+    let code_length_table = HuffmanTable::from_code_lengths(&code_length_lengths);
+
+    let total = literal_length_count + distance_count;
+    let mut lengths = Vec::with_capacity(total);
+    while lengths.len() < total {
+        match code_length_table.decode(reader)? {
+            symbol @ 0..=15 => lengths.push(symbol as u8),
+            16 => {
+                let repeat = 3 + reader.read_bits(2)?;
+                let &previous = lengths
+                    .last()
+                    .ok_or(InflateError::InvalidDynamicHuffmanTable)?;
+                lengths.extend(std::iter::repeat_n(previous, repeat as usize));
+            }
+            17 => {
+                let repeat = 3 + reader.read_bits(3)?;
+                lengths.extend(std::iter::repeat_n(0u8, repeat as usize));
+            }
+            18 => {
+                let repeat = 11 + reader.read_bits(7)?;
+                lengths.extend(std::iter::repeat_n(0u8, repeat as usize));
+            }
+            _ => return Err(InflateError::InvalidDynamicHuffmanTable),
+        }
+    }
+    if lengths.len() != total {
+        return Err(InflateError::InvalidDynamicHuffmanTable);
+    }
+
+    let literal_length_table = HuffmanTable::from_code_lengths(&lengths[..literal_length_count]);
+    let distance_table = HuffmanTable::from_code_lengths(&lengths[literal_length_count..]);
+
+    Ok((literal_length_table, distance_table))
+}
+
+/// Decodes one stored (uncompressed) block (§3.2.4): byte-aligns, reads
+/// `LEN`/`NLEN` (verifying they're complementary), then copies `LEN`
+/// bytes directly into `output`.
+fn decode_stored_block(
+    reader: &mut BitReader<'_>,
+    output: &mut Vec<u8>,
+) -> Result<(), InflateError> {
+    reader.align_to_byte();
+
+    let length = reader.read_bits(16)? as u16;
+    let length_complement = reader.read_bits(16)? as u16;
+    if length_complement != !length {
+        return Err(InflateError::InvalidStoredBlockLength);
+    }
+
+    output.extend_from_slice(reader.read_aligned_bytes(usize::from(length))?);
+    Ok(())
+}
+
+/// Decodes one Huffman-coded block (fixed or dynamic; §3.2.5): literal
+/// bytes are appended directly, length/distance pairs copy already-
+/// produced output (LZ77 back-references), and the end-of-block symbol
+/// (256) ends the block.
+fn decode_huffman_block(
+    reader: &mut BitReader<'_>,
+    literal_length_table: &HuffmanTable,
+    distance_table: &HuffmanTable,
+    output: &mut Vec<u8>,
+) -> Result<(), InflateError> {
+    loop {
+        match literal_length_table.decode(reader)? {
+            symbol @ 0..=255 => output.push(symbol as u8),
+            256 => return Ok(()),
+            symbol @ 257..=285 => {
+                let index = usize::from(symbol - 257);
+                let length =
+                    u32::from(LENGTH_BASE[index]) + reader.read_bits(LENGTH_EXTRA_BITS[index])?;
+
+                let distance_symbol = distance_table.decode(reader)?;
+                let distance_index = usize::from(distance_symbol);
+                let Some(&distance_base) = DISTANCE_BASE.get(distance_index) else {
+                    return Err(InflateError::InvalidBackReference);
+                };
+                let distance = usize::try_from(
+                    u32::from(distance_base)
+                        + reader.read_bits(DISTANCE_EXTRA_BITS[distance_index])?,
+                )
+                .expect("distance always fits in usize on supported targets");
+
+                if distance == 0 || distance > output.len() {
+                    return Err(InflateError::InvalidBackReference);
+                }
+
+                let start = output.len() - distance;
+                for i in 0..length as usize {
+                    output.push(output[start + i]);
+                }
+            }
+            _ => return Err(InflateError::InvalidHuffmanCode), // 286/287: unused
+        }
+    }
+}
+
+/// Decompresses a raw DEFLATE (RFC 1951) stream — the format ZIP's
+/// compression method 8 uses, with no zlib or gzip framing around it.
+pub(crate) fn inflate(compressed: &[u8]) -> Result<Vec<u8>, InflateError> {
+    let mut reader = BitReader::new(compressed);
+    let mut output = Vec::new();
+
+    let fixed_literal_length_table =
+        HuffmanTable::from_code_lengths(&fixed_literal_length_code_lengths());
+    let fixed_distance_table = HuffmanTable::from_code_lengths(&fixed_distance_code_lengths());
+
+    loop {
+        let is_final_block = reader.read_bits(1)? == 1;
+        let block_type = reader.read_bits(2)?;
+
+        match block_type {
+            0 => decode_stored_block(&mut reader, &mut output)?,
+            1 => decode_huffman_block(
+                &mut reader,
+                &fixed_literal_length_table,
+                &fixed_distance_table,
+                &mut output,
+            )?,
+            2 => {
+                let (literal_length_table, distance_table) = decode_dynamic_tables(&mut reader)?;
+                decode_huffman_block(
+                    &mut reader,
+                    &literal_length_table,
+                    &distance_table,
+                    &mut output,
+                )?;
+            }
+            _ => return Err(InflateError::InvalidBlockType),
+        }
+
+        if is_final_block {
+            break;
+        }
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +427,14 @@ mod tests {
         /// RFC 1951 §3.2.2.
         fn write_huffman_code(&mut self, value: u16, length: u8) {
             for i in (0..length).rev() {
+                self.write_bit(((value >> i) & 1) as u8);
+            }
+        }
+
+        /// Writes a non-Huffman field's bits least-significant-bit
+        /// first, matching `BitReader::read_bits`.
+        fn write_bits(&mut self, value: u32, count: u8) {
+            for i in 0..count {
                 self.write_bit(((value >> i) & 1) as u8);
             }
         }
@@ -269,5 +512,88 @@ mod tests {
             table.decode(&mut reader),
             Err(InflateError::InvalidHuffmanCode)
         );
+    }
+
+    #[test]
+    fn inflate_decodes_a_fixed_huffman_block_with_a_back_reference() {
+        let mut writer = BitWriter::new();
+        writer.write_bits(1, 1); // BFINAL = 1
+        writer.write_bits(0b01, 2); // BTYPE = 01 (fixed Huffman)
+        writer.write_huffman_code(0x30 + u16::from(b'A'), 8); // literal 'A'
+        writer.write_huffman_code(0x30 + u16::from(b'B'), 8); // literal 'B'
+        writer.write_huffman_code(2, 7); // length code 258 -> length 4
+        writer.write_huffman_code(1, 5); // distance code 1 -> distance 2
+        writer.write_huffman_code(0, 7); // end-of-block (symbol 256)
+        let bytes = writer.finish();
+
+        // "AB" + a length-4/distance-2 back-reference, copied byte by
+        // byte (the copy source overlaps the destination, since
+        // distance < length): A,B,A,B,A,B -> "ABABAB".
+        assert_eq!(inflate(&bytes).unwrap(), b"ABABAB");
+    }
+
+    fn extract_raw_deflate_bytes(jar_bytes: &[u8], entry_name: &str) -> Vec<u8> {
+        use crate::zip_archive::{EndOfCentralDirectory, decode_central_directory};
+        use crate::zip_reader::ZipReader;
+
+        let eocd = EndOfCentralDirectory::locate_and_decode(jar_bytes).unwrap();
+        let entries = decode_central_directory(jar_bytes, &eocd).unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == entry_name)
+            .expect("entry should be present in the central directory");
+        assert_eq!(
+            entry.compression_method, 8,
+            "fixture entry should be DEFLATE-compressed"
+        );
+
+        // Mirrors ZipArchive::extract_entry's local-header-skipping
+        // logic, stopping short of dispatching on compression method
+        // (ZipArchive doesn't support method 8 until the next increment
+        // wires inflate() into it).
+        let mut reader = ZipReader::with_range(
+            jar_bytes,
+            entry.local_header_offset as usize,
+            jar_bytes.len(),
+        )
+        .unwrap();
+        reader.read_u32().unwrap(); // local file header signature
+        reader.read_u16().unwrap(); // version needed to extract
+        reader.read_u16().unwrap(); // general purpose bit flag
+        reader.read_u16().unwrap(); // compression method
+        reader.read_u16().unwrap(); // last mod file time
+        reader.read_u16().unwrap(); // last mod file date
+        reader.read_u32().unwrap(); // crc-32
+        reader.read_u32().unwrap(); // compressed size
+        reader.read_u32().unwrap(); // uncompressed size
+        let file_name_length = reader.read_u16().unwrap();
+        let extra_field_length = reader.read_u16().unwrap();
+        reader.read_bytes(usize::from(file_name_length)).unwrap();
+        reader.read_bytes(usize::from(extra_field_length)).unwrap();
+
+        reader
+            .read_bytes(entry.compressed_size as usize)
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn inflate_decompresses_a_real_deflate_compressed_jar_entry() {
+        let jar_bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/pool_sample_jar/pool_sample_deflate.jar"),
+        )
+        .expect("pool_sample_deflate.jar fixture should exist");
+        let compressed = extract_raw_deflate_bytes(&jar_bytes, "PoolSample.class");
+
+        let decompressed = inflate(&compressed).unwrap();
+
+        let expected = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-classfile/tests/fixtures/pool_sample/PoolSample.class"),
+        )
+        .unwrap();
+        assert_eq!(decompressed, expected);
+        assert_eq!(crate::crc32::checksum(&decompressed), 0xaa43_8c97);
     }
 }
