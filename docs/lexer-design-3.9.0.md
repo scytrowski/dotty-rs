@@ -520,6 +520,11 @@ and an unclosed attribute expression. Add remaining quote/splice forms,
 compatibility syntax, and broader malformed-input recovery without entangling
 XML state with normal Scala tokenization.
 
+Numeric recovery currently keeps malformed numeric text as one raw literal while
+reporting a typed diagnostic. Missing digits after a base prefix and invalid
+digits in hexadecimal/binary literals are diagnosed independently, without
+emitting duplicate errors for the same malformed literal.
+
 ## 11. Testing strategy
 
 ### Focused unit tests

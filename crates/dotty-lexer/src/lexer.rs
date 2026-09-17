@@ -776,7 +776,12 @@ impl<'source> RawLexer<'source> {
             _ => {}
         }
 
-        if self.cursor.peek().is_some_and(is_identifier_part) {
+        let invalid_non_decimal_digit = base != 10
+            && self
+                .cursor
+                .peek()
+                .is_some_and(|character| character.is_ascii_alphanumeric());
+        if self.cursor.peek().is_some_and(is_identifier_part) && !invalid_non_decimal_digit {
             self.report(start, "invalid literal number")?;
         }
 
@@ -809,16 +814,15 @@ impl<'source> RawLexer<'source> {
         if trailing_separator {
             self.report(start, "numeric literal must not end with a separator")?;
         }
-        if !saw_digit {
-            self.report(start, "numeric literal must contain a digit")?;
-        }
-        if base != 10
+        let invalid_non_decimal_digit = base != 10
             && self
                 .cursor
                 .peek()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-        {
+                .is_some_and(|character| character.is_ascii_alphanumeric());
+        if invalid_non_decimal_digit {
             self.report(start, "invalid digit in non-decimal literal")?;
+        } else if !saw_digit {
+            self.report(start, "numeric literal must contain a digit")?;
         }
 
         Ok(())
@@ -1595,6 +1599,71 @@ mod tests {
             })
         )));
         assert_eq!(diagnostics.len(), 3);
+    }
+
+    #[test]
+    fn reports_missing_exponent_digits_and_keeps_the_numeric_token() {
+        let (items, diagnostics) = scan("1e+ next");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::ExponentLiteral, 0, 3),
+                trivia(TriviaKind::Spaces, 3, 4),
+                token(RawTokenKind::Identifier, 4, 8),
+                token(RawTokenKind::Eof, 8, 8),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(0, 3).expect("valid range")
+        );
+        assert!(diagnostics[0].message().contains("exponent"));
+    }
+
+    #[test]
+    fn reports_missing_digits_after_hex_and_binary_prefixes() {
+        let (items, diagnostics) = scan("0x 0b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::IntegerLiteral, 0, 2),
+                trivia(TriviaKind::Spaces, 2, 3),
+                token(RawTokenKind::IntegerLiteral, 3, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message().contains("digit"))
+        );
+    }
+
+    #[test]
+    fn reports_invalid_digits_after_hex_and_binary_prefixes() {
+        let (items, diagnostics) = scan("0xg 0b2");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::IntegerLiteral, 0, 2),
+                token(RawTokenKind::Identifier, 2, 3),
+                trivia(TriviaKind::Spaces, 3, 4),
+                token(RawTokenKind::IntegerLiteral, 4, 6),
+                token(RawTokenKind::IntegerLiteral, 6, 7),
+                token(RawTokenKind::Eof, 7, 7),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message().contains("invalid digit"))
+        );
     }
 
     #[test]
