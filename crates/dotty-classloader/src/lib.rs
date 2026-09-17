@@ -25,6 +25,7 @@ mod record_component;
 mod repository;
 mod semantic_type;
 mod symbol;
+mod tasty_symbol;
 mod zip_archive;
 mod zip_reader;
 
@@ -47,4 +48,5 @@ pub mod classloader {
     pub use crate::record_component::RecordComponentSymbol;
     pub use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
     pub use crate::symbol::{ClassRef, ClassSymbol};
+    pub use crate::tasty_symbol::TastyDecodeError;
 }

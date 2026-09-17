@@ -1,6 +1,6 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
-use crate::class_path::ClassPathEntry;
+use crate::class_path::{ClassFormat, ClassPathEntry};
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
@@ -9,6 +9,7 @@ use crate::record_component::RecordComponentSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
+use crate::tasty_symbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
@@ -87,7 +88,60 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
 
-        let mut reader = Reader::new(resource.bytes());
+        match resource.format() {
+            ClassFormat::Class => self.load_uncached_class(name, resource.bytes()),
+            ClassFormat::Tasty => self.load_uncached_tasty(name, resource.bytes()),
+        }
+    }
+
+    /// `.tasty`-backed loading (`docs/classloader.md` §9): reconstructs
+    /// only name/flags/superclass/interfaces via [`tasty_symbol::decode`]
+    /// and recurses into the same [`Self::load_dependency`] used by the
+    /// `.class` path, converging on the same [`ClassSymbol`] shape.
+    /// `fields`/`methods`/`signature`/nesting/annotations are left at
+    /// their empty defaults — not yet reconstructed from `.tasty`.
+    fn load_uncached_tasty(
+        &self,
+        name: &BinaryName,
+        bytes: &[u8],
+    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+        let decoded = tasty_symbol::decode(bytes, name)
+            .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
+
+        let shell = Rc::new(ClassSymbol::new_shell(name.clone(), decoded.flags));
+        self.repository
+            .borrow_mut()
+            .mark_loading(name.clone(), shell.clone());
+
+        let super_class = Some(self.load_dependency(name, decoded.super_class)?);
+        let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
+        for dependency in decoded.interfaces {
+            interfaces.push(self.load_dependency(name, dependency)?);
+        }
+
+        shell.complete(
+            super_class,
+            interfaces,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        );
+        Ok(shell)
+    }
+
+    fn load_uncached_class(
+        &self,
+        name: &BinaryName,
+        bytes: &[u8],
+    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+        let mut reader = Reader::new(bytes);
         let class_file = ClassFile::decode(&mut reader)
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
 
@@ -460,7 +514,20 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         index: ConstantPoolIndex,
     ) -> Result<ClassRef, ClassLoadError> {
         let dependency = self.resolve_name(owner, class_file, index)?;
+        self.load_dependency(owner, dependency)
+    }
 
+    /// Loads `dependency` (a superclass or interface, already resolved
+    /// to a name) and wraps a failure as [`ClassLoadError::DependencyFailure`]
+    /// — the format-agnostic half of dependency resolution shared by
+    /// both the `.class` path (via [`Self::resolve_dependency`], which
+    /// resolves a constant-pool index to a name first) and the `.tasty`
+    /// path (which already has the name from [`tasty_symbol::decode`]).
+    fn load_dependency(
+        &self,
+        owner: &BinaryName,
+        dependency: BinaryName,
+    ) -> Result<ClassRef, ClassLoadError> {
         self.load_class(&dependency)
             .map(ClassRef::Resolved)
             .map_err(|source| ClassLoadError::DependencyFailure {
