@@ -1618,8 +1618,34 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_an_unterminated_xml_tag_at_eof() {
-        let source = "<item id=\"x\"";
+    fn diagnoses_an_unterminated_simple_xml_tag_at_eof() {
+        let source = "<item";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_closing_tag_at_eof() {
+        let source = "<item></item";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_attribute_expression_at_eof() {
+        let source = "<item enabled={flag}";
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);

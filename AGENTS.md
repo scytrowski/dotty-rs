@@ -53,6 +53,10 @@ or changed by that increment before it is considered complete.
 - Test names should describe one observable behavior.
 - When a feature has several independent supported variants, prefer separate
   tests or a clearly scoped table-driven group with per-case failure context.
+- For lexer and scanner increments with independent malformed or truncated
+  forms, add one focused test per form. For example, test unterminated opening
+  tags, closing tags, and attribute expressions separately; one representative
+  test or integration fixture does not replace this coverage.
 - Add assertions for exact error variants and important offsets/references,
   not only `is_err()`.
 - Keep test counts meaningful: adding coverage should normally add a test or
