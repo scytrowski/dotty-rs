@@ -386,7 +386,14 @@ impl<'source> RawLexer<'source> {
                     }
                     _ => {
                         let _ = self.cursor.bump();
+                        if self.cursor.is_eof()
+                            || (!state.multiline && matches!(self.cursor.peek(), Some('\n' | '\r')))
+                        {
+                            return self
+                                .recover_interpolated_string(state.part_start, state.multiline);
+                        }
                         self.report(state.part_start, "invalid string interpolation splice")?;
+                        return self.recover_interpolated_string(state.part_start, state.multiline);
                     }
                 }
                 continue;
@@ -394,6 +401,58 @@ impl<'source> RawLexer<'source> {
 
             if !state.multiline && self.cursor.peek() == Some('\\') {
                 let _ = self.scan_escape(state.part_start)?;
+            } else {
+                let _ = self.cursor.bump();
+            }
+        }
+    }
+
+    fn recover_interpolated_string(
+        &mut self,
+        start: u32,
+        multiline: bool,
+    ) -> Result<Option<RawItem>, RawLexerError> {
+        loop {
+            if self.cursor.is_eof() {
+                let _ = self.modes.pop();
+                self.report(start, "unclosed interpolated string literal")?;
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                })));
+            }
+
+            if (multiline
+                && self.cursor.peek() == Some('"')
+                && self.cursor.peek_nth(1) == Some('"')
+                && self.cursor.peek_nth(2) == Some('"'))
+                || (!multiline && self.cursor.peek() == Some('"'))
+            {
+                if multiline {
+                    let _ = self.cursor.bump();
+                    let _ = self.cursor.bump();
+                    let _ = self.cursor.bump();
+                } else {
+                    let _ = self.cursor.bump();
+                }
+                let _ = self.modes.pop();
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::StringLiteral,
+                    span: self.span(start)?,
+                })));
+            }
+
+            if !multiline && matches!(self.cursor.peek(), Some('\n' | '\r')) {
+                let _ = self.modes.pop();
+                self.report(start, "unclosed interpolated string literal")?;
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                })));
+            }
+
+            if !multiline && self.cursor.peek() == Some('\\') {
+                let _ = self.scan_escape(start)?;
             } else {
                 let _ = self.cursor.bump();
             }
@@ -2779,6 +2838,54 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_an_invalid_splice_as_a_string_literal_when_whitespace_follows() {
+        let (items, diagnostics) = scan("s\"$ name\"");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringLiteral, 1, 9),
+                token(RawTokenKind::Eof, 9, 9),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("interpolation splice"));
+    }
+
+    #[test]
+    fn recovers_an_invalid_splice_as_a_string_literal_when_a_digit_follows() {
+        let (items, diagnostics) = scan("s\"$1\"");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringLiteral, 1, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("interpolation splice"));
+    }
+
+    #[test]
+    fn recovers_an_unclosed_simple_splice_at_eof() {
+        let (items, diagnostics) = scan("s\"$\"");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::Error, 1, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("unclosed"));
     }
 
     #[test]

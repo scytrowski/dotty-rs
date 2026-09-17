@@ -65,6 +65,8 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
 
 
 def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
+    if token == "erroneous token":
+        return "error"
     if token == "$XMLSTART$<":
         return token
     if token == "string literal" and in_interpolation:
@@ -95,10 +97,32 @@ def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
         closing = source.find(quote, content_start)
         if closing < 0:
             continue
+        content = source[content_start:closing]
+        if "\n" in content or "\r" in content:
+            continue
+        if has_invalid_simple_splice(content):
+            continue
         start = len(source[:content_start - len(quote)].encode("utf-8"))
         end = len(source[: closing + len(quote)].encode("utf-8"))
         ranges.append((start, end))
     return ranges
+
+
+def has_invalid_simple_splice(content: str) -> bool:
+    for index, character in enumerate(content):
+        if character != "$":
+            continue
+        next_character = content[index + 1] if index + 1 < len(content) else None
+        if next_character in {"$", '"', "{"}:
+            continue
+        if next_character is not None and (
+            next_character == "_"
+            or next_character == "$"
+            or next_character.isalpha()
+        ):
+            continue
+        return True
+    return False
 
 
 def is_identifier_name(name: str) -> bool:

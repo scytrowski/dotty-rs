@@ -460,7 +460,9 @@ Implement arbitrary interpolator identifiers, `STRINGPART`, `$identifier`,
 `${expression}`, `$$`, escaped quotes, multiline interpolation, and recursive
 nested interpolation.
 
-The implementation uses explicit lexical modes and brace depth. Regular
+The implementation uses explicit lexical modes and brace depth. Invalid simple
+splice forms recover to a complete string literal, while an unclosed
+interpolation produces one error token covering the remaining string. Regular
 expressions are not an acceptable implementation strategy.
 
 ### Increment 5 — Semantic newlines
