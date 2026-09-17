@@ -3,6 +3,7 @@ use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::signature::ClassSignature;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// A reference to a class/interface from within another class's symbol,
@@ -27,6 +28,18 @@ pub enum ClassRef {
 /// it, matching the borrowed/owned separation `AGENTS.md` requires between
 /// decoder and higher-level representations.
 ///
+/// `name` and `flags` are known synchronously right after decoding a
+/// class file, before any recursive resolution, so they are plain
+/// fields. Everything else depends on resolving other classes (a
+/// superclass, interfaces, or — from `docs/classloader.md` §9's
+/// Milestone 6 onward — a member's declared type), which can recurse
+/// back into a class that is still being loaded for a legitimate mutual
+/// reference (e.g. two classes each having a field of the other's
+/// type). That requires this same `ClassSymbol` identity (the same
+/// `Rc`) to exist, empty, before its data is known, and to be mutated
+/// in place once resolution finishes — hence `RefCell`. See
+/// [`ClassSymbol::new_shell`]/[`ClassSymbol::complete`].
+///
 /// `signature` is `None` unless the class carries a `Signature`
 /// attribute (JVMS §4.7.9.1) — the common case for a non-generic class.
 /// It is the raw parsed grammar tree from `dotty-classfile`, verbatim:
@@ -36,11 +49,11 @@ pub enum ClassRef {
 pub struct ClassSymbol {
     name: BinaryName,
     flags: ClassAccessFlags,
-    super_class: Option<ClassRef>,
-    interfaces: Vec<ClassRef>,
-    fields: Vec<FieldSymbol>,
-    methods: Vec<MethodSymbol>,
-    signature: Option<ClassSignature>,
+    super_class: RefCell<Option<ClassRef>>,
+    interfaces: RefCell<Vec<ClassRef>>,
+    fields: RefCell<Vec<FieldSymbol>>,
+    methods: RefCell<Vec<MethodSymbol>>,
+    signature: RefCell<Option<ClassSignature>>,
 }
 
 impl ClassSymbol {
@@ -53,15 +66,42 @@ impl ClassSymbol {
         methods: Vec<MethodSymbol>,
         signature: Option<ClassSignature>,
     ) -> Self {
+        let symbol = Self::new_shell(name, flags);
+        symbol.complete(super_class, interfaces, fields, methods, signature);
+        symbol
+    }
+
+    /// An empty shell for `name`/`flags` — every resolved field starts
+    /// empty. See the type's own doc comment for why this exists:
+    /// other classes may capture this same `Rc<ClassSymbol>` while it is
+    /// still a shell, for a legitimate mutual member-type reference.
+    pub(crate) fn new_shell(name: BinaryName, flags: ClassAccessFlags) -> Self {
         Self {
             name,
             flags,
-            super_class,
-            interfaces,
-            fields,
-            methods,
-            signature,
+            super_class: RefCell::new(None),
+            interfaces: RefCell::new(Vec::new()),
+            fields: RefCell::new(Vec::new()),
+            methods: RefCell::new(Vec::new()),
+            signature: RefCell::new(None),
         }
+    }
+
+    /// Fills in a shell's resolved data in place. Called exactly once,
+    /// after everything it needs has itself been resolved.
+    pub(crate) fn complete(
+        &self,
+        super_class: Option<ClassRef>,
+        interfaces: Vec<ClassRef>,
+        fields: Vec<FieldSymbol>,
+        methods: Vec<MethodSymbol>,
+        signature: Option<ClassSignature>,
+    ) {
+        *self.super_class.borrow_mut() = super_class;
+        *self.interfaces.borrow_mut() = interfaces;
+        *self.fields.borrow_mut() = fields;
+        *self.methods.borrow_mut() = methods;
+        *self.signature.borrow_mut() = signature;
     }
 
     pub fn name(&self) -> &BinaryName {
@@ -72,24 +112,24 @@ impl ClassSymbol {
         self.flags
     }
 
-    pub fn super_class(&self) -> Option<&ClassRef> {
-        self.super_class.as_ref()
+    pub fn super_class(&self) -> Option<ClassRef> {
+        self.super_class.borrow().clone()
     }
 
-    pub fn interfaces(&self) -> &[ClassRef] {
-        &self.interfaces
+    pub fn interfaces(&self) -> Vec<ClassRef> {
+        self.interfaces.borrow().clone()
     }
 
-    pub fn fields(&self) -> &[FieldSymbol] {
-        &self.fields
+    pub fn fields(&self) -> Vec<FieldSymbol> {
+        self.fields.borrow().clone()
     }
 
-    pub fn methods(&self) -> &[MethodSymbol] {
-        &self.methods
+    pub fn methods(&self) -> Vec<MethodSymbol> {
+        self.methods.borrow().clone()
     }
 
-    pub fn signature(&self) -> Option<&ClassSignature> {
-        self.signature.as_ref()
+    pub fn signature(&self) -> Option<ClassSignature> {
+        self.signature.borrow().clone()
     }
 }
 
@@ -127,7 +167,7 @@ mod tests {
             Some(ClassRef::Resolved(resolved)) if resolved.name() == object_symbol.name()
         ));
         assert!(matches!(
-            symbol.interfaces(),
+            symbol.interfaces().as_slice(),
             [ClassRef::Unresolved(name)] if name.as_internal() == "java/lang/Runnable"
         ));
     }
@@ -169,7 +209,7 @@ mod tests {
             None,
         );
 
-        assert!(matches!(symbol.fields(), [only] if only.name() == "ANSWER"));
+        assert!(matches!(symbol.fields().as_slice(), [only] if only.name() == "ANSWER"));
     }
 
     #[test]
@@ -196,7 +236,7 @@ mod tests {
             None,
         );
 
-        assert!(matches!(symbol.methods(), [only] if only.name() == "run"));
+        assert!(matches!(symbol.methods().as_slice(), [only] if only.name() == "run"));
     }
 
     #[test]
@@ -223,7 +263,7 @@ mod tests {
             Some(signature.clone()),
         );
 
-        assert_eq!(symbol.signature(), Some(&signature));
+        assert_eq!(symbol.signature(), Some(signature));
     }
 
     #[test]
@@ -239,5 +279,31 @@ mod tests {
         );
 
         assert_eq!(symbol.signature(), None);
+    }
+
+    #[test]
+    fn a_shell_starts_empty_and_reflects_completion_in_place() {
+        let shell = Rc::new(ClassSymbol::new_shell(
+            BinaryName::from_internal("Ping"),
+            ClassAccessFlags(0x0021),
+        ));
+
+        assert!(shell.super_class().is_none());
+        assert!(shell.fields().is_empty());
+
+        shell.complete(
+            Some(ClassRef::Unresolved(BinaryName::from_internal(
+                "java/lang/Object",
+            ))),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+
+        assert!(matches!(
+            shell.super_class(),
+            Some(ClassRef::Unresolved(name)) if name.as_internal() == "java/lang/Object"
+        ));
     }
 }

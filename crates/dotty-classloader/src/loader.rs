@@ -389,7 +389,7 @@ mod tests {
                 if super_symbol.name().as_internal() == "java/lang/Object"
         ));
         assert!(matches!(
-            symbol.interfaces(),
+            symbol.interfaces().as_slice(),
             [ClassRef::Resolved(interface_symbol)]
                 if interface_symbol.name().as_internal() == "java/lang/Runnable"
         ));
@@ -407,9 +407,9 @@ mod tests {
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load");
 
+        let all_fields = symbol.fields();
         let field = |name: &str| {
-            symbol
-                .fields()
+            all_fields
                 .iter()
                 .find(|field| field.name() == name)
                 .unwrap_or_else(|| panic!("field {name} should exist"))
@@ -444,9 +444,9 @@ mod tests {
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load");
 
+        let all_methods = symbol.methods();
         let method = |name: &str| {
-            symbol
-                .methods()
+            all_methods
                 .iter()
                 .find(|method| method.name() == name)
                 .unwrap_or_else(|| panic!("method {name} should exist"))
@@ -520,8 +520,8 @@ mod tests {
             .load_class(&BinaryName::from_internal("GenericSample"))
             .expect("GenericSample should load");
 
-        let items = symbol
-            .fields()
+        let all_fields = symbol.fields();
+        let items = all_fields
             .iter()
             .find(|field| field.name() == "items")
             .expect("items field should exist");
@@ -553,8 +553,8 @@ mod tests {
             .load_class(&BinaryName::from_internal("GenericSample"))
             .expect("GenericSample should load");
 
-        let first = symbol
-            .methods()
+        let all_methods = symbol.methods();
+        let first = all_methods
             .iter()
             .find(|method| method.name() == "first")
             .expect("first method should exist");
@@ -588,7 +588,7 @@ mod tests {
 
         assert_eq!(
             symbol.signature(),
-            Some(&ClassSignature {
+            Some(ClassSignature {
                 type_parameters: vec![TypeParameter {
                     name: "T".to_owned(),
                     class_bound: None,
@@ -942,7 +942,7 @@ mod tests {
                 if super_symbol.name().as_internal() == "java/lang/Object"
         ));
         assert!(matches!(
-            symbol.interfaces(),
+            symbol.interfaces().as_slice(),
             [ClassRef::Resolved(interface_symbol)]
                 if interface_symbol.name().as_internal() == "java/lang/Runnable"
         ));
@@ -1001,7 +1001,7 @@ mod tests {
                 if super_symbol.name().as_internal() == "java/lang/Object"
         ));
         assert!(matches!(
-            symbol.interfaces(),
+            symbol.interfaces().as_slice(),
             [ClassRef::Resolved(interface_symbol)]
                 if interface_symbol.name().as_internal() == "java/lang/Runnable"
         ));
