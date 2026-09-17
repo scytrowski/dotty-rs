@@ -356,6 +356,55 @@ mod tests {
         assert_loads_pool_sample_from_jar("pool_sample_deflate.jar");
     }
 
+    /// Confirms Milestone 1's `ClassLoader` and Milestone 3's
+    /// `JdkClassPath` compose: a real class, packed inside a real JMOD
+    /// (see `tests/fixtures/jdk_classpath/`), loaded from a
+    /// `$JAVA_HOME/jmods`-shaped directory containing more than one
+    /// `.jmod` file, falling through to the same synthetic
+    /// `java/lang/Object`/`java/lang/Runnable` classes used by the
+    /// directory- and JAR-based tests above.
+    #[test]
+    fn loads_pool_sample_from_a_jdk_class_path_with_multiple_jmods() {
+        use crate::class_path::CompositeClassPath;
+        use crate::jdk_class_path::JdkClassPath;
+
+        let jmods_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jdk_classpath");
+        let jdk_class_path = JdkClassPath::new(jmods_dir).unwrap();
+
+        let mut synthetic_classes = HashMap::new();
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/Runnable"),
+            synthetic_class("java/lang/Runnable", None),
+        );
+
+        let composite = CompositeClassPath::new(vec![
+            Box::new(jdk_class_path),
+            Box::new(InMemoryClassPath(synthetic_classes)),
+        ]);
+
+        let loader = ClassLoader::new(composite);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("pool/PoolSample"))
+            .expect("pool/PoolSample should load from the JDK class path");
+
+        assert_eq!(symbol.name().as_internal(), "pool/PoolSample");
+        assert!(matches!(
+            symbol.super_class(),
+            Some(ClassRef::Resolved(super_symbol))
+                if super_symbol.name().as_internal() == "java/lang/Object"
+        ));
+        assert!(matches!(
+            symbol.interfaces(),
+            [ClassRef::Resolved(interface_symbol)]
+                if interface_symbol.name().as_internal() == "java/lang/Runnable"
+        ));
+    }
+
     #[test]
     fn returns_the_same_cached_symbol_on_a_second_load() {
         let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));

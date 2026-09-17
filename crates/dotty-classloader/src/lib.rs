@@ -13,6 +13,7 @@ mod crc32;
 mod error;
 mod inflate;
 mod jar_class_path;
+mod jdk_class_path;
 mod jmod_class_path;
 mod loader;
 mod repository;
@@ -29,6 +30,7 @@ pub mod classloader {
     };
     pub use crate::error::ClassLoadError;
     pub use crate::jar_class_path::JarClassPath;
+    pub use crate::jdk_class_path::JdkClassPath;
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::ClassLoader;
     pub use crate::symbol::{ClassRef, ClassSymbol};
