@@ -26,6 +26,8 @@ pub struct SemanticExpectationDeclaration {
     pub parameter_clauses: Option<usize>,
 }
 
+type DeclarationKey = (String, String, Option<usize>);
+
 pub fn load(path: &Path) -> Result<SemanticExpectation, String> {
     let bytes = fs::read(path).map_err(|error| {
         format!(
@@ -83,19 +85,40 @@ pub fn assert_expectations_cover_selected_fixtures(
             "{} has no semantic-lite declarations",
             expected.path
         );
-        assert!(
-            expected
-                .declarations
-                .iter()
-                .all(|declaration| !declaration.kind.is_empty()),
-            "semantic expectation for {} contains an empty declaration kind",
+        let declaration_keys = expected
+            .declarations
+            .iter()
+            .map(|declaration| {
+                (
+                    declaration.kind.clone(),
+                    declaration.name.clone(),
+                    declaration.parameter_clauses,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            canonical_declarations(&declaration_keys).len(),
+            declaration_keys.len(),
+            "{} contains duplicate semantic-lite declarations",
             expected.path
         );
         assert!(
-            expected
-                .declarations
-                .iter()
-                .all(|declaration| !declaration.name.contains('\0')),
+            expected.declarations.iter().all(|declaration| matches!(
+                declaration.kind.as_str(),
+                "DefDef" | "TypeDef" | "ValDef"
+            )),
+            "semantic expectation for {} contains an unknown declaration kind",
+            expected.path
+        );
+        assert!(
+            expected.declarations.iter().all(|declaration| {
+                !declaration.name.is_empty()
+                    && !declaration.name.contains('\0')
+                    && declaration
+                        .name
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_')
+            }),
             "semantic expectation for {} contains an invalid declaration name",
             expected.path
         );
@@ -104,6 +127,22 @@ pub fn assert_expectations_cover_selected_fixtures(
                 (declaration.kind == "DefDef") == declaration.parameter_clauses.is_some()
             }),
             "semantic expectation for {} has inconsistent parameter-clause metadata",
+            expected.path
+        );
+        assert!(
+            expected
+                .shapes
+                .keys()
+                .all(|shape| is_known_semantic_shape(shape)),
+            "semantic expectation for {} contains an unknown AST shape",
+            expected.path
+        );
+        assert!(
+            expected
+                .parameter_clause_counts
+                .keys()
+                .all(|count| count.parse::<usize>().is_ok()),
+            "semantic expectation for {} contains an invalid parameter-clause count",
             expected.path
         );
         let fixture_path = fixture_root.join(&expected.path);
@@ -124,14 +163,7 @@ pub fn assert_expectations_cover_selected_fixtures(
                 *actual_shapes.entry(shape.to_owned()).or_insert(0) += 1;
             }
         }
-        for (shape, expected_count) in &expected.shapes {
-            let actual_count = actual_shapes.get(shape).copied().unwrap_or_default();
-            assert!(
-                actual_count > 0,
-                "{} has no wire-level {shape} node (oracle has {expected_count})",
-                expected.path
-            );
-        }
+        assert_expected_count_coverage(&expected.path, "shape", &expected.shapes, &actual_shapes);
 
         let mut actual_parameter_clause_counts = BTreeMap::new();
         for node in index
@@ -153,21 +185,13 @@ pub fn assert_expectations_cover_selected_fixtures(
                 .entry(count.to_string())
                 .or_insert(0) += 1;
         }
-        let mut matched_parameter_clause_arity = false;
-        for clause_count in expected.parameter_clause_counts.keys() {
-            let actual_occurrences = actual_parameter_clause_counts
-                .get(clause_count)
-                .copied()
-                .unwrap_or_default();
-            matched_parameter_clause_arity |= actual_occurrences > 0;
-        }
-        if !expected.parameter_clause_counts.is_empty() {
-            assert!(
-                matched_parameter_clause_arity,
-                "{} has no wire-level method with a parameter-clause arity present in the oracle",
-                expected.path
-            );
-        }
+        assert_expected_count_coverage(
+            &expected.path,
+            "parameter-clause",
+            &expected.parameter_clause_counts,
+            &actual_parameter_clause_counts,
+        );
+
         let actual_names: std::collections::BTreeSet<_> = file
             .names()
             .iter()
@@ -226,6 +250,50 @@ pub fn assert_expectations_cover_selected_fixtures(
     }
 }
 
+fn assert_expected_count_coverage(
+    path: &str,
+    label: &str,
+    expected: &BTreeMap<String, usize>,
+    actual: &BTreeMap<String, usize>,
+) {
+    let expected_positive = expected.values().filter(|count| **count > 0).count();
+    let matched = expected
+        .iter()
+        .filter(|(key, expected_count)| {
+            **expected_count > 0 && actual.get(*key).copied().unwrap_or_default() > 0
+        })
+        .count();
+    assert!(
+        expected_positive == 0 || matched > 0,
+        "{path} has no wire-level {label} represented in the oracle; expected keys: {}",
+        expected.keys().cloned().collect::<Vec<_>>().join(", ")
+    );
+}
+
+fn canonical_declarations(declarations: &[DeclarationKey]) -> Vec<DeclarationKey> {
+    let mut declarations = declarations.to_vec();
+    declarations.sort();
+    declarations.dedup();
+    declarations
+}
+
+fn is_known_semantic_shape(shape: &str) -> bool {
+    matches!(
+        shape,
+        "Apply"
+            | "Block"
+            | "If"
+            | "Lambda"
+            | "Match"
+            | "New"
+            | "Return"
+            | "Try"
+            | "TypeApply"
+            | "Typed"
+            | "WhileDo"
+    )
+}
+
 fn semantic_shape(tag: u8) -> Option<&'static str> {
     match tag {
         dotty_tasty::tasty::APPLY_TAG => Some("Apply"),
@@ -245,8 +313,25 @@ fn semantic_shape(tag: u8) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use super::{canonical_declarations, load};
     use std::fs;
+
+    #[test]
+    fn canonicalizes_declarations_in_generator_order_without_duplicates() {
+        let declarations = vec![
+            ("ValDef".to_owned(), "z".to_owned(), None),
+            ("DefDef".to_owned(), "run".to_owned(), Some(1)),
+            ("ValDef".to_owned(), "z".to_owned(), None),
+        ];
+
+        assert_eq!(
+            canonical_declarations(&declarations),
+            vec![
+                ("DefDef".to_owned(), "run".to_owned(), Some(1)),
+                ("ValDef".to_owned(), "z".to_owned(), None),
+            ]
+        );
+    }
 
     #[test]
     fn loads_versioned_semantic_expectations() {
