@@ -3,9 +3,11 @@ use crate::class_path::ClassPathEntry;
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
+use crate::nesting::InnerClassEntry;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
+use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolIndex};
@@ -173,6 +175,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         let nest_host = self.resolve_optional_nest_host(name, &class_file)?;
         let nest_members = self.resolve_nest_members(name, &class_file)?;
         let permitted_subclasses = self.resolve_permitted_subclasses(name, &class_file)?;
+        let inner_classes = self.resolve_inner_classes(name, &class_file)?;
 
         shell.complete(
             super_class,
@@ -183,7 +186,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             nest_host,
             nest_members,
             permitted_subclasses,
-            Vec::new(),
+            inner_classes,
             None,
             None,
             Vec::new(),
@@ -277,6 +280,54 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             .map(|index| {
                 self.resolve_name(owner, class_file, index)
                     .map(ClassRef::Unresolved)
+            })
+            .collect()
+    }
+
+    /// Looks for an `InnerClasses` attribute (JVMS §4.7.6), mapping
+    /// each decoded entry into an [`InnerClassEntry`]. `inner_class`/
+    /// `outer_class` are kept `Unresolved`, for the same reason as
+    /// [`Self::resolve_optional_nest_host`]; `inner_name` resolves via
+    /// the same "Utf8 index -> owned String" helper member names
+    /// already use.
+    fn resolve_inner_classes(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Vec<InnerClassEntry>, ClassLoadError> {
+        let entries = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => Some(entries.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        entries
+            .into_iter()
+            .map(|entry| {
+                let inner_class = ClassRef::Unresolved(self.resolve_name(
+                    owner,
+                    class_file,
+                    entry.inner_class_info_index,
+                )?);
+                let outer_class = entry
+                    .outer_class_info_index
+                    .map(|index| self.resolve_name(owner, class_file, index))
+                    .transpose()?
+                    .map(ClassRef::Unresolved);
+                let inner_name = entry
+                    .inner_name_index
+                    .map(|index| self.resolve_member_name(owner, &class_file.constant_pool, index))
+                    .transpose()?;
+
+                Ok(InnerClassEntry {
+                    inner_class,
+                    outer_class,
+                    inner_name,
+                    access_flags: ClassAccessFlags(entry.inner_class_access_flags),
+                })
             })
             .collect()
     }
@@ -1659,5 +1710,43 @@ mod tests {
         permitted_names.sort_unstable();
 
         assert_eq!(permitted_names, vec!["Shape$Circle", "Shape$Square"]);
+    }
+
+    /// `nested_sample/NestedSample.class`'s real `InnerClasses`
+    /// attribute (JVMS §4.7.6) has two entries in different shapes,
+    /// confirmed via `javap -p -v`: a `public static` member class
+    /// (`Inner`, with an outer class and a simple name) and a local
+    /// class (`LocalRunnable`, with a simple name but no outer class —
+    /// local/anonymous classes have no enclosing-class reference of
+    /// their own in this attribute).
+    #[test]
+    fn resolves_the_inner_classes_of_a_real_nest_host() {
+        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+
+        let entries = symbol.inner_classes();
+        let inner = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| match &entry.inner_class {
+                    ClassRef::Unresolved(inner_name) => inner_name.as_internal() == name,
+                    ClassRef::Resolved(_) => false,
+                })
+                .unwrap_or_else(|| panic!("expected an InnerClasses entry for {name}"))
+        };
+
+        let member = inner("NestedSample$Inner");
+        assert_eq!(member.inner_name.as_deref(), Some("Inner"));
+        assert!(matches!(
+            &member.outer_class,
+            Some(ClassRef::Unresolved(name)) if name.as_internal() == "NestedSample"
+        ));
+        assert!(member.access_flags.is_public());
+
+        let local = inner("NestedSample$1LocalRunnable");
+        assert_eq!(local.inner_name.as_deref(), Some("LocalRunnable"));
+        assert!(local.outer_class.is_none());
     }
 }
