@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dotty::tasty::{NodeCategory, TastyFile};
+use dotty::tasty::{NodeCategory, StructuredNode, TastyFile};
 
 #[derive(Default)]
 struct Count {
@@ -29,6 +29,8 @@ fn run() -> Result<(), String> {
     let mut headers = BTreeMap::<(u32, u32, u32), usize>::new();
     let mut sections = BTreeMap::<String, Count>::new();
     let mut tags = BTreeMap::<u8, Count>::new();
+    let mut structured_category5_tags = BTreeMap::<u8, Count>::new();
+    let mut raw_category5_tags = BTreeMap::<u8, Count>::new();
     let mut visible_node_count = 0;
 
     for path in &fixtures {
@@ -79,6 +81,41 @@ fn run() -> Result<(), String> {
         for tag in file_tags {
             tags.get_mut(&tag).expect("tag was inserted above").files += 1;
         }
+
+        let mut file_structured_category5_tags = BTreeSet::new();
+        let mut file_raw_category5_tags = BTreeSet::new();
+        for raw in index.iter() {
+            let target = match raw.decode_structured() {
+                Ok(StructuredNode::Raw(_)) => {
+                    file_raw_category5_tags.insert(raw.tag);
+                    &mut raw_category5_tags
+                }
+                Ok(_) => {
+                    file_structured_category5_tags.insert(raw.tag);
+                    &mut structured_category5_tags
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to dispatch tag {} in {}: {error}",
+                        raw.tag,
+                        path.display()
+                    ));
+                }
+            };
+            target.entry(raw.tag).or_default().occurrences += 1;
+        }
+        for tag in file_structured_category5_tags {
+            structured_category5_tags
+                .get_mut(&tag)
+                .expect("tag was inserted above")
+                .files += 1;
+        }
+        for tag in file_raw_category5_tags {
+            raw_category5_tags
+                .get_mut(&tag)
+                .expect("tag was inserted above")
+                .files += 1;
+        }
     }
 
     println!("TASTy corpus audit");
@@ -109,6 +146,29 @@ fn run() -> Result<(), String> {
         println!(
             "  {tag:>3}  {category:<9}  {:>11}  {:>5}",
             count.occurrences, count.files
+        );
+    }
+
+    println!("\ncategory5_dispatch:");
+    println!("  tag  structured_occurrences  structured_files  raw_occurrences  raw_files");
+    let category5_tags: BTreeSet<_> = structured_category5_tags
+        .keys()
+        .chain(raw_category5_tags.keys())
+        .copied()
+        .collect();
+    for tag in category5_tags {
+        println!(
+            "  {tag:>3}  {:>22}  {:>16}  {:>14}  {:>9}",
+            structured_category5_tags
+                .get(&tag)
+                .map_or(0, |count| count.occurrences),
+            structured_category5_tags
+                .get(&tag)
+                .map_or(0, |count| count.files),
+            raw_category5_tags
+                .get(&tag)
+                .map_or(0, |count| count.occurrences),
+            raw_category5_tags.get(&tag).map_or(0, |count| count.files)
         );
     }
 
