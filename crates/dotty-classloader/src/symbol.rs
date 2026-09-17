@@ -1,4 +1,5 @@
 use crate::binary_name::BinaryName;
+use crate::field_symbol::FieldSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use std::rc::Rc;
 
@@ -16,8 +17,8 @@ pub enum ClassRef {
     Resolved(Rc<ClassSymbol>),
 }
 
-/// A loaded class or interface's symbol: its name, access flags, and its
-/// direct superclass/interfaces.
+/// A loaded class or interface's symbol: its name, access flags, its
+/// direct superclass/interfaces, and its fields.
 ///
 /// Owns its data — it never borrows from the decode buffer that produced
 /// it, matching the borrowed/owned separation `AGENTS.md` requires between
@@ -28,6 +29,7 @@ pub struct ClassSymbol {
     flags: ClassAccessFlags,
     super_class: Option<ClassRef>,
     interfaces: Vec<ClassRef>,
+    fields: Vec<FieldSymbol>,
 }
 
 impl ClassSymbol {
@@ -36,12 +38,14 @@ impl ClassSymbol {
         flags: ClassAccessFlags,
         super_class: Option<ClassRef>,
         interfaces: Vec<ClassRef>,
+        fields: Vec<FieldSymbol>,
     ) -> Self {
         Self {
             name,
             flags,
             super_class,
             interfaces,
+            fields,
         }
     }
 
@@ -60,6 +64,10 @@ impl ClassSymbol {
     pub fn interfaces(&self) -> &[ClassRef] {
         &self.interfaces
     }
+
+    pub fn fields(&self) -> &[FieldSymbol] {
+        &self.fields
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +81,7 @@ mod tests {
             ClassAccessFlags(0x0021),
             None,
             Vec::new(),
+            Vec::new(),
         ));
         let runnable_ref = ClassRef::Unresolved(BinaryName::from_internal("java/lang/Runnable"));
 
@@ -81,6 +90,7 @@ mod tests {
             ClassAccessFlags(0x0021),
             Some(ClassRef::Resolved(object_symbol.clone())),
             vec![runnable_ref],
+            Vec::new(),
         );
 
         assert_eq!(symbol.name().as_internal(), "PoolSample");
@@ -102,9 +112,31 @@ mod tests {
             ClassAccessFlags(0x0021),
             None,
             Vec::new(),
+            Vec::new(),
         );
 
         assert!(symbol.super_class().is_none());
         assert!(symbol.interfaces().is_empty());
+    }
+
+    #[test]
+    fn exposes_its_fields() {
+        use dotty_classfile::access_flags::FieldAccessFlags;
+        use dotty_classfile::descriptor::FieldType;
+
+        let field = FieldSymbol::new(
+            "ANSWER".to_owned(),
+            FieldAccessFlags(0x0019),
+            FieldType::Int,
+        );
+        let symbol = ClassSymbol::new(
+            BinaryName::from_internal("PoolSample"),
+            ClassAccessFlags(0x0021),
+            None,
+            Vec::new(),
+            vec![field],
+        );
+
+        assert!(matches!(symbol.fields(), [only] if only.name() == "ANSWER"));
     }
 }

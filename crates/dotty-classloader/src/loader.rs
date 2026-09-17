@@ -1,6 +1,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathEntry;
 use crate::error::ClassLoadError;
+use crate::field_symbol::FieldSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::symbol::{ClassRef, ClassSymbol};
 use dotty_classfile::class_file::ClassFile;
@@ -99,12 +100,37 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             interfaces.push(self.resolve_dependency(name, &class_file, *index)?);
         }
 
+        let mut fields = Vec::with_capacity(class_file.fields.len());
+        for field in &class_file.fields {
+            let field_name =
+                self.resolve_member_name(name, &class_file.constant_pool, field.name_index)?;
+            let field_type = field
+                .field_type(&class_file.constant_pool)
+                .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
+            fields.push(FieldSymbol::new(field_name, field.access_flags, field_type));
+        }
+
         Ok(Rc::new(ClassSymbol::new(
             name.clone(),
             class_file.access_flags,
             super_class,
             interfaces,
+            fields,
         )))
+    }
+
+    /// Resolves a `Utf8` constant-pool reference (a field or method's
+    /// `name_index`) to an owned `String`.
+    fn resolve_member_name(
+        &self,
+        owner: &BinaryName,
+        constant_pool: &dotty_classfile::constant_pool::ConstantPool,
+        index: ConstantPoolIndex,
+    ) -> Result<String, ClassLoadError> {
+        constant_pool
+            .utf8(index)
+            .map(str::to_owned)
+            .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))
     }
 
     /// Resolves a constant-pool `Class` reference to a [`BinaryName`],
@@ -293,6 +319,94 @@ mod tests {
             symbol.interfaces(),
             [ClassRef::Resolved(interface_symbol)]
                 if interface_symbol.name().as_internal() == "java/lang/Runnable"
+        ));
+    }
+
+    /// `pool_sample/PoolSample.class` declares 5 real `public static
+    /// final` fields (confirmed via `javap -p -v`); this asserts every
+    /// one decodes with the right name, type, and flags.
+    #[test]
+    fn loads_a_real_fixtures_fields() {
+        use dotty_classfile::descriptor::FieldType;
+
+        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load");
+
+        let field = |name: &str| {
+            symbol
+                .fields()
+                .iter()
+                .find(|field| field.name() == name)
+                .unwrap_or_else(|| panic!("field {name} should exist"))
+        };
+
+        assert_eq!(symbol.fields().len(), 5);
+        assert_eq!(field("ANSWER").field_type(), &FieldType::Int);
+        assert_eq!(field("BIG_ANSWER").field_type(), &FieldType::Long);
+        assert_eq!(field("HALF").field_type(), &FieldType::Float);
+        assert_eq!(field("PI").field_type(), &FieldType::Double);
+        assert_eq!(
+            field("GREETING").field_type(),
+            &FieldType::Object("java/lang/String".to_owned())
+        );
+        for name in ["ANSWER", "BIG_ANSWER", "HALF", "PI", "GREETING"] {
+            assert!(field(name).flags().is_static(), "{name} should be static");
+            assert!(field(name).flags().is_final(), "{name} should be final");
+        }
+    }
+
+    /// A hand-built, minimal, synthetic class file with one field whose
+    /// descriptor is not a valid field descriptor. `javac` cannot produce
+    /// this; it exists purely to exercise `MalformedDescriptor`.
+    fn synthetic_class_with_malformed_field_descriptor() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&[0x00, 0x05]); // constant_pool_count = 5
+        bytes.push(1); // #1 Utf8
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"C");
+        bytes.push(7); // #2 Class -> #1
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(1); // #3 Utf8 "field"
+        bytes.extend_from_slice(&5u16.to_be_bytes());
+        bytes.extend_from_slice(b"field");
+        bytes.push(1); // #4 Utf8 "X" (not a valid field descriptor)
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"X");
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // fields_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // field access_flags
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // field name_index = #3
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // field descriptor_index = #4
+        bytes.extend_from_slice(&[0x00, 0x00]); // field attributes_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    #[test]
+    fn malformed_descriptor_when_a_field_descriptor_does_not_parse() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_malformed_field_descriptor(),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let error = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::MalformedDescriptor(name, _) if name.as_internal() == "C"
         ));
     }
 

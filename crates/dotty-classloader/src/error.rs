@@ -2,6 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathError;
 use dotty_classfile::class_file::ClassFileError;
 use dotty_classfile::constant_pool::PoolRefError;
+use dotty_classfile::descriptor::ResolveDescriptorError;
 use std::fmt;
 use std::rc::Rc;
 
@@ -22,9 +23,14 @@ pub enum ClassLoadError {
     /// file.
     InvalidClassFile(BinaryName, ClassFileError),
     /// The class file decoded structurally, but one of its own
-    /// `this_class`/`super_class`/interface constant-pool indices does not
-    /// resolve to a usable class name (JVMS §4.4.1).
+    /// `this_class`/`super_class`/interface constant-pool indices, or a
+    /// field/method's `name_index`, does not resolve to a usable entry
+    /// (JVMS §4.4.1).
     MalformedReference(BinaryName, PoolRefError),
+    /// The class file decoded structurally, but a field or method's
+    /// descriptor did not resolve or parse as a valid type (JVMS
+    /// §4.3.2/§4.3.3).
+    MalformedDescriptor(BinaryName, ResolveDescriptorError),
     /// The class file's own `this_class` name did not match the name it
     /// was requested under (JVMS §5.3.5).
     NameMismatch {
@@ -59,6 +65,12 @@ impl fmt::Display for ClassLoadError {
                     "malformed reference in class file for {name}: {source}"
                 )
             }
+            Self::MalformedDescriptor(name, source) => {
+                write!(
+                    formatter,
+                    "malformed descriptor in class file for {name}: {source}"
+                )
+            }
             Self::NameMismatch { requested, actual } => write!(
                 formatter,
                 "requested class {requested} but its class file declares {actual}"
@@ -85,6 +97,7 @@ impl std::error::Error for ClassLoadError {
             Self::Io(_, source) => Some(source.as_ref()),
             Self::InvalidClassFile(_, source) => Some(source),
             Self::MalformedReference(_, source) => Some(source),
+            Self::MalformedDescriptor(_, source) => Some(source),
             Self::DependencyFailure { source, .. } => Some(source.as_ref()),
         }
     }
@@ -143,6 +156,23 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "malformed reference in class file for PoolSample: constant pool index 7 does not resolve to any entry"
+        );
+    }
+
+    #[test]
+    fn malformed_descriptor_displays_the_descriptor_error() {
+        use dotty_classfile::constant_pool::ConstantPoolIndex;
+
+        let error = ClassLoadError::MalformedDescriptor(
+            BinaryName::from_internal("PoolSample"),
+            ResolveDescriptorError::NotUtf8 {
+                index: ConstantPoolIndex(9),
+            },
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "malformed descriptor in class file for PoolSample: descriptor index 9 does not resolve to a Utf8 entry"
         );
     }
 

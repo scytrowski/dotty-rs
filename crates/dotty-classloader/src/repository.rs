@@ -83,6 +83,7 @@ mod tests {
             ClassAccessFlags(0x0021),
             None,
             Vec::new(),
+            Vec::new(),
         ));
 
         repository.mark_loaded(name.clone(), symbol.clone());
