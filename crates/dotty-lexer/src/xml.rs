@@ -27,11 +27,12 @@ pub(crate) struct XmlState {
     closing_tag: bool,
     expressions: Vec<XmlExpression>,
     content: XmlContent,
+    cdata_brackets: u8,
 }
 
 impl XmlState {
     pub(crate) fn can_start_literal(&self) -> bool {
-        self.depth == 0 || !self.expressions.is_empty()
+        self.content == XmlContent::Text && (self.depth == 0 || !self.expressions.is_empty())
     }
 
     pub(crate) fn eof_message(&self) -> Option<&'static str> {
@@ -44,6 +45,23 @@ impl XmlState {
     }
 
     pub(crate) fn update_token(&mut self, kind: RawTokenKind, spelling: &str) -> bool {
+        if self.content == XmlContent::Cdata {
+            match kind {
+                RawTokenKind::Punctuation(Punctuation::RightBracket) => {
+                    self.cdata_brackets = self.cdata_brackets.saturating_add(1).min(2);
+                    return false;
+                }
+                RawTokenKind::Operator if self.cdata_brackets == 2 && spelling.starts_with('>') => {
+                    self.content = XmlContent::Text;
+                    self.cdata_brackets = 0;
+                }
+                _ => {
+                    self.cdata_brackets = 0;
+                    return false;
+                }
+            }
+        }
+
         match kind {
             RawTokenKind::XmlStart => {
                 self.depth = self.depth.saturating_add(1);
@@ -58,7 +76,7 @@ impl XmlState {
     }
 
     fn update_left_brace(&mut self) {
-        if self.depth == 0 {
+        if self.depth == 0 || self.content != XmlContent::Text {
             return;
         }
 
@@ -194,7 +212,21 @@ mod tests {
         assert!(!state.update_token(RawTokenKind::Operator, "><!"));
         assert!(!state.update_token(RawTokenKind::Operator, "<"));
         assert!(!state.update_token(RawTokenKind::Operator, ">"));
-        assert!(!state.update_token(RawTokenKind::Operator, "</"));
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+        assert!(!state.update_token(RawTokenKind::Operator, "></"));
         assert!(state.update_token(RawTokenKind::Operator, ">"));
+    }
+
+    #[test]
+    fn does_not_start_nested_xml_inside_comment_or_cdata() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Operator, "><!--");
+        assert!(!state.can_start_literal());
+        state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBrace), "{");
+        state.update_token(RawTokenKind::Operator, "-->");
+        state.update_token(RawTokenKind::Operator, "><!");
+        assert!(!state.can_start_literal());
     }
 }
