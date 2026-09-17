@@ -3,7 +3,7 @@ use crate::class_path::ClassPathEntry;
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
-use crate::nesting::InnerClassEntry;
+use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
@@ -176,6 +176,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         let nest_members = self.resolve_nest_members(name, &class_file)?;
         let permitted_subclasses = self.resolve_permitted_subclasses(name, &class_file)?;
         let inner_classes = self.resolve_inner_classes(name, &class_file)?;
+        let enclosing_method = self.resolve_enclosing_method(name, &class_file)?;
 
         shell.complete(
             super_class,
@@ -187,7 +188,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             nest_members,
             permitted_subclasses,
             inner_classes,
-            None,
+            enclosing_method,
             None,
             Vec::new(),
         );
@@ -330,6 +331,47 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 })
             })
             .collect()
+    }
+
+    /// Looks for an `EnclosingMethod` attribute (JVMS §4.7.7) — present
+    /// only on a local or anonymous class. `class` (the immediately
+    /// enclosing class) is kept `Unresolved`, for the same reason as
+    /// [`Self::resolve_optional_nest_host`]. `method` is `None` when
+    /// the class is enclosed directly by a class body (an initializer)
+    /// rather than a method/constructor; when present, it's resolved
+    /// to its raw `(name, descriptor)` pair, not parsed/resolved
+    /// further — see [`EnclosingMethodRef`]'s doc comment for why.
+    fn resolve_enclosing_method(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<EnclosingMethodRef>, ClassLoadError> {
+        let found = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::EnclosingMethod {
+                    class_index,
+                    method_index,
+                } => Some((*class_index, *method_index)),
+                _ => None,
+            });
+        let Some((class_index, method_index)) = found else {
+            return Ok(None);
+        };
+
+        let class = ClassRef::Unresolved(self.resolve_name(owner, class_file, class_index)?);
+        let method = method_index
+            .map(|index| {
+                class_file
+                    .constant_pool
+                    .name_and_type(index)
+                    .map(|(name, descriptor)| (name.to_owned(), descriptor.to_owned()))
+                    .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))
+            })
+            .transpose()?;
+
+        Ok(Some(EnclosingMethodRef { class, method }))
     }
 
     /// Resolves a `Utf8` constant-pool reference (a field or method's
@@ -1748,5 +1790,33 @@ mod tests {
         let local = inner("NestedSample$1LocalRunnable");
         assert_eq!(local.inner_name.as_deref(), Some("LocalRunnable"));
         assert!(local.outer_class.is_none());
+    }
+
+    /// `nested_sample/NestedSample$1LocalRunnable.class`'s real
+    /// `EnclosingMethod` attribute (JVMS §4.7.7), confirmed via
+    /// `javap -p -v`: this anonymous local class is enclosed by
+    /// `NestedSample.makeLocalRunnable(String):Runnable`.
+    #[test]
+    fn resolves_the_enclosing_method_of_a_real_local_class() {
+        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample$1LocalRunnable"))
+            .expect("NestedSample$1LocalRunnable should load");
+
+        let enclosing = symbol
+            .enclosing_method()
+            .expect("NestedSample$1LocalRunnable should have an EnclosingMethod attribute");
+
+        assert!(matches!(
+            enclosing.class,
+            ClassRef::Unresolved(name) if name.as_internal() == "NestedSample"
+        ));
+        assert_eq!(
+            enclosing.method,
+            Some((
+                "makeLocalRunnable".to_owned(),
+                "(Ljava/lang/String;)Ljava/lang/Runnable;".to_owned()
+            ))
+        );
     }
 }
