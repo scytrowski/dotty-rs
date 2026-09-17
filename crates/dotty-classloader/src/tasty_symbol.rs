@@ -417,6 +417,47 @@ mod tests {
         assert!(matches!(error, TastyDecodeError::Parse(_)));
     }
 
+    /// `opaque/UserId.tasty` declares a real `opaque type UserId`, not
+    /// a class/trait/object — a `TYPEDEF_TAG` whose `type_or_template`
+    /// is a type tree, not a `Template`. `decode` searches every
+    /// `TYPEDEF_TAG` regardless of what kind of definition it is (a
+    /// type alias included), so requesting one by name reaches this
+    /// path instead of `MissingTypeDef`.
+    #[test]
+    fn no_template_body_when_the_matching_type_def_is_a_type_alias() {
+        let error = decode(
+            &fixture_bytes("opaque/UserId.tasty"),
+            &BinaryName::from_internal("UserId"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, TastyDecodeError::NoTemplateBody));
+    }
+
+    /// `scala3-library/scala/concurrent/impl/CompletionLatch.tasty`'s
+    /// real `CompletionLatch` mixes in `Try[T] => Unit` (a function
+    /// type, `Function1[Try[T], Unit]` under the hood) — an
+    /// `AppliedType` whose own `tycon` is a bare `TYPEREF` referencing
+    /// its target purely by a prefix-relative name/symbol pair.
+    /// [`RawTree::name_refs`] deliberately does not treat `TYPEREF`'s
+    /// value as a visitable name the way it does `IDENT`/`IDENTTPT` (it
+    /// only whitelists tags for genuine source-level identifier
+    /// occurrences — see `visit_name_refs`'s match arms in
+    /// `dotty-tasty`), so [`resolve_applied_type_name`] correctly gives
+    /// up here rather than guessing. A real, disclosed limitation, not
+    /// a bug: this asserts it surfaces as `UnresolvedSupertype`, not a
+    /// silently dropped interface or a panic.
+    #[test]
+    fn unresolved_supertype_when_a_generic_mixins_tycon_is_a_bare_typeref() {
+        let error = decode(
+            &fixture_bytes("scala3-library/scala/concurrent/impl/CompletionLatch.tasty"),
+            &BinaryName::from_internal("CompletionLatch"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
+    }
+
     /// `decode_flags` is a pure, narrow mapping function. `TRAIT_TAG`/
     /// `ABSTRACT_TAG`/`FINAL_TAG`/`PRIVATE_TAG` are all exercised
     /// end-to-end above, through real fixtures (`Animal`, `Source`,
