@@ -1857,6 +1857,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_string_literal_inside_an_expression_xml_attribute_value() {
+        let (_, diagnostics) = scan(r#"<item title={"hello"}/>"#);
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_character_literal_inside_an_expression_xml_attribute_value() {
+        let (_, diagnostics) = scan("<item marker={'x'}/>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_number_inside_an_expression_xml_attribute_value() {
+        let (_, diagnostics) = scan("<item count={42}/>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn diagnoses_an_unterminated_simple_xml_tag_at_eof() {
         let source = "<item";
         let (_, diagnostics) = scan(source);

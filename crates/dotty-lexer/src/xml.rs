@@ -126,7 +126,9 @@ impl XmlState {
                 }
             }
             RawTokenKind::StringLiteral => {
-                self.consume_attribute_value(false);
+                if !self.in_xml_expression_at_current_depth() {
+                    self.consume_attribute_value(false);
+                }
             }
             RawTokenKind::Punctuation(punctuation)
                 if matches!(punctuation, Punctuation::Colon | Punctuation::Dot)

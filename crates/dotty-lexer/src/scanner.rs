@@ -1419,6 +1419,13 @@ mod tests {
     }
 
     #[test]
+    fn accepts_string_literals_inside_xml_attribute_expressions() {
+        let scanner = ContextualScanner::new(r#"<item title={"hello"}/>"#).expect("source scans");
+
+        assert!(scanner.diagnostics().is_empty());
+    }
+
+    #[test]
     fn diagnoses_incomparable_indentation_prefixes() {
         let scanner =
             ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");

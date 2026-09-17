@@ -499,9 +499,10 @@ The current implementation covers term/type quote markers, legacy quoted
 identifiers, and their interaction with character literals. It also recognizes
 the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, tracks
 opening and closing tag names, validates quoted and expression-valued
-attributes, and tracks XML expression braces and nested XML literals to end
-layout-sensitive processing after the root literal. Namespace separators in
-XML names remain operators at the parser-facing boundary. It also tracks
+attributes, isolates expression contents from attribute-list validation, and
+tracks XML expression braces and nested XML literals to end layout-sensitive
+processing after the root literal. Namespace separators in XML names remain
+operators at the parser-facing boundary. It also tracks
 comment and CDATA sections and diagnoses those constructs, mismatched closing
 names, invalid attribute structure, unexpected tokens in an open attribute
 list, and unfinished tags when they reach EOF. EOF recovery distinguishes a
