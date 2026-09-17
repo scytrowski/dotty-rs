@@ -45,6 +45,7 @@ fn is_unicode_symbol(character: char) -> bool {
             | 0x2500..=0x27bf
             | 0x2900..=0x2bff
             | 0x1d400..=0x1d7ff
+            | 0x1f000..=0x1faff
             | 0x2ff0..=0x303f
             | 0xfe30..=0xfe6f
             | 0xff00..=0xff65
@@ -79,6 +80,7 @@ mod tests {
     fn recognizes_ascii_and_unicode_operator_characters() {
         assert!(is_operator_character('+'));
         assert!(is_operator_character('⇒'));
+        assert!(is_operator_character('🂡'));
         assert!(!is_operator_character('a'));
     }
 }
