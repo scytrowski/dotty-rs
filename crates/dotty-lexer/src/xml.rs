@@ -117,6 +117,24 @@ impl XmlState {
             }
         }
 
+        if self.tag_open && self.closing_tag {
+            let name_separator = self.is_xml_name_separator_token(kind, spelling);
+            let closing_tag_boundary = kind == RawTokenKind::Operator
+                && (spelling == ">" || (spelling.starts_with('>') && spelling.ends_with("</")));
+            if self.pending_tag_name.is_none() {
+                if !closing_tag_boundary {
+                    self.report_unexpected_closing_tag_token();
+                }
+            } else if self.current_tag_name.is_some()
+                && !self.tag_name_separator
+                && !name_separator
+                && !closing_tag_boundary
+            {
+                self.finalize_tag_name();
+                self.report_unexpected_closing_tag_token();
+            }
+        }
+
         match kind {
             RawTokenKind::XmlStart => {
                 self.depth = self.depth.saturating_add(1);
@@ -164,6 +182,8 @@ impl XmlState {
             self.finalize_tag_name();
             if pending == PendingTagName::Opening {
                 self.consume_attribute_name();
+            } else {
+                self.report_unexpected_closing_tag_token();
             }
             return;
         }
@@ -207,6 +227,14 @@ impl XmlState {
         }
 
         false
+    }
+
+    fn is_xml_name_separator_token(&self, kind: RawTokenKind, spelling: &str) -> bool {
+        matches!(kind, RawTokenKind::Operator if matches!(spelling, "-" | ":" | "."))
+            || matches!(
+                kind,
+                RawTokenKind::Punctuation(Punctuation::Colon | Punctuation::Dot)
+            )
     }
 
     fn consume_attribute_name(&mut self) {
@@ -265,6 +293,12 @@ impl XmlState {
                 self.report_error("XML attribute value expected after `=`")
             }
             Some(XmlAttributeState::InExpression) | None => {}
+        }
+    }
+
+    fn report_unexpected_closing_tag_token(&mut self) {
+        if self.tag_open && self.closing_tag && self.pending_tag_name.is_none() {
+            self.report_error("XML closing tag cannot contain attributes");
         }
     }
 

@@ -505,11 +505,11 @@ processing after the root literal. Namespace separators in XML names remain
 operators at the parser-facing boundary. It also tracks
 comment and CDATA sections and diagnoses those constructs, mismatched closing
 names, invalid attribute structure, unexpected tokens in an open attribute
-list, and unfinished tags when they reach EOF. EOF recovery distinguishes a
-missing attribute `=`, a missing attribute value, and an unclosed attribute
-expression. Add remaining quote/splice forms, compatibility syntax, and
-broader malformed-input recovery without entangling XML state with normal
-Scala tokenization.
+list, attributes on closing tags, and unfinished tags when they reach EOF.
+EOF recovery distinguishes a missing attribute `=`, a missing attribute value,
+and an unclosed attribute expression. Add remaining quote/splice forms,
+compatibility syntax, and broader malformed-input recovery without entangling
+XML state with normal Scala tokenization.
 
 ## 11. Testing strategy
 

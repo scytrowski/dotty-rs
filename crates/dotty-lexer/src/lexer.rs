@@ -1799,6 +1799,38 @@ mod tests {
     }
 
     #[test]
+    fn diagnoses_an_attribute_name_on_an_xml_closing_tag() {
+        let source = "<root></root id>";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML closing tag cannot contain attributes"
+        );
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(13, 15).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_string_value_on_an_xml_closing_tag() {
+        let source = r#"<root></root "value">"#;
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML closing tag cannot contain attributes"
+        );
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(13, 20).expect("valid range")
+        );
+    }
+
+    #[test]
     fn accepts_hard_keywords_as_xml_tag_names() {
         let (_, diagnostics) = scan("<if></if>");
 

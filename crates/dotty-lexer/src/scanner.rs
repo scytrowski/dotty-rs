@@ -1442,6 +1442,22 @@ mod tests {
     }
 
     #[test]
+    fn forwards_an_invalid_xml_closing_tag_diagnostic() {
+        let source = "<root></root id>";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(
+            scanner.diagnostics()[0].message(),
+            "XML closing tag cannot contain attributes"
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].span(),
+            TextRange::new(13, 15).expect("valid range")
+        );
+    }
+
+    #[test]
     fn diagnoses_incomparable_indentation_prefixes() {
         let scanner =
             ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");
