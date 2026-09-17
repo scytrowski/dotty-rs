@@ -11,6 +11,9 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
+use dotty_classfile::signature::{
+    ClassSignature, ClassTypeSignature, ReferenceTypeSignature, TypeArgument, TypeParameter,
+};
 use std::path::Path;
 
 const CLASSES_TXT: &str = include_str!("fixtures/jdk_corpus/classes.txt");
@@ -149,6 +152,64 @@ fn list_and_stream_are_real_interfaces() {
             "{name} should be an interface"
         );
     }
+}
+
+#[test]
+fn stream_class_signature_parses_its_real_self_referential_generic_bound() {
+    let bytes = read_corpus_class("java/util/stream/Stream");
+    let class_file = decode("Stream", &bytes);
+    let pool = &class_file.constant_pool;
+
+    let signature_index = class_file
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Signature(index) => Some(*index),
+            _ => None,
+        })
+        .expect("expected a class-level Signature attribute");
+
+    let signature = ClassSignature::parse(utf8_name(pool, signature_index))
+        .expect("expected Stream's real Signature to parse");
+
+    let type_variable_t = ReferenceTypeSignature::TypeVariable("T".to_owned());
+    let stream_of_t = ReferenceTypeSignature::Class(ClassTypeSignature {
+        package: vec!["java".to_owned(), "util".to_owned(), "stream".to_owned()],
+        simple_name: "Stream".to_owned(),
+        type_arguments: vec![TypeArgument::Exact(type_variable_t.clone())],
+        suffix: vec![],
+    });
+
+    assert_eq!(
+        signature,
+        ClassSignature {
+            type_parameters: vec![TypeParameter {
+                name: "T".to_owned(),
+                class_bound: Some(ReferenceTypeSignature::Class(ClassTypeSignature {
+                    package: vec!["java".to_owned(), "lang".to_owned()],
+                    simple_name: "Object".to_owned(),
+                    type_arguments: vec![],
+                    suffix: vec![],
+                })),
+                interface_bounds: vec![],
+            }],
+            superclass: ClassTypeSignature {
+                package: vec!["java".to_owned(), "lang".to_owned()],
+                simple_name: "Object".to_owned(),
+                type_arguments: vec![],
+                suffix: vec![],
+            },
+            superinterfaces: vec![ClassTypeSignature {
+                package: vec!["java".to_owned(), "util".to_owned(), "stream".to_owned()],
+                simple_name: "BaseStream".to_owned(),
+                type_arguments: vec![
+                    TypeArgument::Exact(type_variable_t),
+                    TypeArgument::Exact(stream_of_t),
+                ],
+                suffix: vec![],
+            }],
+        }
+    );
 }
 
 #[test]
