@@ -46,7 +46,8 @@ pub enum ClassLoadError {
     /// JVMS §5.3.5 error, not a legitimate mutual reference.
     CircularInheritance(BinaryName),
     /// Loading `owner` failed because resolving `dependency` (its
-    /// superclass or an interface) failed.
+    /// superclass, an interface, or — since `docs/classloader.md` §9's
+    /// Milestone 6 — a member's declared type) failed.
     DependencyFailure {
         owner: BinaryName,
         dependency: BinaryName,

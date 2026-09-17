@@ -19,6 +19,7 @@ mod jmod_class_path;
 mod loader;
 mod method_symbol;
 mod repository;
+mod semantic_type;
 mod symbol;
 mod zip_archive;
 mod zip_reader;
@@ -37,5 +38,6 @@ pub mod classloader {
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::ClassLoader;
     pub use crate::method_symbol::MethodSymbol;
+    pub use crate::semantic_type::SemanticFieldType;
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }

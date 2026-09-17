@@ -4,6 +4,7 @@ use crate::method_symbol::MethodSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::signature::ClassSignature;
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 /// A reference to a class/interface from within another class's symbol,
@@ -45,7 +46,13 @@ pub enum ClassRef {
 /// It is the raw parsed grammar tree from `dotty-classfile`, verbatim:
 /// no resolution of the class names it mentions, no semantic type model
 /// built from it (`docs/classloader.md` §3/§9).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually (not derived) to print only the
+/// name: a legitimate mutual member-type reference (Milestone 6) means
+/// two `ClassSymbol`s can genuinely reference each other through
+/// `Rc<ClassSymbol>` — a derived, field-recursing `Debug` would recurse
+/// forever printing such a pair.
+#[derive(Clone)]
 pub struct ClassSymbol {
     name: BinaryName,
     flags: ClassAccessFlags,
@@ -54,6 +61,12 @@ pub struct ClassSymbol {
     fields: RefCell<Vec<FieldSymbol>>,
     methods: RefCell<Vec<MethodSymbol>>,
     signature: RefCell<Option<ClassSignature>>,
+}
+
+impl fmt::Debug for ClassSymbol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ClassSymbol({})", self.name)
+    }
 }
 
 impl ClassSymbol {
@@ -198,6 +211,7 @@ mod tests {
             FieldAccessFlags(0x0019),
             FieldType::Int,
             None,
+            crate::semantic_type::SemanticFieldType::Int,
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),

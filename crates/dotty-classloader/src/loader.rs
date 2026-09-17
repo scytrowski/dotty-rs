@@ -4,10 +4,12 @@ use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
+use crate::semantic_type::SemanticFieldType;
 use crate::symbol::{ClassRef, ClassSymbol};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolIndex};
+use dotty_classfile::descriptor::FieldType;
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
 use std::cell::RefCell;
@@ -46,7 +48,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         match cached {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
             Some(ClassEntry::Failed(error)) => return Err(error),
-            Some(ClassEntry::Loading) => {
+            Some(ClassEntry::Loading(_)) => {
                 let error = ClassLoadError::CircularInheritance(name.clone());
                 self.repository
                     .borrow_mut()
@@ -55,8 +57,6 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             }
             None => {}
         }
-
-        self.repository.borrow_mut().mark_loading(name.clone());
 
         match self.load_uncached(name) {
             Ok(symbol) => {
@@ -93,6 +93,20 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             });
         }
 
+        // Registered before any recursive resolution below, so a
+        // legitimate mutual member-type reference back to `name` (see
+        // `resolve_member_class`) can reuse this same shell instead of
+        // erroring, and a genuine supertype cycle back to `name` (via
+        // `resolve_dependency` -> `load_class`) still hits `Loading` and
+        // is rejected as `CircularInheritance`, exactly as before.
+        let shell = Rc::new(ClassSymbol::new_shell(
+            name.clone(),
+            class_file.access_flags,
+        ));
+        self.repository
+            .borrow_mut()
+            .mark_loading(name.clone(), shell.clone());
+
         let super_class = class_file
             .super_class
             .map(|index| self.resolve_dependency(name, &class_file, index))
@@ -110,6 +124,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             let field_type = field
                 .field_type(&class_file.constant_pool)
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
+            let semantic_type = self.resolve_semantic_field_type(name, &field_type)?;
             let signature = self.resolve_optional_signature(
                 name,
                 &field.attributes,
@@ -121,6 +136,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 field.access_flags,
                 field_type,
                 signature,
+                semantic_type,
             ));
         }
 
@@ -152,15 +168,8 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             ClassSignature::parse,
         )?;
 
-        Ok(Rc::new(ClassSymbol::new(
-            name.clone(),
-            class_file.access_flags,
-            super_class,
-            interfaces,
-            fields,
-            methods,
-            signature,
-        )))
+        shell.complete(super_class, interfaces, fields, methods, signature);
+        Ok(shell)
     }
 
     /// Resolves a `Utf8` constant-pool reference (a field or method's
@@ -224,6 +233,12 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// Resolves a constant-pool `Class` reference (a superclass or
     /// interface) and loads it, wrapping any failure as a
     /// [`ClassLoadError::DependencyFailure`] against `owner`.
+    ///
+    /// Unlike [`Self::resolve_member_class`], hitting an already-`Loading`
+    /// entry here is *not* tolerated: a class being its own (in)direct
+    /// supertype is a hard JVMS §5.3.5 error, not a legitimate mutual
+    /// reference (`docs/classloader.md` §5) — `self.load_class(&dependency)`
+    /// reports that as `CircularInheritance`, unchanged.
     fn resolve_dependency(
         &self,
         owner: &BinaryName,
@@ -239,6 +254,69 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 dependency,
                 source: Rc::new(source),
             })
+    }
+
+    /// Resolves a class referenced by a member's declared type (a field
+    /// or method's `Object`/array-of-`Object` descriptor entry),
+    /// tolerant of `owner`'s own load reaching back around to
+    /// `dependency` while `dependency` is still `Loading` — the
+    /// "reusing an in-progress shell" technique `docs/classloader.md`
+    /// §5/§9 (Milestone 6) describes: two classes each having a field or
+    /// method typed as the other is completely legitimate Java, unlike
+    /// a supertype cycle, so hitting `Loading` here returns the
+    /// in-progress shell directly instead of erroring or re-entering
+    /// [`Self::load_class`]. Every other state (`Loaded`/`Failed`/
+    /// absent) just delegates to `load_class` as normal.
+    fn resolve_member_class(
+        &self,
+        owner: &BinaryName,
+        dependency: &BinaryName,
+    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+        let cached = {
+            let repository = self.repository.borrow();
+            repository.get(dependency).cloned()
+        };
+
+        match cached {
+            Some(ClassEntry::Loading(shell)) => Ok(shell),
+            _ => self
+                .load_class(dependency)
+                .map_err(|source| ClassLoadError::DependencyFailure {
+                    owner: owner.clone(),
+                    dependency: dependency.clone(),
+                    source: Rc::new(source),
+                }),
+        }
+    }
+
+    /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2), resolving
+    /// every `Object`/array-of-`Object` leaf into a [`SemanticFieldType::Object`]
+    /// via [`Self::resolve_member_class`]. Base types map straight
+    /// across; `Array` recurses into its component type.
+    fn resolve_semantic_field_type(
+        &self,
+        owner: &BinaryName,
+        field_type: &FieldType,
+    ) -> Result<SemanticFieldType, ClassLoadError> {
+        match field_type {
+            FieldType::Byte => Ok(SemanticFieldType::Byte),
+            FieldType::Char => Ok(SemanticFieldType::Char),
+            FieldType::Double => Ok(SemanticFieldType::Double),
+            FieldType::Float => Ok(SemanticFieldType::Float),
+            FieldType::Int => Ok(SemanticFieldType::Int),
+            FieldType::Long => Ok(SemanticFieldType::Long),
+            FieldType::Short => Ok(SemanticFieldType::Short),
+            FieldType::Boolean => Ok(SemanticFieldType::Boolean),
+            FieldType::Object(class_name) => {
+                let dependency = BinaryName::from_internal(class_name);
+                let symbol = self.resolve_member_class(owner, &dependency)?;
+                Ok(SemanticFieldType::Object(ClassRef::Resolved(symbol)))
+            }
+            FieldType::Array(component) => {
+                let resolved = self.resolve_semantic_field_type(owner, component)?;
+                Ok(SemanticFieldType::Array(Box::new(resolved)))
+            }
+        }
     }
 }
 
@@ -354,10 +432,13 @@ mod tests {
     }
 
     /// The real `PoolSample.class` fixture references `java/lang/Object`
-    /// and `java/lang/Runnable`. No JDK classpath exists yet (Milestone
-    /// 3), so these are stood in with hand-built, minimal, clearly
-    /// synthetic classes on the same test classpath, alongside the real
-    /// fixture bytes.
+    /// (superclass) and `java/lang/Runnable` (interface); since
+    /// Milestone 6, its `GREETING` field's type also forces resolving
+    /// `java/lang/String`. No JDK classpath is used in these
+    /// unit-level tests (that's what the JAR/JMOD-based integration
+    /// tests further down exercise), so all three are stood in with
+    /// hand-built, minimal, clearly synthetic classes on the same test
+    /// classpath, alongside the real fixture bytes.
     fn pool_sample_classpath() -> HashMap<BinaryName, Vec<u8>> {
         let mut classes = HashMap::new();
         classes.insert(
@@ -371,6 +452,10 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("java/lang/Runnable"),
             synthetic_class("java/lang/Runnable", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/String"),
+            synthetic_class("java/lang/String", None),
         );
         classes
     }
@@ -490,9 +575,10 @@ mod tests {
     }
 
     /// `generic_sample/GenericSample.class` has no user-declared
-    /// superclass (implicitly `java/lang/Object`) and no interfaces, so
-    /// only a synthetic `java/lang/Object` fallback is needed alongside
-    /// the real fixture bytes.
+    /// superclass (implicitly `java/lang/Object`) and no interfaces;
+    /// since Milestone 6, its `items` field's erased type
+    /// (`java/util/List`) also forces resolution, so a synthetic
+    /// stand-in is needed for it too, alongside the real fixture bytes.
     fn generic_sample_classpath() -> HashMap<BinaryName, Vec<u8>> {
         let mut classes = HashMap::new();
         classes.insert(
@@ -502,6 +588,10 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("java/lang/Object"),
             synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", None),
         );
         classes
     }
@@ -924,6 +1014,10 @@ mod tests {
             BinaryName::from_internal("java/lang/Runnable"),
             synthetic_class("java/lang/Runnable", None),
         );
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/String"),
+            synthetic_class("java/lang/String", None),
+        );
 
         let composite = CompositeClassPath::new(vec![
             Box::new(jar_class_path),
@@ -982,6 +1076,10 @@ mod tests {
         synthetic_classes.insert(
             BinaryName::from_internal("java/lang/Runnable"),
             synthetic_class("java/lang/Runnable", None),
+        );
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/String"),
+            synthetic_class("java/lang/String", None),
         );
 
         let composite = CompositeClassPath::new(vec![
@@ -1151,5 +1249,60 @@ mod tests {
         }
 
         assert!(contains_circular_inheritance(&error));
+    }
+
+    /// Confirms the "reuse an in-progress shell" technique
+    /// (`docs/classloader.md` §5/§9, Milestone 6): `Ping.other` is typed
+    /// `Pong`, and `Pong.other` is typed `Ping` — a completely
+    /// legitimate mutual reference `javac` compiles without complaint
+    /// (see `tests/fixtures/ping_pong/generate.sh`), unlike the
+    /// synthetic supertype cycle above, which must still hard-error.
+    /// Checking both sides proves the cycle resolves to consistent,
+    /// fully-completed data rather than a permanently-empty shell.
+    #[test]
+    fn resolves_a_legitimate_mutual_field_type_reference_between_two_real_classes() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Ping"),
+            own_fixture_bytes("ping_pong/Ping.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("Pong"),
+            own_fixture_bytes("ping_pong/Pong.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let ping = loader
+            .load_class(&BinaryName::from_internal("Ping"))
+            .expect("Ping should load despite the mutual field reference");
+
+        let ping_fields = ping.fields();
+        let ping_other = ping_fields
+            .iter()
+            .find(|field| field.name() == "other")
+            .expect("Ping.other should exist");
+
+        let pong = match ping_other.semantic_type() {
+            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => symbol.clone(),
+            unexpected => panic!("expected Ping.other to resolve to a class, got {unexpected:?}"),
+        };
+        assert_eq!(pong.name().as_internal(), "Pong");
+
+        let pong_fields = pong.fields();
+        let pong_other = pong_fields
+            .iter()
+            .find(|field| field.name() == "other")
+            .expect("Pong.other should exist");
+
+        match pong_other.semantic_type() {
+            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => {
+                assert_eq!(symbol.name().as_internal(), "Ping");
+            }
+            unexpected => panic!("expected Pong.other to resolve to a class, got {unexpected:?}"),
+        }
     }
 }
