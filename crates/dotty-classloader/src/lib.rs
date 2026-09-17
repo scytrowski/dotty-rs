@@ -18,6 +18,7 @@ mod jar_class_path;
 mod jdk_class_path;
 mod jmod_class_path;
 mod loader;
+mod manifest;
 mod method_symbol;
 mod nesting;
 mod record_component;
