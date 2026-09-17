@@ -282,10 +282,6 @@ fn read_record_components<'a>(
 
 /// Validates the constant pool references inside a single attribute (JVMS
 /// §4.7), recursing into nested attribute lists (`Record`, `Code`).
-///
-/// Not yet called outside tests — wired into `FieldInfo`/`MethodInfo`/
-/// `ClassFile` in the next increment.
-#[allow(dead_code)]
 fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<(), PoolRefError> {
     match attribute {
         Attribute::ConstantValue(index) => pool.check_constant_value(*index),
@@ -361,10 +357,6 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
 
 /// Validates the constant pool references of every attribute in `attributes`
 /// (JVMS §4.7), stopping at the first bad reference.
-///
-/// Not yet called outside tests — wired into `FieldInfo`/`MethodInfo`/
-/// `ClassFile` in the next increment.
-#[allow(dead_code)]
 pub(crate) fn validate_attributes(
     attributes: &[Attribute<'_>],
     pool: &ConstantPool,

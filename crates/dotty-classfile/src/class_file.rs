@@ -1,8 +1,11 @@
 use crate::access_flags::ClassAccessFlags;
 use crate::attribute::{
     Attribute, AttributeError, decode_attributes, read_index_list, read_optional_index,
+    validate_attributes,
 };
-use crate::constant_pool::{ConstantPool, ConstantPoolError, ConstantPoolIndex, read_index};
+use crate::constant_pool::{
+    ConstantPool, ConstantPoolError, ConstantPoolIndex, PoolRefError, read_index,
+};
 use crate::field::FieldInfo;
 use crate::method::MethodInfo;
 use crate::reader::{ReadError, Reader};
@@ -164,6 +167,29 @@ impl<'a> ClassFile<'a> {
             attributes,
         })
     }
+
+    /// Validates that every constant pool reference reachable from this
+    /// `ClassFile` — `this_class`, `super_class`, `interfaces`, and every
+    /// field/method/attribute's indices, recursively — resolves to the
+    /// expected entry kind (JVMS §4.1). Stops at the first bad reference.
+    pub fn validate_references(&self) -> Result<(), PoolRefError> {
+        let pool = &self.constant_pool;
+
+        pool.class_name(self.this_class)?;
+        if let Some(super_class) = self.super_class {
+            pool.class_name(super_class)?;
+        }
+        for interface in &self.interfaces {
+            pool.class_name(*interface)?;
+        }
+        for field in &self.fields {
+            field.validate_references(pool)?;
+        }
+        for method in &self.methods {
+            method.validate_references(pool)?;
+        }
+        validate_attributes(&self.attributes, pool)
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +258,175 @@ mod tests {
                     remaining: 0,
                 }
             )))
+        );
+    }
+
+    #[test]
+    fn validate_references_accepts_the_minimal_class_file() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let class_file = ClassFile::decode(&mut reader).unwrap();
+
+        assert_eq!(class_file.validate_references(), Ok(()));
+    }
+
+    #[test]
+    fn validate_references_rejects_a_this_class_that_is_not_a_class_entry() {
+        let class_file = ClassFile {
+            version: ClassFileVersion {
+                major: 69,
+                minor: 0,
+            },
+            constant_pool: ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8(
+                "Foo".to_owned(),
+            ))]),
+            access_flags: ClassAccessFlags(0),
+            this_class: ConstantPoolIndex(1),
+            super_class: None,
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![],
+            attributes: vec![],
+        };
+
+        assert_eq!(
+            class_file.validate_references(),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_rejects_a_super_class_that_is_not_a_class_entry() {
+        let class_file = ClassFile {
+            version: ClassFileVersion {
+                major: 69,
+                minor: 0,
+            },
+            constant_pool: ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Utf8("Foo".to_owned())),
+                Some(ConstantPoolEntry::Class {
+                    name_index: ConstantPoolIndex(1),
+                }),
+                Some(ConstantPoolEntry::Integer(1)),
+            ]),
+            access_flags: ClassAccessFlags(0),
+            this_class: ConstantPoolIndex(2),
+            super_class: Some(ConstantPoolIndex(3)),
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![],
+            attributes: vec![],
+        };
+
+        assert_eq!(
+            class_file.validate_references(),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_rejects_an_interface_that_is_not_a_class_entry() {
+        let class_file = ClassFile {
+            version: ClassFileVersion {
+                major: 69,
+                minor: 0,
+            },
+            constant_pool: ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Utf8("Foo".to_owned())),
+                Some(ConstantPoolEntry::Class {
+                    name_index: ConstantPoolIndex(1),
+                }),
+                Some(ConstantPoolEntry::Integer(1)),
+            ]),
+            access_flags: ClassAccessFlags(0),
+            this_class: ConstantPoolIndex(2),
+            super_class: None,
+            interfaces: vec![ConstantPoolIndex(3)],
+            fields: vec![],
+            methods: vec![],
+            attributes: vec![],
+        };
+
+        assert_eq!(
+            class_file.validate_references(),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_propagates_a_bad_field_reference() {
+        let class_file = ClassFile {
+            version: ClassFileVersion {
+                major: 69,
+                minor: 0,
+            },
+            constant_pool: ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Utf8("Foo".to_owned())),
+                Some(ConstantPoolEntry::Class {
+                    name_index: ConstantPoolIndex(1),
+                }),
+                Some(ConstantPoolEntry::Integer(1)),
+            ]),
+            access_flags: ClassAccessFlags(0),
+            this_class: ConstantPoolIndex(2),
+            super_class: None,
+            interfaces: vec![],
+            fields: vec![FieldInfo {
+                access_flags: crate::access_flags::FieldAccessFlags(0),
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(1),
+                attributes: vec![],
+            }],
+            methods: vec![],
+            attributes: vec![],
+        };
+
+        assert_eq!(
+            class_file.validate_references(),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_propagates_a_bad_top_level_attribute_reference() {
+        let class_file = ClassFile {
+            version: ClassFileVersion {
+                major: 69,
+                minor: 0,
+            },
+            constant_pool: ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Utf8("Foo".to_owned())),
+                Some(ConstantPoolEntry::Class {
+                    name_index: ConstantPoolIndex(1),
+                }),
+                Some(ConstantPoolEntry::Integer(1)),
+            ]),
+            access_flags: ClassAccessFlags(0),
+            this_class: ConstantPoolIndex(2),
+            super_class: None,
+            interfaces: vec![],
+            fields: vec![],
+            methods: vec![],
+            attributes: vec![Attribute::SourceFile(ConstantPoolIndex(3))],
+        };
+
+        assert_eq!(
+            class_file.validate_references(),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
         );
     }
 

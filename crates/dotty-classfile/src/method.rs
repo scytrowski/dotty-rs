@@ -1,6 +1,6 @@
 use crate::access_flags::MethodAccessFlags;
-use crate::attribute::{Attribute, AttributeError, decode_attributes};
-use crate::constant_pool::{ConstantPool, ConstantPoolIndex, read_index};
+use crate::attribute::{Attribute, AttributeError, decode_attributes, validate_attributes};
+use crate::constant_pool::{ConstantPool, ConstantPoolIndex, PoolRefError, read_index};
 use crate::descriptor::{MethodDescriptor, ResolveDescriptorError, resolve_method_descriptor};
 use crate::reader::Reader;
 
@@ -37,6 +37,14 @@ impl<'a> MethodInfo<'a> {
         constant_pool: &ConstantPool,
     ) -> Result<MethodDescriptor, ResolveDescriptorError> {
         resolve_method_descriptor(constant_pool, self.descriptor_index)
+    }
+
+    /// Validates that `name_index`, `descriptor_index`, and every attribute's
+    /// constant pool references resolve to the expected entry kind.
+    pub fn validate_references(&self, constant_pool: &ConstantPool) -> Result<(), PoolRefError> {
+        constant_pool.utf8(self.name_index)?;
+        constant_pool.utf8(self.descriptor_index)?;
+        validate_attributes(&self.attributes, constant_pool)
     }
 }
 
@@ -151,6 +159,69 @@ mod tests {
             method_with_descriptor(ConstantPoolIndex(3)).descriptor(&pool),
             Err(ResolveDescriptorError::NotUtf8 {
                 index: ConstantPoolIndex(3)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_accepts_a_well_formed_method() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+        ]);
+        let method = MethodInfo {
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(2),
+            attributes: vec![],
+        };
+
+        assert_eq!(method.validate_references(&pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_references_rejects_a_non_utf8_descriptor_index() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+            Some(ConstantPoolEntry::Integer(1)),
+        ]);
+        let method = MethodInfo {
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(2),
+            attributes: vec![],
+        };
+
+        assert_eq!(
+            method.validate_references(&pool),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_references_propagates_a_bad_attribute_reference() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+        ]);
+        let method = MethodInfo {
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(2),
+            // ConstantValue is not valid on a method, but validate_references
+            // only checks constant pool reference kinds, not attribute
+            // placement — entry #1 is a Utf8, not a valid ConstantValue kind.
+            attributes: vec![Attribute::ConstantValue(ConstantPoolIndex(1))],
+        };
+
+        assert_eq!(
+            method.validate_references(&pool),
+            Err(crate::constant_pool::PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::ConstantValue,
             })
         );
     }
