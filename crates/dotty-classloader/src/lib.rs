@@ -13,5 +13,7 @@ mod class_path;
 /// Classpath loading APIs.
 pub mod classloader {
     pub use crate::binary_name::BinaryName;
-    pub use crate::class_path::{ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
+    pub use crate::class_path::{
+        ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, DirectoryClassPath,
+    };
 }

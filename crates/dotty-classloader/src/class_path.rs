@@ -89,6 +89,37 @@ pub trait ClassPathEntry: Send + Sync {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError>;
 }
 
+/// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
+/// `BinaryName` to `<root>/<internal name>.class`.
+pub struct DirectoryClassPath {
+    root: PathBuf,
+}
+
+impl DirectoryClassPath {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn class_file_path(&self, name: &BinaryName) -> PathBuf {
+        self.root.join(format!("{}.class", name.as_internal()))
+    }
+}
+
+impl ClassPathEntry for DirectoryClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let path = self.class_file_path(name);
+
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(ClassResource::new(
+                bytes,
+                ClassOrigin::Directory(self.root.clone()),
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ClassPathError::from(error)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
