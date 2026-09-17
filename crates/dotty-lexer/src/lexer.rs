@@ -1705,6 +1705,135 @@ mod tests {
     }
 
     #[test]
+    fn emits_xml_attribute_tokens_with_exact_spans() {
+        let source = r#"<item id="x" enabled={flag}>text</item>"#;
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::StringLiteral,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| &source[token.span.start() as usize..token.span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec![
+                "<", "item", "id", "=", "\"x\"", "enabled", "=", "{", "flag", "}", ">", "text",
+                "</", "item", ">", ""
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_xml_comment_tokens_with_exact_spans() {
+        let source = "<root><!-- comment --><x></x></root>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| &source[token.span.start() as usize..token.span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec![
+                "<", "root", "><!--", "comment", "--><", "x", "></", "x", "></", "root", ">", ""
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_xml_cdata_tokens_with_exact_spans() {
+        let source = "<root><![CDATA[text]]></root>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| &source[token.span.start() as usize..token.span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec![
+                "<", "root", "><!", "[", "CDATA", "[", "text", "]", "]", "></", "root", ">", ""
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn keeps_spaced_less_than_as_an_operator() {
         let (items, diagnostics) = scan("a < b");
         let kinds: Vec<_> = items

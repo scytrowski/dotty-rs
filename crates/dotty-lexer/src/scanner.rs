@@ -784,6 +784,19 @@ mod tests {
             .collect()
     }
 
+    fn assert_newline_after_xml_literal(source: &str) {
+        let tokens = kinds(source);
+        let newline = tokens
+            .iter()
+            .position(|kind| *kind == TokenKind::Newline)
+            .expect("XML literal should end with a newline separator");
+
+        assert_eq!(
+            tokens.get(newline + 1),
+            Some(&TokenKind::Keyword(HardKeyword::Val))
+        );
+    }
+
     #[test]
     fn maps_raw_tokens_to_shared_parser_kinds() {
         assert_eq!(
@@ -914,6 +927,25 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn separates_after_xml_with_attributes() {
+        assert_newline_after_xml_literal(
+            "val xml = <item id=\"x\" enabled={flag}>text</item>\nval next = 1",
+        );
+    }
+
+    #[test]
+    fn separates_after_xml_with_a_comment() {
+        assert_newline_after_xml_literal(
+            "val xml = <root><!-- comment --><x></x></root>\nval next = 1",
+        );
+    }
+
+    #[test]
+    fn separates_after_xml_with_cdata() {
+        assert_newline_after_xml_literal("val xml = <root><![CDATA[text]]></root>\nval next = 1");
     }
 
     #[test]
