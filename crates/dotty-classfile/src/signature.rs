@@ -21,6 +21,8 @@ pub enum SignatureError {
     EmptyIdentifier { offset: usize },
     MissingSemicolon { offset: usize },
     MissingColon { offset: usize },
+    MissingOpenParen { offset: usize },
+    MissingCloseParen { offset: usize },
     TooDeeplyNested { offset: usize },
     TrailingCharacters { offset: usize },
 }
@@ -45,6 +47,12 @@ impl fmt::Display for SignatureError {
             }
             Self::MissingColon { offset } => {
                 write!(formatter, "expected ':' at offset {offset}")
+            }
+            Self::MissingOpenParen { offset } => {
+                write!(formatter, "expected '(' at offset {offset}")
+            }
+            Self::MissingCloseParen { offset } => {
+                write!(formatter, "expected ')' at offset {offset}")
             }
             Self::TooDeeplyNested { offset } => write!(
                 formatter,
@@ -358,6 +366,66 @@ pub struct MethodSignature {
     /// The `Result`; `None` means `void`.
     pub result: Option<TypeSignature>,
     pub throws: Vec<ThrowsSignature>,
+}
+
+impl MethodSignature {
+    /// Parses a complete `MethodSignature` (JVMS §4.7.9.1): optional
+    /// `TypeParameters`, `(` + `JavaTypeSignature*` + `)`, a `Result`, then
+    /// `ThrowsSignature*`.
+    pub fn parse(input: &str) -> Result<Self, SignatureError> {
+        let mut cursor = Cursor::new(input);
+        let type_parameters = parse_type_parameters(&mut cursor, 0)?;
+
+        let open_paren_offset = cursor.offset();
+        if !cursor.eat_ascii(b'(') {
+            return Err(SignatureError::MissingOpenParen {
+                offset: open_paren_offset,
+            });
+        }
+
+        let mut parameters = Vec::new();
+        loop {
+            match cursor.peek_ascii() {
+                Some(b')') => break,
+                Some(_) => parameters.push(parse_type_signature(&mut cursor, 0)?),
+                None => {
+                    return Err(SignatureError::MissingCloseParen {
+                        offset: cursor.offset(),
+                    });
+                }
+            }
+        }
+        cursor.bump_ascii();
+
+        let result = if cursor.eat_ascii(b'V') {
+            None
+        } else {
+            Some(parse_type_signature(&mut cursor, 0)?)
+        };
+
+        let mut throws = Vec::new();
+        while cursor.eat_ascii(b'^') {
+            let throw = if cursor.peek_ascii() == Some(b'T') {
+                ThrowsSignature::TypeVariable(parse_type_variable(&mut cursor)?)
+            } else {
+                ThrowsSignature::Class(parse_class_type_signature(&mut cursor, 0)?)
+            };
+            throws.push(throw);
+        }
+
+        if !cursor.is_empty() {
+            return Err(SignatureError::TrailingCharacters {
+                offset: cursor.offset(),
+            });
+        }
+
+        Ok(Self {
+            type_parameters,
+            parameters,
+            result,
+            throws,
+        })
+    }
 }
 
 /// A `ThrowsSignature` (JVMS §4.7.9.1).
@@ -679,5 +747,106 @@ mod tests {
         assert_eq!(signature.type_parameters.len(), 1);
         assert_eq!(signature.superclass, object_class_type());
         assert_eq!(signature.superinterfaces.len(), 2);
+    }
+
+    #[test]
+    fn parses_a_no_argument_void_method_signature() {
+        assert_eq!(
+            MethodSignature::parse("()V"),
+            Ok(MethodSignature {
+                type_parameters: vec![],
+                parameters: vec![],
+                result: None,
+                throws: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_a_method_signature_with_parameters_and_a_typed_result() {
+        assert_eq!(
+            MethodSignature::parse("(Ljava/lang/String;I)Ljava/lang/Object;"),
+            Ok(MethodSignature {
+                type_parameters: vec![],
+                parameters: vec![
+                    TypeSignature::Reference(ReferenceTypeSignature::Class(ClassTypeSignature {
+                        package: vec!["java".to_owned(), "lang".to_owned()],
+                        simple_name: "String".to_owned(),
+                        type_arguments: vec![],
+                        suffix: vec![],
+                    })),
+                    TypeSignature::Base(FieldType::Int),
+                ],
+                result: Some(TypeSignature::Reference(ReferenceTypeSignature::Class(
+                    ClassTypeSignature {
+                        package: vec!["java".to_owned(), "lang".to_owned()],
+                        simple_name: "Object".to_owned(),
+                        type_arguments: vec![],
+                        suffix: vec![],
+                    }
+                ))),
+                throws: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_a_method_signature_with_one_throws_clause() {
+        let signature = MethodSignature::parse("()V^Ljava/lang/Exception;").unwrap();
+
+        assert_eq!(
+            signature.throws,
+            vec![ThrowsSignature::Class(ClassTypeSignature {
+                package: vec!["java".to_owned(), "lang".to_owned()],
+                simple_name: "Exception".to_owned(),
+                type_arguments: vec![],
+                suffix: vec![],
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_a_method_signature_with_multiple_throws_clauses() {
+        let signature =
+            MethodSignature::parse("()V^Ljava/lang/Exception;^Ljava/lang/Error;").unwrap();
+
+        assert_eq!(signature.throws.len(), 2);
+    }
+
+    #[test]
+    fn parses_the_real_signature_from_the_nested_sample_fixture() {
+        // NestedSample.max's real Signature attribute string, per `javap -v`.
+        let signature =
+            MethodSignature::parse("<T::Ljava/lang/Comparable<TT;>;>(TT;TT;)TT;").unwrap();
+
+        assert_eq!(
+            signature.type_parameters,
+            vec![TypeParameter {
+                name: "T".to_owned(),
+                class_bound: None,
+                interface_bounds: vec![ReferenceTypeSignature::Class(ClassTypeSignature {
+                    package: vec!["java".to_owned(), "lang".to_owned()],
+                    simple_name: "Comparable".to_owned(),
+                    type_arguments: vec![TypeArgument::Exact(
+                        ReferenceTypeSignature::TypeVariable("T".to_owned())
+                    )],
+                    suffix: vec![],
+                })],
+            }]
+        );
+        assert_eq!(
+            signature.parameters,
+            vec![
+                TypeSignature::Reference(ReferenceTypeSignature::TypeVariable("T".to_owned())),
+                TypeSignature::Reference(ReferenceTypeSignature::TypeVariable("T".to_owned())),
+            ]
+        );
+        assert_eq!(
+            signature.result,
+            Some(TypeSignature::Reference(
+                ReferenceTypeSignature::TypeVariable("T".to_owned())
+            ))
+        );
+        assert_eq!(signature.throws, vec![]);
     }
 }
