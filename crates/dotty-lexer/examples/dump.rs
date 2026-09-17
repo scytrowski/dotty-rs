@@ -45,6 +45,7 @@ fn normalized_kind(token: &Token, spelling: &str) -> String {
         TokenKind::BackquotedIdentifier => "backquoted identifier".to_owned(),
         TokenKind::Quote => "'".to_owned(),
         TokenKind::QuoteId => "quoted identifier".to_owned(),
+        TokenKind::XmlStart => "$XMLSTART$<".to_owned(),
         TokenKind::Operator => "operator".to_owned(),
         TokenKind::Keyword(keyword) => keyword_spelling(keyword, spelling),
         TokenKind::Punctuation(punctuation) => punctuation_spelling(punctuation),

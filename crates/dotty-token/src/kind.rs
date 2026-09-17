@@ -11,6 +11,8 @@ pub enum TokenKind {
     Quote,
     /// A legacy quoted identifier such as `'name`.
     QuoteId,
+    /// The start of a Scala XML literal.
+    XmlStart,
     /// A symbolic operator.
     Operator,
     /// A Scala hard keyword.

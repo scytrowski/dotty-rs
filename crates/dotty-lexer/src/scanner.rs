@@ -195,6 +195,8 @@ fn build_tokens(
     let mut paren_depth = 0u32;
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
+    let mut xml_depth = 0u32;
+    let mut xml_closing_tag = false;
 
     for (item_index, item) in items.iter().enumerate() {
         match item {
@@ -267,6 +269,17 @@ fn build_tokens(
                 );
                 previous_end = raw.span.end();
                 tokens.push(token);
+
+                let xml_literal_ended = update_xml_state(
+                    raw.kind,
+                    &source[raw.span.start() as usize..raw.span.end() as usize],
+                    &mut xml_depth,
+                    &mut xml_closing_tag,
+                );
+                if xml_literal_ended {
+                    previous_kind = Some(TokenKind::Identifier);
+                    previous_opens_indentation = false;
+                }
 
                 if has_line_break && is_closing_delimiter(raw.kind) {
                     close_regions_after_delimiter(
@@ -662,6 +675,42 @@ fn is_closing_delimiter(kind: RawTokenKind) -> bool {
     )
 }
 
+fn update_xml_state(
+    kind: RawTokenKind,
+    spelling: &str,
+    depth: &mut u32,
+    closing_tag: &mut bool,
+) -> bool {
+    match kind {
+        RawTokenKind::XmlStart => {
+            *depth = depth.saturating_add(1);
+            *closing_tag = false;
+        }
+        RawTokenKind::Operator if *depth > 0 && spelling.ends_with("</") => {
+            if (spelling.starts_with('>') || spelling.starts_with("/>")) && *depth > 1 {
+                *depth = depth.saturating_sub(1);
+            }
+            *closing_tag = true;
+        }
+        RawTokenKind::Operator if *depth > 0 && spelling == "/>" => {
+            *depth = depth.saturating_sub(1);
+            *closing_tag = false;
+            return *depth == 0;
+        }
+        RawTokenKind::Operator if *depth > 0 && spelling.ends_with('<') => {
+            *depth = depth.saturating_add(1);
+            *closing_tag = false;
+        }
+        RawTokenKind::Operator if *depth > 0 && spelling == ">" && *closing_tag => {
+            *depth = depth.saturating_sub(1);
+            *closing_tag = false;
+            return *depth == 0;
+        }
+        _ => {}
+    }
+    false
+}
+
 fn trivia_has_line_break(source: &str, trivia: &[&Trivia]) -> bool {
     trivia_line_breaks(source, trivia) > 0
 }
@@ -727,6 +776,7 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
         RawTokenKind::BackquotedIdentifier => TokenKind::BackquotedIdentifier,
         RawTokenKind::Quote => TokenKind::Quote,
         RawTokenKind::QuoteId => TokenKind::QuoteId,
+        RawTokenKind::XmlStart => TokenKind::XmlStart,
         RawTokenKind::Operator => TokenKind::Operator,
         RawTokenKind::Keyword(keyword) => TokenKind::Keyword(keyword),
         RawTokenKind::Punctuation(Punctuation::Colon) => {
@@ -814,6 +864,91 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::LeftBrace),
                 TokenKind::IntegerLiteral,
                 TokenKind::Punctuation(Punctuation::RightBrace),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_xml_start_to_a_parser_facing_token() {
+        assert_eq!(
+            kinds("val xml = <tag>"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::XmlStart,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_after_a_closed_xml_literal() {
+        assert_eq!(
+            kinds("val xml = <tag></tag>\nval next = 1"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::XmlStart,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::IntegerLiteral,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_after_a_self_closing_xml_literal() {
+        assert_eq!(
+            kinds("val xml = <tag/>\nval next = 1"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::XmlStart,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::IntegerLiteral,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_after_a_nested_xml_literal() {
+        assert_eq!(
+            kinds("val xml = <root><child/></root>\nval next = 1"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::XmlStart,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::IntegerLiteral,
                 TokenKind::Eof,
             ]
         );

@@ -65,6 +65,8 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
 
 
 def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
+    if token == "$XMLSTART$<":
+        return token
     if token == "string literal" and in_interpolation:
         return "string part"
     if token == "number literal with exponent":

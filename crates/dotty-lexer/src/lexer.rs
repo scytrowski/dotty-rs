@@ -31,6 +31,8 @@ pub struct RawLexer<'source> {
     emitted_eof: bool,
     modes: Vec<LexMode>,
     pending: Option<RawItem>,
+    xml_depth: u32,
+    xml_closing_tag: bool,
 }
 
 /// Failure of a raw-lexer operation that is not recoverable as a source
@@ -85,6 +87,8 @@ impl<'source> RawLexer<'source> {
             emitted_eof: false,
             modes: vec![LexMode::Normal],
             pending: None,
+            xml_depth: 0,
+            xml_closing_tag: false,
         })
     }
 
@@ -172,6 +176,21 @@ impl<'source> RawLexer<'source> {
         }
         if character == '"' {
             return Ok(Some(RawItem::Token(self.scan_string_literal(start)?)));
+        }
+        if self.xml_depth == 0
+            && character == '<'
+            && self
+                .cursor
+                .peek_nth(1)
+                .is_some_and(crate::identifier::is_identifier_start)
+        {
+            let _ = self.cursor.bump();
+            self.xml_depth = self.xml_depth.saturating_add(1);
+            self.xml_closing_tag = false;
+            return Ok(Some(RawItem::Token(RawToken {
+                kind: RawTokenKind::XmlStart,
+                span: self.span(start)?,
+            })));
         }
         if is_identifier_start(character) {
             return Ok(Some(RawItem::Token(self.scan_identifier(start)?)));
@@ -596,10 +615,38 @@ impl<'source> RawLexer<'source> {
             let _ = self.cursor.bump();
         }
 
-        Ok(RawToken {
+        let token = RawToken {
             kind: RawTokenKind::Operator,
             span: self.span(start)?,
-        })
+        };
+        self.update_xml_operator_state(token.span)?;
+        Ok(token)
+    }
+
+    fn update_xml_operator_state(&mut self, span: TextRange) -> Result<(), RawLexerError> {
+        let spelling = self.source.slice(span)?;
+        match spelling {
+            spelling if self.xml_depth > 0 && spelling.ends_with("</") => {
+                if (spelling.starts_with('>') || spelling.starts_with("/>")) && self.xml_depth > 1 {
+                    self.xml_depth = self.xml_depth.saturating_sub(1);
+                }
+                self.xml_closing_tag = true
+            }
+            "/>" if self.xml_depth > 0 => {
+                self.xml_depth = self.xml_depth.saturating_sub(1);
+                self.xml_closing_tag = false;
+            }
+            spelling if self.xml_depth > 0 && spelling.ends_with('<') => {
+                self.xml_depth = self.xml_depth.saturating_add(1);
+                self.xml_closing_tag = false;
+            }
+            ">" if self.xml_depth > 0 && self.xml_closing_tag => {
+                self.xml_depth = self.xml_depth.saturating_sub(1);
+                self.xml_closing_tag = false;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn looks_like_quote_id(&self) -> bool {
@@ -1554,6 +1601,119 @@ mod tests {
                 RawTokenKind::Punctuation(Punctuation::RightBrace),
                 RawTokenKind::Eof,
             ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_xml_start_before_a_name() {
+        let (items, diagnostics) = scan("<tag");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_spaced_less_than_as_an_operator() {
+        let (items, diagnostics) = scan("a < b");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_xml_greedy_tag_operator_boundaries() {
+        let (items, diagnostics) = scan("<tag></tag>");
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.span)
+                .map(|span| &"<tag></tag>"[span.start() as usize..span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec!["<", "tag", "></", "tag", ">", ""]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_xml_self_closing_and_closing_tag_operators() {
+        let (items, diagnostics) = scan("<root><child/></root>");
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.span)
+                .map(|span| &"<root><child/></root>"[span.start() as usize..span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec!["<", "root", "><", "child", "/></", "root", ">", ""]
         );
         assert!(diagnostics.is_empty());
     }

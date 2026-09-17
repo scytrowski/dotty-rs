@@ -25,6 +25,7 @@ pub enum RawTokenKind {
     BackquotedIdentifier,
     Quote,
     QuoteId,
+    XmlStart,
     Operator,
     Keyword(HardKeyword),
     Punctuation(Punctuation),

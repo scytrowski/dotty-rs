@@ -71,7 +71,11 @@ Implementation status on the current lexer branch:
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
   `QuoteId`; splice syntax remains the `$` plus `{` token sequence;
-- richer infix lookahead and XML remain intentionally staged.
+- an XML start marker is emitted for `<` immediately followed by an XML name;
+  XML tag operators retain Scala's greedy operator boundaries and the scanner
+  returns to normal layout processing after a closed root literal;
+- richer infix lookahead and full XML body handling remain intentionally
+  staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require
@@ -484,9 +488,12 @@ ownership and grammar-driven closures remain to be refined.
 ### Increment 9 — Quotes, legacy syntax, and XML
 
 The current implementation covers term/type quote markers, legacy quoted
-identifiers, and their interaction with character literals. Add remaining
-quote/splice forms, compatibility syntax, and an isolated XML entry point that
-does not entangle XML parsing with normal Scala tokenization.
+identifiers, and their interaction with character literals. It also recognizes
+the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, and
+tracks enough tag-closing state to end layout-sensitive processing after the
+root literal. Add remaining quote/splice forms, compatibility syntax, and the
+full XML body/attribute/expression state machine without entangling it with
+normal Scala tokenization.
 
 ## 11. Testing strategy
 
