@@ -32,3 +32,18 @@ fn validates_and_reencodes_a_file_through_the_public_facade() {
     assert!(!file.asts().unwrap().is_empty());
     assert_eq!(file.encode().unwrap(), bytes);
 }
+
+#[test]
+fn reencodes_structured_asts_through_the_public_facade() {
+    let bytes = include_bytes!("../crates/dotty-tasty/tests/fixtures/simple_def/SimpleDef.tasty");
+    let file = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+    let original_ast_count = file.asts().unwrap().len();
+    let structured = file.structured_asts().unwrap();
+
+    let encoded = file.encode_structured_relocated(&structured).unwrap();
+    let reparsed = TastyFile::parse_and_validate_scala_3_9(&encoded).unwrap();
+
+    assert_eq!(reparsed.asts().unwrap().len(), original_ast_count);
+    reparsed.validate_ast_reference_targets().unwrap();
+    assert_eq!(reparsed.source_file(), file.source_file());
+}

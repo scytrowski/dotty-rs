@@ -34,6 +34,21 @@ inventing a tag-to-language-feature mapping.
 Corpus-wide tests remain responsible for file invariants and round-trip
 guarantees. They complement, but do not replace, the named fixture tests.
 
+## Round-trip guarantees
+
+Round-trip tests state which equivalence they establish:
+
+- raw file encoding is byte-for-byte identical to the input;
+- structured AST encoding preserves the normalized AST node representation;
+- relocated structured file encoding reparses and validates all AST, position,
+  and comment references;
+- the manual TastyInspector workflow compares the semantic-lite projection of
+  every original corpus file with the projection after structured re-encoding.
+
+These guarantees are intentionally distinct. A relocated structured encoding
+may change offsets and AST addresses while remaining structurally and
+semantically equivalent.
+
 ## Baseline corpora
 
 External-library compatibility suites use a corpus directory with a
