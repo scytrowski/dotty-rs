@@ -1,0 +1,17 @@
+# Real .class files extracted from a local OpenJDK 25 runtime image via
+# `jimage extract` (see generate.sh). Unlike the crate's other fixtures,
+# these binaries were not written by us and have no accompanying .java
+# source — classes.txt is the source of truth for corpus membership.
+#
+# fixture_count/fixture_bytes are a drift-detection invariant: generate.sh
+# fails loudly if a regeneration produces a different inventory, prompting
+# a manual update here (and a note on why the JDK build changed).
+id = "jdk25-corpus"
+source_kind = "jdk-runtime-image"
+jdk_vendor = "Amazon Corretto"
+jdk_version = "25.0.4"
+jdk_build = "25.0.4+7-LTS"
+classes_file = "classes.txt"
+fixture_root = "."
+fixture_count = 6
+fixture_bytes = 100449
