@@ -118,6 +118,9 @@ impl<'source> RawLexer<'source> {
 
         let start = self.cursor.position();
         let Some(character) = self.cursor.peek() else {
+            if let Some(message) = self.xml.eof_message() {
+                self.report(start, message)?;
+            }
             self.emitted_eof = true;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::Eof,
@@ -1660,6 +1663,45 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_comment_at_eof() {
+        let source = "<root><!--";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML comment");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_cdata_section_at_eof() {
+        let source = "<root><![CDATA[text";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML CDATA section");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_expression_at_eof() {
+        let source = "<root>{flag";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML expression");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
     }
 
     #[test]

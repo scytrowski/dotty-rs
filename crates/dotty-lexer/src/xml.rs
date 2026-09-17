@@ -7,17 +7,40 @@ struct XmlExpression {
     xml_floor: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmlContent {
+    Text,
+    Comment,
+    Cdata,
+}
+
+impl Default for XmlContent {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 /// State shared by the raw and contextual XML handling stages.
 #[derive(Debug, Default)]
 pub(crate) struct XmlState {
     depth: u32,
     closing_tag: bool,
     expressions: Vec<XmlExpression>,
+    content: XmlContent,
 }
 
 impl XmlState {
     pub(crate) fn can_start_literal(&self) -> bool {
         self.depth == 0 || !self.expressions.is_empty()
+    }
+
+    pub(crate) fn eof_message(&self) -> Option<&'static str> {
+        match self.content {
+            XmlContent::Comment => Some("unterminated XML comment"),
+            XmlContent::Cdata => Some("unterminated XML CDATA section"),
+            XmlContent::Text if !self.expressions.is_empty() => Some("unterminated XML expression"),
+            XmlContent::Text => None,
+        }
     }
 
     pub(crate) fn update_token(&mut self, kind: RawTokenKind, spelling: &str) -> bool {
@@ -75,6 +98,30 @@ impl XmlState {
             return false;
         }
 
+        if self.content == XmlContent::Comment {
+            if spelling.contains("-->") {
+                self.content = XmlContent::Text;
+            } else {
+                return false;
+            }
+        }
+        if self.content == XmlContent::Cdata {
+            if spelling.ends_with("</") {
+                self.content = XmlContent::Text;
+            } else {
+                return false;
+            }
+        }
+
+        if spelling.contains("<!--") {
+            self.content = XmlContent::Comment;
+            return false;
+        }
+        if spelling.contains("<!") {
+            self.content = XmlContent::Cdata;
+            return false;
+        }
+
         match spelling {
             spelling if spelling.ends_with("</") => {
                 if (spelling.starts_with('>') || spelling.starts_with("/>")) && self.depth > 1 {
@@ -125,6 +172,28 @@ mod tests {
         state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBrace), "{");
         assert!(!state.update_token(RawTokenKind::Operator, "<"));
         state.update_token(RawTokenKind::Punctuation(Punctuation::RightBrace), "}");
+        assert!(!state.update_token(RawTokenKind::Operator, "</"));
+        assert!(state.update_token(RawTokenKind::Operator, ">"));
+    }
+
+    #[test]
+    fn closes_a_comment_before_processing_the_following_nested_tag() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        assert!(!state.update_token(RawTokenKind::Operator, "><!--"));
+        assert!(!state.update_token(RawTokenKind::Operator, "--><"));
+        assert!(!state.update_token(RawTokenKind::Operator, "/>"));
+        assert!(!state.update_token(RawTokenKind::Operator, "</"));
+        assert!(state.update_token(RawTokenKind::Operator, ">"));
+    }
+
+    #[test]
+    fn keeps_cdata_contents_out_of_xml_depth_tracking() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        assert!(!state.update_token(RawTokenKind::Operator, "><!"));
+        assert!(!state.update_token(RawTokenKind::Operator, "<"));
+        assert!(!state.update_token(RawTokenKind::Operator, ">"));
         assert!(!state.update_token(RawTokenKind::Operator, "</"));
         assert!(state.update_token(RawTokenKind::Operator, ">"));
     }
