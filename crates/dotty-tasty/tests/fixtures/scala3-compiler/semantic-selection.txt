@@ -10,11 +10,16 @@ dotty/tools/dotc/core/Denotations.tasty
 dotty/tools/dotc/core/Names.tasty
 dotty/tools/dotc/core/Symbols.tasty
 dotty/tools/dotc/core/Types.tasty
+dotty/tools/dotc/core/MatchTypes.tasty
+dotty/tools/dotc/core/tasty/TreePickler.tasty
+dotty/tools/dotc/core/tasty/TreeUnpickler.tasty
 dotty/tools/dotc/core/tasty/DottyUnpickler.tasty
 dotty/tools/dotc/parsing/Parsers.tasty
 dotty/tools/dotc/quoted/PickledQuotes.tasty
+dotty/tools/dotc/semanticdb/MatchType.tasty
 dotty/tools/dotc/transform/Erasure.tasty
 dotty/tools/dotc/transform/Inlining.tasty
+dotty/tools/dotc/inlines/Inliner.tasty
 dotty/tools/dotc/transform/PatternMatcher.tasty
 dotty/tools/dotc/typer/Applications.tasty
 dotty/tools/dotc/typer/Typer.tasty

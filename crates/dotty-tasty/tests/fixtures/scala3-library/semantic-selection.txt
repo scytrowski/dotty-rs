@@ -1,12 +1,18 @@
 # Small representative subset used for semantic baseline generation.
 scala/Boolean.tasty
+scala/CanEqual.tasty
 scala/Int.tasty
+scala/NamedTuple.tasty
 scala/Option.tasty
 scala/Predef.tasty
 scala/Tuple.tasty
 scala/collection/immutable/List.tasty
 scala/collection/immutable/Map.tasty
 scala/collection/mutable/ArrayBuffer.tasty
+scala/Function.tasty
+scala/NonEmptyTuple.tasty
+scala/PartialFunction.tasty
+scala/quoted/Quotes.tasty
 scala/util/Either.tasty
 scala/util/Try.tasty
 scala/util/Using.tasty
