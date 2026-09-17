@@ -14,6 +14,12 @@ enum XmlContent {
     Cdata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingTagName {
+    Opening,
+    Closing,
+}
+
 impl Default for XmlContent {
     fn default() -> Self {
         Self::Text
@@ -28,8 +34,11 @@ pub(crate) struct XmlState {
     expressions: Vec<XmlExpression>,
     content: XmlContent,
     cdata_brackets: u8,
-    pending_error: Option<&'static str>,
+    pending_error: Option<String>,
     tag_open: bool,
+    open_tags: Vec<String>,
+    pending_tag_name: Option<PendingTagName>,
+    closing_tag_name: Option<String>,
 }
 
 impl XmlState {
@@ -47,7 +56,7 @@ impl XmlState {
         }
     }
 
-    pub(crate) fn take_error(&mut self) -> Option<&'static str> {
+    pub(crate) fn take_error(&mut self) -> Option<String> {
         self.pending_error.take()
     }
 
@@ -74,6 +83,10 @@ impl XmlState {
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
                 self.tag_open = true;
+                self.pending_tag_name = Some(PendingTagName::Opening);
+            }
+            RawTokenKind::Identifier | RawTokenKind::Keyword(_) => {
+                self.consume_tag_name(spelling);
             }
             RawTokenKind::Punctuation(Punctuation::LeftBrace) => self.update_left_brace(),
             RawTokenKind::Punctuation(Punctuation::RightBrace) => self.update_right_brace(),
@@ -81,6 +94,69 @@ impl XmlState {
             _ => {}
         }
         false
+    }
+
+    fn consume_tag_name(&mut self, spelling: &str) {
+        match self.pending_tag_name.take() {
+            Some(PendingTagName::Opening) => self.open_tags.push(spelling.to_owned()),
+            Some(PendingTagName::Closing) => self.closing_tag_name = Some(spelling.to_owned()),
+            None => {}
+        }
+    }
+
+    fn report_error(&mut self, message: impl Into<String>) {
+        if self.pending_error.is_none() {
+            self.pending_error = Some(message.into());
+        }
+    }
+
+    fn finish_opening_tag(&mut self) {
+        if self.pending_tag_name == Some(PendingTagName::Opening) {
+            self.report_error("XML opening tag name expected");
+            self.pending_tag_name = None;
+        }
+        self.tag_open = false;
+    }
+
+    fn finish_closing_tag(&mut self) {
+        if self.pending_tag_name == Some(PendingTagName::Closing) {
+            self.report_error("XML closing tag name expected");
+            self.pending_tag_name = None;
+        }
+
+        if let Some(actual) = self.closing_tag_name.take() {
+            match self.open_tags.pop() {
+                Some(expected) if expected == actual => {}
+                Some(expected) => self.report_error(format!(
+                    "mismatched XML closing tag: expected </{expected}>, found </{actual}>"
+                )),
+                None => self.report_error(format!(
+                    "XML closing tag </{actual}> has no matching opening tag"
+                )),
+            }
+        } else if self.open_tags.pop().is_none() {
+            self.report_error("XML closing tag has no matching opening tag");
+        }
+
+        self.closing_tag = false;
+        self.tag_open = false;
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn finish_self_closing_tag(&mut self) {
+        self.finish_opening_tag();
+        let _ = self.open_tags.pop();
+        self.depth = self.depth.saturating_sub(1);
+        self.closing_tag = false;
+        self.tag_open = false;
+    }
+
+    fn finish_empty_closing_tag(&mut self) {
+        self.report_error("XML closing tag name expected");
+        let _ = self.open_tags.pop();
+        self.depth = self.depth.saturating_sub(1);
+        self.closing_tag = false;
+        self.tag_open = false;
     }
 
     fn update_left_brace(&mut self) {
@@ -129,8 +205,7 @@ impl XmlState {
                 self.content = XmlContent::Text;
             } else {
                 if spelling.contains("--") {
-                    self.pending_error
-                        .get_or_insert("invalid `--` sequence in XML comment");
+                    self.report_error("invalid `--` sequence in XML comment");
                 }
                 return false;
             }
@@ -144,45 +219,61 @@ impl XmlState {
         }
 
         if spelling.contains("<!--") {
+            self.finish_opening_tag();
             self.tag_open = false;
             self.content = XmlContent::Comment;
             return false;
         }
         if spelling.contains("<!") {
+            self.finish_opening_tag();
             self.tag_open = false;
             self.content = XmlContent::Cdata;
             return false;
         }
 
-        if spelling.starts_with('>') || spelling.starts_with("/>") {
-            self.tag_open = false;
-        }
-
         match spelling {
+            spelling if spelling.ends_with("</>") => {
+                if spelling.starts_with('>') {
+                    if self.closing_tag {
+                        self.finish_closing_tag();
+                    } else {
+                        self.finish_opening_tag();
+                    }
+                }
+                self.finish_empty_closing_tag();
+                return self.depth == 0;
+            }
             spelling if spelling.ends_with("</") => {
-                if (spelling.starts_with('>') || spelling.starts_with("/>")) && self.depth > 1 {
-                    self.depth -= 1;
+                if spelling.starts_with("/>") {
+                    self.finish_self_closing_tag();
+                } else if spelling.starts_with('>') {
+                    if self.closing_tag {
+                        self.finish_closing_tag();
+                    } else {
+                        self.finish_opening_tag();
+                    }
                 }
                 self.closing_tag = true;
                 self.tag_open = true;
+                self.pending_tag_name = Some(PendingTagName::Closing);
+                self.closing_tag_name = None;
             }
             "/>" => {
-                self.depth = self.depth.saturating_sub(1);
-                self.closing_tag = false;
-                self.tag_open = false;
+                self.finish_self_closing_tag();
                 return self.depth == 0;
             }
             spelling if spelling.ends_with('<') => {
+                self.finish_opening_tag();
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
                 self.tag_open = true;
+                self.pending_tag_name = Some(PendingTagName::Opening);
             }
             ">" if self.closing_tag => {
-                self.depth = self.depth.saturating_sub(1);
-                self.closing_tag = false;
-                self.tag_open = false;
+                self.finish_closing_tag();
                 return self.depth == 0;
             }
+            ">" => self.finish_opening_tag(),
             _ => {}
         }
         false

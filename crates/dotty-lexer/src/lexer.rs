@@ -502,7 +502,9 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        self.scan_identifier_token(start, true)
+        let token = self.scan_identifier_token(start, true)?;
+        self.update_xml_token(token.kind, token.span)?;
+        Ok(token)
     }
 
     fn scan_identifier_token(
@@ -1744,6 +1746,49 @@ mod tests {
                 RawTokenKind::Eof
             ]
         );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_matching_nested_xml_tag_names() {
+        let (_, diagnostics) = scan("<root><child/></root>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_a_mismatched_xml_closing_tag_name() {
+        let source = "<root></wrong>";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "mismatched XML closing tag: expected </root>, found </wrong>"
+        );
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new((source.len() - 1) as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_xml_closing_tag_without_a_name() {
+        let source = "<root></>";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "XML closing tag name expected");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new((source.len() - 4) as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn accepts_hard_keywords_as_xml_tag_names() {
+        let (_, diagnostics) = scan("<if></if>");
+
         assert!(diagnostics.is_empty());
     }
 
