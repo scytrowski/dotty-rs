@@ -51,6 +51,19 @@ The lexer also does not own:
 - macro execution or constant folding;
 - TASTy generation.
 
+Implementation status on the current lexer branch:
+
+- `RawLexer` emits a lossless stream for trivia, identifiers, operators,
+  keywords, punctuation, numeric and character literals, ordinary and
+  multiline strings, and basic string interpolation;
+- `ContextualScanner` maps raw categories to the shared `dotty-token` kinds;
+- the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
+  prefix-based indentation regions for non-colon triggers such as `then`,
+  `else`, `match`, and `try`;
+- colon-triggered indentation, parser-observed colon events, end markers,
+  leading-infix continuation, and `CASECLASS`/`CASEOBJECT` post-processing are
+  intentionally still staged.
+
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require
 changing the RawLexer/ContextualScanner boundary.
@@ -289,6 +302,11 @@ parser-facing stream. It is responsible for:
 
 The scanner may maintain pending synthetic tokens, but their insertion
 positions must be deterministic and source ranges must remain meaningful.
+
+The first scanner implementation materializes the raw item stream while
+constructing `ContextualScanner`. This keeps the state machine small while the
+raw/scanner contract is still being stabilized. It can later be replaced by
+incremental buffering without changing parser-facing token kinds or ranges.
 
 The scanner must preserve source-token ordering, balance regions by EOF, and
 never underflow its region stack.
