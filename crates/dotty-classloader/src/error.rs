@@ -3,6 +3,7 @@ use crate::class_path::ClassPathError;
 use dotty_classfile::class_file::ClassFileError;
 use dotty_classfile::constant_pool::PoolRefError;
 use dotty_classfile::descriptor::ResolveDescriptorError;
+use dotty_classfile::signature::SignatureError;
 use std::fmt;
 use std::rc::Rc;
 
@@ -23,14 +24,18 @@ pub enum ClassLoadError {
     /// file.
     InvalidClassFile(BinaryName, ClassFileError),
     /// The class file decoded structurally, but one of its own
-    /// `this_class`/`super_class`/interface constant-pool indices, or a
-    /// field/method's `name_index`, does not resolve to a usable entry
-    /// (JVMS §4.4.1).
+    /// `this_class`/`super_class`/interface constant-pool indices, a
+    /// field/method's `name_index`, or a `Signature` attribute's own
+    /// index, does not resolve to a usable entry (JVMS §4.4.1).
     MalformedReference(BinaryName, PoolRefError),
     /// The class file decoded structurally, but a field or method's
     /// descriptor did not resolve or parse as a valid type (JVMS
     /// §4.3.2/§4.3.3).
     MalformedDescriptor(BinaryName, ResolveDescriptorError),
+    /// The class file decoded structurally, but a class, field, or
+    /// method's `Signature` attribute did not parse as a valid generic
+    /// signature (JVMS §4.7.9.1).
+    MalformedSignature(BinaryName, SignatureError),
     /// The class file's own `this_class` name did not match the name it
     /// was requested under (JVMS §5.3.5).
     NameMismatch {
@@ -71,6 +76,12 @@ impl fmt::Display for ClassLoadError {
                     "malformed descriptor in class file for {name}: {source}"
                 )
             }
+            Self::MalformedSignature(name, source) => {
+                write!(
+                    formatter,
+                    "malformed signature in class file for {name}: {source}"
+                )
+            }
             Self::NameMismatch { requested, actual } => write!(
                 formatter,
                 "requested class {requested} but its class file declares {actual}"
@@ -98,6 +109,7 @@ impl std::error::Error for ClassLoadError {
             Self::InvalidClassFile(_, source) => Some(source),
             Self::MalformedReference(_, source) => Some(source),
             Self::MalformedDescriptor(_, source) => Some(source),
+            Self::MalformedSignature(_, source) => Some(source),
             Self::DependencyFailure { source, .. } => Some(source.as_ref()),
         }
     }
@@ -173,6 +185,19 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "malformed descriptor in class file for PoolSample: descriptor index 9 does not resolve to a Utf8 entry"
+        );
+    }
+
+    #[test]
+    fn malformed_signature_displays_the_signature_error() {
+        let error = ClassLoadError::MalformedSignature(
+            BinaryName::from_internal("GenericSample"),
+            SignatureError::UnexpectedEnd { offset: 3 },
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "malformed signature in class file for GenericSample: unexpected end of signature at offset 3"
         );
     }
 

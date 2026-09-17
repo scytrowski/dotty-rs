@@ -139,6 +139,7 @@ mod tests {
             "ANSWER".to_owned(),
             FieldAccessFlags(0x0019),
             FieldType::Int,
+            None,
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),
