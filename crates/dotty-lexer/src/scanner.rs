@@ -305,7 +305,7 @@ fn build_tokens(
         }
     }
 
-    fuse_case_declarations(&mut tokens)?;
+    fuse_case_declarations(source, &mut tokens)?;
     classify_end_markers(source, &mut tokens);
 
     Ok(tokens)
@@ -549,9 +549,17 @@ fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
         .find(|token| !is_layout_token(token.kind))
 }
 
-fn fuse_case_declarations(tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
+fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
     let mut index = 0;
     while index + 1 < tokens.len() {
+        if has_source_line_break(
+            source,
+            tokens[index].span.end(),
+            tokens[index + 1].span.start(),
+        ) {
+            index += 1;
+            continue;
+        }
         let Some(fused_kind) = (match (tokens[index].kind, tokens[index + 1].kind) {
             (TokenKind::Keyword(HardKeyword::Case), TokenKind::Keyword(HardKeyword::Class)) => {
                 Some(TokenKind::CaseClass)
@@ -1008,6 +1016,45 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Newline,
                 TokenKind::CaseObject,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_fuse_case_and_class_across_a_line_break() {
+        assert_eq!(
+            kinds("case\nclass Foo"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Keyword(HardKeyword::Class),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_fuse_case_and_object_across_a_line_break() {
+        assert_eq!(
+            kinds("case\nobject Foo"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Keyword(HardKeyword::Object),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_fuse_case_and_class_across_a_multiline_comment() {
+        assert_eq!(
+            kinds("case /* comment\n*/ class Foo"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Keyword(HardKeyword::Class),
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
