@@ -953,6 +953,25 @@ mod tests {
         }
     }
 
+    /// Like [`InMemoryClassPath`], but tags every entry
+    /// [`ClassFormat::Tasty`] instead of [`ClassFormat::Class`] — for
+    /// tests that need control over `.tasty` bytes specifically (real
+    /// fixture bytes for the happy path, or bytes deliberately missing a
+    /// dependency to exercise an error path).
+    struct InMemoryTastyClassPath(HashMap<BinaryName, Vec<u8>>);
+
+    impl ClassPathEntry for InMemoryTastyClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(self.0.get(name).map(|bytes| {
+                ClassResource::new(
+                    bytes.clone(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("<memory>")),
+                )
+            }))
+        }
+    }
+
     struct AlwaysErrors;
 
     impl ClassPathEntry for AlwaysErrors {
@@ -1894,6 +1913,46 @@ mod tests {
             error,
             ClassLoadError::DependencyFailure { owner, dependency, source }
                 if owner.as_internal() == "PoolSample"
+                    && dependency.as_internal() == "java/lang/Object"
+                    && matches!(*source, ClassLoadError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_tasty_file_when_the_bytes_do_not_decode() {
+        let mut classes = HashMap::new();
+        classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
+
+        let loader = ClassLoader::new(InMemoryTastyClassPath(classes));
+        let error = loader
+            .load_class(&BinaryName::from_internal("Broken"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "Broken"
+        ));
+    }
+
+    #[test]
+    fn dependency_failure_when_a_tasty_classes_super_class_cannot_be_found() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Dog"),
+            own_fixture_bytes("tasty_sample/Dog.tasty"),
+        );
+        // Deliberately omit java/lang/Object (and Animal) so resolving
+        // Dog's implicit superclass fails.
+
+        let loader = ClassLoader::new(InMemoryTastyClassPath(classes));
+        let error = loader
+            .load_class(&BinaryName::from_internal("Dog"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::DependencyFailure { owner, dependency, source }
+                if owner.as_internal() == "Dog"
                     && dependency.as_internal() == "java/lang/Object"
                     && matches!(*source, ClassLoadError::NotFound(_))
         ));

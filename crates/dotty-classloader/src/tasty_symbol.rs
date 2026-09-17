@@ -322,4 +322,63 @@ mod tests {
 
         assert!(matches!(error, TastyDecodeError::Parse(_)));
     }
+
+    /// `decode_flags` is a pure, narrow mapping function (the tag
+    /// values below are real ones — confirmed against `dotty-tasty`'s
+    /// own `ast.rs` constants and cross-checked by scanning every
+    /// committed real fixture's `TypeDef` modifiers for each tag), so
+    /// its modifier-to-`ClassAccessFlags` mapping is tested directly
+    /// against hand-built `tail` vectors, the same treatment
+    /// `manifest.rs`'s hand-written-input tests give its own narrow
+    /// parsing concern. Full end-to-end `decode()` coverage of a real
+    /// `abstract`/`final`/`private` class is a separate concern — the
+    /// three real `scala3-library` fixtures confirmed to carry these
+    /// modifiers (`scala/io/Source.tasty`'s `Source`, `scala/math/
+    /// BigInt.tasty`'s `BigInt`, `scala/math/Ordering.tasty`'s private
+    /// `Reverse`) all currently fail `decode()` with `UnresolvedSupertype`
+    /// on a later parent, which is a real, disclosed limitation, not a
+    /// missing test.
+    #[test]
+    fn decode_flags_marks_trait_as_interface_and_abstract() {
+        let flags = decode_flags(&[DefinitionTail::Modifier(TRAIT_TAG)]);
+
+        assert!(flags.is_interface());
+        assert!(flags.is_abstract());
+    }
+
+    #[test]
+    fn decode_flags_marks_abstract_classes() {
+        let flags = decode_flags(&[DefinitionTail::Modifier(ABSTRACT_TAG)]);
+
+        assert!(flags.is_abstract());
+        assert!(!flags.is_interface());
+    }
+
+    #[test]
+    fn decode_flags_marks_final_classes() {
+        let flags = decode_flags(&[DefinitionTail::Modifier(FINAL_TAG)]);
+
+        assert!(flags.is_final());
+    }
+
+    #[test]
+    fn decode_flags_clears_public_for_a_private_modifier() {
+        let flags = decode_flags(&[DefinitionTail::Modifier(PRIVATE_TAG)]);
+
+        assert!(!flags.is_public());
+    }
+
+    #[test]
+    fn decode_flags_clears_public_for_a_protected_modifier() {
+        let flags = decode_flags(&[DefinitionTail::Modifier(PROTECTED_TAG)]);
+
+        assert!(!flags.is_public());
+    }
+
+    #[test]
+    fn decode_flags_defaults_to_public_with_no_modifiers() {
+        let flags = decode_flags(&[]);
+
+        assert!(flags.is_public());
+    }
 }
