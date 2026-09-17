@@ -4,7 +4,7 @@
 //! `tests/fixtures/`; indices below come from `javap -v` on the exact
 //! checked-in bytes.
 
-use dotty_classfile::attribute::Attribute;
+use dotty_classfile::attribute::{Attribute, DeprecationInfo, find_deprecated_annotation};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
@@ -141,6 +141,14 @@ fn decodes_nested_sample_inner_deprecated_and_nest_host() {
     let pool = &class_file.constant_pool;
 
     assert!(class_file.attributes.contains(&Attribute::Deprecated));
+
+    assert_eq!(
+        find_deprecated_annotation(&class_file.attributes, pool),
+        Some(DeprecationInfo {
+            since: Some("1.0".to_owned()),
+            for_removal: true,
+        })
+    );
 
     let nest_host = class_file
         .attributes
