@@ -640,6 +640,8 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
                     | HardKeyword::Var
                     | HardKeyword::Type
                     | HardKeyword::Package
+                    | HardKeyword::Given
+                    | HardKeyword::Enum
             )
     )
 }
@@ -1052,6 +1054,30 @@ mod tests {
             vec![
                 TokenKind::EndMarker,
                 TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_for_a_given_declaration() {
+        assert_eq!(
+            kinds("end given"),
+            vec![
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Given),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_for_an_enum_declaration() {
+        assert_eq!(
+            kinds("end enum"),
+            vec![
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Enum),
                 TokenKind::Eof,
             ]
         );

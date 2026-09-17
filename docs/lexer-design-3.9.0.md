@@ -66,7 +66,8 @@ Implementation status on the current lexer branch:
 - leading-infix continuation is recognized for line-start operators, while a
   symbolic operator after a blank line starts a new logical statement;
 - `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker recognition
-  are now part of scanner post-processing, including source-start markers;
+  are now part of scanner post-processing, including source-start markers and
+  `given`/`enum` targets;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
@@ -490,9 +491,9 @@ outdent rules remain next.
 Implement contextual `END`, `CASECLASS`, `CASEOBJECT`, grammar-driven region
 closures, and exact EOF behavior. The current increment covers token fusion,
 basic end-marker recognition, source-start and line-start markers, non-panicking
-EOF classification, and closure of implicit regions after dedented closing
-delimiters. More precise region ownership and grammar-driven closures remain to
-be refined.
+EOF classification, `given`/`enum` targets, and closure of implicit regions
+after dedented closing delimiters. More precise region ownership and
+grammar-driven closures remain to be refined.
 
 ### Increment 9 — Quotes, legacy syntax, and XML
 
