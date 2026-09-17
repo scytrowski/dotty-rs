@@ -191,10 +191,19 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     }
 
     /// Looks for a `NestHost` attribute (JVMS §4.7.28) — present only on
-    /// a class that is a nest *member*, naming its nest host. Resolved
-    /// via [`Self::resolve_member_class`]: a nest host commonly also
-    /// carries a `NestMembers` attribute pointing back here, which is a
-    /// legitimate mutual reference, not a supertype cycle.
+    /// a class that is a nest *member*, naming its nest host.
+    ///
+    /// Kept as `ClassRef::Unresolved`, deliberately *not* loaded: unlike
+    /// a field/method's declared type (`docs/classloader.md` §9,
+    /// Milestone 6), a nest host is a structural back-reference, not
+    /// type information this class needs to be understood. Eagerly
+    /// loading it would also cascade into loading every other nest
+    /// member (via their own `NestHost`), any of which may in turn
+    /// declare *this* still-`Loading` class as a superclass/interface —
+    /// e.g. a sealed interface's own permitted-subclass records
+    /// implementing it (`sealed_record_sample`) — which would collide
+    /// with [`Self::resolve_dependency`]'s strict cycle detection over
+    /// an ordering artifact, not a real supertype cycle.
     fn resolve_optional_nest_host(
         &self,
         owner: &BinaryName,
@@ -211,14 +220,13 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             return Ok(None);
         };
 
-        let dependency = self.resolve_name(owner, class_file, index)?;
-        self.resolve_member_class(owner, &dependency)
-            .map(|symbol| Some(ClassRef::Resolved(symbol)))
+        self.resolve_name(owner, class_file, index)
+            .map(|dependency| Some(ClassRef::Unresolved(dependency)))
     }
 
     /// Looks for a `NestMembers` attribute (JVMS §4.7.29) — present only
-    /// on a nest *host*, listing its members. Each entry resolves the
-    /// same tolerant way [`Self::resolve_optional_nest_host`] does.
+    /// on a nest *host*, listing its members. Kept `Unresolved`, for the
+    /// same reason as [`Self::resolve_optional_nest_host`].
     fn resolve_nest_members(
         &self,
         owner: &BinaryName,
@@ -236,9 +244,8 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         indices
             .into_iter()
             .map(|index| {
-                let dependency = self.resolve_name(owner, class_file, index)?;
-                self.resolve_member_class(owner, &dependency)
-                    .map(ClassRef::Resolved)
+                self.resolve_name(owner, class_file, index)
+                    .map(ClassRef::Unresolved)
             })
             .collect()
     }
@@ -1541,8 +1548,10 @@ mod tests {
         classes
     }
 
-    /// Confirms `NestMembers` (JVMS §4.7.29) resolves both of
-    /// `NestedSample`'s real members.
+    /// Confirms `NestMembers` (JVMS §4.7.29) names both of
+    /// `NestedSample`'s real members. Kept `Unresolved` deliberately —
+    /// see `resolve_nest_members`'s doc comment — so this only checks
+    /// the names, not that the members were loaded.
     #[test]
     fn resolves_the_nest_members_of_a_real_nest_host() {
         let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
@@ -1554,8 +1563,8 @@ mod tests {
             .nest_members()
             .into_iter()
             .map(|member| match member {
-                ClassRef::Resolved(symbol) => symbol.name().as_internal().to_owned(),
                 ClassRef::Unresolved(name) => name.as_internal().to_owned(),
+                unexpected => panic!("expected an unresolved nest member ref, got {unexpected:?}"),
             })
             .collect();
         member_names.sort_unstable();
@@ -1566,26 +1575,19 @@ mod tests {
         );
     }
 
-    /// Confirms `NestHost` (JVMS §4.7.28) resolves a real member back
-    /// to its host, reusing the host's in-progress shell (the same
-    /// "legitimate mutual reference" proof shape as the Ping/Pong tests
-    /// above): loading `NestedSample$Inner` cascades into loading
-    /// `NestedSample`, whose own `NestMembers` points right back to
-    /// `NestedSample$Inner` while it is still `Loading`.
+    /// Confirms `NestHost` (JVMS §4.7.28) names a real member's host.
+    /// Kept `Unresolved` deliberately — see `resolve_optional_nest_host`'s
+    /// doc comment for why this attribute is never eagerly loaded.
     #[test]
-    fn resolves_the_nest_host_of_a_real_nest_member_via_shell_reuse() {
+    fn resolves_the_nest_host_of_a_real_nest_member() {
         let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample$Inner"))
             .expect("NestedSample$Inner should load");
 
-        match symbol.nest_host() {
-            Some(ClassRef::Resolved(host)) => {
-                assert_eq!(host.name().as_internal(), "NestedSample");
-            }
-            unexpected => {
-                panic!("expected NestedSample$Inner's nest host to resolve, got {unexpected:?}")
-            }
-        }
+        assert!(matches!(
+            symbol.nest_host(),
+            Some(ClassRef::Unresolved(name)) if name.as_internal() == "NestedSample"
+        ));
     }
 }
