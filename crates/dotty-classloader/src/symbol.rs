@@ -239,6 +239,10 @@ mod tests {
                 return_type: None,
             },
             None,
+            crate::semantic_type::SemanticMethodDescriptor {
+                parameters: vec![],
+                return_type: None,
+            },
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),

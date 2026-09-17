@@ -4,12 +4,12 @@ use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
-use crate::semantic_type::SemanticFieldType;
+use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolIndex};
-use dotty_classfile::descriptor::FieldType;
+use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
 use std::cell::RefCell;
@@ -147,6 +147,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             let descriptor = method
                 .descriptor(&class_file.constant_pool)
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
+            let semantic_descriptor = self.resolve_semantic_method_descriptor(name, &descriptor)?;
             let signature = self.resolve_optional_signature(
                 name,
                 &method.attributes,
@@ -158,6 +159,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 method.access_flags,
                 descriptor,
                 signature,
+                semantic_descriptor,
             ));
         }
 
@@ -317,6 +319,31 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 Ok(SemanticFieldType::Array(Box::new(resolved)))
             }
         }
+    }
+
+    /// Walks an already-parsed [`MethodDescriptor`] (JVMS §4.3.3) the
+    /// same way [`Self::resolve_semantic_field_type`] walks a field's
+    /// type, applied to every parameter and the return type.
+    fn resolve_semantic_method_descriptor(
+        &self,
+        owner: &BinaryName,
+        descriptor: &MethodDescriptor,
+    ) -> Result<SemanticMethodDescriptor, ClassLoadError> {
+        let mut parameters = Vec::with_capacity(descriptor.parameters.len());
+        for parameter in &descriptor.parameters {
+            parameters.push(self.resolve_semantic_field_type(owner, parameter)?);
+        }
+
+        let return_type = descriptor
+            .return_type
+            .as_ref()
+            .map(|field_type| self.resolve_semantic_field_type(owner, field_type))
+            .transpose()?;
+
+        Ok(SemanticMethodDescriptor {
+            parameters,
+            return_type,
+        })
     }
 }
 
@@ -577,8 +604,10 @@ mod tests {
     /// `generic_sample/GenericSample.class` has no user-declared
     /// superclass (implicitly `java/lang/Object`) and no interfaces;
     /// since Milestone 6, its `items` field's erased type
-    /// (`java/util/List`) also forces resolution, so a synthetic
-    /// stand-in is needed for it too, alongside the real fixture bytes.
+    /// (`java/util/List`) and its `first()` method's erased return type
+    /// (`java/lang/Comparable` — `T`'s bound, since descriptors erase
+    /// generics to the first bound) also force resolution, so synthetic
+    /// stand-ins are needed for both, alongside the real fixture bytes.
     fn generic_sample_classpath() -> HashMap<BinaryName, Vec<u8>> {
         let mut classes = HashMap::new();
         classes.insert(
@@ -592,6 +621,10 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("java/util/List"),
             synthetic_class("java/util/List", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Comparable"),
+            synthetic_class("java/lang/Comparable", None),
         );
         classes
     }
@@ -1304,5 +1337,47 @@ mod tests {
             }
             unexpected => panic!("expected Pong.other to resolve to a class, got {unexpected:?}"),
         }
+    }
+
+    /// Same "reuse an in-progress shell" technique as the field-level
+    /// test above, applied to a mutual *method* parameter/return type:
+    /// `Ping.exchange(Pong): Pong` and `Pong.exchange(Ping): Ping`.
+    #[test]
+    fn resolves_a_legitimate_mutual_method_type_reference_between_two_real_classes() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Ping"),
+            own_fixture_bytes("ping_pong/Ping.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("Pong"),
+            own_fixture_bytes("ping_pong/Pong.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let ping = loader
+            .load_class(&BinaryName::from_internal("Ping"))
+            .expect("Ping should load despite the mutual method reference");
+
+        let ping_methods = ping.methods();
+        let exchange = ping_methods
+            .iter()
+            .find(|method| method.name() == "exchange")
+            .expect("Ping.exchange should exist");
+
+        assert!(matches!(
+            exchange.semantic_descriptor().parameters.as_slice(),
+            [SemanticFieldType::Object(ClassRef::Resolved(symbol))]
+                if symbol.name().as_internal() == "Pong"
+        ));
+        assert!(matches!(
+            &exchange.semantic_descriptor().return_type,
+            Some(SemanticFieldType::Object(ClassRef::Resolved(symbol)))
+                if symbol.name().as_internal() == "Pong"
+        ));
     }
 }

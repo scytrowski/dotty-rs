@@ -23,3 +23,14 @@ pub enum SemanticFieldType {
     Object(ClassRef),
     Array(Box<SemanticFieldType>),
 }
+
+/// A method descriptor, resolved the same way [`SemanticFieldType`]
+/// resolves a field's type. Mirrors
+/// `dotty_classfile::descriptor::MethodDescriptor`; `return_type: None`
+/// still means `void`. Added alongside
+/// `MethodSymbol::descriptor`, not replacing it.
+#[derive(Debug, Clone)]
+pub struct SemanticMethodDescriptor {
+    pub parameters: Vec<SemanticFieldType>,
+    pub return_type: Option<SemanticFieldType>,
+}

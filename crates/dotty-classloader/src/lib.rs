@@ -38,6 +38,6 @@ pub mod classloader {
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::ClassLoader;
     pub use crate::method_symbol::MethodSymbol;
-    pub use crate::semantic_type::SemanticFieldType;
+    pub use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }
