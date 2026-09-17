@@ -7,6 +7,21 @@ use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_cha
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 use crate::{Trivia, TriviaKind};
 
+#[derive(Debug, Clone)]
+enum LexMode {
+    Normal,
+    InterpolatedString(StringState),
+    InterpolationExpression { brace_depth: u32 },
+    SimpleSplice,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StringState {
+    part_start: u32,
+    multiline: bool,
+    started: bool,
+}
+
 /// The first-stage raw lexer for Scala source text.
 #[derive(Debug)]
 pub struct RawLexer<'source> {
@@ -14,6 +29,8 @@ pub struct RawLexer<'source> {
     cursor: Cursor<'source>,
     diagnostics: Vec<Diagnostic>,
     emitted_eof: bool,
+    modes: Vec<LexMode>,
+    pending: Option<RawItem>,
 }
 
 /// Failure of a raw-lexer operation that is not recoverable as a source
@@ -66,6 +83,8 @@ impl<'source> RawLexer<'source> {
             cursor,
             diagnostics: Vec::new(),
             emitted_eof: false,
+            modes: vec![LexMode::Normal],
+            pending: None,
         })
     }
 
@@ -76,6 +95,20 @@ impl<'source> RawLexer<'source> {
 
     /// Emits the next raw token or trivia item.
     pub fn next(&mut self) -> Result<Option<RawItem>, RawLexerError> {
+        if let Some(item) = self.pending.take() {
+            return Ok(Some(item));
+        }
+
+        match self.modes.last().cloned() {
+            Some(LexMode::Normal) => self.next_normal(),
+            Some(LexMode::InterpolatedString(_)) => self.next_string_part(),
+            Some(LexMode::InterpolationExpression { .. }) => self.next_expression(),
+            Some(LexMode::SimpleSplice) => self.next_simple_splice(),
+            None => Ok(None),
+        }
+    }
+
+    fn next_normal(&mut self) -> Result<Option<RawItem>, RawLexerError> {
         if self.emitted_eof {
             return Ok(None);
         }
@@ -142,6 +175,9 @@ impl<'source> RawLexer<'source> {
                 self.scan_backquoted_identifier(start)?,
             )));
         }
+        if character == ':' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
+            return Ok(Some(RawItem::Token(self.scan_operator(start)?)));
+        }
         if let Some(punctuation) = punctuation(character) {
             let _ = self.cursor.bump();
             return Ok(Some(RawItem::Token(RawToken {
@@ -164,6 +200,187 @@ impl<'source> RawLexer<'source> {
             kind: RawTokenKind::Error,
             span,
         })))
+    }
+
+    fn next_expression(&mut self) -> Result<Option<RawItem>, RawLexerError> {
+        if self.cursor.is_eof() {
+            let start = self.cursor.position();
+            self.report(start, "unterminated interpolation expression")?;
+            let _ = self.modes.pop();
+            return self.next();
+        }
+
+        if self.cursor.peek() == Some('}')
+            && matches!(
+                self.modes.last(),
+                Some(LexMode::InterpolationExpression { brace_depth: 1 })
+            )
+        {
+            let start = self.cursor.position();
+            let _ = self.cursor.bump();
+            let _ = self.modes.pop();
+            self.resume_string_after_expression();
+            return Ok(Some(RawItem::Token(RawToken {
+                kind: RawTokenKind::Punctuation(Punctuation::RightBrace),
+                span: self.span(start)?,
+            })));
+        }
+
+        let Some(item) = self.next_normal()? else {
+            return Ok(None);
+        };
+        if let RawItem::Token(token) = &item {
+            match token.kind {
+                RawTokenKind::Punctuation(Punctuation::LeftBrace) => {
+                    if let Some(LexMode::InterpolationExpression { brace_depth }) = self
+                        .modes
+                        .iter_mut()
+                        .rev()
+                        .find(|mode| matches!(mode, LexMode::InterpolationExpression { .. }))
+                    {
+                        *brace_depth = brace_depth.saturating_add(1);
+                    }
+                }
+                RawTokenKind::Punctuation(Punctuation::RightBrace) => {
+                    if let Some(LexMode::InterpolationExpression { brace_depth }) = self
+                        .modes
+                        .iter_mut()
+                        .rev()
+                        .find(|mode| matches!(mode, LexMode::InterpolationExpression { .. }))
+                    {
+                        *brace_depth = brace_depth.saturating_sub(1);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Some(item))
+    }
+
+    fn next_string_part(&mut self) -> Result<Option<RawItem>, RawLexerError> {
+        let Some(LexMode::InterpolatedString(state)) = self.modes.last().cloned() else {
+            return Ok(None);
+        };
+
+        if !state.started {
+            let _ = self.cursor.bump();
+            if state.multiline {
+                let _ = self.cursor.bump();
+                let _ = self.cursor.bump();
+            }
+            if let Some(LexMode::InterpolatedString(current)) = self.modes.last_mut() {
+                current.started = true;
+            }
+        }
+
+        loop {
+            if self.cursor.is_eof() {
+                let start = state.part_start;
+                let _ = self.modes.pop();
+                self.report(start, "unclosed interpolated string literal")?;
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                })));
+            }
+
+            if !state.multiline && matches!(self.cursor.peek(), Some('\n' | '\r')) {
+                let start = state.part_start;
+                let _ = self.modes.pop();
+                self.report(start, "unclosed interpolated string literal")?;
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                })));
+            }
+
+            if (state.multiline
+                && self.cursor.peek() == Some('"')
+                && self.cursor.peek_nth(1) == Some('"')
+                && self.cursor.peek_nth(2) == Some('"'))
+                || (!state.multiline && self.cursor.peek() == Some('"'))
+            {
+                if state.multiline {
+                    let _ = self.cursor.bump();
+                    let _ = self.cursor.bump();
+                    let _ = self.cursor.bump();
+                } else {
+                    let _ = self.cursor.bump();
+                }
+                let _ = self.modes.pop();
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::StringPart,
+                    span: self.span(state.part_start)?,
+                })));
+            }
+
+            if self.cursor.peek() == Some('$') {
+                match self.cursor.peek_nth(1) {
+                    Some('$' | '"') => {
+                        let _ = self.cursor.bump();
+                        let _ = self.cursor.bump();
+                    }
+                    Some('{') => {
+                        let _ = self.cursor.bump();
+                        let brace_start = self.cursor.position();
+                        let _ = self.cursor.bump();
+                        self.modes
+                            .push(LexMode::InterpolationExpression { brace_depth: 1 });
+                        self.pending = Some(RawItem::Token(RawToken {
+                            kind: RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                            span: self.span(brace_start)?,
+                        }));
+                        return Ok(Some(RawItem::Token(RawToken {
+                            kind: RawTokenKind::StringPart,
+                            span: self.span(state.part_start)?,
+                        })));
+                    }
+                    Some(character) if is_identifier_start(character) => {
+                        let _ = self.cursor.bump();
+                        self.modes.push(LexMode::SimpleSplice);
+                        return Ok(Some(RawItem::Token(RawToken {
+                            kind: RawTokenKind::StringPart,
+                            span: self.span(state.part_start)?,
+                        })));
+                    }
+                    _ => {
+                        let _ = self.cursor.bump();
+                        self.report(state.part_start, "invalid string interpolation splice")?;
+                    }
+                }
+                continue;
+            }
+
+            if !state.multiline && self.cursor.peek() == Some('\\') {
+                let _ = self.scan_escape(state.part_start)?;
+            } else {
+                let _ = self.cursor.bump();
+            }
+        }
+    }
+
+    fn next_simple_splice(&mut self) -> Result<Option<RawItem>, RawLexerError> {
+        let start = self.cursor.position();
+        if !self.cursor.peek().is_some_and(is_identifier_start) {
+            let _ = self.modes.pop();
+            self.report(start, "interpolation identifier expected after `$`")?;
+            return Ok(Some(RawItem::Token(RawToken {
+                kind: RawTokenKind::Error,
+                span: self.span(start)?,
+            })));
+        }
+
+        let token = self.scan_identifier_token(start, false)?;
+        let _ = self.modes.pop();
+        self.resume_string_after_expression();
+        Ok(Some(RawItem::Token(token)))
+    }
+
+    fn resume_string_after_expression(&mut self) {
+        if let Some(LexMode::InterpolatedString(state)) = self.modes.last_mut() {
+            state.part_start = self.cursor.position();
+        }
     }
 
     fn scan_whitespace(
@@ -258,6 +475,14 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        self.scan_identifier_token(start, true)
+    }
+
+    fn scan_identifier_token(
+        &mut self,
+        start: u32,
+        allow_interpolation: bool,
+    ) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         while let Some(character) = self.cursor.peek() {
             if character == '_' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
@@ -276,9 +501,26 @@ impl<'source> RawLexer<'source> {
 
         let span = self.span(start)?;
         let text = self.source.slice(span)?;
-        let kind = classify_keyword(text)
-            .map(RawTokenKind::Keyword)
-            .unwrap_or(RawTokenKind::Identifier);
+        if allow_interpolation && self.cursor.peek() == Some('"') {
+            let multiline =
+                self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
+            self.modes.push(LexMode::InterpolatedString(StringState {
+                part_start: self.cursor.position(),
+                multiline,
+                started: false,
+            }));
+            return Ok(RawToken {
+                kind: RawTokenKind::InterpolationId,
+                span,
+            });
+        }
+        let kind = if !allow_interpolation {
+            RawTokenKind::Identifier
+        } else {
+            classify_keyword(text)
+                .map(RawTokenKind::Keyword)
+                .unwrap_or(RawTokenKind::Identifier)
+        };
 
         Ok(RawToken { kind, span })
     }
@@ -890,8 +1132,7 @@ mod tests {
                 RawTokenKind::Operator,
                 RawTokenKind::Identifier,
                 RawTokenKind::Punctuation(Punctuation::RightParen),
-                RawTokenKind::Punctuation(Punctuation::Colon),
-                RawTokenKind::Punctuation(Punctuation::Colon),
+                RawTokenKind::Operator,
                 RawTokenKind::Identifier,
                 RawTokenKind::Eof,
             ]
@@ -1249,5 +1490,185 @@ mod tests {
 
         assert_eq!(error_count, 1);
         assert_eq!(diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn recognizes_simple_interpolation_and_preserves_part_spans() {
+        let (items, diagnostics) = scan("s\"hello $name!\"");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 9),
+                token(RawTokenKind::Identifier, 9, 13),
+                token(RawTokenKind::StringPart, 13, 15),
+                token(RawTokenKind::Eof, 15, 15),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_braced_interpolation_expressions() {
+        let (items, diagnostics) = scan("s\"${foo + bar}\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn treats_double_dollar_as_string_content() {
+        let (items, diagnostics) = scan("s\"$$$x\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_simple_splice_names_as_identifiers_even_when_they_are_keywords() {
+        let (items, diagnostics) = scan("s\"$if\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn supports_arbitrary_and_multiline_interpolator_names() {
+        let (items, diagnostics) = scan("foo\"$x\" s\"\"\"$y\"\"\"");
+        let interpolators = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RawItem::Token(RawToken {
+                        kind: RawTokenKind::InterpolationId,
+                        ..
+                    })
+                )
+            })
+            .count();
+
+        assert_eq!(interpolators, 2);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn supports_nested_interpolation_inside_a_braced_expression() {
+        let (items, diagnostics) = scan("s\"${s\"$x\"}\"");
+        let interpolation_count = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RawItem::Token(RawToken {
+                        kind: RawTokenKind::InterpolationId,
+                        ..
+                    })
+                )
+            })
+            .count();
+
+        assert_eq!(interpolation_count, 2);
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                RawItem::Token(RawToken {
+                    kind: RawTokenKind::Punctuation(Punctuation::RightBrace),
+                    ..
+                })
+            )
+        }));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn does_not_start_interpolation_after_whitespace() {
+        let (items, diagnostics) = scan("s \"text\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::StringLiteral,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_unclosed_interpolation_expression() {
+        let (items, diagnostics) = scan("s\"${foo\"");
+
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                RawItem::Token(RawToken {
+                    kind: RawTokenKind::Error,
+                    ..
+                })
+            )
+        }));
+        assert!(!diagnostics.is_empty());
     }
 }

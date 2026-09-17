@@ -32,6 +32,8 @@ pub enum RawTokenKind {
     FloatLiteral,
     DoubleLiteral,
     StringLiteral,
+    InterpolationId,
+    StringPart,
 }
 
 /// Alphabetic keywords recognized by the Scala 3.9.0 scanner.
