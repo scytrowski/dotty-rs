@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 
@@ -41,6 +42,7 @@ LAYOUT_KINDS = {"end of statement", "indent", "unindent"}
 
 def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
     rows: list[tuple[str, int]] = []
+    interpolation_ranges = find_interpolation_ranges(source)
     for line in lines:
         fields = line.split("\t")
         if len(fields) < 6 or fields[0] == "token":
@@ -52,13 +54,19 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
             continue
         token, _, _, _, name, *_ = fields
         spelling = source.encode("utf-8")[start:end].decode("utf-8", errors="replace")
-        rows.append((oracle_kind(token, name, spelling), start))
+        in_interpolation = any(
+            range_start <= start < range_end
+            for range_start, range_end in interpolation_ranges
+        )
+        rows.append((oracle_kind(token, name, spelling, in_interpolation), start))
     if not rows:
         raise ValueError("oracle output did not contain token rows")
     return rows
 
 
-def oracle_kind(token: str, name: str, spelling: str) -> str:
+def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
+    if token == "string literal" and in_interpolation:
+        return "string part"
     if token == "number literal":
         if "." in spelling:
             return "decimal literal"
@@ -70,6 +78,21 @@ def oracle_kind(token: str, name: str, spelling: str) -> str:
     if token and not token[0].isalnum() and not token.startswith("'"):
         return "operator"
     return token
+
+
+def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    pattern = re.compile(r'(?<![\w$])(?:[A-Za-z_][A-Za-z0-9_]*)("""|")')
+    for match in pattern.finditer(source):
+        quote = match.group(1)
+        content_start = match.end()
+        closing = source.find(quote, content_start)
+        if closing < 0:
+            continue
+        start = len(source[:content_start - len(quote)].encode("utf-8"))
+        end = len(source[: closing + len(quote)].encode("utf-8"))
+        ranges.append((start, end))
+    return ranges
 
 
 def is_identifier_name(name: str) -> bool:
