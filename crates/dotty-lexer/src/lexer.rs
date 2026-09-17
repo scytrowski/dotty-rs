@@ -1186,6 +1186,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_supplementary_unicode_identifier_starts() {
+        let source = "val 𐐀 = 1";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Keyword(HardKeyword::Val), 0, 3),
+                trivia(TriviaKind::Spaces, 3, 4),
+                token(RawTokenKind::Identifier, 4, 8),
+                trivia(TriviaKind::Spaces, 8, 9),
+                token(RawTokenKind::Operator, 9, 10),
+                trivia(TriviaKind::Spaces, 10, 11),
+                token(RawTokenKind::IntegerLiteral, 11, 12),
+                token(RawTokenKind::Eof, 12, 12),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn keeps_soft_keywords_as_identifiers() {
         let (items, diagnostics) = scan("using inline extension end");
         let kinds: Vec<_> = items
@@ -1434,6 +1455,30 @@ mod tests {
                 RawTokenKind::LongLiteral,
                 RawTokenKind::IntegerLiteral,
                 RawTokenKind::Punctuation(Punctuation::Dot),
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_case_variants_of_numeric_suffixes_and_exponent_separators() {
+        let (items, diagnostics) = scan("1l 1F 1D 1.0e1_0");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::LongLiteral,
+                RawTokenKind::FloatLiteral,
+                RawTokenKind::DoubleLiteral,
+                RawTokenKind::ExponentLiteral,
                 RawTokenKind::Eof,
             ]
         );
