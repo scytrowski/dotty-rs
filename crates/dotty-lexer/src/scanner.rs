@@ -192,7 +192,7 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
 
-    for item in items {
+    for (item_index, item) in items.iter().enumerate() {
         match item {
             RawItem::Trivia(current) => trivia.push(current),
             RawItem::Token(raw) => {
@@ -200,6 +200,14 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                 let blank_line = trivia_line_breaks(source, &trivia) > 1;
                 let indentation = line_indentation(source, raw.span.start());
                 let layout_enabled = paren_depth == 0 && bracket_depth == 0;
+                let leading_infix = is_leading_infix(
+                    source,
+                    items,
+                    item_index,
+                    previous_kind,
+                    blank_line,
+                    previous_end,
+                );
 
                 if has_line_break && layout_enabled {
                     if brace_depth == 0 {
@@ -214,8 +222,8 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                     }
 
                     if can_end_statement(previous_kind)
-                        && can_start_statement(raw.kind)
-                        && !matches!(raw.kind, RawTokenKind::Operator)
+                        && (can_start_statement(raw.kind) || leading_infix)
+                        && !leading_infix
                     {
                         let separator = if blank_line {
                             TokenKind::Newlines
@@ -377,6 +385,42 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
                     | Punctuation::RightBrace
             )
     )
+}
+
+fn is_leading_infix(
+    source: &str,
+    items: &[RawItem],
+    item_index: usize,
+    previous_kind: Option<TokenKind>,
+    blank_line: bool,
+    previous_end: u32,
+) -> bool {
+    if blank_line || !can_end_statement(previous_kind) {
+        return false;
+    }
+    let RawItem::Token(current) = &items[item_index] else {
+        return false;
+    };
+    if current.kind != RawTokenKind::Operator {
+        return false;
+    }
+    let Some(next) = next_raw_token(items, item_index) else {
+        return false;
+    };
+    if !can_start_statement(next.kind) {
+        return false;
+    }
+
+    let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
+    let operator_indent = line_indentation(source, current.span.start());
+    is_prefix(&previous_indent, &operator_indent)
+}
+
+fn next_raw_token(items: &[RawItem], item_index: usize) -> Option<&RawToken> {
+    items[item_index + 1..].iter().find_map(|item| match item {
+        RawItem::Token(token) => Some(token),
+        RawItem::Trivia(_) => None,
+    })
 }
 
 fn is_prefix(prefix: &str, value: &str) -> bool {
@@ -587,6 +631,21 @@ mod tests {
     #[test]
     fn inserts_newlines_after_a_blank_line() {
         assert!(kinds("val first = 1\n\nval second = 2").contains(&TokenKind::Newlines));
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_operator_on_the_previous_statement() {
+        assert_eq!(
+            kinds("value\n  + other\n\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

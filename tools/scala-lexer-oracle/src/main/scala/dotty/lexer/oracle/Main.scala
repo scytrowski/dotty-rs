@@ -18,7 +18,6 @@ object Main:
     val scanner = Scanners.Scanner(sourceFile)(using context)
 
     println("token\tstart\tend\tline_start\tname\tstring_value\tbase")
-    scanner.nextToken()
     var done = false
     while !done do
       val token = Tokens.tokenString(scanner.token)

@@ -63,7 +63,9 @@ Implementation status on the current lexer branch:
 - parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
   scanner event contract;
-- end markers, leading-infix continuation, and `CASECLASS`/`CASEOBJECT`
+- basic leading-infix continuation is recognized when a line-start operator
+  continues a previous expression;
+- end markers, richer infix lookahead rules, and `CASECLASS`/`CASEOBJECT`
   post-processing are intentionally still staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
@@ -461,8 +463,9 @@ Tests include nested regions, tabs/spaces, incomparable prefixes, `match`,
 Implement independently testable leading-infix detection and parser/scanner
 events for `ColonEol`, `Indented`, `Outdented`, and `ArrowIndented`. Classify
 `COLONop`, `COLONfollow`, and `COLONeol` only with the context available at this
-layer. The current increment covers the colon classification and event
-transport; leading-infix detection and richer outdent rules remain next.
+layer. The current increment covers colon classification, event transport, and
+the first leading-infix continuation rule; richer lookahead and outdent rules
+remain next.
 
 ### Increment 8 — End markers and post-processing
 
