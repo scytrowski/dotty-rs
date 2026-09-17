@@ -1,14 +1,18 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
+#[path = "support/category_five.rs"]
+mod category_five;
 #[path = "support/corpus.rs"]
 mod corpus;
 #[path = "support/semantic.rs"]
 mod semantic;
 
 use dotty_tasty::tasty::{
-    EncodedSection, RawNode, RawNodes, Reader, StandardSection, TastyFile, TastyFileBuilder, Writer,
+    EncodedSection, NodeCategory, RawNode, RawNodes, Reader, StandardSection, TastyFile,
+    TastyFileBuilder, Writer,
 };
 
 fn scala3_compiler_corpus() -> corpus::Corpus {
@@ -19,6 +23,31 @@ fn scala3_compiler_corpus() -> corpus::Corpus {
 
 fn scala3_compiler_fixtures() -> &'static [corpus::ParsedFixture] {
     corpus::parsed_fixtures(&scala3_compiler_corpus(), 28, 9, 0)
+}
+
+fn scala3_library_corpus() -> corpus::Corpus {
+    corpus::Corpus::load(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scala3-library"),
+    )
+}
+
+fn add_category_five_tags(file: &TastyFile<'_>, tags: &mut BTreeSet<u8>) {
+    let index = file
+        .ast_address_index()
+        .expect("all coverage corpus files must build an AST index");
+    for node in index.iter_nodes() {
+        if NodeCategory::from_tag(node.tag) == Some(NodeCategory::Category5) {
+            tags.insert(node.tag);
+        }
+    }
+}
+
+fn add_category_five_tags_from_path(path: &Path, tags: &mut BTreeSet<u8>) {
+    let bytes =
+        fs::read(path).unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let file = TastyFile::parse_scala_3_9(&bytes)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    add_category_five_tags(&file, tags);
 }
 
 /// Returns canonical structured bytes for a node, excluding its original
@@ -62,6 +91,57 @@ fn scala3_compiler_fixture_inventory_is_complete() {
     );
     assert_eq!(fixtures.len(), corpus.manifest().fixture_count);
     assert_eq!(total_bytes, corpus.manifest().fixture_bytes);
+}
+
+#[test]
+fn category_five_coverage_matrix_matches_all_real_corpora() {
+    let mut observed = BTreeSet::new();
+
+    for fixture in scala3_compiler_fixtures() {
+        add_category_five_tags(&fixture.file, &mut observed);
+    }
+    for path in scala3_library_corpus().fixture_paths() {
+        add_category_five_tags_from_path(&path, &mut observed);
+    }
+    for relative_path in [
+        "obscure_tasty/ObscureTasty.tasty",
+        "signature_polymorphic/SignaturePolymorphic$package.tasty",
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(relative_path);
+        add_category_five_tags_from_path(&path, &mut observed);
+    }
+
+    let matrix_tags = category_five::MATRIX
+        .iter()
+        .map(|entry| entry.tag)
+        .collect::<BTreeSet<_>>();
+    let assigned_tags = (0..=u8::MAX)
+        .filter(|tag| NodeCategory::is_known_tag(*tag))
+        .filter(|tag| NodeCategory::from_tag(*tag) == Some(NodeCategory::Category5))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        matrix_tags.len(),
+        category_five::MATRIX.len(),
+        "category-five coverage matrix contains duplicate tags"
+    );
+    assert_eq!(
+        matrix_tags, assigned_tags,
+        "category-five coverage matrix is incomplete or contains an unassigned tag"
+    );
+
+    let expected = category_five::MATRIX
+        .iter()
+        .filter(|entry| entry.kind == category_five::CoverageKind::RealCorpus)
+        .map(|entry| entry.tag)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        observed, expected,
+        "real category-five tag coverage changed; update support/category_five.rs and the coverage documentation"
+    );
+    assert_eq!(category_five::MATRIX.len(), 58);
 }
 
 #[test]

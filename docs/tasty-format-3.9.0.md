@@ -782,6 +782,9 @@ Unassigned values in this range include `1`, `7`, and `30`.
 
 Unassigned values in category 5 must not automatically be treated as valid nodes. `HOLE` is a valid special tag.
 
+The current real-fixture and synthetic-test coverage of the category-five
+matrix is tracked in [`category-five-coverage-3.9.0.md`](category-five-coverage-3.9.0.md).
+
 ## 8. Modifiers
 
 A modifier is usually a single category-1 tag. Modifiers carrying a payload are:
