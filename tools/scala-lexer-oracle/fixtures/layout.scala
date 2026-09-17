@@ -8,3 +8,10 @@ value
 value
 
   + other
+
+value
+  `op` other
+
+value
+
+  `op` other

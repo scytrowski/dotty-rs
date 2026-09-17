@@ -63,8 +63,9 @@ Implementation status on the current lexer branch:
 - parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
   scanner event contract;
-- leading-infix continuation is recognized for line-start operators, while a
-  symbolic operator after a blank line starts a new logical statement;
+- leading-infix continuation is recognized for line-start symbolic and
+  backquoted operators, while an operator after a blank line starts a new
+  logical statement;
 - same-line `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker
   recognition are now part of scanner post-processing, including
   `new`/`this`/`given`/`val` targets;

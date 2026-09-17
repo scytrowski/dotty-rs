@@ -508,7 +508,10 @@ fn is_leading_infix(
     let RawItem::Token(current) = &items[item_index] else {
         return false;
     };
-    if current.kind != RawTokenKind::Operator {
+    if !matches!(
+        current.kind,
+        RawTokenKind::Operator | RawTokenKind::BackquotedIdentifier
+    ) {
         return false;
     }
     let Some(next) = next_raw_token(items, item_index) else {
@@ -1443,6 +1446,35 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_backquoted_operator_on_the_previous_statement() {
+        assert_eq!(
+            kinds("value\n  `op` other\n\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::BackquotedIdentifier,
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_a_backquoted_operator_after_a_blank_line() {
+        assert_eq!(
+            kinds("value\n\n  `op` other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::BackquotedIdentifier,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
