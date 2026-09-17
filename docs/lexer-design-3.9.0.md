@@ -76,6 +76,9 @@ Implementation status on the current lexer branch:
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
   `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
   plus `{` token sequence;
+- contextual modifier and clause words such as `using`, `extension`, `inline`,
+  `opaque`, `open`, `transparent`, `as`, `derives`, and `infix` remain raw
+  identifiers until a later contextual phase;
 - an XML start marker is emitted for `<` immediately followed by an XML name;
   XML tag operators retain Scala's greedy operator boundaries, XML body
   expressions have an isolated state stack, comments and CDATA protect their
@@ -520,7 +523,8 @@ list, attributes on closing tags, and unfinished tags when they reach EOF.
 EOF recovery distinguishes a missing attribute `=`, a missing attribute value,
 and an unclosed attribute expression. Add remaining quote/splice forms,
 compatibility syntax, and broader malformed-input recovery without entangling
-XML state with normal Scala tokenization.
+XML state with normal Scala tokenization. The currently supported soft
+compatibility words are covered by a dedicated oracle fixture.
 
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid

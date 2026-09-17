@@ -1307,6 +1307,75 @@ mod tests {
     }
 
     #[test]
+    fn keeps_soft_modifier_words_as_identifiers() {
+        let (items, diagnostics) = scan("using extension inline");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_soft_type_modifier_words_as_identifiers() {
+        let (items, diagnostics) = scan("opaque open transparent");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_soft_context_words_as_identifiers() {
+        let (items, diagnostics) = scan("as derives infix");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn emits_a_valid_backquoted_identifier() {
         let (items, diagnostics) = scan("`foo-bar`");
 
