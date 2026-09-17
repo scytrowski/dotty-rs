@@ -1343,6 +1343,19 @@ mod tests {
     }
 
     #[test]
+    fn forwards_unterminated_xml_element_diagnostic() {
+        let source = "<item>text";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(scanner.diagnostics()[0].message(), "unterminated XML tag");
+        assert_eq!(
+            scanner.diagnostics()[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
     fn diagnoses_incomparable_indentation_prefixes() {
         let scanner =
             ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");
