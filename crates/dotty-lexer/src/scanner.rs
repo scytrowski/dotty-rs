@@ -1,17 +1,18 @@
 use dotty_diagnostics::Diagnostic;
 use dotty_source::{TextRange, TextRangeError};
-use dotty_token::{HardKeyword, Punctuation, Token, TokenKind};
+use dotty_token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
 use crate::{RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia};
 
 /// The first parser-facing scanner stage.
 ///
 /// This stage maps the lossless raw stream to shared token kinds and performs
-/// the layout rules that do not require parser feedback. It is intentionally
-/// conservative around `:`: colon-triggered regions will be enabled when the
-/// parser event protocol is implemented.
+/// the layout rules that do not require parser feedback. Colon-triggered
+/// regions are enabled only after the parser sends the corresponding scanner
+/// event.
 #[derive(Debug)]
 pub struct ContextualScanner {
+    source: String,
     tokens: Vec<Token>,
     position: usize,
     diagnostics: Vec<Diagnostic>,
@@ -42,6 +43,7 @@ impl ContextualScanner {
         let diagnostics = raw_lexer.diagnostics().to_vec();
         let tokens = build_tokens(source, &items)?;
         Ok(Self {
+            source: source.to_owned(),
             tokens,
             position: 0,
             diagnostics,
@@ -65,6 +67,117 @@ impl ContextualScanner {
             self.position += 1;
         }
         token
+    }
+
+    fn current_index(&self) -> usize {
+        self.position.min(self.tokens.len().saturating_sub(1))
+    }
+
+    fn next_line_is_indented(&self, current_index: usize) -> bool {
+        let Some(current) = self.tokens.get(current_index) else {
+            return false;
+        };
+        let Some(next) = self.tokens.get(current_index + 1) else {
+            return false;
+        };
+        if next.kind == TokenKind::Eof {
+            return false;
+        }
+        if !has_source_line_break(&self.source, current.span.end(), next.span.start()) {
+            return false;
+        }
+        let current_indent = line_indentation(&self.source, current.span.start());
+        let next_indent = line_indentation(&self.source, next.span.start());
+        is_prefix(&current_indent, &next_indent) && current_indent != next_indent
+    }
+
+    fn insert_indent_after_current(&mut self) {
+        let index = self.current_index();
+        if !self.next_line_is_indented(index)
+            || self
+                .tokens
+                .get(index + 1)
+                .is_some_and(|token| token.kind == TokenKind::Indent)
+        {
+            return;
+        }
+        let offset = self.tokens[index + 1].span.start();
+        self.tokens.insert(
+            index + 1,
+            Token::new(
+                TokenKind::Indent,
+                TextRange::new(offset, offset).expect("synthetic range is valid"),
+            ),
+        );
+    }
+
+    fn insert_outdent_before_current(&mut self) {
+        let index = self.current_index();
+        if self
+            .tokens
+            .get(index)
+            .is_some_and(|token| token.kind == TokenKind::Outdent)
+        {
+            return;
+        }
+        let depth = self.tokens[..index]
+            .iter()
+            .fold(0usize, |depth, token| match token.kind {
+                TokenKind::Indent => depth.saturating_add(1),
+                TokenKind::Outdent => depth.saturating_sub(1),
+                _ => depth,
+            });
+        if depth == 0 {
+            return;
+        }
+        let offset = self.tokens[index].span.start();
+        self.tokens.insert(
+            index,
+            Token::new(
+                TokenKind::Outdent,
+                TextRange::new(offset, offset).expect("synthetic range is valid"),
+            ),
+        );
+    }
+}
+
+impl TokenSource for ContextualScanner {
+    fn current(&self) -> &Token {
+        &self.tokens[self.current_index()]
+    }
+
+    fn advance(&mut self) {
+        if self.position + 1 < self.tokens.len() {
+            self.position += 1;
+        }
+    }
+
+    fn lookahead(&mut self, n: usize) -> &Token {
+        let index = self
+            .current_index()
+            .saturating_add(n)
+            .min(self.tokens.len().saturating_sub(1));
+        &self.tokens[index]
+    }
+
+    fn observe(&mut self, event: ScannerEvent) {
+        match event {
+            ScannerEvent::ColonEol { .. } => {
+                let index = self.current_index();
+                if self.tokens[index].kind == TokenKind::ColonFollow
+                    || self.tokens[index].kind == TokenKind::ColonOp
+                {
+                    self.tokens[index].kind = TokenKind::ColonEol;
+                }
+            }
+            ScannerEvent::Indented => self.insert_indent_after_current(),
+            ScannerEvent::Outdented => self.insert_outdent_before_current(),
+            ScannerEvent::ArrowIndented => {
+                if self.current().kind == TokenKind::Operator {
+                    self.insert_indent_after_current();
+                }
+            }
+        }
     }
 }
 
@@ -116,7 +229,7 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
                     }
                 }
 
-                let token = Token::new(to_token_kind(raw.kind), raw.span);
+                let token = Token::new(to_token_kind(raw.kind, previous_kind), raw.span);
                 update_delimiters(
                     raw.kind,
                     &mut paren_depth,
@@ -329,7 +442,11 @@ fn line_indentation(source: &str, offset: u32) -> String {
         .collect()
 }
 
-fn to_token_kind(kind: RawTokenKind) -> TokenKind {
+fn has_source_line_break(source: &str, start: u32, end: u32) -> bool {
+    start < end && count_line_breaks(&source[start as usize..end as usize]) > 0
+}
+
+fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
     match kind {
         RawTokenKind::Error => TokenKind::Error,
         RawTokenKind::Eof => TokenKind::Eof,
@@ -337,6 +454,22 @@ fn to_token_kind(kind: RawTokenKind) -> TokenKind {
         RawTokenKind::BackquotedIdentifier => TokenKind::BackquotedIdentifier,
         RawTokenKind::Operator => TokenKind::Operator,
         RawTokenKind::Keyword(keyword) => TokenKind::Keyword(keyword),
+        RawTokenKind::Punctuation(Punctuation::Colon) => {
+            if matches!(
+                previous,
+                Some(
+                    TokenKind::Identifier
+                        | TokenKind::BackquotedIdentifier
+                        | TokenKind::Punctuation(
+                            Punctuation::RightParen | Punctuation::RightBracket
+                        )
+                )
+            ) {
+                TokenKind::ColonFollow
+            } else {
+                TokenKind::ColonOp
+            }
+        }
         RawTokenKind::Punctuation(punctuation) => TokenKind::Punctuation(punctuation),
         RawTokenKind::CharLiteral => TokenKind::CharLiteral,
         RawTokenKind::IntegerLiteral => TokenKind::IntegerLiteral,
@@ -376,6 +509,60 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn classifies_colons_by_their_lexical_predecessor() {
+        assert_eq!(
+            kinds("value: Int"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::ColonFollow,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("+ : Int"),
+            vec![
+                TokenKind::Operator,
+                TokenKind::ColonOp,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_eol_feedback_reclassifies_colon_and_can_open_indent() {
+        let mut scanner = ContextualScanner::new("object Foo:\n  val x = 1").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::ColonFollow);
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        assert_eq!(scanner.current().kind, TokenKind::ColonEol);
+
+        scanner.observe(ScannerEvent::Indented);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Keyword(HardKeyword::Val));
+    }
+
+    #[test]
+    fn arrow_indented_feedback_opens_a_body_region() {
+        let mut scanner = ContextualScanner::new("case 1 =>\n  body").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::Operator);
+        scanner.observe(ScannerEvent::ArrowIndented);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
     }
 
     #[test]

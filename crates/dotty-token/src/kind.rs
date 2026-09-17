@@ -13,6 +13,12 @@ pub enum TokenKind {
     Keyword(HardKeyword),
     /// A delimiter or punctuation token.
     Punctuation(Punctuation),
+    /// A colon used as an operator.
+    ColonOp,
+    /// A colon following a type or term prefix.
+    ColonFollow,
+    /// A colon confirmed by parser feedback to end a line.
+    ColonEol,
     /// A character literal.
     CharLiteral,
     /// An integer literal.

@@ -60,9 +60,11 @@ Implementation status on the current lexer branch:
 - the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
   prefix-based indentation regions for non-colon triggers such as `then`,
   `else`, `match`, and `try`;
-- colon-triggered indentation, parser-observed colon events, end markers,
-  leading-infix continuation, and `CASECLASS`/`CASEOBJECT` post-processing are
-  intentionally still staged.
+- parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
+  `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
+  scanner event contract;
+- end markers, leading-infix continuation, and `CASECLASS`/`CASEOBJECT`
+  post-processing are intentionally still staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require
@@ -459,7 +461,8 @@ Tests include nested regions, tabs/spaces, incomparable prefixes, `match`,
 Implement independently testable leading-infix detection and parser/scanner
 events for `ColonEol`, `Indented`, `Outdented`, and `ArrowIndented`. Classify
 `COLONop`, `COLONfollow`, and `COLONeol` only with the context available at this
-layer.
+layer. The current increment covers the colon classification and event
+transport; leading-infix detection and richer outdent rules remain next.
 
 ### Increment 8 — End markers and post-processing
 
