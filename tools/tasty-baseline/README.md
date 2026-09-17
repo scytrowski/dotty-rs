@@ -59,3 +59,22 @@ share the same traversal semantics.
 The projection deliberately excludes absolute AST offsets, types,
 overload-resolution details, and compiler-generated symbols.
 It is a semantic-lite oracle, not a Rust semantic model.
+
+## Wire-aligned Rust baseline
+
+The root Rust package also provides `tasty-wire-baseline`. It reads a
+materialized directory of `.tasty` files with the Rust decoder and writes the
+manifest-selected `wire-v1` projection:
+
+```text
+tools/tasty-baseline/generate-wire.sh \
+  crates/dotty-tasty/tests/fixtures/scala3-library
+```
+
+This projection is deliberately separate from the Scala semantic oracle. It
+records exact AST tag counts, definition order, raw definition name references
+and kinds, and the wire header sequence of `TYPEPARAM`, `PARAM`, `EMPTYCLAUSE`,
+and `SPLITCLAUSE` markers for every indexed definition. Rust integration tests
+compare these fields exactly and report the fixture and definition index on a
+mismatch. It is a structural regression baseline for a pinned corpus, not a
+replacement for an independent semantic oracle.

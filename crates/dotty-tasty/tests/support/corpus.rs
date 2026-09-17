@@ -15,6 +15,7 @@ pub struct CorpusManifest {
     pub tasty_root: PathBuf,
     pub selection_file: Option<PathBuf>,
     pub expectation_file: Option<PathBuf>,
+    pub wire_expectation_file: Option<PathBuf>,
     pub artifact: Option<String>,
     pub artifact_sha256: Option<String>,
 }
@@ -92,6 +93,13 @@ impl Corpus {
     pub fn expectation_path(&self) -> Option<PathBuf> {
         self.manifest
             .expectation_file
+            .as_ref()
+            .map(|path| self.root.join(path))
+    }
+
+    pub fn wire_expectation_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .wire_expectation_file
             .as_ref()
             .map(|path| self.root.join(path))
     }
@@ -266,6 +274,9 @@ impl CorpusManifest {
             expectation_file: input.lines().filter_map(parse_assignment).find_map(
                 |(key, value)| (key == "expectation_file").then_some(PathBuf::from(value)),
             ),
+            wire_expectation_file: input.lines().filter_map(parse_assignment).find_map(
+                |(key, value)| (key == "wire_expectation_file").then_some(PathBuf::from(value)),
+            ),
             artifact: input
                 .lines()
                 .filter_map(parse_assignment)
@@ -347,6 +358,7 @@ mod tests {
         assert_eq!(manifest.tasty_root, PathBuf::from("tasty"));
         assert_eq!(manifest.selection_file, None);
         assert_eq!(manifest.expectation_file, None);
+        assert_eq!(manifest.wire_expectation_file, None);
         assert_eq!(manifest.artifact, None);
         assert_eq!(manifest.artifact_sha256, None);
     }
@@ -368,6 +380,7 @@ mod tests {
         assert_eq!(manifest.tasty_root, PathBuf::from("."));
         assert_eq!(manifest.selection_file, None);
         assert_eq!(manifest.expectation_file, None);
+        assert_eq!(manifest.wire_expectation_file, None);
         assert_eq!(manifest.artifact, None);
         assert_eq!(manifest.artifact_sha256, None);
     }
@@ -386,6 +399,7 @@ mod tests {
                 tasty_root: PathBuf::from("."),
                 selection_file: Some(PathBuf::from("selection.txt")),
                 expectation_file: Some(PathBuf::from("expectations/semantic.json")),
+                wire_expectation_file: Some(PathBuf::from("expectations/wire-v1.json")),
                 artifact: None,
                 artifact_sha256: None,
             },
@@ -399,6 +413,12 @@ mod tests {
             corpus.expectation_path(),
             Some(PathBuf::from(
                 "/tmp/example-corpus/expectations/semantic.json"
+            ))
+        );
+        assert_eq!(
+            corpus.wire_expectation_path(),
+            Some(PathBuf::from(
+                "/tmp/example-corpus/expectations/wire-v1.json"
             ))
         );
         assert_eq!(

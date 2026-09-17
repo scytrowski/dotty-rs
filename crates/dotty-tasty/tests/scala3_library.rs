@@ -6,6 +6,8 @@ use std::path::Path;
 mod corpus;
 #[path = "support/semantic.rs"]
 mod semantic;
+#[path = "support/wire.rs"]
+mod wire;
 
 use dotty_tasty::tasty::{
     EncodedSection, PACKAGE_TAG, RawNode, RawNodes, Reader, StandardSection, TastyFile,
@@ -20,6 +22,11 @@ fn scala3_library_corpus() -> corpus::Corpus {
 
 fn scala3_library_fixtures() -> &'static [corpus::ParsedFixture] {
     corpus::parsed_fixtures(&scala3_library_corpus(), 28, 9, 0)
+}
+
+#[test]
+fn scala3_library_wire_expectations_match_selected_fixtures() {
+    wire::assert_expectations_match_selected_fixtures(&scala3_library_corpus(), 1, (28, 9, 0));
 }
 
 /// Returns canonical structured bytes used as a structural fingerprint.
