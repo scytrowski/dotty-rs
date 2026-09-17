@@ -153,6 +153,70 @@ impl From<ReadError> for ConstantPoolError {
     }
 }
 
+/// The expected shape of a constant pool entry, used by [`PoolRefError`] to
+/// report what a reference *should* have resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Utf8,
+    Class,
+    NameAndType,
+    MethodHandle,
+    /// One of the "loadable constant" tags (JVMS §4.4): `Integer`, `Float`,
+    /// `Long`, `Double`, `String`, `Class`, `MethodHandle`, `MethodType`, or
+    /// `Dynamic`.
+    Loadable,
+    /// One of the tags allowed for a `ConstantValue` attribute (JVMS
+    /// §4.7.2): `Integer`, `Float`, `Long`, `Double`, or `String`.
+    ConstantValue,
+}
+
+impl fmt::Display for EntryKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let description = match self {
+            Self::Utf8 => "a Utf8 entry",
+            Self::Class => "a Class entry",
+            Self::NameAndType => "a NameAndType entry",
+            Self::MethodHandle => "a MethodHandle entry",
+            Self::Loadable => "a loadable constant",
+            Self::ConstantValue => "a ConstantValue-compatible constant",
+        };
+        formatter.write_str(description)
+    }
+}
+
+/// A failure to resolve a [`ConstantPoolIndex`] to the expected kind of
+/// entry — either nothing is there, or something is, but not the right
+/// shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolRefError {
+    InvalidIndex {
+        index: ConstantPoolIndex,
+    },
+    WrongKind {
+        index: ConstantPoolIndex,
+        expected: EntryKind,
+    },
+}
+
+impl fmt::Display for PoolRefError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidIndex { index } => write!(
+                formatter,
+                "constant pool index {} does not resolve to any entry",
+                index.0
+            ),
+            Self::WrongKind { index, expected } => write!(
+                formatter,
+                "constant pool index {} does not resolve to {expected}",
+                index.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PoolRefError {}
+
 impl ConstantPool {
     pub fn from_entries(entries: Vec<Option<ConstantPoolEntry>>) -> Self {
         Self { entries }
@@ -161,6 +225,104 @@ impl ConstantPool {
     pub fn get(&self, index: ConstantPoolIndex) -> Option<&ConstantPoolEntry> {
         let position = usize::from(index.0).checked_sub(1)?;
         self.entries.get(position)?.as_ref()
+    }
+
+    /// Resolves `index` to a `Utf8` entry's string (JVMS §4.4.7).
+    pub fn utf8(&self, index: ConstantPoolIndex) -> Result<&str, PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Utf8(value)) => Ok(value.as_str()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Utf8,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Resolves `index` to a `Class` entry, then that entry's `name_index`
+    /// to a `Utf8` string (the class's internal binary name, JVMS §4.4.1).
+    pub fn class_name(&self, index: ConstantPoolIndex) -> Result<&str, PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Class { name_index }) => self.utf8(*name_index),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Class,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Resolves `index` to a `NameAndType` entry, then both of its indices
+    /// to `Utf8` strings (name, descriptor) (JVMS §4.4.6).
+    pub fn name_and_type(&self, index: ConstantPoolIndex) -> Result<(&str, &str), PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::NameAndType {
+                name_index,
+                descriptor_index,
+            }) => Ok((self.utf8(*name_index)?, self.utf8(*descriptor_index)?)),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::NameAndType,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Resolves `index` to a `MethodHandle` entry (JVMS §4.4.8).
+    pub fn method_handle(
+        &self,
+        index: ConstantPoolIndex,
+    ) -> Result<&ConstantPoolEntry, PoolRefError> {
+        match self.get(index) {
+            Some(entry @ ConstantPoolEntry::MethodHandle { .. }) => Ok(entry),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::MethodHandle,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to a "loadable constant" (JVMS §4.4),
+    /// as required for e.g. `BootstrapMethods` arguments.
+    pub fn check_loadable(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(
+                ConstantPoolEntry::Integer(_)
+                | ConstantPoolEntry::Float(_)
+                | ConstantPoolEntry::Long(_)
+                | ConstantPoolEntry::Double(_)
+                | ConstantPoolEntry::String { .. }
+                | ConstantPoolEntry::Class { .. }
+                | ConstantPoolEntry::MethodHandle { .. }
+                | ConstantPoolEntry::MethodType { .. }
+                | ConstantPoolEntry::Dynamic { .. },
+            ) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Loadable,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to a tag allowed for a `ConstantValue`
+    /// attribute (JVMS §4.7.2).
+    pub fn check_constant_value(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(
+                ConstantPoolEntry::Integer(_)
+                | ConstantPoolEntry::Float(_)
+                | ConstantPoolEntry::Long(_)
+                | ConstantPoolEntry::Double(_)
+                | ConstantPoolEntry::String { .. },
+            ) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::ConstantValue,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
     }
 
     /// Decodes `constant_pool_count` followed by that many constant pool
@@ -545,6 +707,288 @@ mod tests {
         assert_eq!(
             decode_single_entry(2, &[]),
             Err(ConstantPoolError::UnknownTag { index: 1, tag: 2 })
+        );
+    }
+
+    fn method_handle_entry() -> ConstantPoolEntry {
+        ConstantPoolEntry::MethodHandle {
+            reference_kind: MethodHandleKind::InvokeStatic,
+            reference_index: ConstantPoolIndex(1),
+        }
+    }
+
+    #[test]
+    fn utf8_resolves_a_utf8_entry() {
+        let pool =
+            ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8("hello".to_owned()))]);
+
+        assert_eq!(pool.utf8(ConstantPoolIndex(1)), Ok("hello"));
+    }
+
+    #[test]
+    fn utf8_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.utf8(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn utf8_reports_the_wrong_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            pool.utf8(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn class_name_resolves_a_class_entry() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("java/lang/Object".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+        ]);
+
+        assert_eq!(
+            pool.class_name(ConstantPoolIndex(2)),
+            Ok("java/lang/Object")
+        );
+    }
+
+    #[test]
+    fn class_name_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.class_name(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn class_name_reports_the_wrong_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            pool.class_name(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Class,
+            })
+        );
+    }
+
+    #[test]
+    fn class_name_propagates_a_bad_name_index() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(1)),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+        ]);
+
+        assert_eq!(
+            pool.class_name(ConstantPoolIndex(2)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn name_and_type_resolves_both_strings() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(1),
+                descriptor_index: ConstantPoolIndex(2),
+            }),
+        ]);
+
+        assert_eq!(pool.name_and_type(ConstantPoolIndex(3)), Ok(("run", "()V")));
+    }
+
+    #[test]
+    fn name_and_type_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.name_and_type(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn name_and_type_reports_the_wrong_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            pool.name_and_type(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::NameAndType,
+            })
+        );
+    }
+
+    #[test]
+    fn method_handle_resolves_a_method_handle_entry() {
+        let pool = ConstantPool::from_entries(vec![Some(method_handle_entry())]);
+
+        assert_eq!(
+            pool.method_handle(ConstantPoolIndex(1)),
+            Ok(&method_handle_entry())
+        );
+    }
+
+    #[test]
+    fn method_handle_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.method_handle(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn method_handle_reports_the_wrong_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+
+        assert_eq!(
+            pool.method_handle(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::MethodHandle,
+            })
+        );
+    }
+
+    #[test]
+    fn check_loadable_accepts_every_loadable_kind() {
+        let entries = vec![
+            ConstantPoolEntry::Integer(1),
+            ConstantPoolEntry::Float(1.0),
+            ConstantPoolEntry::Long(1),
+            ConstantPoolEntry::Double(1.0),
+            ConstantPoolEntry::String {
+                string_index: ConstantPoolIndex(1),
+            },
+            ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            },
+            method_handle_entry(),
+            ConstantPoolEntry::MethodType {
+                descriptor_index: ConstantPoolIndex(1),
+            },
+            ConstantPoolEntry::Dynamic {
+                bootstrap_method_attr_index: BootstrapMethodIndex(0),
+                name_and_type_index: ConstantPoolIndex(1),
+            },
+        ];
+
+        for entry in entries {
+            let pool = ConstantPool::from_entries(vec![Some(entry.clone())]);
+            assert_eq!(
+                pool.check_loadable(ConstantPoolIndex(1)),
+                Ok(()),
+                "{entry:?} should be loadable"
+            );
+        }
+    }
+
+    #[test]
+    fn check_loadable_rejects_a_non_loadable_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::NameAndType {
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(1),
+        })]);
+
+        assert_eq!(
+            pool.check_loadable(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Loadable,
+            })
+        );
+    }
+
+    #[test]
+    fn check_loadable_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.check_loadable(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn check_constant_value_accepts_every_constant_value_kind() {
+        let entries = vec![
+            ConstantPoolEntry::Integer(1),
+            ConstantPoolEntry::Float(1.0),
+            ConstantPoolEntry::Long(1),
+            ConstantPoolEntry::Double(1.0),
+            ConstantPoolEntry::String {
+                string_index: ConstantPoolIndex(1),
+            },
+        ];
+
+        for entry in entries {
+            let pool = ConstantPool::from_entries(vec![Some(entry.clone())]);
+            assert_eq!(
+                pool.check_constant_value(ConstantPoolIndex(1)),
+                Ok(()),
+                "{entry:?} should be a valid ConstantValue"
+            );
+        }
+    }
+
+    #[test]
+    fn check_constant_value_rejects_a_non_constant_value_kind() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Class {
+            name_index: ConstantPoolIndex(1),
+        })]);
+
+        assert_eq!(
+            pool.check_constant_value(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::ConstantValue,
+            })
+        );
+    }
+
+    #[test]
+    fn check_constant_value_reports_an_invalid_index() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(
+            pool.check_constant_value(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
         );
     }
 
