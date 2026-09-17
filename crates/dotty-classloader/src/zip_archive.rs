@@ -1,4 +1,6 @@
+use crate::crc32;
 use crate::zip_reader::{ZipReadError, ZipReader};
+use std::collections::HashMap;
 use std::fmt;
 
 const END_OF_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x0605_4B50;
@@ -9,6 +11,9 @@ const END_OF_CENTRAL_DIRECTORY_RECORD_SIZE: usize = 22;
 /// many bytes.
 const MAX_COMMENT_LENGTH: usize = 0xFFFF;
 const CENTRAL_DIRECTORY_FILE_HEADER_SIGNATURE: u32 = 0x0201_4B50;
+const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x0403_4B50;
+/// ZIP `compression method` 0 (APPNOTE.TXT §4.4.5): no compression.
+const COMPRESSION_METHOD_STORED: u16 = 0;
 
 /// Errors reading a ZIP (JAR) archive. Crate-private: callers only see
 /// `JarClassPath`, which maps these into [`crate::class_path::ClassPathError`].
@@ -27,6 +32,20 @@ pub(crate) enum ZipError {
     /// given byte offset.
     InvalidEntryName {
         offset: usize,
+    },
+    /// A local file header didn't start with the expected signature, at
+    /// the given byte offset.
+    InvalidLocalFileHeader {
+        offset: usize,
+    },
+    /// The entry uses a compression method this crate does not (yet)
+    /// implement.
+    UnsupportedCompressionMethod(u16),
+    /// An entry's decompressed bytes did not match the CRC-32 declared
+    /// for it in the central directory.
+    CrcMismatch {
+        expected: u32,
+        actual: u32,
     },
     Read(ZipReadError),
 }
@@ -48,6 +67,16 @@ impl fmt::Display for ZipError {
                     "invalid (non-UTF-8) entry name at offset {offset}"
                 )
             }
+            Self::InvalidLocalFileHeader { offset } => {
+                write!(formatter, "invalid local file header at offset {offset}")
+            }
+            Self::UnsupportedCompressionMethod(method) => {
+                write!(formatter, "unsupported ZIP compression method {method}")
+            }
+            Self::CrcMismatch { expected, actual } => write!(
+                formatter,
+                "CRC-32 mismatch: expected {expected:#010x}, computed {actual:#010x}"
+            ),
             Self::Read(error) => error.fmt(formatter),
         }
     }
@@ -58,7 +87,10 @@ impl std::error::Error for ZipError {
         match self {
             Self::EndOfCentralDirectoryNotFound
             | Self::InvalidCentralDirectoryHeader { .. }
-            | Self::InvalidEntryName { .. } => None,
+            | Self::InvalidEntryName { .. }
+            | Self::InvalidLocalFileHeader { .. }
+            | Self::UnsupportedCompressionMethod(_)
+            | Self::CrcMismatch { .. } => None,
             Self::Read(error) => Some(error),
         }
     }
@@ -210,6 +242,86 @@ pub(crate) fn decode_central_directory(
     }
 
     Ok(entries)
+}
+
+/// A ZIP (JAR) archive opened once from its full byte contents, with its
+/// central directory parsed and indexed by entry name.
+pub(crate) struct ZipArchive {
+    bytes: Vec<u8>,
+    entries: HashMap<String, CentralDirectoryEntry>,
+}
+
+impl ZipArchive {
+    pub(crate) fn open(bytes: Vec<u8>) -> Result<Self, ZipError> {
+        let eocd = EndOfCentralDirectory::locate_and_decode(&bytes)?;
+        let entries = decode_central_directory(&bytes, &eocd)?
+            .into_iter()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect();
+
+        Ok(Self { bytes, entries })
+    }
+
+    /// Extracts and decompresses the entry named `name`, verifying its
+    /// CRC-32 against the value declared in the central directory.
+    /// `Ok(None)` means the archive has no such entry — not an error.
+    pub(crate) fn read_entry(&self, name: &str) -> Result<Option<Vec<u8>>, ZipError> {
+        let Some(entry) = self.entries.get(name) else {
+            return Ok(None);
+        };
+
+        let decompressed = self.extract_entry(entry)?;
+
+        let actual_crc32 = crc32::checksum(&decompressed);
+        if actual_crc32 != entry.crc32 {
+            return Err(ZipError::CrcMismatch {
+                expected: entry.crc32,
+                actual: actual_crc32,
+            });
+        }
+
+        Ok(Some(decompressed))
+    }
+
+    /// Reads the local file header at `entry.local_header_offset` to find
+    /// where the entry's data starts, then decompresses
+    /// `entry.compressed_size` bytes from there. Sizes and the
+    /// compression method are taken from the central directory (already
+    /// parsed), not re-read from the local header — the local header's
+    /// own size fields can legitimately be zero when the general-purpose
+    /// "data descriptor follows" bit is set, so the central directory is
+    /// the only field that's always authoritative.
+    fn extract_entry(&self, entry: &CentralDirectoryEntry) -> Result<Vec<u8>, ZipError> {
+        let header_offset = entry.local_header_offset as usize;
+        let mut reader = ZipReader::with_range(&self.bytes, header_offset, self.bytes.len())?;
+
+        let signature = reader.read_u32()?;
+        if signature != LOCAL_FILE_HEADER_SIGNATURE {
+            return Err(ZipError::InvalidLocalFileHeader {
+                offset: header_offset,
+            });
+        }
+
+        reader.read_u16()?; // version needed to extract
+        reader.read_u16()?; // general purpose bit flag
+        reader.read_u16()?; // compression method (already known)
+        reader.read_u16()?; // last mod file time
+        reader.read_u16()?; // last mod file date
+        reader.read_u32()?; // crc-32 (already known)
+        reader.read_u32()?; // compressed size (already known)
+        reader.read_u32()?; // uncompressed size (already known)
+        let file_name_length = reader.read_u16()?;
+        let extra_field_length = reader.read_u16()?;
+        reader.read_bytes(usize::from(file_name_length))?;
+        reader.read_bytes(usize::from(extra_field_length))?;
+
+        let compressed = reader.read_bytes(entry.compressed_size as usize)?;
+
+        match entry.compression_method {
+            COMPRESSION_METHOD_STORED => Ok(compressed.to_vec()),
+            other => Err(ZipError::UnsupportedCompressionMethod(other)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +484,57 @@ mod tests {
             decode_central_directory(&central_directory, &eocd),
             Err(ZipError::InvalidCentralDirectoryHeader { offset: 0 })
         );
+    }
+
+    fn pool_sample_class_bytes() -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-classfile/tests/fixtures/pool_sample/PoolSample.class"),
+        )
+        .expect("PoolSample.class fixture should exist")
+    }
+
+    fn pool_sample_stored_jar_bytes() -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/pool_sample_jar/pool_sample_stored.jar"),
+        )
+        .expect("pool_sample_stored.jar fixture should exist")
+    }
+
+    #[test]
+    fn extracts_a_stored_entry_matching_the_original_bytes_exactly() {
+        let archive = ZipArchive::open(pool_sample_stored_jar_bytes()).unwrap();
+
+        let extracted = archive
+            .read_entry("PoolSample.class")
+            .unwrap()
+            .expect("entry should be present");
+
+        assert_eq!(extracted, pool_sample_class_bytes());
+    }
+
+    #[test]
+    fn read_entry_returns_none_for_a_missing_name() {
+        let archive = ZipArchive::open(pool_sample_stored_jar_bytes()).unwrap();
+
+        assert_eq!(archive.read_entry("DoesNotExist.class").unwrap(), None);
+    }
+
+    #[test]
+    fn crc_mismatch_is_reported_instead_of_silently_returning_bad_bytes() {
+        let mut jar_bytes = pool_sample_stored_jar_bytes();
+
+        // Corrupt one byte inside the entry's stored data (past the local
+        // file header + "PoolSample.class" name, well before the central
+        // directory) so the CRC-32 declared for it no longer matches.
+        jar_bytes[100] ^= 0xFF;
+
+        let archive = ZipArchive::open(jar_bytes).unwrap();
+
+        assert!(matches!(
+            archive.read_entry("PoolSample.class"),
+            Err(ZipError::CrcMismatch { .. })
+        ));
     }
 }
