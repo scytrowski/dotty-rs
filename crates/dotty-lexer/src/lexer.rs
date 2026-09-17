@@ -165,7 +165,9 @@ impl<'source> RawLexer<'source> {
                     .peek_nth(1)
                     .is_some_and(|next| next.is_ascii_digit()))
         {
-            return Ok(Some(RawItem::Token(self.scan_number(start)?)));
+            let token = self.scan_number(start)?;
+            self.update_xml_token(token.kind, token.span)?;
+            return Ok(Some(RawItem::Token(token)));
         }
         if character == '\'' {
             if matches!(self.cursor.peek_nth(1), Some('{' | '[')) {
@@ -174,7 +176,9 @@ impl<'source> RawLexer<'source> {
             if self.looks_like_quote_id() {
                 return Ok(Some(RawItem::Token(self.scan_quote_id(start)?)));
             }
-            return Ok(Some(RawItem::Token(self.scan_char_literal(start)?)));
+            let token = self.scan_char_literal(start)?;
+            self.update_xml_token(token.kind, token.span)?;
+            return Ok(Some(RawItem::Token(token)));
         }
         if character == '"' {
             let token = self.scan_string_literal(start)?;
@@ -2163,6 +2167,42 @@ mod tests {
         assert_eq!(
             diagnostics[0].message(),
             "XML attribute value must follow `=`"
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_xml_attribute_without_a_name() {
+        let (_, diagnostics) = scan("<item 123/>");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(6, 9).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_xml_attribute_expression_without_a_name() {
+        let (_, diagnostics) = scan("<item {flag}/>");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(6, 7).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unexpected_operator_in_an_xml_attribute_list() {
+        let (_, diagnostics) = scan("<item @ />");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(6, 7).expect("valid range")
         );
     }
 

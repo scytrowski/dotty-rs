@@ -121,7 +121,7 @@ impl XmlState {
             RawTokenKind::Identifier | RawTokenKind::Keyword(_) => {
                 if self.pending_tag_name.is_some() {
                     self.consume_tag_name(spelling);
-                } else {
+                } else if !self.in_xml_expression_at_current_depth() {
                     self.consume_attribute_name();
                 }
             }
@@ -134,7 +134,7 @@ impl XmlState {
             RawTokenKind::Punctuation(Punctuation::LeftBrace) => self.update_left_brace(),
             RawTokenKind::Punctuation(Punctuation::RightBrace) => self.update_right_brace(),
             RawTokenKind::Operator => return self.update_operator(spelling),
-            _ => {}
+            _ => self.report_unexpected_attribute_token(),
         }
         false
     }
@@ -232,6 +232,38 @@ impl XmlState {
         }
     }
 
+    fn report_unexpected_attribute_token(&mut self) {
+        if !self.tag_open || self.closing_tag {
+            return;
+        }
+        if self.in_xml_expression_at_current_depth() {
+            return;
+        }
+
+        if self.pending_tag_name.is_some() && self.current_tag_name.is_some() {
+            self.finalize_tag_name();
+        }
+
+        match self.attribute_state {
+            Some(XmlAttributeState::ExpectNameOrEnd) => {
+                self.report_error("XML attribute name expected")
+            }
+            Some(XmlAttributeState::ExpectEquals) => {
+                self.report_error("XML attribute name must be followed by `=`")
+            }
+            Some(XmlAttributeState::ExpectValue) => {
+                self.report_error("XML attribute value expected after `=`")
+            }
+            Some(XmlAttributeState::InExpression) | None => {}
+        }
+    }
+
+    fn in_xml_expression_at_current_depth(&self) -> bool {
+        self.expressions
+            .last()
+            .is_some_and(|expression| self.depth == expression.xml_floor)
+    }
+
     fn report_error(&mut self, message: impl Into<String>) {
         if self.pending_error.is_none() {
             self.pending_error = Some(message.into());
@@ -310,6 +342,16 @@ impl XmlState {
         let attribute = self.tag_open
             && !self.closing_tag
             && self.attribute_state == Some(XmlAttributeState::ExpectValue);
+        if self.tag_open
+            && !self.closing_tag
+            && !self.in_xml_expression_at_current_depth()
+            && !matches!(
+                self.attribute_state,
+                Some(XmlAttributeState::ExpectValue | XmlAttributeState::InExpression)
+            )
+        {
+            self.report_unexpected_attribute_token();
+        }
         if attribute {
             self.consume_attribute_value(true);
         }
@@ -457,6 +499,7 @@ impl XmlState {
                 return self.depth == 0;
             }
             ">" => self.finish_opening_tag(),
+            _ if self.tag_open && !self.closing_tag => self.report_unexpected_attribute_token(),
             _ => {}
         }
         false
