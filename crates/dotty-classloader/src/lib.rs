@@ -9,6 +9,7 @@
 
 mod binary_name;
 mod class_path;
+mod crc32;
 mod error;
 mod loader;
 mod repository;
