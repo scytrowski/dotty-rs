@@ -7,9 +7,9 @@
 //! format, or type inference — see `docs/dotty-core-design.md` for the full
 //! design and the boundary with those crates.
 //!
-//! This crate is under active construction; only the identity, name,
-//! source-position, type, symbol/scope, and (partial) AST phase layers exist
-//! so far.
+//! This crate is under active construction; the identity, name,
+//! source-position, type, symbol/scope, and AST phase layers exist so far.
+//! The parser and typer that will consume this crate do not exist yet.
 
 pub mod ast;
 pub mod ids;
@@ -19,6 +19,7 @@ pub mod store;
 pub mod symbols;
 pub mod types;
 
+pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
 pub use ids::{
     AnnotationId, ClassfileOriginId, CompletionId, NameId, ScopeId, SourceId, SymbolId,
     TastyOriginId, TreeId, TypeId,
