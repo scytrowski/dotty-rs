@@ -67,12 +67,22 @@ impl XmlState {
                 && !self.attribute_name_separator)
     }
 
-    pub(crate) fn eof_message(&self) -> Option<&'static str> {
+    pub(crate) fn eof_message(&self) -> Option<String> {
         match self.content {
-            XmlContent::Comment => Some("unterminated XML comment"),
-            XmlContent::Cdata => Some("unterminated XML CDATA section"),
-            XmlContent::Text if !self.expressions.is_empty() => Some("unterminated XML expression"),
-            XmlContent::Text if self.tag_open || self.depth > 0 => Some("unterminated XML tag"),
+            XmlContent::Comment => Some("unterminated XML comment".to_owned()),
+            XmlContent::Cdata => Some("unterminated XML CDATA section".to_owned()),
+            XmlContent::Text if !self.expressions.is_empty() => {
+                Some("unterminated XML expression".to_owned())
+            }
+            XmlContent::Text if self.attribute_state == Some(XmlAttributeState::ExpectEquals) => {
+                Some("XML attribute name must be followed by `=`".to_owned())
+            }
+            XmlContent::Text if self.attribute_state == Some(XmlAttributeState::ExpectValue) => {
+                Some("XML attribute value expected after `=`".to_owned())
+            }
+            XmlContent::Text if self.tag_open || self.depth > 0 => {
+                Some("unterminated XML tag".to_owned())
+            }
             XmlContent::Text => None,
         }
     }

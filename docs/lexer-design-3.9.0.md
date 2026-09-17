@@ -79,7 +79,8 @@ Implementation status on the current lexer branch:
   XML namespace separators remain operators in tag and attribute names, and
   the scanner returns to normal layout processing after a closed root literal;
 - unterminated XML comments, CDATA sections, tags, and body expressions
-  produce recoverable EOF diagnostics; tag/attribute grammar validation
+  produce recoverable EOF diagnostics, and incomplete attribute names or
+  values receive specific EOF diagnostics; tag/attribute grammar validation
   beyond the basic forms remains staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
@@ -502,7 +503,8 @@ layout-sensitive processing after the root literal. Namespace separators in
 XML names remain operators at the parser-facing boundary. It also tracks
 comment and CDATA sections and diagnoses those constructs, mismatched closing
 names, invalid attribute structure, and unfinished tags when they reach EOF.
-Add remaining quote/splice forms, compatibility syntax, and broader
+EOF recovery distinguishes a missing attribute `=` from a missing attribute
+value. Add remaining quote/splice forms, compatibility syntax, and broader
 malformed-input recovery without entangling XML state with normal Scala
 tokenization.
 

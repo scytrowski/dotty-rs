@@ -1392,6 +1392,17 @@ mod tests {
     }
 
     #[test]
+    fn forwards_an_incomplete_xml_attribute_diagnostic() {
+        let scanner = ContextualScanner::new("<item id=").expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(
+            scanner.diagnostics()[0].message(),
+            "XML attribute value expected after `=`"
+        );
+    }
+
+    #[test]
     fn diagnoses_incomparable_indentation_prefixes() {
         let scanner =
             ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");

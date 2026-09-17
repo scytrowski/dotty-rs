@@ -2134,6 +2134,28 @@ mod tests {
     }
 
     #[test]
+    fn diagnoses_a_missing_xml_attribute_equals_at_eof() {
+        let (_, diagnostics) = scan("<item id");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute name must be followed by `=`"
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_missing_xml_attribute_value_at_eof() {
+        let (_, diagnostics) = scan("<item id=");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute value expected after `=`"
+        );
+    }
+
+    #[test]
     fn diagnoses_an_unexpected_xml_attribute_value() {
         let (_, diagnostics) = scan(r#"<item "x"/>"#);
 
