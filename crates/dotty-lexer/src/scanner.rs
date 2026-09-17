@@ -2,6 +2,7 @@ use dotty_diagnostics::Diagnostic;
 use dotty_source::{TextRange, TextRangeError};
 use dotty_token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
+use crate::xml::XmlState;
 use crate::{RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia};
 
 /// The first parser-facing scanner stage.
@@ -195,8 +196,7 @@ fn build_tokens(
     let mut paren_depth = 0u32;
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
-    let mut xml_depth = 0u32;
-    let mut xml_closing_tag = false;
+    let mut xml = XmlState::default();
 
     for (item_index, item) in items.iter().enumerate() {
         match item {
@@ -270,11 +270,9 @@ fn build_tokens(
                 previous_end = raw.span.end();
                 tokens.push(token);
 
-                let xml_literal_ended = update_xml_state(
+                let xml_literal_ended = xml.update_token(
                     raw.kind,
                     &source[raw.span.start() as usize..raw.span.end() as usize],
-                    &mut xml_depth,
-                    &mut xml_closing_tag,
                 );
                 if xml_literal_ended {
                     previous_kind = Some(TokenKind::Identifier);
@@ -673,42 +671,6 @@ fn is_closing_delimiter(kind: RawTokenKind) -> bool {
             Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
         )
     )
-}
-
-fn update_xml_state(
-    kind: RawTokenKind,
-    spelling: &str,
-    depth: &mut u32,
-    closing_tag: &mut bool,
-) -> bool {
-    match kind {
-        RawTokenKind::XmlStart => {
-            *depth = depth.saturating_add(1);
-            *closing_tag = false;
-        }
-        RawTokenKind::Operator if *depth > 0 && spelling.ends_with("</") => {
-            if (spelling.starts_with('>') || spelling.starts_with("/>")) && *depth > 1 {
-                *depth = depth.saturating_sub(1);
-            }
-            *closing_tag = true;
-        }
-        RawTokenKind::Operator if *depth > 0 && spelling == "/>" => {
-            *depth = depth.saturating_sub(1);
-            *closing_tag = false;
-            return *depth == 0;
-        }
-        RawTokenKind::Operator if *depth > 0 && spelling.ends_with('<') => {
-            *depth = depth.saturating_add(1);
-            *closing_tag = false;
-        }
-        RawTokenKind::Operator if *depth > 0 && spelling == ">" && *closing_tag => {
-            *depth = depth.saturating_sub(1);
-            *closing_tag = false;
-            return *depth == 0;
-        }
-        _ => {}
-    }
-    false
 }
 
 fn trivia_has_line_break(source: &str, trivia: &[&Trivia]) -> bool {

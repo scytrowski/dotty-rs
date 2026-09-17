@@ -4,6 +4,7 @@ use dotty_diagnostics::{Diagnostic, DiagnosticSeverity};
 use dotty_source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
+use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 use crate::{Trivia, TriviaKind};
 
@@ -31,8 +32,7 @@ pub struct RawLexer<'source> {
     emitted_eof: bool,
     modes: Vec<LexMode>,
     pending: Option<RawItem>,
-    xml_depth: u32,
-    xml_closing_tag: bool,
+    xml: XmlState,
 }
 
 /// Failure of a raw-lexer operation that is not recoverable as a source
@@ -87,8 +87,7 @@ impl<'source> RawLexer<'source> {
             emitted_eof: false,
             modes: vec![LexMode::Normal],
             pending: None,
-            xml_depth: 0,
-            xml_closing_tag: false,
+            xml: XmlState::default(),
         })
     }
 
@@ -177,7 +176,7 @@ impl<'source> RawLexer<'source> {
         if character == '"' {
             return Ok(Some(RawItem::Token(self.scan_string_literal(start)?)));
         }
-        if self.xml_depth == 0
+        if self.xml.can_start_literal()
             && character == '<'
             && self
                 .cursor
@@ -185,8 +184,7 @@ impl<'source> RawLexer<'source> {
                 .is_some_and(crate::identifier::is_identifier_start)
         {
             let _ = self.cursor.bump();
-            self.xml_depth = self.xml_depth.saturating_add(1);
-            self.xml_closing_tag = false;
+            self.xml.update_token(RawTokenKind::XmlStart, "<");
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::XmlStart,
                 span: self.span(start)?,
@@ -205,10 +203,10 @@ impl<'source> RawLexer<'source> {
         }
         if let Some(punctuation) = punctuation(character) {
             let _ = self.cursor.bump();
-            return Ok(Some(RawItem::Token(RawToken {
-                kind: RawTokenKind::Punctuation(punctuation),
-                span: self.span(start)?,
-            })));
+            let kind = RawTokenKind::Punctuation(punctuation);
+            let span = self.span(start)?;
+            self.xml.update_token(kind, self.source.slice(span)?);
+            return Ok(Some(RawItem::Token(RawToken { kind, span })));
         }
         if is_operator_character(character) {
             return Ok(Some(RawItem::Token(self.scan_operator(start)?)));
@@ -619,34 +617,9 @@ impl<'source> RawLexer<'source> {
             kind: RawTokenKind::Operator,
             span: self.span(start)?,
         };
-        self.update_xml_operator_state(token.span)?;
+        self.xml
+            .update_token(token.kind, self.source.slice(token.span)?);
         Ok(token)
-    }
-
-    fn update_xml_operator_state(&mut self, span: TextRange) -> Result<(), RawLexerError> {
-        let spelling = self.source.slice(span)?;
-        match spelling {
-            spelling if self.xml_depth > 0 && spelling.ends_with("</") => {
-                if (spelling.starts_with('>') || spelling.starts_with("/>")) && self.xml_depth > 1 {
-                    self.xml_depth = self.xml_depth.saturating_sub(1);
-                }
-                self.xml_closing_tag = true
-            }
-            "/>" if self.xml_depth > 0 => {
-                self.xml_depth = self.xml_depth.saturating_sub(1);
-                self.xml_closing_tag = false;
-            }
-            spelling if self.xml_depth > 0 && spelling.ends_with('<') => {
-                self.xml_depth = self.xml_depth.saturating_add(1);
-                self.xml_closing_tag = false;
-            }
-            ">" if self.xml_depth > 0 && self.xml_closing_tag => {
-                self.xml_depth = self.xml_depth.saturating_sub(1);
-                self.xml_closing_tag = false;
-            }
-            _ => {}
-        }
-        Ok(())
     }
 
     fn looks_like_quote_id(&self) -> bool {
@@ -1622,6 +1595,68 @@ mod tests {
                 RawTokenKind::XmlStart,
                 RawTokenKind::Identifier,
                 RawTokenKind::Eof
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_comparison_operators_inside_xml_expressions() {
+        let (items, diagnostics) = scan("<root>{a < b}</root>");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_nested_xml_inside_an_xml_expression() {
+        let (items, diagnostics) = scan("<root>{<inner/>}</root>");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
             ]
         );
         assert!(diagnostics.is_empty());

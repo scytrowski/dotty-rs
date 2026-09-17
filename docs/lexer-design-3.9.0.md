@@ -72,9 +72,10 @@ Implementation status on the current lexer branch:
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
   `QuoteId`; splice syntax remains the `$` plus `{` token sequence;
 - an XML start marker is emitted for `<` immediately followed by an XML name;
-  XML tag operators retain Scala's greedy operator boundaries and the scanner
-  returns to normal layout processing after a closed root literal;
-- richer infix lookahead and full XML body handling remain intentionally
+  XML tag operators retain Scala's greedy operator boundaries, XML body
+  expressions have an isolated state stack, and the scanner returns to normal
+  layout processing after a closed root literal;
+- richer infix lookahead and complete XML diagnostics remain intentionally
   staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
@@ -151,6 +152,7 @@ crates/dotty-lexer/src/
 ├── number.rs
 ├── string.rs
 ├── interpolation.rs
+├── xml.rs
 └── scanner/
     ├── mod.rs
     ├── region.rs
@@ -490,10 +492,10 @@ ownership and grammar-driven closures remain to be refined.
 The current implementation covers term/type quote markers, legacy quoted
 identifiers, and their interaction with character literals. It also recognizes
 the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, and
-tracks enough tag-closing state to end layout-sensitive processing after the
-root literal. Add remaining quote/splice forms, compatibility syntax, and the
-full XML body/attribute/expression state machine without entangling it with
-normal Scala tokenization.
+tracks XML expression braces and nested XML literals to end layout-sensitive
+processing after the root literal. Add remaining quote/splice forms,
+compatibility syntax, complete XML body/attribute handling, and malformed-input
+diagnostics without entangling XML state with normal Scala tokenization.
 
 ## 11. Testing strategy
 

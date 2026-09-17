@@ -6,6 +6,7 @@ mod lexer;
 mod raw_token;
 mod scanner;
 mod trivia;
+mod xml;
 
 pub use cursor::{Cursor, CursorError};
 pub use lexer::{RawLexer, RawLexerError};
