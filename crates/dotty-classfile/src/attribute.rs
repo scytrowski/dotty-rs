@@ -92,6 +92,7 @@ pub enum Attribute<'a> {
     },
     SourceFile(ConstantPoolIndex),
     Deprecated,
+    Synthetic,
     NestHost(ConstantPoolIndex),
     NestMembers(Vec<ConstantPoolIndex>),
     Record(Vec<RecordComponentInfo<'a>>),
@@ -316,7 +317,7 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
             }
             Ok(())
         }
-        Attribute::Deprecated => Ok(()),
+        Attribute::Deprecated | Attribute::Synthetic => Ok(()),
         Attribute::NestHost(index) => pool.class_name(*index).map(|_| ()),
         Attribute::Record(components) => {
             for component in components {
@@ -390,6 +391,7 @@ impl<'a> Attribute<'a> {
             "SourceFile" => Attribute::SourceFile(read_index(&mut sub_reader)?),
             "NestHost" => Attribute::NestHost(read_index(&mut sub_reader)?),
             "Deprecated" => Attribute::Deprecated,
+            "Synthetic" => Attribute::Synthetic,
             "Exceptions" => Attribute::Exceptions(read_index_list(&mut sub_reader)?),
             "NestMembers" => Attribute::NestMembers(read_index_list(&mut sub_reader)?),
             "PermittedSubclasses" => {
@@ -503,6 +505,25 @@ mod tests {
             Attribute::decode(&mut reader, &pool),
             Ok(Attribute::Deprecated)
         );
+    }
+
+    #[test]
+    fn decodes_a_synthetic_attribute() {
+        let pool = pool_with_utf8_name("Synthetic");
+        let bytes = attribute_info_bytes(1, &[]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Synthetic)
+        );
+    }
+
+    #[test]
+    fn validate_synthetic_is_always_ok() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(validate_attribute(&Attribute::Synthetic, &pool), Ok(()));
     }
 
     #[test]
