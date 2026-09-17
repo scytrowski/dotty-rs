@@ -1555,6 +1555,43 @@ mod tests {
     }
 
     #[test]
+    fn supports_an_else_if_chain_without_separators_before_clauses() {
+        assert_eq!(
+            kinds("if first then\n  one()\nelse if second then\n  two()\nelse\n  three()\ndone()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Else),
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Else),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn closes_try_regions_without_separators_before_catch_and_finally() {
         assert_eq!(
             kinds(
@@ -1597,6 +1634,25 @@ mod tests {
             kinds("value\n\ndo\n  body()\nwhile condition"),
             vec![
                 TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Do),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::While),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_a_do_region_and_closes_it_before_while() {
+        assert_eq!(
+            kinds("do\n  body()\nwhile condition"),
+            vec![
                 TokenKind::Keyword(HardKeyword::Do),
                 TokenKind::Indent,
                 TokenKind::Identifier,
@@ -1790,6 +1846,43 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Outdent,
                 TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_match_case_regions_before_a_following_statement() {
+        assert_eq!(
+            kinds(
+                "value match\n  case first =>\n    one()\n  case second =>\n    two()\nafter_match()"
+            ),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Eof,
             ]
         );
