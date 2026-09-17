@@ -141,7 +141,9 @@ impl From<ReadError> for AttributeError {
     }
 }
 
-fn read_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, ReadError> {
+pub(crate) fn read_index_list(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<ConstantPoolIndex>, ReadError> {
     let count = reader.read_u16()?;
     let mut indices = Vec::with_capacity(usize::from(count));
     for _ in 0..count {
@@ -152,7 +154,9 @@ fn read_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, Re
 
 /// Reads a `ConstantPoolIndex`, treating `0` as "absent" — the convention
 /// several attributes use for an optional constant pool reference.
-fn read_optional_index(reader: &mut Reader<'_>) -> Result<Option<ConstantPoolIndex>, ReadError> {
+pub(crate) fn read_optional_index(
+    reader: &mut Reader<'_>,
+) -> Result<Option<ConstantPoolIndex>, ReadError> {
     let index = read_index(reader)?;
     Ok(if index.0 == 0 { None } else { Some(index) })
 }
