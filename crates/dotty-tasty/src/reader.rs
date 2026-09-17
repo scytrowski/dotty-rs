@@ -300,12 +300,48 @@ mod tests {
     }
 
     #[test]
+    fn reads_minimal_natural_number_boundaries() {
+        let mut reader = Reader::new(&[
+            0x80, // 0
+            0xff, // 127
+            0x01, 0x80, // 128
+            0x7f, 0xff, // 16_383
+            0x01, 0x00, 0x80, // 16_384
+            0x0f, 0x7f, 0x7f, 0x7f, 0xff, // u32::MAX
+        ]);
+
+        assert_eq!(reader.read_nat().unwrap(), 0);
+        assert_eq!(reader.read_nat().unwrap(), 127);
+        assert_eq!(reader.read_nat().unwrap(), 128);
+        assert_eq!(reader.read_nat().unwrap(), 16_383);
+        assert_eq!(reader.read_nat().unwrap(), 16_384);
+        assert_eq!(reader.read_nat().unwrap(), u32::MAX);
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
     fn reads_signed_two_complement_numbers() {
         let mut reader = Reader::new(&[0xff, 0x00, 0xff, 0x01, 0x80]);
 
         assert_eq!(reader.read_long_int().unwrap(), -1);
         assert_eq!(reader.read_long_int().unwrap(), 127);
         assert_eq!(reader.read_long_int().unwrap(), 128);
+    }
+
+    #[test]
+    fn reads_minimal_signed_integer_boundaries() {
+        let mut reader = Reader::new(&[
+            0xc0, // -64
+            0xbf, // 63
+            0x00, 0xc0, // 64
+            0x7f, 0xbf, // -65
+        ]);
+
+        assert_eq!(reader.read_long_int().unwrap(), -64);
+        assert_eq!(reader.read_long_int().unwrap(), 63);
+        assert_eq!(reader.read_long_int().unwrap(), 64);
+        assert_eq!(reader.read_long_int().unwrap(), -65);
+        assert!(reader.is_at_end());
     }
 
     #[test]
@@ -330,6 +366,16 @@ mod tests {
         ]);
 
         assert_eq!(reader.read_utf8().unwrap(), "Scala 3.9.0");
+    }
+
+    #[test]
+    fn reads_utf8_length_in_bytes_not_code_points() {
+        let mut reader = Reader::new(&[
+            0x8a, b'z', b'a', 0xc5, 0xbc, 0xc3, 0xb3, 0xc5, 0x82, 0xc4, 0x87,
+        ]);
+
+        assert_eq!(reader.read_utf8().unwrap(), "zażółć");
+        assert!(reader.is_at_end());
     }
 
     #[test]

@@ -218,6 +218,24 @@ mod tests {
     }
 
     #[test]
+    fn writes_minimal_natural_number_boundaries() {
+        let cases = [
+            (0, vec![0x80]),
+            (127, vec![0xff]),
+            (128, vec![0x01, 0x80]),
+            (16_383, vec![0x7f, 0xff]),
+            (16_384, vec![0x01, 0x00, 0x80]),
+            (u32::MAX, vec![0x0f, 0x7f, 0x7f, 0x7f, 0xff]),
+        ];
+
+        for (value, expected) in cases {
+            let mut writer = Writer::new();
+            writer.write_nat(value);
+            assert_eq!(writer.into_inner(), expected, "value {value}");
+        }
+    }
+
+    #[test]
     fn writes_signed_numbers_that_reader_can_decode() {
         for value in [
             i64::MIN,
@@ -246,10 +264,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_minimal_signed_integer_boundaries() {
+        let cases = [
+            (-64, vec![0xc0]),
+            (63, vec![0xbf]),
+            (64, vec![0x00, 0xc0]),
+            (-65, vec![0x7f, 0xbf]),
+        ];
+
+        for (value, expected) in cases {
+            let mut writer = Writer::new();
+            writer.write_long_int(value);
+            assert_eq!(writer.into_inner(), expected, "value {value}");
+        }
+    }
+
+    #[test]
     fn writes_length_prefixed_utf8() {
         let mut writer = Writer::new();
         writer.write_utf8("zażółć").unwrap();
         let bytes = writer.into_inner();
+
+        assert_eq!(bytes[0], 0x8a, "UTF-8 prefix must count bytes");
         let mut reader = Reader::new(&bytes);
 
         assert_eq!(reader.read_utf8().unwrap(), "zażółć");

@@ -914,6 +914,7 @@ fn all_tasty_fixture_source_range_queries_return_only_overlapping_positions() {
 #[test]
 fn all_tasty_fixture_signed_names_have_typed_views() {
     let mut signed_name_count = 0;
+    let mut parameter_signature_count = 0;
 
     for path in tasty_fixture_paths() {
         let bytes = fs::read(&path)
@@ -922,8 +923,17 @@ fn all_tasty_fixture_signed_names_have_typed_views() {
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
 
         for (index, name) in file.names().entries().iter().enumerate() {
-            if matches!(name, RawName::Signed { .. } | RawName::TargetSigned { .. }) {
+            if let RawName::Signed {
+                parameter_signatures,
+                ..
+            }
+            | RawName::TargetSigned {
+                parameter_signatures,
+                ..
+            } = name
+            {
                 signed_name_count += 1;
+                parameter_signature_count += parameter_signatures.len();
                 let reference = index as u32 + 1;
                 assert!(
                     name.signed_name().is_some(),
@@ -950,6 +960,10 @@ fn all_tasty_fixture_signed_names_have_typed_views() {
     assert!(
         signed_name_count > 0,
         "fixtures contain no signature-bearing names"
+    );
+    assert!(
+        parameter_signature_count > 0,
+        "fixtures contain no method parameter signatures"
     );
 }
 

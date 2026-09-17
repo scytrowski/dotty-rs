@@ -1174,6 +1174,22 @@ mod tests {
     }
 
     #[test]
+    fn name_table_length_counts_the_complete_utf8_byte_region() {
+        let mut reader = Reader::new(&[
+            0x8c, // name-table payload length: tag + UTF-8 length + 10 bytes
+            1, 0x8a, b'z', b'a', 0xc5, 0xbc, 0xc3, 0xb3, 0xc5, 0x82, 0xc4, 0x87,
+            0xa5, // bytes after the bounded name table, e.g. a section header
+        ]);
+
+        let names = NameTable::decode(&mut reader).unwrap();
+
+        assert_eq!(names.get_utf8(1), Some("zażółć"));
+        assert_eq!(reader.position(), 13);
+        assert_eq!(reader.read_u8().unwrap(), 0xa5);
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
     fn classifies_utf8_names() {
         assert_eq!(RawName::Utf8("name".to_owned()).kind(), RawNameKind::Utf8);
     }

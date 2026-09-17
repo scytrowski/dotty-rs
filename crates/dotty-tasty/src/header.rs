@@ -194,7 +194,13 @@ mod tests {
         assert_eq!(header.minor_version, 9);
         assert_eq!(header.experimental_version, 0);
         assert_eq!(header.tooling_version, "Scala 3.9.0");
-        assert_eq!(header.uuid.len(), 16);
+        assert_eq!(
+            header.uuid,
+            [
+                0x00, 0x30, 0x05, 0xd9, 0x6e, 0x38, 0x51, 0xc3, 0x00, 0xf2, 0xa7, 0xf0, 0x9b, 0x88,
+                0x27, 0x30,
+            ]
+        );
     }
 
     #[test]

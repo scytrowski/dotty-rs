@@ -1128,16 +1128,23 @@ guessing their grammar.
 
 ## 16. Points to confirm with Scala-generated fixtures
 
-Before declaring the implementation compatible, confirm the following using real `.tasty` files:
+The following points are covered by the Scala 3.9.0 fixture corpus and focused
+wire-level tests:
 
-- the exact length unit used by `Utf8`;
-- the exact interpretation of `nameTable_Length`;
-- minimal signed and unsigned integer encodings;
-- UUID semantics in generated files;
-- recognition rules for optional lists and `Modifier*`;
-- behavior for unknown tags and trailing bytes;
-- the relation between `ASTRef` and the beginning of the `ASTs` section;
-- `SIGNED`/`TARGETSIGNED` behavior for actual overloaded-method signatures.
+- `Utf8` lengths count UTF-8 bytes;
+- `nameTable_Length` bounds the complete name-table byte region;
+- Scala's minimal signed and unsigned integer encodings;
+- UUID values are opaque and occupy exactly 16 bytes;
+- optional lists and `Modifier*` tails;
+- unknown tags and trailing bytes at bounded payloads;
+- `ASTRef` values are relative to the beginning of the `ASTs` payload;
+- `SIGNED` entries with actual parameter signatures in the fixture corpus;
+  `TARGETSIGNED` has dedicated structural tests, but is not emitted by the
+  currently pinned local fixture corpus.
+
+The remaining compatibility work is not a wire-format assumption audit: it is
+the separate semantic symbol/type model described in Stage 7, plus validation
+that structured re-encoding is accepted by the Scala compiler.
 
 The fixture suite should also round-trip every top-level AST through the
 structured encoder once its corresponding semantic node is supported. Raw
