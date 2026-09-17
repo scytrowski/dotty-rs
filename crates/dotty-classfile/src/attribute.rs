@@ -2097,6 +2097,31 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_truncated_element_value_inside_an_annotation() {
+        let pool = pool_with_utf8_name("RuntimeVisibleAnnotations");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // num_annotations = 1
+                0x00, 0x02, // type_index = #2
+                0x00, 0x01, // num_element_value_pairs = 1
+                0x00, 0x03, // element_name_index = #3
+                b'B', 0x00, // Int element_value's index truncated to 1 byte
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof {
+                offset: 15,
+                needed: 2,
+                remaining: 1,
+            }))
+        );
+    }
+
+    #[test]
     fn reports_a_truncated_recognized_attribute() {
         let pool = pool_with_utf8_name("ConstantValue");
         // ConstantValue needs 2 payload bytes; only 1 is declared/provided.
