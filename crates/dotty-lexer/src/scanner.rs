@@ -1889,6 +1889,87 @@ mod tests {
     }
 
     #[test]
+    fn closes_nested_match_regions_before_the_outer_case_continues() {
+        assert_eq!(
+            kinds(
+                "value match\n  case outer =>\n    value match\n      case inner =>\n        inner()\n    after_inner()\n  case next =>\n    next()\nafter_nested_match()"
+            ),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_two_nested_then_regions_before_a_following_statement() {
+        assert_eq!(
+            kinds("if outer then\n  if inner then\n    body()\n  after_inner()\nafter_outer()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn synthetic_layout_tokens_are_zero_width_at_the_following_token() {
         let scanner = ContextualScanner::new("if ready then\n  run()").expect("source scans");
         let indent = scanner

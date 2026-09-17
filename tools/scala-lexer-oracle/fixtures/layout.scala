@@ -41,3 +41,13 @@ do
   body()
 while condition
 after_do()
+
+value match
+  case outer =>
+    value match
+      case inner =>
+        inner()
+    after_inner()
+  case next =>
+    next()
+after_nested_match()
