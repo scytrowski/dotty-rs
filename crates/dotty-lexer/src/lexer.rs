@@ -1289,6 +1289,22 @@ mod tests {
     }
 
     #[test]
+    fn preserves_form_feed_as_other_whitespace() {
+        let (items, diagnostics) = scan("a\u{000c}b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 1),
+                trivia(TriviaKind::OtherWhitespace, 1, 2),
+                token(RawTokenKind::Identifier, 2, 3),
+                token(RawTokenKind::Eof, 3, 3),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn preserves_line_comments_without_consuming_the_newline() {
         let (items, diagnostics) = scan("a // comment\nb");
 

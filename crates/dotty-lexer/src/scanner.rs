@@ -1276,6 +1276,19 @@ mod tests {
     }
 
     #[test]
+    fn treats_a_standalone_cr_as_a_logical_line_break() {
+        assert_eq!(
+            kinds("first\rsecond"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_newline_separators_in_braces_but_disables_indentation() {
         let token_kinds = kinds("{\n  first\n  second\n}");
 
