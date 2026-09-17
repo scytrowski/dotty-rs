@@ -2253,30 +2253,33 @@ mod tests {
     }
 
     #[test]
-    fn recovers_octal_escapes_as_literals_with_diagnostics() {
-        let (items, diagnostics) = scan(r#"'\101' "\101""#);
-        let kinds: Vec<_> = items
-            .into_iter()
-            .filter_map(|item| match item {
-                RawItem::Token(token) => Some(token.kind),
-                RawItem::Trivia(_) => None,
-            })
-            .collect();
+    fn recovers_an_octal_character_escape_as_a_literal_with_a_diagnostic() {
+        let (items, diagnostics) = scan(r#"'\101'"#);
 
         assert_eq!(
-            kinds,
+            items,
             vec![
-                RawTokenKind::CharLiteral,
-                RawTokenKind::StringLiteral,
-                RawTokenKind::Eof,
+                token(RawTokenKind::CharLiteral, 0, 6),
+                token(RawTokenKind::Eof, 6, 6),
             ]
         );
-        assert_eq!(diagnostics.len(), 2);
-        assert!(
-            diagnostics
-                .iter()
-                .all(|diagnostic| diagnostic.message().contains("octal escape"))
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("octal escape"));
+    }
+
+    #[test]
+    fn recovers_an_octal_string_escape_as_a_literal_with_a_diagnostic() {
+        let (items, diagnostics) = scan(r#""\101""#);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, 6),
+                token(RawTokenKind::Eof, 6, 6),
+            ]
         );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("octal escape"));
     }
 
     #[test]
