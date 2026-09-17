@@ -165,6 +165,7 @@ mod tests {
                 parameters: vec![],
                 return_type: None,
             },
+            None,
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),
