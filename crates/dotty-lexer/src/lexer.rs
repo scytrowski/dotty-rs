@@ -119,6 +119,21 @@ impl<'source> RawLexer<'source> {
         if character == '/' && self.cursor.peek_nth(1) == Some('*') {
             return Ok(Some(RawItem::Trivia(self.scan_block_comment(start)?)));
         }
+        if character.is_ascii_digit()
+            || (character == '.'
+                && self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(|next| next.is_ascii_digit()))
+        {
+            return Ok(Some(RawItem::Token(self.scan_number(start)?)));
+        }
+        if character == '\'' {
+            return Ok(Some(RawItem::Token(self.scan_char_literal(start)?)));
+        }
+        if character == '"' {
+            return Ok(Some(RawItem::Token(self.scan_string_literal(start)?)));
+        }
         if is_identifier_start(character) {
             return Ok(Some(RawItem::Token(self.scan_identifier(start)?)));
         }
@@ -339,8 +354,373 @@ impl<'source> RawLexer<'source> {
         })
     }
 
+    fn scan_number(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        let mut kind = RawTokenKind::IntegerLiteral;
+        let mut base = 10;
+
+        if self.cursor.peek() == Some('.') {
+            let _ = self.cursor.bump();
+            kind = RawTokenKind::DecimalLiteral;
+            self.scan_decimal_digits(start, "fractional part")?;
+        } else {
+            if self.cursor.peek() == Some('0')
+                && matches!(self.cursor.peek_nth(1), Some('x' | 'X' | 'b' | 'B'))
+            {
+                let _ = self.cursor.bump();
+                match self.cursor.peek() {
+                    Some('x' | 'X') => {
+                        base = 16;
+                        let _ = self.cursor.bump();
+                    }
+                    Some('b' | 'B') => {
+                        base = 2;
+                        let _ = self.cursor.bump();
+                    }
+                    _ => {}
+                }
+            }
+
+            self.scan_based_digits(start, base)?;
+
+            if base == 10 && self.cursor.peek() == Some('.') {
+                if self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(|character| character.is_ascii_digit())
+                {
+                    let _ = self.cursor.bump();
+                    kind = RawTokenKind::DecimalLiteral;
+                    self.scan_decimal_digits(start, "fractional part")?;
+                }
+            }
+
+            if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
+                let _ = self.cursor.bump();
+                kind = RawTokenKind::ExponentLiteral;
+                if matches!(self.cursor.peek(), Some('+' | '-')) {
+                    let _ = self.cursor.bump();
+                }
+                if !self
+                    .cursor
+                    .peek()
+                    .is_some_and(|character| character.is_ascii_digit())
+                {
+                    self.report(start, "exponent must contain at least one digit")?;
+                } else {
+                    self.scan_decimal_digits(start, "exponent")?;
+                }
+            }
+        }
+
+        match self.cursor.peek() {
+            Some('l' | 'L') if matches!(kind, RawTokenKind::IntegerLiteral) => {
+                let _ = self.cursor.bump();
+                kind = RawTokenKind::LongLiteral;
+            }
+            Some('f' | 'F') if base == 10 => {
+                let _ = self.cursor.bump();
+                kind = RawTokenKind::FloatLiteral;
+            }
+            Some('d' | 'D') if base == 10 => {
+                let _ = self.cursor.bump();
+                kind = RawTokenKind::DoubleLiteral;
+            }
+            Some('l' | 'L') => {
+                self.report(start, "long suffix is only valid on an integer literal")?;
+                let _ = self.cursor.bump();
+            }
+            _ => {}
+        }
+
+        if self.cursor.peek().is_some_and(is_identifier_part) {
+            self.report(start, "invalid literal number")?;
+        }
+
+        Ok(RawToken {
+            kind,
+            span: self.span(start)?,
+        })
+    }
+
+    fn scan_based_digits(&mut self, start: u32, base: u32) -> Result<(), RawLexerError> {
+        let mut saw_digit = false;
+        let mut trailing_separator = false;
+
+        while let Some(character) = self.cursor.peek() {
+            if digit_value(character).is_some_and(|digit| digit < base) {
+                saw_digit = true;
+                trailing_separator = false;
+                let _ = self.cursor.bump();
+            } else if character == '_' {
+                if !saw_digit || trailing_separator {
+                    self.report(start, "invalid numeric separator")?;
+                }
+                trailing_separator = true;
+                let _ = self.cursor.bump();
+            } else {
+                break;
+            }
+        }
+
+        if trailing_separator {
+            self.report(start, "numeric literal must not end with a separator")?;
+        }
+        if !saw_digit {
+            self.report(start, "numeric literal must contain a digit")?;
+        }
+        if base != 10
+            && self
+                .cursor
+                .peek()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+        {
+            self.report(start, "invalid digit in non-decimal literal")?;
+        }
+
+        Ok(())
+    }
+
+    fn scan_decimal_digits(&mut self, start: u32, component: &str) -> Result<(), RawLexerError> {
+        let mut saw_digit = false;
+        let mut trailing_separator = false;
+
+        while let Some(character) = self.cursor.peek() {
+            if character.is_ascii_digit() {
+                saw_digit = true;
+                trailing_separator = false;
+                let _ = self.cursor.bump();
+            } else if character == '_' {
+                if !saw_digit || trailing_separator {
+                    self.report(start, "invalid numeric separator")?;
+                }
+                trailing_separator = true;
+                let _ = self.cursor.bump();
+            } else {
+                break;
+            }
+        }
+
+        if trailing_separator {
+            self.report(start, "numeric literal must not end with a separator")?;
+        }
+        if !saw_digit {
+            self.report(start, format!("{component} must contain a digit"))?;
+        }
+
+        Ok(())
+    }
+
+    fn scan_char_literal(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        let _ = self.cursor.bump();
+        let mut valid = true;
+
+        match self.cursor.peek() {
+            None | Some('\n' | '\r') => {
+                self.report(start, "unterminated character literal")?;
+                return Ok(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                });
+            }
+            Some('\'') => {
+                let _ = self.cursor.bump();
+                self.report(start, "empty character literal")?;
+                return Ok(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                });
+            }
+            Some('\\') => {
+                valid &= self.scan_escape(start)?;
+            }
+            Some(character) => {
+                let _ = self.cursor.bump();
+                if character.len_utf16() != 1 {
+                    self.report(start, "character literal must contain one UTF-16 code unit")?;
+                    valid = false;
+                }
+            }
+        }
+
+        if self.cursor.peek() == Some('\'') {
+            let _ = self.cursor.bump();
+        } else if !self.cursor.is_eof() && !matches!(self.cursor.peek(), Some('\n' | '\r')) {
+            valid = false;
+            self.report(start, "character literal contains more than one character")?;
+            while let Some(character) = self.cursor.peek() {
+                let _ = self.cursor.bump();
+                if character == '\'' || character == '\n' || character == '\r' {
+                    break;
+                }
+            }
+        } else if !self.cursor.is_eof() {
+            valid = false;
+            self.report(start, "unterminated character literal")?;
+        }
+
+        Ok(RawToken {
+            kind: if valid {
+                RawTokenKind::CharLiteral
+            } else {
+                RawTokenKind::Error
+            },
+            span: self.span(start)?,
+        })
+    }
+
+    fn scan_string_literal(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        let multiline =
+            self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
+        if multiline {
+            let _ = self.cursor.bump();
+            let _ = self.cursor.bump();
+            let _ = self.cursor.bump();
+            return self.scan_multiline_string(start);
+        }
+
+        let _ = self.cursor.bump();
+        loop {
+            match self.cursor.peek() {
+                Some('"') => {
+                    let _ = self.cursor.bump();
+                    return Ok(RawToken {
+                        kind: RawTokenKind::StringLiteral,
+                        span: self.span(start)?,
+                    });
+                }
+                Some('\n' | '\r') => {
+                    self.report(start, "unclosed string literal")?;
+                    return Ok(RawToken {
+                        kind: RawTokenKind::Error,
+                        span: self.span(start)?,
+                    });
+                }
+                Some('\\') => {
+                    let _ = self.scan_escape(start)?;
+                }
+                Some(_) => {
+                    let _ = self.cursor.bump();
+                }
+                None => {
+                    self.report(start, "unclosed string literal")?;
+                    return Ok(RawToken {
+                        kind: RawTokenKind::Error,
+                        span: self.span(start)?,
+                    });
+                }
+            }
+        }
+    }
+
+    fn scan_multiline_string(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        loop {
+            if self.cursor.peek() == Some('"')
+                && self.cursor.peek_nth(1) == Some('"')
+                && self.cursor.peek_nth(2) == Some('"')
+            {
+                let _ = self.cursor.bump();
+                let _ = self.cursor.bump();
+                let _ = self.cursor.bump();
+                return Ok(RawToken {
+                    kind: RawTokenKind::StringLiteral,
+                    span: self.span(start)?,
+                });
+            }
+            if self.cursor.bump().is_none() {
+                self.report(start, "unclosed multi-line string literal")?;
+                return Ok(RawToken {
+                    kind: RawTokenKind::Error,
+                    span: self.span(start)?,
+                });
+            }
+        }
+    }
+
+    fn scan_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
+        let _ = self.cursor.bump();
+        let valid = match self.cursor.peek() {
+            Some('b' | 't' | 'n' | 'f' | 'r' | '"' | '\'' | '\\') => {
+                let _ = self.cursor.bump();
+                true
+            }
+            Some('u' | 'U') => self.scan_unicode_escape(start)?,
+            Some('0'..='7') => self.scan_octal_escape(start)?,
+            Some(_) => {
+                let _ = self.cursor.bump();
+                self.report(start, "invalid escape character")?;
+                false
+            }
+            None => {
+                self.report(start, "unterminated escape sequence")?;
+                false
+            }
+        };
+
+        Ok(valid)
+    }
+
+    fn scan_unicode_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
+        while matches!(self.cursor.peek(), Some('u' | 'U')) {
+            let _ = self.cursor.bump();
+        }
+
+        for _ in 0..4 {
+            match self.cursor.peek() {
+                Some(character) if character.is_ascii_hexdigit() => {
+                    let _ = self.cursor.bump();
+                }
+                Some(_) => {
+                    self.report(start, "invalid character in Unicode escape sequence")?;
+                    return Ok(false);
+                }
+                None => {
+                    self.report(start, "incomplete Unicode escape sequence")?;
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn scan_octal_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
+        let mut count = 0;
+        while count < 3
+            && self
+                .cursor
+                .peek()
+                .is_some_and(|character| ('0'..='7').contains(&character))
+        {
+            let _ = self.cursor.bump();
+            count += 1;
+        }
+        self.report(
+            start,
+            "octal escape literals are unsupported; use a Unicode escape",
+        )?;
+        Ok(false)
+    }
+
+    fn report(&mut self, start: u32, message: impl Into<String>) -> Result<(), RawLexerError> {
+        self.diagnostics.push(Diagnostic::new(
+            DiagnosticSeverity::Error,
+            self.span(start)?,
+            message,
+        ));
+        Ok(())
+    }
+
     fn span(&self, start: u32) -> Result<TextRange, RawLexerError> {
         TextRange::new(start, self.cursor.position()).map_err(Into::into)
+    }
+}
+
+fn digit_value(character: char) -> Option<u32> {
+    match character {
+        '0'..='9' => Some(character as u32 - '0' as u32),
+        'a'..='f' => Some(character as u32 - 'a' as u32 + 10),
+        'A'..='F' => Some(character as u32 - 'A' as u32 + 10),
+        _ => None,
     }
 }
 
@@ -658,16 +1038,216 @@ mod tests {
     }
 
     #[test]
-    fn emits_an_error_token_for_an_unsupported_character() {
-        let (items, diagnostics) = scan("1");
+    fn recognizes_integer_bases_and_numeric_separators() {
+        let (items, diagnostics) = scan("0 42 1_000 0xff 0b1010");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) if token.kind != RawTokenKind::Eof => Some(token.kind),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::IntegerLiteral,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_decimal_exponent_and_suffix_forms() {
+        let (items, diagnostics) = scan("1.0 .5 1e10 1e-10 1f 1d 1L 1.");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::DecimalLiteral,
+                RawTokenKind::DecimalLiteral,
+                RawTokenKind::ExponentLiteral,
+                RawTokenKind::ExponentLiteral,
+                RawTokenKind::FloatLiteral,
+                RawTokenKind::DoubleLiteral,
+                RawTokenKind::LongLiteral,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::Punctuation(Punctuation::Dot),
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_unary_minus_outside_the_numeric_literal() {
+        let (items, diagnostics) = scan("-123");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Operator,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::Eof
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_malformed_numeric_separators() {
+        let (items, diagnostics) = scan("1_ 0x_1 1.0_");
+
+        assert!(items.iter().all(|item| !matches!(
+            item,
+            RawItem::Token(RawToken {
+                kind: RawTokenKind::Error,
+                ..
+            })
+        )));
+        assert_eq!(diagnostics.len(), 3);
+    }
+
+    #[test]
+    fn does_not_accept_decimal_suffixes_on_non_decimal_literals() {
+        let (items, diagnostics) = scan("0b1010f 0xffd");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::Identifier,
+                RawTokenKind::IntegerLiteral,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_character_literals_and_unicode_escapes() {
+        let (items, diagnostics) = scan(r#"'a' '\n' '\t' '\'' '\\' '\u0041'"#);
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::CharLiteral,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_empty_invalid_and_unterminated_character_literals() {
+        let (items, diagnostics) = scan("'' 'ab' '\\q' '");
+        let error_count = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RawItem::Token(RawToken {
+                        kind: RawTokenKind::Error,
+                        ..
+                    })
+                )
+            })
+            .count();
+
+        assert_eq!(error_count, 4);
+        assert_eq!(diagnostics.len(), 4);
+    }
+
+    #[test]
+    fn recognizes_ordinary_and_multiline_strings() {
+        let (items, diagnostics) = scan("\"hello\\nworld\" \"\"\"hello\nworld\"\"\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::StringLiteral,
+                RawTokenKind::StringLiteral,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_multiline_string_backslashes_raw() {
+        let (items, diagnostics) = scan("\"\"\"\\n\"\"\"");
 
         assert_eq!(
             items,
             vec![
-                token(RawTokenKind::Error, 0, 1),
-                token(RawTokenKind::Eof, 1, 1),
+                token(RawTokenKind::StringLiteral, 0, 8),
+                token(RawTokenKind::Eof, 8, 8),
             ]
         );
-        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_invalid_escapes_and_unclosed_strings() {
+        let (items, diagnostics) = scan("\"bad\\q\" \"unclosed\nnext");
+        let error_count = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RawItem::Token(RawToken {
+                        kind: RawTokenKind::Error,
+                        ..
+                    })
+                )
+            })
+            .count();
+
+        assert_eq!(error_count, 1);
+        assert_eq!(diagnostics.len(), 2);
     }
 }

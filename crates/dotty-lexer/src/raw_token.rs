@@ -24,6 +24,14 @@ pub enum RawTokenKind {
     Operator,
     Keyword(HardKeyword),
     Punctuation(Punctuation),
+    CharLiteral,
+    IntegerLiteral,
+    DecimalLiteral,
+    ExponentLiteral,
+    LongLiteral,
+    FloatLiteral,
+    DoubleLiteral,
+    StringLiteral,
 }
 
 /// Alphabetic keywords recognized by the Scala 3.9.0 scanner.
