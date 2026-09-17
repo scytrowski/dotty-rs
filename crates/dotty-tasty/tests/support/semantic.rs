@@ -219,15 +219,7 @@ pub fn assert_expectations_cover_selected_fixtures(
             );
         }
         assert!(
-            !file
-                .asts()
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "failed to decode ASTs in {}: {error}",
-                        fixture_path.display()
-                    )
-                })
-                .is_empty(),
+            !fixture.asts().is_empty(),
             "{} has no AST roots",
             expected.path
         );

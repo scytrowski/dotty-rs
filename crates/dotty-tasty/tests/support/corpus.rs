@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use dotty_tasty::tasty::{AstAddressIndex, TastyFile};
+use dotty_tasty::tasty::{AstAddressIndex, RawNodes, StructuredNode, TastyFile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusManifest {
@@ -29,12 +29,35 @@ pub struct ParsedFixture {
     pub path: PathBuf,
     pub file: TastyFile<'static>,
     pub index: AstAddressIndex<'static>,
+    asts: OnceLock<RawNodes<'static>>,
+    structured_asts: OnceLock<Vec<StructuredNode<'static>>>,
 }
 
 // The test cache intentionally keeps fixture buffers alive until process exit.
 // `TastyFile` and its index are zero-copy views, so this avoids changing the
 // production ownership model just to share parsed corpus data between tests.
 static PARSED_FIXTURES: OnceLock<Vec<ParsedFixture>> = OnceLock::new();
+
+impl ParsedFixture {
+    pub fn asts(&self) -> &RawNodes<'static> {
+        self.asts.get_or_init(|| {
+            self.file.asts().unwrap_or_else(|error| {
+                panic!("failed to decode ASTs in {}: {error}", self.path.display())
+            })
+        })
+    }
+
+    pub fn structured_asts(&self) -> &[StructuredNode<'static>] {
+        self.structured_asts.get_or_init(|| {
+            self.file.structured_asts().unwrap_or_else(|error| {
+                panic!(
+                    "failed to decode structured ASTs in {}: {error}",
+                    self.path.display()
+                )
+            })
+        })
+    }
+}
 
 impl Corpus {
     pub fn load(root: impl Into<PathBuf>) -> Self {
@@ -189,7 +212,13 @@ pub fn parsed_fixtures(
                     let index = file.ast_address_index().unwrap_or_else(|error| {
                         panic!("failed to index {}: {error}", path.display())
                     });
-                    ParsedFixture { path, file, index }
+                    ParsedFixture {
+                        path,
+                        file,
+                        index,
+                        asts: OnceLock::new(),
+                        structured_asts: OnceLock::new(),
+                    }
                 })
                 .collect()
         })

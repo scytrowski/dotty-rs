@@ -146,16 +146,11 @@ fn all_scala3_compiler_fixtures_round_trip_through_file_encoder() {
 fn all_scala3_compiler_structured_files_validate_after_reencoding() {
     for fixture in scala3_compiler_fixtures() {
         let file = &fixture.file;
-        let structured = file.structured_asts().unwrap_or_else(|error| {
-            panic!(
-                "failed to decode structured ASTs in {}: {error}",
-                fixture.path.display()
-            )
-        });
+        let structured = fixture.structured_asts();
         let original_ast_section = file
             .section(StandardSection::Asts)
             .expect("Scala compiler fixture must have an ASTs section");
-        let ast_section = EncodedSection::structured_asts(original_ast_section.name, &structured)
+        let ast_section = EncodedSection::structured_asts(original_ast_section.name, structured)
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to encode structured ASTs in {}: {error}",

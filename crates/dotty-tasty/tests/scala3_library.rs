@@ -94,12 +94,7 @@ fn all_scala3_library_fixtures_decode_through_file_model() {
             "fixture {}",
             fixture.path.display()
         );
-        let asts = file.asts().unwrap_or_else(|error| {
-            panic!(
-                "failed to decode ASTs in {}: {error}",
-                fixture.path.display()
-            )
-        });
+        let asts = fixture.asts();
         assert!(!asts.is_empty(), "fixture {}", fixture.path.display());
     }
 }
@@ -154,13 +149,7 @@ fn scala3_library_fixtures_have_package_ast_roots() {
     let mut tags = BTreeSet::new();
 
     for fixture in scala3_library_fixtures() {
-        let file = &fixture.file;
-        let nodes = file.asts().unwrap_or_else(|error| {
-            panic!(
-                "failed to decode ASTs in {}: {error}",
-                fixture.path.display()
-            )
-        });
+        let nodes = fixture.asts();
 
         tags.extend(nodes.iter().map(|node| node.tag));
     }
@@ -311,16 +300,11 @@ fn all_scala3_library_indexed_structured_nodes_round_trip() {
 fn all_scala3_library_structured_files_validate_after_reencoding() {
     for fixture in scala3_library_fixtures() {
         let file = &fixture.file;
-        let structured = file.structured_asts().unwrap_or_else(|error| {
-            panic!(
-                "failed to decode structured ASTs in {}: {error}",
-                fixture.path.display()
-            )
-        });
+        let structured = fixture.structured_asts();
         let original_ast_section = file
             .section(StandardSection::Asts)
             .expect("Scala library fixture must have an ASTs section");
-        let ast_section = EncodedSection::structured_asts(original_ast_section.name, &structured)
+        let ast_section = EncodedSection::structured_asts(original_ast_section.name, structured)
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to encode structured ASTs in {}: {error}",
@@ -363,14 +347,9 @@ fn all_scala3_library_structured_files_validate_after_reencoding() {
 fn all_scala3_library_structured_relocated_files_validate() {
     for fixture in scala3_library_fixtures() {
         let file = &fixture.file;
-        let structured = file.structured_asts().unwrap_or_else(|error| {
-            panic!(
-                "failed to decode structured ASTs in {}: {error}",
-                fixture.path.display()
-            )
-        });
+        let structured = fixture.structured_asts();
         let encoded = file
-            .encode_structured_relocated(&structured)
+            .encode_structured_relocated(structured)
             .unwrap_or_else(|error| {
                 panic!(
                     "failed to re-encode relocated file {}: {error}",
