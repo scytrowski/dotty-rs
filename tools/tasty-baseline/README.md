@@ -80,8 +80,9 @@ without adding another Rust test target.
 The expensive compiler-side check is intentionally separate from normal Rust
 CI. `verify-roundtrip.sh` re-encodes every `.tasty` file in a manifest corpus
 through the structured Rust encoder, then invokes `TastyInspector` for the
-entire re-encoded corpus. It performs a second, selected-file projection and
-compares that semantic-lite result with the checked-in expectation:
+original and entire re-encoded corpora. Their semantic-lite projections must
+match for every file. It then performs a selected-file projection and compares
+that result with the checked-in expectation:
 
 ```text
 tools/tasty-baseline/verify-roundtrip.sh \

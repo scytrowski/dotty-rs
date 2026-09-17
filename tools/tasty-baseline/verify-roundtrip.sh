@@ -126,12 +126,22 @@ run_inspector() {
   )
 }
 
+original_full_output="$work_dir/original-full-semantic.json"
 full_output="$work_dir/full-semantic.json"
+original_full_arguments="run $original_full_output $input_root"
 full_arguments="run $full_output $roundtrip_root"
 if [[ -n "$classpath_path" ]]; then
+  original_full_arguments+=" --classpath=$classpath_path"
   full_arguments+=" --classpath=$classpath_path"
 fi
+run_inspector "$original_full_arguments" original-full
 run_inspector "$full_arguments" full
+
+if ! cmp -s "$original_full_output" "$full_output"; then
+  echo "full semantic projection mismatch after structured re-encoding: $corpus_dir" >&2
+  diff -u "$original_full_output" "$full_output" | head -200 >&2 || true
+  exit 1
+fi
 
 selected_arguments="run $semantic_output --select=$selection_path $roundtrip_root"
 if [[ -n "$classpath_path" ]]; then
@@ -145,4 +155,4 @@ if ! cmp -s "$semantic_output" "$expectation_path"; then
   exit 1
 fi
 
-echo "Scala TastyInspector accepted all structured round-trip files and the selected semantic baseline for $corpus_dir"
+echo "Scala TastyInspector accepted all structured round-trip files; full semantic projection and selected baseline match for $corpus_dir"
