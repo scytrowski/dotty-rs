@@ -439,6 +439,7 @@ fn can_end_statement(kind: Option<TokenKind>) -> bool {
         Some(
             TokenKind::Identifier
                 | TokenKind::BackquotedIdentifier
+                | TokenKind::QuoteId
                 | TokenKind::CharLiteral
                 | TokenKind::IntegerLiteral
                 | TokenKind::DecimalLiteral
@@ -724,6 +725,8 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
         RawTokenKind::Eof => TokenKind::Eof,
         RawTokenKind::Identifier => TokenKind::Identifier,
         RawTokenKind::BackquotedIdentifier => TokenKind::BackquotedIdentifier,
+        RawTokenKind::Quote => TokenKind::Quote,
+        RawTokenKind::QuoteId => TokenKind::QuoteId,
         RawTokenKind::Operator => TokenKind::Operator,
         RawTokenKind::Keyword(keyword) => TokenKind::Keyword(keyword),
         RawTokenKind::Punctuation(Punctuation::Colon) => {
@@ -774,6 +777,25 @@ mod tests {
         assert_eq!(
             kinds("val answer = 42"),
             vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::IntegerLiteral,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_statements_after_a_legacy_quoted_identifier() {
+        assert_eq!(
+            kinds("val first = 'foo\nval second = 1"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::QuoteId,
+                TokenKind::Newline,
                 TokenKind::Keyword(HardKeyword::Val),
                 TokenKind::Identifier,
                 TokenKind::Operator,

@@ -23,6 +23,8 @@ pub enum RawTokenKind {
     Eof,
     Identifier,
     BackquotedIdentifier,
+    Quote,
+    QuoteId,
     Operator,
     Keyword(HardKeyword),
     Punctuation(Punctuation),

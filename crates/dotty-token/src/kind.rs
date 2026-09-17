@@ -7,6 +7,10 @@ pub enum TokenKind {
     Identifier,
     /// An identifier enclosed in backquotes.
     BackquotedIdentifier,
+    /// A Scala quote marker before a quoted term or type.
+    Quote,
+    /// A legacy quoted identifier such as `'name`.
+    QuoteId,
     /// A symbolic operator.
     Operator,
     /// A Scala hard keyword.

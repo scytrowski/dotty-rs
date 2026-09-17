@@ -43,6 +43,8 @@ fn normalized_kind(token: &Token, spelling: &str) -> String {
         TokenKind::Error => "error".to_owned(),
         TokenKind::Identifier => "identifier".to_owned(),
         TokenKind::BackquotedIdentifier => "backquoted identifier".to_owned(),
+        TokenKind::Quote => "'".to_owned(),
+        TokenKind::QuoteId => "quoted identifier".to_owned(),
         TokenKind::Operator => "operator".to_owned(),
         TokenKind::Keyword(keyword) => keyword_spelling(keyword, spelling),
         TokenKind::Punctuation(punctuation) => punctuation_spelling(punctuation),

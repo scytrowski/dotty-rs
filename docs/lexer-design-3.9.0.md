@@ -69,6 +69,8 @@ Implementation status on the current lexer branch:
   are now part of scanner post-processing;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
+- quote markers and legacy quoted identifiers are emitted as `Quote` and
+  `QuoteId`; splice syntax remains the `$` plus `{` token sequence;
 - richer infix lookahead and XML remain intentionally staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
@@ -481,8 +483,10 @@ ownership and grammar-driven closures remain to be refined.
 
 ### Increment 9 — Quotes, legacy syntax, and XML
 
-Add remaining quote/splice forms, compatibility syntax, and an isolated XML
-entry point that does not entangle XML parsing with normal Scala tokenization.
+The current implementation covers term/type quote markers, legacy quoted
+identifiers, and their interaction with character literals. Add remaining
+quote/splice forms, compatibility syntax, and an isolated XML entry point that
+does not entangle XML parsing with normal Scala tokenization.
 
 ## 11. Testing strategy
 

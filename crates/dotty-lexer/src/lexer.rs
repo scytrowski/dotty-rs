@@ -162,6 +162,12 @@ impl<'source> RawLexer<'source> {
             return Ok(Some(RawItem::Token(self.scan_number(start)?)));
         }
         if character == '\'' {
+            if matches!(self.cursor.peek_nth(1), Some('{' | '[')) {
+                return Ok(Some(RawItem::Token(self.scan_quote(start)?)));
+            }
+            if self.looks_like_quote_id() {
+                return Ok(Some(RawItem::Token(self.scan_quote_id(start)?)));
+            }
             return Ok(Some(RawItem::Token(self.scan_char_literal(start)?)));
         }
         if character == '"' {
@@ -592,6 +598,52 @@ impl<'source> RawLexer<'source> {
 
         Ok(RawToken {
             kind: RawTokenKind::Operator,
+            span: self.span(start)?,
+        })
+    }
+
+    fn looks_like_quote_id(&self) -> bool {
+        if !self
+            .cursor
+            .peek_nth(1)
+            .is_some_and(crate::identifier::is_identifier_start)
+        {
+            return false;
+        }
+
+        let mut lookahead = 2;
+        while let Some(character) = self.cursor.peek_nth(lookahead) {
+            if character == '\'' {
+                return false;
+            }
+            if matches!(character, '\n' | '\r') {
+                return true;
+            }
+            lookahead += 1;
+        }
+        true
+    }
+
+    fn scan_quote(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        let _ = self.cursor.bump();
+        Ok(RawToken {
+            kind: RawTokenKind::Quote,
+            span: self.span(start)?,
+        })
+    }
+
+    fn scan_quote_id(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
+        let _ = self.cursor.bump();
+        let _ = self.cursor.bump();
+        while self
+            .cursor
+            .peek()
+            .is_some_and(crate::identifier::is_identifier_part)
+        {
+            let _ = self.cursor.bump();
+        }
+        Ok(RawToken {
+            kind: RawTokenKind::QuoteId,
             span: self.span(start)?,
         })
     }
@@ -1413,6 +1465,50 @@ mod tests {
                 RawTokenKind::Eof,
             ]
         );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_term_and_type_quote_markers() {
+        let (items, diagnostics) = scan("'{ '[List[Int]]");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Quote,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Quote,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_legacy_quoted_identifier() {
+        let (items, diagnostics) = scan("'foo");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(kinds, vec![RawTokenKind::QuoteId, RawTokenKind::Eof]);
         assert!(diagnostics.is_empty());
     }
 
