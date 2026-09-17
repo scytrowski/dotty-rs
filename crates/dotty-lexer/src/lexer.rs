@@ -177,7 +177,9 @@ impl<'source> RawLexer<'source> {
             return Ok(Some(RawItem::Token(self.scan_char_literal(start)?)));
         }
         if character == '"' {
-            return Ok(Some(RawItem::Token(self.scan_string_literal(start)?)));
+            let token = self.scan_string_literal(start)?;
+            self.update_xml_token(token.kind, token.span)?;
+            return Ok(Some(RawItem::Token(token)));
         }
         if self.xml.can_start_literal()
             && character == '<'
@@ -1793,6 +1795,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_hyphenated_xml_tag_names() {
+        let (_, diagnostics) = scan("<data-item></data-item>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_namespaced_xml_attribute_names() {
+        let (_, diagnostics) = scan(r#"<item xml:lang="en"/>"#);
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_hyphenated_xml_attribute_names() {
+        let (_, diagnostics) = scan("<item data-id={id}/>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn diagnoses_an_unterminated_simple_xml_tag_at_eof() {
         let source = "<item";
         let (_, diagnostics) = scan(source);
@@ -2028,6 +2051,60 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_quoted_xml_attribute_value() {
+        let (_, diagnostics) = scan(r#"<item id="x"/>"#);
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_an_expression_xml_attribute_value() {
+        let (_, diagnostics) = scan("<item enabled={flag}/>");
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_multiple_xml_attributes() {
+        let (_, diagnostics) = scan(r#"<item id="x" enabled={flag}/>"#);
+
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_xml_attribute_without_equals() {
+        let (_, diagnostics) = scan("<item id/>");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute name must be followed by `=`"
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_xml_attribute_without_a_value() {
+        let (_, diagnostics) = scan("<item id=/>");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute value expected after `=`"
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unexpected_xml_attribute_value() {
+        let (_, diagnostics) = scan(r#"<item "x"/>"#);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute value must follow `=`"
+        );
     }
 
     #[test]

@@ -75,11 +75,12 @@ Implementation status on the current lexer branch:
   XML tag operators retain Scala's greedy operator boundaries, XML body
   expressions have an isolated state stack, comments and CDATA protect their
   contents from tag-depth tracking, matching opening and closing tag names are
-  tracked for recoverable diagnostics, and the scanner returns to normal
-  layout processing after a closed root literal;
+  tracked for recoverable diagnostics, basic attribute forms are validated,
+  and the scanner returns to normal layout processing after a closed root
+  literal;
 - unterminated XML comments, CDATA sections, tags, and body expressions
   produce recoverable EOF diagnostics; tag/attribute grammar validation
-  remains staged.
+  beyond the basic forms remains staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require
@@ -495,13 +496,13 @@ ownership and grammar-driven closures remain to be refined.
 The current implementation covers term/type quote markers, legacy quoted
 identifiers, and their interaction with character literals. It also recognizes
 the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, tracks
-opening and closing tag names, and tracks XML expression braces and nested XML
-literals to end layout-sensitive processing after the root literal. It also
-tracks comment and CDATA sections and diagnoses those constructs, mismatched
-closing names, and unfinished tags when they reach EOF. Add remaining
-quote/splice forms, compatibility syntax, tag/attribute grammar validation,
-and broader malformed-input recovery without entangling XML state with normal
-Scala tokenization.
+opening and closing tag names, validates quoted and expression-valued
+attributes, and tracks XML expression braces and nested XML literals to end
+layout-sensitive processing after the root literal. It also tracks comment
+and CDATA sections and diagnoses those constructs, mismatched closing names,
+invalid attribute structure, and unfinished tags when they reach EOF. Add
+remaining quote/splice forms, compatibility syntax, and broader malformed-
+input recovery without entangling XML state with normal Scala tokenization.
 
 ## 11. Testing strategy
 

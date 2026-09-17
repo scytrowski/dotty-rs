@@ -5,6 +5,7 @@ use dotty_token::Punctuation;
 struct XmlExpression {
     brace_depth: u32,
     xml_floor: u32,
+    attribute: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +19,14 @@ enum XmlContent {
 enum PendingTagName {
     Opening,
     Closing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmlAttributeState {
+    ExpectNameOrEnd,
+    ExpectEquals,
+    ExpectValue,
+    InExpression,
 }
 
 impl Default for XmlContent {
@@ -38,7 +47,11 @@ pub(crate) struct XmlState {
     tag_open: bool,
     open_tags: Vec<String>,
     pending_tag_name: Option<PendingTagName>,
+    current_tag_name: Option<String>,
+    tag_name_separator: bool,
     closing_tag_name: Option<String>,
+    attribute_state: Option<XmlAttributeState>,
+    attribute_name_separator: bool,
 }
 
 impl XmlState {
@@ -84,10 +97,22 @@ impl XmlState {
                 self.closing_tag = false;
                 self.tag_open = true;
                 self.pending_tag_name = Some(PendingTagName::Opening);
+                self.current_tag_name = None;
+                self.tag_name_separator = false;
             }
             RawTokenKind::Identifier | RawTokenKind::Keyword(_) => {
-                self.consume_tag_name(spelling);
+                if self.pending_tag_name.is_some() {
+                    self.consume_tag_name(spelling);
+                } else {
+                    self.consume_attribute_name();
+                }
             }
+            RawTokenKind::StringLiteral => {
+                self.consume_attribute_value(false);
+            }
+            RawTokenKind::Punctuation(punctuation)
+                if matches!(punctuation, Punctuation::Colon | Punctuation::Dot)
+                    && self.consume_xml_name_separator(spelling) => {}
             RawTokenKind::Punctuation(Punctuation::LeftBrace) => self.update_left_brace(),
             RawTokenKind::Punctuation(Punctuation::RightBrace) => self.update_right_brace(),
             RawTokenKind::Operator => return self.update_operator(spelling),
@@ -97,10 +122,95 @@ impl XmlState {
     }
 
     fn consume_tag_name(&mut self, spelling: &str) {
-        match self.pending_tag_name.take() {
-            Some(PendingTagName::Opening) => self.open_tags.push(spelling.to_owned()),
-            Some(PendingTagName::Closing) => self.closing_tag_name = Some(spelling.to_owned()),
-            None => {}
+        let Some(pending) = self.pending_tag_name else {
+            return;
+        };
+
+        if let Some(name) = self.current_tag_name.as_mut() {
+            if self.tag_name_separator {
+                name.push_str(spelling);
+                self.tag_name_separator = false;
+                return;
+            }
+
+            self.finalize_tag_name();
+            if pending == PendingTagName::Opening {
+                self.consume_attribute_name();
+            }
+            return;
+        }
+
+        self.current_tag_name = Some(spelling.to_owned());
+    }
+
+    fn finalize_tag_name(&mut self) {
+        let Some(pending) = self.pending_tag_name.take() else {
+            return;
+        };
+        let Some(name) = self.current_tag_name.take() else {
+            return;
+        };
+
+        self.tag_name_separator = false;
+        match pending {
+            PendingTagName::Opening => {
+                self.open_tags.push(name);
+                self.attribute_state = Some(XmlAttributeState::ExpectNameOrEnd);
+            }
+            PendingTagName::Closing => self.closing_tag_name = Some(name),
+        }
+    }
+
+    fn consume_xml_name_separator(&mut self, spelling: &str) -> bool {
+        if self.pending_tag_name.is_some() && self.current_tag_name.is_some() {
+            if let Some(name) = self.current_tag_name.as_mut() {
+                name.push_str(spelling);
+            }
+            self.tag_name_separator = true;
+            return true;
+        }
+
+        if self.tag_open
+            && !self.closing_tag
+            && self.attribute_state == Some(XmlAttributeState::ExpectEquals)
+        {
+            self.attribute_name_separator = true;
+            return true;
+        }
+
+        false
+    }
+
+    fn consume_attribute_name(&mut self) {
+        if !self.tag_open || self.closing_tag {
+            return;
+        }
+
+        if self.attribute_name_separator {
+            self.attribute_name_separator = false;
+            return;
+        }
+
+        if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
+            self.report_error("XML attribute name must be followed by `=`");
+        } else if self.attribute_state == Some(XmlAttributeState::ExpectValue) {
+            self.report_error("XML attribute value expected after `=`");
+        }
+        self.attribute_state = Some(XmlAttributeState::ExpectEquals);
+    }
+
+    fn consume_attribute_value(&mut self, expression: bool) {
+        if !self.tag_open || self.closing_tag {
+            return;
+        }
+
+        if expression {
+            self.attribute_state = Some(XmlAttributeState::InExpression);
+        } else if self.attribute_state == Some(XmlAttributeState::ExpectValue) {
+            self.attribute_state = Some(XmlAttributeState::ExpectNameOrEnd);
+            self.attribute_name_separator = false;
+        } else {
+            self.report_error("XML attribute value must follow `=`");
         }
     }
 
@@ -111,14 +221,29 @@ impl XmlState {
     }
 
     fn finish_opening_tag(&mut self) {
+        self.finalize_tag_name();
         if self.pending_tag_name == Some(PendingTagName::Opening) {
             self.report_error("XML opening tag name expected");
             self.pending_tag_name = None;
         }
+        match self.attribute_state {
+            Some(XmlAttributeState::ExpectEquals) => {
+                self.report_error("XML attribute name must be followed by `=`")
+            }
+            Some(XmlAttributeState::ExpectValue) => {
+                self.report_error("XML attribute value expected after `=`")
+            }
+            Some(XmlAttributeState::InExpression) => {
+                self.report_error("XML attribute expression must be closed")
+            }
+            Some(XmlAttributeState::ExpectNameOrEnd) | None => {}
+        }
+        self.attribute_state = None;
         self.tag_open = false;
     }
 
     fn finish_closing_tag(&mut self) {
+        self.finalize_tag_name();
         if self.pending_tag_name == Some(PendingTagName::Closing) {
             self.report_error("XML closing tag name expected");
             self.pending_tag_name = None;
@@ -164,6 +289,13 @@ impl XmlState {
             return;
         }
 
+        let attribute = self.tag_open
+            && !self.closing_tag
+            && self.attribute_state == Some(XmlAttributeState::ExpectValue);
+        if attribute {
+            self.consume_attribute_value(true);
+        }
+
         let starts_xml_expression = self
             .expressions
             .last()
@@ -172,6 +304,7 @@ impl XmlState {
             self.expressions.push(XmlExpression {
                 brace_depth: 1,
                 xml_floor: self.depth,
+                attribute,
             });
         } else if let Some(expression) = self.expressions.last_mut() {
             expression.brace_depth = expression.brace_depth.saturating_add(1);
@@ -186,7 +319,12 @@ impl XmlState {
         if expression.brace_depth > 1 {
             expression.brace_depth -= 1;
         } else {
+            let attribute = expression.attribute;
             let _ = self.expressions.pop();
+            if attribute {
+                self.attribute_state = Some(XmlAttributeState::ExpectNameOrEnd);
+                self.attribute_name_separator = false;
+            }
         }
     }
 
@@ -231,6 +369,29 @@ impl XmlState {
             return false;
         }
 
+        if self.tag_open && !self.closing_tag && spelling == "=/>" {
+            if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
+                self.attribute_state = Some(XmlAttributeState::ExpectValue);
+            } else {
+                self.report_error("XML attribute `=` is unexpected");
+            }
+            self.finish_self_closing_tag();
+            return self.depth == 0;
+        }
+
+        if spelling == "-" && self.consume_xml_name_separator(spelling) {
+            return false;
+        }
+
+        if self.tag_open && !self.closing_tag && spelling == "=" {
+            if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
+                self.attribute_state = Some(XmlAttributeState::ExpectValue);
+            } else {
+                self.report_error("XML attribute `=` is unexpected");
+            }
+            return false;
+        }
+
         match spelling {
             spelling if spelling.ends_with("</>") => {
                 if spelling.starts_with('>') {
@@ -256,6 +417,8 @@ impl XmlState {
                 self.closing_tag = true;
                 self.tag_open = true;
                 self.pending_tag_name = Some(PendingTagName::Closing);
+                self.current_tag_name = None;
+                self.tag_name_separator = false;
                 self.closing_tag_name = None;
             }
             "/>" => {
@@ -268,6 +431,8 @@ impl XmlState {
                 self.closing_tag = false;
                 self.tag_open = true;
                 self.pending_tag_name = Some(PendingTagName::Opening);
+                self.current_tag_name = None;
+                self.tag_name_separator = false;
             }
             ">" if self.closing_tag => {
                 self.finish_closing_tag();
