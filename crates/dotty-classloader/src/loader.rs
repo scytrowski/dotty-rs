@@ -2,6 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathEntry;
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
+use crate::method_symbol::MethodSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::symbol::{ClassRef, ClassSymbol};
 use dotty_classfile::class_file::ClassFile;
@@ -110,12 +111,27 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             fields.push(FieldSymbol::new(field_name, field.access_flags, field_type));
         }
 
+        let mut methods = Vec::with_capacity(class_file.methods.len());
+        for method in &class_file.methods {
+            let method_name =
+                self.resolve_member_name(name, &class_file.constant_pool, method.name_index)?;
+            let descriptor = method
+                .descriptor(&class_file.constant_pool)
+                .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
+            methods.push(MethodSymbol::new(
+                method_name,
+                method.access_flags,
+                descriptor,
+            ));
+        }
+
         Ok(Rc::new(ClassSymbol::new(
             name.clone(),
             class_file.access_flags,
             super_class,
             interfaces,
             fields,
+            methods,
         )))
     }
 
@@ -357,6 +373,54 @@ mod tests {
         }
     }
 
+    /// `pool_sample/PoolSample.class` declares 3 real methods (confirmed
+    /// via `javap -p -v`): the implicit `<init>()V` constructor,
+    /// `run()V` (overriding `Runnable.run`), and `computeAnswer()I`
+    /// (`private static`) — this asserts every one decodes with the
+    /// right name, descriptor, and flags.
+    #[test]
+    fn loads_a_real_fixtures_methods() {
+        use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
+
+        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load");
+
+        let method = |name: &str| {
+            symbol
+                .methods()
+                .iter()
+                .find(|method| method.name() == name)
+                .unwrap_or_else(|| panic!("method {name} should exist"))
+        };
+
+        assert_eq!(symbol.methods().len(), 3);
+        assert_eq!(
+            method("<init>").descriptor(),
+            &MethodDescriptor {
+                parameters: vec![],
+                return_type: None,
+            }
+        );
+        assert_eq!(
+            method("run").descriptor(),
+            &MethodDescriptor {
+                parameters: vec![],
+                return_type: None,
+            }
+        );
+        assert_eq!(
+            method("computeAnswer").descriptor(),
+            &MethodDescriptor {
+                parameters: vec![],
+                return_type: Some(FieldType::Int),
+            }
+        );
+        assert!(method("computeAnswer").flags().is_private());
+        assert!(method("computeAnswer").flags().is_static());
+    }
+
     /// A hand-built, minimal, synthetic class file with one field whose
     /// descriptor is not a valid field descriptor. `javac` cannot produce
     /// this; it exists purely to exercise `MalformedDescriptor`.
@@ -397,6 +461,60 @@ mod tests {
         classes.insert(
             BinaryName::from_internal("C"),
             synthetic_class_with_malformed_field_descriptor(),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let error = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::MalformedDescriptor(name, _) if name.as_internal() == "C"
+        ));
+    }
+
+    /// A hand-built, minimal, synthetic class file with one method whose
+    /// descriptor is not a valid method descriptor. `javac` cannot
+    /// produce this; it exists purely to exercise `MalformedDescriptor`
+    /// for a method rather than a field.
+    fn synthetic_class_with_malformed_method_descriptor() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&[0x00, 0x05]); // constant_pool_count = 5
+        bytes.push(1); // #1 Utf8
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"C");
+        bytes.push(7); // #2 Class -> #1
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(1); // #3 Utf8 "method"
+        bytes.extend_from_slice(&6u16.to_be_bytes());
+        bytes.extend_from_slice(b"method");
+        bytes.push(1); // #4 Utf8 "X" (not a valid method descriptor)
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"X");
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // fields_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // methods_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // method access_flags
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // method name_index = #3
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // method descriptor_index = #4
+        bytes.extend_from_slice(&[0x00, 0x00]); // method attributes_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    #[test]
+    fn malformed_descriptor_when_a_method_descriptor_does_not_parse() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_malformed_method_descriptor(),
         );
 
         let loader = ClassLoader::new(InMemoryClassPath(classes));

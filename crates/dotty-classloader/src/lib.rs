@@ -17,6 +17,7 @@ mod jar_class_path;
 mod jdk_class_path;
 mod jmod_class_path;
 mod loader;
+mod method_symbol;
 mod repository;
 mod symbol;
 mod zip_archive;
@@ -35,5 +36,6 @@ pub mod classloader {
     pub use crate::jdk_class_path::JdkClassPath;
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::ClassLoader;
+    pub use crate::method_symbol::MethodSymbol;
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }

@@ -84,6 +84,7 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ));
 
         repository.mark_loaded(name.clone(), symbol.clone());

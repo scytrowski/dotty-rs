@@ -1,5 +1,6 @@
 use crate::binary_name::BinaryName;
 use crate::field_symbol::FieldSymbol;
+use crate::method_symbol::MethodSymbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use std::rc::Rc;
 
@@ -18,7 +19,7 @@ pub enum ClassRef {
 }
 
 /// A loaded class or interface's symbol: its name, access flags, its
-/// direct superclass/interfaces, and its fields.
+/// direct superclass/interfaces, its fields, and its methods.
 ///
 /// Owns its data — it never borrows from the decode buffer that produced
 /// it, matching the borrowed/owned separation `AGENTS.md` requires between
@@ -30,6 +31,7 @@ pub struct ClassSymbol {
     super_class: Option<ClassRef>,
     interfaces: Vec<ClassRef>,
     fields: Vec<FieldSymbol>,
+    methods: Vec<MethodSymbol>,
 }
 
 impl ClassSymbol {
@@ -39,6 +41,7 @@ impl ClassSymbol {
         super_class: Option<ClassRef>,
         interfaces: Vec<ClassRef>,
         fields: Vec<FieldSymbol>,
+        methods: Vec<MethodSymbol>,
     ) -> Self {
         Self {
             name,
@@ -46,6 +49,7 @@ impl ClassSymbol {
             super_class,
             interfaces,
             fields,
+            methods,
         }
     }
 
@@ -68,6 +72,10 @@ impl ClassSymbol {
     pub fn fields(&self) -> &[FieldSymbol] {
         &self.fields
     }
+
+    pub fn methods(&self) -> &[MethodSymbol] {
+        &self.methods
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +90,7 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ));
         let runnable_ref = ClassRef::Unresolved(BinaryName::from_internal("java/lang/Runnable"));
 
@@ -90,6 +99,7 @@ mod tests {
             ClassAccessFlags(0x0021),
             Some(ClassRef::Resolved(object_symbol.clone())),
             vec![runnable_ref],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -111,6 +121,7 @@ mod tests {
             BinaryName::from_internal("java/lang/Object"),
             ClassAccessFlags(0x0021),
             None,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );
@@ -135,8 +146,34 @@ mod tests {
             None,
             Vec::new(),
             vec![field],
+            Vec::new(),
         );
 
         assert!(matches!(symbol.fields(), [only] if only.name() == "ANSWER"));
+    }
+
+    #[test]
+    fn exposes_its_methods() {
+        use dotty_classfile::access_flags::MethodAccessFlags;
+        use dotty_classfile::descriptor::MethodDescriptor;
+
+        let method = MethodSymbol::new(
+            "run".to_owned(),
+            MethodAccessFlags(0x0001),
+            MethodDescriptor {
+                parameters: vec![],
+                return_type: None,
+            },
+        );
+        let symbol = ClassSymbol::new(
+            BinaryName::from_internal("PoolSample"),
+            ClassAccessFlags(0x0021),
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![method],
+        );
+
+        assert!(matches!(symbol.methods(), [only] if only.name() == "run"));
     }
 }
