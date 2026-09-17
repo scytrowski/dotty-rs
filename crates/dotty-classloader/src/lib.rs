@@ -9,6 +9,7 @@
 
 mod binary_name;
 mod class_path;
+mod symbol;
 
 /// Classpath loading APIs.
 pub mod classloader {
@@ -17,4 +18,5 @@ pub mod classloader {
         ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, CompositeClassPath,
         DirectoryClassPath,
     };
+    pub use crate::symbol::{ClassRef, ClassSymbol};
 }
