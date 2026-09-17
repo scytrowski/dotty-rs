@@ -67,12 +67,16 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
 def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
     if token == "string literal" and in_interpolation:
         return "string part"
+    if token == "number literal with exponent":
+        return "exponent literal"
     if token == "number literal":
         if "." in spelling:
             return "decimal literal"
         if "e" in spelling.lower():
             return "exponent literal"
         return "integer literal"
+    if token == "identifier" and spelling.startswith("`"):
+        return "backquoted identifier"
     if token == "identifier" and name and not is_identifier_name(name):
         return "operator"
     if token and not token[0].isalnum() and not token.startswith("'"):
