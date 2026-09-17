@@ -806,6 +806,20 @@ mod tests {
     }
 
     #[test]
+    fn maps_quote_markers_to_parser_facing_tokens() {
+        assert_eq!(
+            kinds("'{ 1 }"),
+            vec![
+                TokenKind::Quote,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                TokenKind::IntegerLiteral,
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn classifies_colon_after_an_identifier_as_colon_follow() {
         assert_eq!(
             kinds("value: Int"),

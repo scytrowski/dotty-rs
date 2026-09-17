@@ -1513,6 +1513,52 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_legacy_quoted_identifier_bounded_by_a_line_break() {
+        let (items, diagnostics) = scan("'foo\nbar");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::QuoteId,
+                RawTokenKind::Identifier,
+                RawTokenKind::Eof
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_splice_syntax_as_identifier_and_brace_tokens() {
+        let (items, diagnostics) = scan("${value}");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn diagnoses_empty_invalid_and_unterminated_character_literals() {
         let (items, diagnostics) = scan("'' 'ab' '\\q' '");
         let error_count = items
