@@ -67,8 +67,9 @@ Implementation status on the current lexer branch:
   continues a previous expression;
 - `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker recognition
   are now part of scanner post-processing;
-- richer infix lookahead, delimiter-owned indentation closure, and XML remain
-  intentionally staged.
+- dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
+- incomparable space/tab indentation prefixes produce recoverable diagnostics;
+- richer infix lookahead and XML remain intentionally staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require

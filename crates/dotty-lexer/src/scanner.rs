@@ -40,8 +40,8 @@ impl ContextualScanner {
             }
         }
 
-        let diagnostics = raw_lexer.diagnostics().to_vec();
-        let tokens = build_tokens(source, &items)?;
+        let mut diagnostics = raw_lexer.diagnostics().to_vec();
+        let tokens = build_tokens(source, &items, &mut diagnostics)?;
         Ok(Self {
             source: source.to_owned(),
             tokens,
@@ -181,7 +181,11 @@ impl TokenSource for ContextualScanner {
     }
 }
 
-fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerError> {
+fn build_tokens(
+    source: &str,
+    items: &[RawItem],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<Token>, RawLexerError> {
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
     let mut previous_kind = None;
@@ -211,6 +215,13 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
 
                 if has_line_break && layout_enabled {
                     if brace_depth == 0 {
+                        if has_incomparable_indentation(&indentation_stack, &indentation) {
+                            let line_start = line_start_offset(source, raw.span.start());
+                            diagnostics.push(Diagnostic::error(
+                                TextRange::new(line_start, raw.span.start())?,
+                                "incompatible indentation prefixes",
+                            ));
+                        }
                         adjust_indentation(
                             &mut tokens,
                             &mut indentation_stack,
@@ -382,6 +393,16 @@ fn close_regions_after_delimiter(
         ));
     }
     Ok(())
+}
+
+fn has_incomparable_indentation(stack: &[LayoutRegion], indentation: &str) -> bool {
+    let Some(current) = stack.last().map(|region| region.indentation.as_str()) else {
+        return false;
+    };
+    !current.is_empty()
+        && !indentation.is_empty()
+        && !is_prefix(current, indentation)
+        && !is_prefix(indentation, current)
 }
 
 fn opens_indentation(kind: Option<TokenKind>, operator: bool) -> bool {
@@ -670,15 +691,20 @@ fn count_line_breaks(text: &str) -> usize {
 }
 
 fn line_indentation(source: &str, offset: u32) -> String {
+    let line_start = line_start_offset(source, offset) as usize;
+    source[line_start..offset as usize]
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect()
+}
+
+fn line_start_offset(source: &str, offset: u32) -> u32 {
     let bytes = source.as_bytes();
     let mut line_start = offset as usize;
     while line_start > 0 && !matches!(bytes[line_start - 1], b'\n' | b'\r') {
         line_start -= 1;
     }
-    source[line_start..offset as usize]
-        .chars()
-        .take_while(|character| matches!(character, ' ' | '\t'))
-        .collect()
+    line_start as u32
 }
 
 fn has_source_line_break(source: &str, start: u32, end: u32) -> bool {
@@ -1128,5 +1154,17 @@ mod tests {
         let scanner = ContextualScanner::new("\"unclosed").expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn diagnoses_incomparable_indentation_prefixes() {
+        let scanner =
+            ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(
+            scanner.diagnostics()[0].message(),
+            "incompatible indentation prefixes"
+        );
     }
 }
