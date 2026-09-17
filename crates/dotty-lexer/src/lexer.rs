@@ -663,16 +663,15 @@ impl<'source> RawLexer<'source> {
         }
 
         let mut lookahead = 2;
-        while let Some(character) = self.cursor.peek_nth(lookahead) {
-            if character == '\'' {
-                return false;
-            }
-            if matches!(character, '\n' | '\r') {
-                return true;
-            }
+        while self
+            .cursor
+            .peek_nth(lookahead)
+            .is_some_and(crate::identifier::is_identifier_part)
+        {
             lookahead += 1;
         }
-        true
+
+        self.cursor.peek_nth(lookahead) != Some('\'')
     }
 
     fn scan_quote(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -1708,6 +1707,51 @@ mod tests {
                 RawTokenKind::QuoteId,
                 RawTokenKind::Identifier,
                 RawTokenKind::Eof
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_multiple_legacy_quoted_identifiers_on_one_line() {
+        let (items, diagnostics) = scan("'foo + 'bar");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::QuoteId,
+                RawTokenKind::Operator,
+                RawTokenKind::QuoteId,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_legacy_quoted_identifier_before_a_character_literal() {
+        let (items, diagnostics) = scan("'foo 'a'");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::QuoteId,
+                RawTokenKind::CharLiteral,
+                RawTokenKind::Eof,
             ]
         );
         assert!(diagnostics.is_empty());

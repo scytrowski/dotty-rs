@@ -71,7 +71,8 @@ Implementation status on the current lexer branch:
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
-  `QuoteId`; splice syntax remains the `$` plus `{` token sequence;
+  `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
+  plus `{` token sequence;
 - an XML start marker is emitted for `<` immediately followed by an XML name;
   XML tag operators retain Scala's greedy operator boundaries, XML body
   expressions have an isolated state stack, comments and CDATA protect their
