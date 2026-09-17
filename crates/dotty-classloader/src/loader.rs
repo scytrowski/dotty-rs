@@ -1339,6 +1339,55 @@ mod tests {
         }
     }
 
+    /// `resolve_semantic_field_type`'s `FieldType::Array` branch
+    /// recurses into its component type; every other test in this file
+    /// only exercises plain `Object` fields, so this specifically
+    /// targets `Ping.others: Pong[]` (real `javac` output, see
+    /// `tests/fixtures/ping_pong/generate.sh`) to prove an
+    /// array-of-`Object` field resolves its component class the same
+    /// way a bare `Object` field does.
+    #[test]
+    fn resolves_the_component_class_of_an_array_typed_field() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Ping"),
+            own_fixture_bytes("ping_pong/Ping.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("Pong"),
+            own_fixture_bytes("ping_pong/Pong.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let ping = loader
+            .load_class(&BinaryName::from_internal("Ping"))
+            .expect("Ping should load");
+
+        let ping_fields = ping.fields();
+        let others = ping_fields
+            .iter()
+            .find(|field| field.name() == "others")
+            .expect("Ping.others should exist");
+
+        match others.semantic_type() {
+            SemanticFieldType::Array(component) => match component.as_ref() {
+                SemanticFieldType::Object(ClassRef::Resolved(symbol)) => {
+                    assert_eq!(symbol.name().as_internal(), "Pong");
+                }
+                unexpected => {
+                    panic!(
+                        "expected the array's component to resolve to a class, got {unexpected:?}"
+                    )
+                }
+            },
+            unexpected => panic!("expected Ping.others to be an array type, got {unexpected:?}"),
+        }
+    }
+
     /// Same "reuse an in-progress shell" technique as the field-level
     /// test above, applied to a mutual *method* parameter/return type:
     /// `Ping.exchange(Pong): Pong` and `Pong.exchange(Ping): Ping`.
