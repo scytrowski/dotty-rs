@@ -15,6 +15,7 @@ pub mod ast;
 pub mod ids;
 pub mod names;
 pub mod source;
+pub mod store;
 pub mod symbols;
 pub mod types;
 
@@ -24,6 +25,7 @@ pub use ids::{
 };
 pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
 pub use source::{SourceSpan, Span};
+pub use store::SemanticStore;
 pub use symbols::{
     Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
     SymbolTable,
