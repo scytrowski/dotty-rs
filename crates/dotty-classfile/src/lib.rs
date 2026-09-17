@@ -15,6 +15,7 @@ pub mod constant_pool;
 pub mod descriptor;
 pub mod field;
 pub mod method;
+pub mod reader;
 pub mod signature;
 
 /// JVM class file binary and structural APIs.
@@ -26,5 +27,6 @@ pub mod classfile {
     pub use super::descriptor::*;
     pub use super::field::*;
     pub use super::method::*;
+    pub use super::reader::*;
     pub use super::signature::*;
 }
