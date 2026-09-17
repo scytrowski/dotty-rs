@@ -1549,7 +1549,7 @@ mod tests {
         let jar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/pool_sample_jar")
             .join(jar_file_name);
-        let jar_class_path = JarClassPath::new(jar_path).unwrap();
+        let jar_class_path = JarClassPath::new(jar_path, 21).unwrap();
 
         let mut synthetic_classes = HashMap::new();
         synthetic_classes.insert(
@@ -1596,6 +1596,73 @@ mod tests {
     #[test]
     fn loads_pool_sample_from_a_real_deflate_compressed_jar_via_composite_class_path() {
         assert_loads_pool_sample_from_jar("pool_sample_deflate.jar");
+    }
+
+    /// Confirms Milestone 8's `JarClassPath` release-version selection
+    /// reaches all the way through to a decoded `ClassSymbol`: the real
+    /// multi-release fixture (`tests/fixtures/multi_release_jar/`) has a
+    /// distinct `@Deprecated(since = ...)` annotation on its base entry
+    /// (none) and its `versions/11`/`versions/17` overrides, so which
+    /// variant `ClassLoader` actually decoded is visible in
+    /// `symbol.annotations()` without needing any new symbol-level
+    /// concept just for this test.
+    fn assert_loads_mr_sample_annotation_for_release(
+        release_version: u16,
+        expected_since: Option<&str>,
+    ) {
+        use crate::annotation::AnnotationValue;
+        use crate::class_path::CompositeClassPath;
+        use crate::jar_class_path::JarClassPath;
+
+        let jar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/multi_release_jar/mr_sample.jar");
+        let jar_class_path = JarClassPath::new(jar_path, release_version).unwrap();
+
+        let mut synthetic_classes = HashMap::new();
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let composite = CompositeClassPath::new(vec![
+            Box::new(jar_class_path),
+            Box::new(InMemoryClassPath(synthetic_classes)),
+        ]);
+
+        let loader = ClassLoader::new(composite);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("MrSample"))
+            .expect("MrSample should load from the multi-release JAR");
+
+        let since = symbol.annotations().iter().find_map(|annotation| {
+            annotation
+                .elements
+                .iter()
+                .find(|(name, _)| name == "since")
+                .map(|(_, value)| match value {
+                    AnnotationValue::String(value) => value.clone(),
+                    other => panic!("unexpected element value: {other:?}"),
+                })
+        });
+
+        assert_eq!(since.as_deref(), expected_since);
+    }
+
+    #[test]
+    fn loads_the_base_mr_sample_variant_for_a_release_below_every_versioned_directory() {
+        assert_loads_mr_sample_annotation_for_release(9, None);
+    }
+
+    #[test]
+    fn loads_the_v11_mr_sample_variant_for_a_release_between_11_and_16() {
+        assert_loads_mr_sample_annotation_for_release(11, Some("11"));
+        assert_loads_mr_sample_annotation_for_release(16, Some("11"));
+    }
+
+    #[test]
+    fn loads_the_v17_mr_sample_variant_for_a_release_at_or_above_17() {
+        assert_loads_mr_sample_annotation_for_release(17, Some("17"));
+        assert_loads_mr_sample_annotation_for_release(25, Some("17"));
     }
 
     /// Confirms Milestone 1's `ClassLoader` and Milestone 3's

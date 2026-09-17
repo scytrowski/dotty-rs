@@ -18,11 +18,11 @@ pub(crate) fn declares_multi_release(bytes: &[u8]) -> bool {
 
     let mut unfolded_lines: Vec<String> = Vec::new();
     for line in text.lines() {
-        if let Some(continuation) = line.strip_prefix(' ') {
-            if let Some(last) = unfolded_lines.last_mut() {
-                last.push_str(continuation);
-                continue;
-            }
+        if let Some(continuation) = line.strip_prefix(' ')
+            && let Some(last) = unfolded_lines.last_mut()
+        {
+            last.push_str(continuation);
+            continue;
         }
         unfolded_lines.push(line.to_owned());
     }
