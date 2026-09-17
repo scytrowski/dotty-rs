@@ -2249,4 +2249,278 @@ mod tests {
             AnnotationValue::Boolean(true)
         ));
     }
+
+    /// A hand-built, minimal, synthetic class file carrying one
+    /// `RuntimeVisibleAnnotations` annotation with one element of every
+    /// `ElementValue` tag kind (JVMS §4.7.16.1) that no real fixture
+    /// exercises: `Byte`/`Char`/`Int`/`Long`/`Float`/`Double`/`Short`/
+    /// `Enum`/`Class`/nested `Annotation`/`Array`. `javac` cannot
+    /// produce every one of these in a single real annotation (a
+    /// user-defined annotation type's element kinds are fixed by its
+    /// declaration), so this closes the gap left after Milestone 7's
+    /// `@Deprecated`-based test only covered `String`/`Boolean`, the
+    /// same way other `synthetic_class_with_*` helpers in this module
+    /// hand-build bytes for shapes `javac` can't produce.
+    fn synthetic_class_with_varied_annotation_element_values() -> Vec<u8> {
+        fn push_utf8(pool: &mut Vec<u8>, next_index: &mut u16, value: &str) -> u16 {
+            let index = *next_index;
+            pool.push(1); // CONSTANT_Utf8
+            pool.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            pool.extend_from_slice(value.as_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_class(pool: &mut Vec<u8>, next_index: &mut u16, name_index: u16) -> u16 {
+            let index = *next_index;
+            pool.push(7); // CONSTANT_Class
+            pool.extend_from_slice(&name_index.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_integer(pool: &mut Vec<u8>, next_index: &mut u16, value: i32) -> u16 {
+            let index = *next_index;
+            pool.push(3); // CONSTANT_Integer
+            pool.extend_from_slice(&value.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_long(pool: &mut Vec<u8>, next_index: &mut u16, value: i64) -> u16 {
+            let index = *next_index;
+            pool.push(5); // CONSTANT_Long
+            pool.extend_from_slice(&value.to_be_bytes());
+            *next_index += 2; // a Long "counts as two entries" per JVMS §4.4.5
+            index
+        }
+        fn push_float(pool: &mut Vec<u8>, next_index: &mut u16, value: f32) -> u16 {
+            let index = *next_index;
+            pool.push(4); // CONSTANT_Float
+            pool.extend_from_slice(&value.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_double(pool: &mut Vec<u8>, next_index: &mut u16, value: f64) -> u16 {
+            let index = *next_index;
+            pool.push(6); // CONSTANT_Double
+            pool.extend_from_slice(&value.to_be_bytes());
+            *next_index += 2; // a Double "counts as two entries" per JVMS §4.4.5
+            index
+        }
+
+        let mut pool = Vec::new();
+        let mut next_index: u16 = 1;
+
+        let class_name_index = push_utf8(&mut pool, &mut next_index, "C");
+        let this_class_index = push_class(&mut pool, &mut next_index, class_name_index);
+
+        let annotation_type_index = push_utf8(&mut pool, &mut next_index, "LTag;");
+
+        let byte_name = push_utf8(&mut pool, &mut next_index, "byteField");
+        let byte_value = push_integer(&mut pool, &mut next_index, 7);
+
+        let char_name = push_utf8(&mut pool, &mut next_index, "charField");
+        let char_value = push_integer(&mut pool, &mut next_index, 'A' as i32);
+
+        let int_name = push_utf8(&mut pool, &mut next_index, "intField");
+        let int_value = push_integer(&mut pool, &mut next_index, 123_456);
+
+        let long_name = push_utf8(&mut pool, &mut next_index, "longField");
+        let long_value = push_long(&mut pool, &mut next_index, 9_000_000_000);
+
+        let float_name = push_utf8(&mut pool, &mut next_index, "floatField");
+        let float_value = push_float(&mut pool, &mut next_index, 3.5);
+
+        let double_name = push_utf8(&mut pool, &mut next_index, "doubleField");
+        let double_value = push_double(&mut pool, &mut next_index, 2.5);
+
+        let short_name = push_utf8(&mut pool, &mut next_index, "shortField");
+        let short_value = push_integer(&mut pool, &mut next_index, 9);
+
+        let class_name = push_utf8(&mut pool, &mut next_index, "classField");
+        let class_value = push_utf8(&mut pool, &mut next_index, "Ljava/lang/String;");
+
+        let enum_name = push_utf8(&mut pool, &mut next_index, "enumField");
+        let enum_type = push_utf8(&mut pool, &mut next_index, "LKind;");
+        let enum_const = push_utf8(&mut pool, &mut next_index, "FOO");
+
+        let annotation_name = push_utf8(&mut pool, &mut next_index, "annotationField");
+        let nested_type = push_utf8(&mut pool, &mut next_index, "LNested;");
+        let nested_element_name = push_utf8(&mut pool, &mut next_index, "value");
+        let nested_string_value = push_utf8(&mut pool, &mut next_index, "nested-value");
+
+        let array_name = push_utf8(&mut pool, &mut next_index, "arrayField");
+        let array_element_1 = push_integer(&mut pool, &mut next_index, 1);
+        let array_element_2 = push_integer(&mut pool, &mut next_index, 2);
+        let array_element_3 = push_integer(&mut pool, &mut next_index, 3);
+
+        let attribute_name_index =
+            push_utf8(&mut pool, &mut next_index, "RuntimeVisibleAnnotations");
+
+        let mut annotation_bytes = Vec::new();
+        annotation_bytes.extend_from_slice(&annotation_type_index.to_be_bytes());
+        annotation_bytes.extend_from_slice(&11u16.to_be_bytes()); // num_element_value_pairs
+
+        annotation_bytes.extend_from_slice(&byte_name.to_be_bytes());
+        annotation_bytes.push(b'B');
+        annotation_bytes.extend_from_slice(&byte_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&char_name.to_be_bytes());
+        annotation_bytes.push(b'C');
+        annotation_bytes.extend_from_slice(&char_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&int_name.to_be_bytes());
+        annotation_bytes.push(b'I');
+        annotation_bytes.extend_from_slice(&int_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&long_name.to_be_bytes());
+        annotation_bytes.push(b'J');
+        annotation_bytes.extend_from_slice(&long_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&float_name.to_be_bytes());
+        annotation_bytes.push(b'F');
+        annotation_bytes.extend_from_slice(&float_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&double_name.to_be_bytes());
+        annotation_bytes.push(b'D');
+        annotation_bytes.extend_from_slice(&double_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&short_name.to_be_bytes());
+        annotation_bytes.push(b'S');
+        annotation_bytes.extend_from_slice(&short_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&class_name.to_be_bytes());
+        annotation_bytes.push(b'c');
+        annotation_bytes.extend_from_slice(&class_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&enum_name.to_be_bytes());
+        annotation_bytes.push(b'e');
+        annotation_bytes.extend_from_slice(&enum_type.to_be_bytes());
+        annotation_bytes.extend_from_slice(&enum_const.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&annotation_name.to_be_bytes());
+        annotation_bytes.push(b'@');
+        annotation_bytes.extend_from_slice(&nested_type.to_be_bytes());
+        annotation_bytes.extend_from_slice(&1u16.to_be_bytes()); // nested num_element_value_pairs
+        annotation_bytes.extend_from_slice(&nested_element_name.to_be_bytes());
+        annotation_bytes.push(b's');
+        annotation_bytes.extend_from_slice(&nested_string_value.to_be_bytes());
+
+        annotation_bytes.extend_from_slice(&array_name.to_be_bytes());
+        annotation_bytes.push(b'[');
+        annotation_bytes.extend_from_slice(&3u16.to_be_bytes()); // num_values
+        for element in [array_element_1, array_element_2, array_element_3] {
+            annotation_bytes.push(b'I');
+            annotation_bytes.extend_from_slice(&element.to_be_bytes());
+        }
+
+        let mut attribute_body = Vec::new();
+        attribute_body.extend_from_slice(&1u16.to_be_bytes()); // num_annotations
+        attribute_body.extend_from_slice(&annotation_bytes);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&next_index.to_be_bytes()); // constant_pool_count
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&this_class_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // fields_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count
+        bytes.extend_from_slice(&[0x00, 0x01]); // attributes_count = 1
+        bytes.extend_from_slice(&attribute_name_index.to_be_bytes());
+        bytes.extend_from_slice(&(attribute_body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&attribute_body);
+        bytes
+    }
+
+    #[test]
+    fn resolves_every_element_value_variant_from_a_synthetic_annotation() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_varied_annotation_element_values(),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .expect("C should load");
+
+        let annotations = symbol.annotations();
+        let tag = annotations
+            .first()
+            .expect("C should carry the synthetic annotation");
+        assert!(matches!(
+            &tag.annotation_type,
+            ClassRef::Unresolved(name) if name.as_internal() == "Tag"
+        ));
+
+        let element = |name: &str| {
+            tag.elements
+                .iter()
+                .find(|(element_name, _)| element_name == name)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("expected a {name} element"))
+        };
+
+        assert!(matches!(element("byteField"), AnnotationValue::Byte(7)));
+        assert!(matches!(
+            element("charField"),
+            AnnotationValue::Char(value) if *value == 'A' as i32
+        ));
+        assert!(matches!(element("intField"), AnnotationValue::Int(123_456)));
+        assert!(matches!(
+            element("longField"),
+            AnnotationValue::Long(9_000_000_000)
+        ));
+        assert!(matches!(
+            element("floatField"),
+            AnnotationValue::Float(value) if *value == 3.5
+        ));
+        assert!(matches!(
+            element("doubleField"),
+            AnnotationValue::Double(value) if *value == 2.5
+        ));
+        assert!(matches!(element("shortField"), AnnotationValue::Short(9)));
+        assert!(matches!(
+            element("classField"),
+            AnnotationValue::Class(value) if value == "Ljava/lang/String;"
+        ));
+        assert!(matches!(
+            element("enumField"),
+            AnnotationValue::Enum { type_descriptor, const_name }
+                if type_descriptor == "LKind;" && const_name == "FOO"
+        ));
+
+        match element("annotationField") {
+            AnnotationValue::Annotation(nested) => {
+                assert!(matches!(
+                    &nested.annotation_type,
+                    ClassRef::Unresolved(name) if name.as_internal() == "Nested"
+                ));
+                assert!(matches!(
+                    nested.elements.as_slice(),
+                    [(name, AnnotationValue::String(value))]
+                        if name == "value" && value == "nested-value"
+                ));
+            }
+            unexpected => panic!("expected a nested annotation, got {unexpected:?}"),
+        }
+
+        match element("arrayField") {
+            AnnotationValue::Array(values) => {
+                let ints: Vec<i32> = values
+                    .iter()
+                    .map(|value| match value {
+                        AnnotationValue::Int(value) => *value,
+                        unexpected => panic!("expected an Int array element, got {unexpected:?}"),
+                    })
+                    .collect();
+                assert_eq!(ints, vec![1, 2, 3]);
+            }
+            unexpected => panic!("expected an array element value, got {unexpected:?}"),
+        }
+    }
 }
