@@ -44,12 +44,11 @@ pub enum ClassLoadError {
         actual: BinaryName,
     },
     /// The bytes found for this class did not decode as a valid
-    /// `.tasty` file, or no `TypeDef` in it matched the requested name.
+    /// `.tasty` file, or no `TypeDef` in it matched the requested name —
+    /// including a `.tasty` supertype reference that could not be
+    /// resolved to a name (see [`TastyDecodeError::UnresolvedSupertype`]
+    /// and `tasty_symbol::resolve_parent_name`'s doc comment).
     InvalidTastyFile(BinaryName, TastyDecodeError),
-    /// A `.tasty` supertype reference (a mixin interface, not the
-    /// implicit superclass slot) could not be resolved to a name (see
-    /// `tasty_symbol::resolve_parent_name`'s doc comment).
-    UnresolvedSupertype(BinaryName),
     /// A class is (in)directly its own superclass or interface — a hard
     /// JVMS §5.3.5 error, not a legitimate mutual reference.
     CircularInheritance(BinaryName),
@@ -98,12 +97,6 @@ impl fmt::Display for ClassLoadError {
             Self::InvalidTastyFile(name, source) => {
                 write!(formatter, "invalid .tasty file for {name}: {source}")
             }
-            Self::UnresolvedSupertype(name) => {
-                write!(
-                    formatter,
-                    "a supertype of {name} could not be resolved to a name"
-                )
-            }
             Self::CircularInheritance(name) => {
                 write!(formatter, "circular inheritance involving {name}")
             }
@@ -122,10 +115,7 @@ impl fmt::Display for ClassLoadError {
 impl std::error::Error for ClassLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotFound(_)
-            | Self::NameMismatch { .. }
-            | Self::CircularInheritance(_)
-            | Self::UnresolvedSupertype(_) => None,
+            Self::NotFound(_) | Self::NameMismatch { .. } | Self::CircularInheritance(_) => None,
             Self::Io(_, source) => Some(source.as_ref()),
             Self::InvalidClassFile(_, source) => Some(source),
             Self::MalformedReference(_, source) => Some(source),
@@ -233,16 +223,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "invalid .tasty file for Dog: no matching TypeDef found in .tasty file"
-        );
-    }
-
-    #[test]
-    fn unresolved_supertype_displays_the_owning_class_name() {
-        let error = ClassLoadError::UnresolvedSupertype(BinaryName::from_internal("Dog"));
-
-        assert_eq!(
-            error.to_string(),
-            "a supertype of Dog could not be resolved to a name"
         );
     }
 
