@@ -170,14 +170,17 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             ClassSignature::parse,
         )?;
 
+        let nest_host = self.resolve_optional_nest_host(name, &class_file)?;
+        let nest_members = self.resolve_nest_members(name, &class_file)?;
+
         shell.complete(
             super_class,
             interfaces,
             fields,
             methods,
             signature,
-            None,
-            Vec::new(),
+            nest_host,
+            nest_members,
             Vec::new(),
             Vec::new(),
             None,
@@ -185,6 +188,59 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             Vec::new(),
         );
         Ok(shell)
+    }
+
+    /// Looks for a `NestHost` attribute (JVMS §4.7.28) — present only on
+    /// a class that is a nest *member*, naming its nest host. Resolved
+    /// via [`Self::resolve_member_class`]: a nest host commonly also
+    /// carries a `NestMembers` attribute pointing back here, which is a
+    /// legitimate mutual reference, not a supertype cycle.
+    fn resolve_optional_nest_host(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<ClassRef>, ClassLoadError> {
+        let index = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::NestHost(index) => Some(*index),
+                _ => None,
+            });
+        let Some(index) = index else {
+            return Ok(None);
+        };
+
+        let dependency = self.resolve_name(owner, class_file, index)?;
+        self.resolve_member_class(owner, &dependency)
+            .map(|symbol| Some(ClassRef::Resolved(symbol)))
+    }
+
+    /// Looks for a `NestMembers` attribute (JVMS §4.7.29) — present only
+    /// on a nest *host*, listing its members. Each entry resolves the
+    /// same tolerant way [`Self::resolve_optional_nest_host`] does.
+    fn resolve_nest_members(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Vec<ClassRef>, ClassLoadError> {
+        let indices = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::NestMembers(indices) => Some(indices.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        indices
+            .into_iter()
+            .map(|index| {
+                let dependency = self.resolve_name(owner, class_file, index)?;
+                self.resolve_member_class(owner, &dependency)
+                    .map(ClassRef::Resolved)
+            })
+            .collect()
     }
 
     /// Resolves a `Utf8` constant-pool reference (a field or method's
@@ -1441,5 +1497,95 @@ mod tests {
             Some(SemanticFieldType::Object(ClassRef::Resolved(symbol)))
                 if symbol.name().as_internal() == "Pong"
         ));
+    }
+
+    /// `nested_sample/NestedSample.class` (real `javac` output, see
+    /// `docs/classloader.md` §9 Milestone 7) is a nest host with two
+    /// members: `NestedSample$Inner` (a static member class) and
+    /// `NestedSample$1LocalRunnable` (an anonymous local class
+    /// implementing `Runnable`). Loading `NestedSample` also eagerly
+    /// resolves `max`'s erased-to-bound `Comparable` parameter/return
+    /// type and `makeLocalRunnable`'s `String` parameter/`Runnable`
+    /// return type, so those need synthetic stand-ins too, alongside
+    /// `java/lang/Object`.
+    fn nested_sample_classpath() -> HashMap<BinaryName, Vec<u8>> {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("NestedSample"),
+            fixture_bytes("nested_sample/NestedSample.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("NestedSample$Inner"),
+            fixture_bytes("nested_sample/NestedSample$Inner.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("NestedSample$1LocalRunnable"),
+            fixture_bytes("nested_sample/NestedSample$1LocalRunnable.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Runnable"),
+            synthetic_class("java/lang/Runnable", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/String"),
+            synthetic_class("java/lang/String", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Comparable"),
+            synthetic_class("java/lang/Comparable", None),
+        );
+        classes
+    }
+
+    /// Confirms `NestMembers` (JVMS §4.7.29) resolves both of
+    /// `NestedSample`'s real members.
+    #[test]
+    fn resolves_the_nest_members_of_a_real_nest_host() {
+        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+
+        let mut member_names: Vec<String> = symbol
+            .nest_members()
+            .into_iter()
+            .map(|member| match member {
+                ClassRef::Resolved(symbol) => symbol.name().as_internal().to_owned(),
+                ClassRef::Unresolved(name) => name.as_internal().to_owned(),
+            })
+            .collect();
+        member_names.sort_unstable();
+
+        assert_eq!(
+            member_names,
+            vec!["NestedSample$1LocalRunnable", "NestedSample$Inner"]
+        );
+    }
+
+    /// Confirms `NestHost` (JVMS §4.7.28) resolves a real member back
+    /// to its host, reusing the host's in-progress shell (the same
+    /// "legitimate mutual reference" proof shape as the Ping/Pong tests
+    /// above): loading `NestedSample$Inner` cascades into loading
+    /// `NestedSample`, whose own `NestMembers` points right back to
+    /// `NestedSample$Inner` while it is still `Loading`.
+    #[test]
+    fn resolves_the_nest_host_of_a_real_nest_member_via_shell_reuse() {
+        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample$Inner"))
+            .expect("NestedSample$Inner should load");
+
+        match symbol.nest_host() {
+            Some(ClassRef::Resolved(host)) => {
+                assert_eq!(host.name().as_internal(), "NestedSample");
+            }
+            unexpected => {
+                panic!("expected NestedSample$Inner's nest host to resolve, got {unexpected:?}")
+            }
+        }
     }
 }
