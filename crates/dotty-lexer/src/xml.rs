@@ -42,7 +42,7 @@ impl XmlState {
             XmlContent::Comment => Some("unterminated XML comment"),
             XmlContent::Cdata => Some("unterminated XML CDATA section"),
             XmlContent::Text if !self.expressions.is_empty() => Some("unterminated XML expression"),
-            XmlContent::Text if self.tag_open => Some("unterminated XML tag"),
+            XmlContent::Text if self.tag_open || self.depth > 0 => Some("unterminated XML tag"),
             XmlContent::Text => None,
         }
     }
