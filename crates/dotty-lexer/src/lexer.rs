@@ -1028,7 +1028,7 @@ impl<'source> RawLexer<'source> {
             start,
             "octal escape literals are unsupported; use a Unicode escape",
         )?;
-        Ok(false)
+        Ok(true)
     }
 
     fn report(&mut self, start: u32, message: impl Into<String>) -> Result<(), RawLexerError> {
@@ -2250,6 +2250,33 @@ mod tests {
 
         assert_eq!(error_count, 1);
         assert_eq!(diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn recovers_octal_escapes_as_literals_with_diagnostics() {
+        let (items, diagnostics) = scan(r#"'\101' "\101""#);
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::CharLiteral,
+                RawTokenKind::StringLiteral,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message().contains("octal escape"))
+        );
     }
 
     #[test]
