@@ -975,6 +975,48 @@ mod tests {
     }
 
     #[test]
+    fn closes_an_indentation_region_after_a_dedented_bracket() {
+        assert_eq!(
+            kinds("if ready then\n  values[\n    0\n]\nnext"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftBracket),
+                TokenKind::IntegerLiteral,
+                TokenKind::Punctuation(Punctuation::RightBracket),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_an_indentation_region_after_a_dedented_brace() {
+        assert_eq!(
+            kinds("if ready then\n  block {\n    value\n}\nnext"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn suppresses_layout_inside_parentheses() {
         assert!(!kinds("call(\n  first,\n  second\n)").iter().any(|kind| {
             matches!(
