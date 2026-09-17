@@ -5640,6 +5640,45 @@ mod tests {
     }
 
     #[test]
+    fn matches_the_complete_scala_3_9_tag_assignment_matrix() {
+        let assigned: Vec<u8> = [
+            2..=6,
+            8..=29,
+            31..=49,
+            60..=76,
+            90..=104,
+            110..=119,
+            128..=134,
+            136..=165,
+            167..=167,
+            169..=183,
+            190..=193,
+            255..=255,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        for tag in 0..=u8::MAX {
+            let is_assigned = assigned.contains(&tag);
+            assert_eq!(NodeCategory::is_known_tag(tag), is_assigned, "tag {tag}");
+
+            let category = match tag {
+                1..=59 => Some(NodeCategory::Category1),
+                60..=89 => Some(NodeCategory::Category2),
+                90..=109 => Some(NodeCategory::Category3),
+                110..=127 => Some(NodeCategory::Category4),
+                128..=255 => Some(NodeCategory::Category5),
+                0 => None,
+            };
+            assert_eq!(NodeCategory::from_tag(tag), category, "tag {tag}");
+            if let Some(category) = category {
+                assert_eq!(category.contains_known_tag(tag), is_assigned, "tag {tag}");
+            }
+        }
+    }
+
+    #[test]
     fn exposes_the_complete_category_one_tag_matrix() {
         use super::{
             ABSTRACT_TAG, ARTIFACT_TAG, CASE_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG,
