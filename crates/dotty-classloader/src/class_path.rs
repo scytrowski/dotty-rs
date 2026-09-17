@@ -6,14 +6,16 @@ use std::path::PathBuf;
 /// Where a [`ClassResource`]'s bytes came from, kept for diagnostics and
 /// duplicate-class detection.
 ///
-/// `#[non_exhaustive]` and only `Directory` today: JAR/JMOD-backed origins
-/// are planned (see `docs/classloader.md` §3) and will be added as new
-/// variants without breaking existing matches on this type.
+/// `#[non_exhaustive]`: JMOD-backed origins are still planned (see
+/// `docs/classloader.md` §3) and will be added as a further variant
+/// without breaking existing matches on this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClassOrigin {
     /// The resource was read from a file under this directory root.
     Directory(PathBuf),
+    /// The resource was read from an entry inside this JAR file.
+    Jar(PathBuf),
 }
 
 /// A decoded-but-not-yet-parsed classpath entry: the raw bytes of a class
@@ -42,33 +44,56 @@ impl ClassResource {
 ///
 /// A class simply not being present on an entry is not an error: it is
 /// `Ok(None)` from [`ClassPathEntry::find_class`]. This type is for actual
-/// I/O failures (a permission error, a truncated read, etc.).
+/// I/O failures (a permission error, a truncated read, a malformed JAR,
+/// etc.).
 #[derive(Debug)]
 pub struct ClassPathError {
-    source: io::Error,
+    source: ClassPathErrorSource,
+}
+
+#[derive(Debug)]
+enum ClassPathErrorSource {
+    Io(io::Error),
+    Zip(crate::zip_archive::ZipError),
 }
 
 impl ClassPathError {
     pub fn new(source: io::Error) -> Self {
-        Self { source }
+        Self {
+            source: ClassPathErrorSource::Io(source),
+        }
     }
 }
 
 impl fmt::Display for ClassPathError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "classpath I/O error: {}", self.source)
+        match &self.source {
+            ClassPathErrorSource::Io(error) => write!(formatter, "classpath I/O error: {error}"),
+            ClassPathErrorSource::Zip(error) => write!(formatter, "classpath I/O error: {error}"),
+        }
     }
 }
 
 impl std::error::Error for ClassPathError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        match &self.source {
+            ClassPathErrorSource::Io(error) => Some(error),
+            ClassPathErrorSource::Zip(error) => Some(error),
+        }
     }
 }
 
 impl From<io::Error> for ClassPathError {
     fn from(source: io::Error) -> Self {
         Self::new(source)
+    }
+}
+
+impl From<crate::zip_archive::ZipError> for ClassPathError {
+    fn from(source: crate::zip_archive::ZipError) -> Self {
+        Self {
+            source: ClassPathErrorSource::Zip(source),
+        }
     }
 }
 

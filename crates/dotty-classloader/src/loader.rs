@@ -296,6 +296,54 @@ mod tests {
         ));
     }
 
+    /// Confirms Milestone 1's `ClassLoader` and Milestone 2's
+    /// `JarClassPath` compose: the same PoolSample fixture, loaded from
+    /// inside a real JAR (via a `CompositeClassPath` that falls through
+    /// to the same synthetic `java/lang/Object`/`java/lang/Runnable`
+    /// classes as the directory-based test above) instead of from a
+    /// bare in-memory map.
+    #[test]
+    fn loads_pool_sample_from_a_real_jar_via_composite_class_path() {
+        use crate::class_path::CompositeClassPath;
+        use crate::jar_class_path::JarClassPath;
+
+        let jar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pool_sample_jar/pool_sample_stored.jar");
+        let jar_class_path = JarClassPath::new(jar_path).unwrap();
+
+        let mut synthetic_classes = HashMap::new();
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        synthetic_classes.insert(
+            BinaryName::from_internal("java/lang/Runnable"),
+            synthetic_class("java/lang/Runnable", None),
+        );
+
+        let composite = CompositeClassPath::new(vec![
+            Box::new(jar_class_path),
+            Box::new(InMemoryClassPath(synthetic_classes)),
+        ]);
+
+        let loader = ClassLoader::new(composite);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load from the JAR");
+
+        assert_eq!(symbol.name().as_internal(), "PoolSample");
+        assert!(matches!(
+            symbol.super_class(),
+            Some(ClassRef::Resolved(super_symbol))
+                if super_symbol.name().as_internal() == "java/lang/Object"
+        ));
+        assert!(matches!(
+            symbol.interfaces(),
+            [ClassRef::Resolved(interface_symbol)]
+                if interface_symbol.name().as_internal() == "java/lang/Runnable"
+        ));
+    }
+
     #[test]
     fn returns_the_same_cached_symbol_on_a_second_load() {
         let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));

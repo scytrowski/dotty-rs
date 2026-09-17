@@ -11,6 +11,7 @@ mod binary_name;
 mod class_path;
 mod crc32;
 mod error;
+mod jar_class_path;
 mod loader;
 mod repository;
 mod symbol;
@@ -25,6 +26,7 @@ pub mod classloader {
         DirectoryClassPath,
     };
     pub use crate::error::ClassLoadError;
+    pub use crate::jar_class_path::JarClassPath;
     pub use crate::loader::ClassLoader;
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }
