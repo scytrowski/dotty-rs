@@ -19,6 +19,12 @@ pub enum TokenKind {
     ColonFollow,
     /// A colon confirmed by parser feedback to end a line.
     ColonEol,
+    /// A `case class` pair fused by scanner post-processing.
+    CaseClass,
+    /// A `case object` pair fused by scanner post-processing.
+    CaseObject,
+    /// An `end` token recognized as an end marker.
+    EndMarker,
     /// A character literal.
     CharLiteral,
     /// An integer literal.

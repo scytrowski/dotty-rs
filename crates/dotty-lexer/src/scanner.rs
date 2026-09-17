@@ -272,6 +272,9 @@ fn build_tokens(source: &str, items: &[RawItem]) -> Result<Vec<Token>, RawLexerE
         }
     }
 
+    fuse_case_declarations(&mut tokens)?;
+    classify_end_markers(source, &mut tokens);
+
     Ok(tokens)
 }
 
@@ -366,6 +369,7 @@ fn can_end_statement(kind: Option<TokenKind>) -> bool {
                         | HardKeyword::False
                         | HardKeyword::End
                 )
+                | TokenKind::EndMarker
         )
     )
 }
@@ -421,6 +425,126 @@ fn next_raw_token(items: &[RawItem], item_index: usize) -> Option<&RawToken> {
         RawItem::Token(token) => Some(token),
         RawItem::Trivia(_) => None,
     })
+}
+
+fn is_layout_token(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline | TokenKind::Newlines | TokenKind::Indent | TokenKind::Outdent
+    )
+}
+
+fn previous_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
+    tokens[..index]
+        .iter()
+        .rev()
+        .find(|token| !is_layout_token(token.kind))
+}
+
+fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
+    tokens[index + 1..]
+        .iter()
+        .find(|token| !is_layout_token(token.kind))
+}
+
+fn fuse_case_declarations(tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
+    let mut index = 0;
+    while index + 1 < tokens.len() {
+        let Some(fused_kind) = (match (tokens[index].kind, tokens[index + 1].kind) {
+            (TokenKind::Keyword(HardKeyword::Case), TokenKind::Keyword(HardKeyword::Class)) => {
+                Some(TokenKind::CaseClass)
+            }
+            (TokenKind::Keyword(HardKeyword::Case), TokenKind::Keyword(HardKeyword::Object)) => {
+                Some(TokenKind::CaseObject)
+            }
+            _ => None,
+        }) else {
+            index += 1;
+            continue;
+        };
+
+        let span = TextRange::new(tokens[index].span.start(), tokens[index + 1].span.end())?;
+        tokens[index] = Token::new(fused_kind, span);
+        tokens.remove(index + 1);
+    }
+    Ok(())
+}
+
+fn classify_end_markers(source: &str, tokens: &mut [Token]) {
+    for index in 0..tokens.len() {
+        if tokens[index].kind != TokenKind::Keyword(HardKeyword::End) {
+            continue;
+        }
+
+        let starts_line = previous_real_token(tokens, index).is_some_and(|previous| {
+            has_source_line_break(source, previous.span.end(), tokens[index].span.start())
+        });
+        let Some(next) = next_real_token(tokens, index) else {
+            tokens[index].kind = if starts_line {
+                TokenKind::EndMarker
+            } else {
+                TokenKind::Identifier
+            };
+            continue;
+        };
+
+        let same_line = !has_source_line_break(source, tokens[index].span.end(), next.span.start());
+        let target = same_line && is_end_marker_target(next.kind);
+        let line_ends = if target {
+            match next_real_token_after(tokens, index, next) {
+                None => true,
+                Some(following) if following.kind == TokenKind::Eof => true,
+                Some(following) => {
+                    has_source_line_break(source, next.span.end(), following.span.start())
+                }
+            }
+        } else {
+            next.kind == TokenKind::Eof
+                || has_source_line_break(source, tokens[index].span.end(), next.span.start())
+        };
+
+        tokens[index].kind = if starts_line && line_ends {
+            TokenKind::EndMarker
+        } else {
+            TokenKind::Identifier
+        };
+    }
+}
+
+fn next_real_token_after<'tokens>(
+    tokens: &'tokens [Token],
+    index: usize,
+    token: &Token,
+) -> Option<&'tokens Token> {
+    let token_index = tokens[index + 1..]
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, token))?;
+    next_real_token(tokens, index + 1 + token_index)
+}
+
+fn is_end_marker_target(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Keyword(
+                HardKeyword::If
+                    | HardKeyword::For
+                    | HardKeyword::While
+                    | HardKeyword::Match
+                    | HardKeyword::Try
+                    | HardKeyword::Catch
+                    | HardKeyword::Finally
+                    | HardKeyword::Class
+                    | HardKeyword::Object
+                    | HardKeyword::Trait
+                    | HardKeyword::Def
+                    | HardKeyword::Val
+                    | HardKeyword::Var
+                    | HardKeyword::Type
+                    | HardKeyword::Package
+            )
+    )
 }
 
 fn is_prefix(prefix: &str, value: &str) -> bool {
@@ -572,6 +696,52 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::ColonOp,
                 TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn fuses_case_class_and_case_object_declarations() {
+        assert_eq!(
+            kinds("case class Foo\ncase object Bar"),
+            vec![
+                TokenKind::CaseClass,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::CaseObject,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_end_markers_only_at_the_start_of_a_line() {
+        assert_eq!(
+            kinds("if ready then\n  run()\nend if"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("val end = 1"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::IntegerLiteral,
                 TokenKind::Eof,
             ]
         );

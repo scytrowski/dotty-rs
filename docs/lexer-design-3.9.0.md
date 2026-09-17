@@ -65,8 +65,10 @@ Implementation status on the current lexer branch:
   scanner event contract;
 - basic leading-infix continuation is recognized when a line-start operator
   continues a previous expression;
-- end markers, richer infix lookahead rules, and `CASECLASS`/`CASEOBJECT`
-  post-processing are intentionally still staged.
+- `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker recognition
+  are now part of scanner post-processing;
+- richer infix lookahead, delimiter-owned indentation closure, and XML remain
+  intentionally staged.
 
 XML, migration syntax, deprecated syntax, experimental syntax, parser, and AST
 are staged after the core lexer. Their eventual addition must not require
@@ -470,7 +472,9 @@ remain next.
 ### Increment 8 — End markers and post-processing
 
 Implement contextual `END`, `CASECLASS`, `CASEOBJECT`, grammar-driven region
-closures, and exact EOF behavior.
+closures, and exact EOF behavior. The current increment covers token fusion,
+basic end-marker recognition, and non-panicking EOF classification; region
+ownership and grammar-driven closures remain to be refined.
 
 ### Increment 9 — Quotes, legacy syntax, and XML
 
