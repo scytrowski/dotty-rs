@@ -10,6 +10,7 @@
 mod binary_name;
 mod class_path;
 mod error;
+mod loader;
 mod repository;
 mod symbol;
 
@@ -21,5 +22,6 @@ pub mod classloader {
         DirectoryClassPath,
     };
     pub use crate::error::ClassLoadError;
+    pub use crate::loader::ClassLoader;
     pub use crate::symbol::{ClassRef, ClassSymbol};
 }

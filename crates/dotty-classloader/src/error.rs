@@ -1,6 +1,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathError;
 use dotty_classfile::class_file::ClassFileError;
+use dotty_classfile::constant_pool::PoolRefError;
 use std::fmt;
 use std::rc::Rc;
 
@@ -20,6 +21,10 @@ pub enum ClassLoadError {
     /// The bytes found for this class did not decode as a valid class
     /// file.
     InvalidClassFile(BinaryName, ClassFileError),
+    /// The class file decoded structurally, but one of its own
+    /// `this_class`/`super_class`/interface constant-pool indices does not
+    /// resolve to a usable class name (JVMS §4.4.1).
+    MalformedReference(BinaryName, PoolRefError),
     /// The class file's own `this_class` name did not match the name it
     /// was requested under (JVMS §5.3.5).
     NameMismatch {
@@ -48,6 +53,12 @@ impl fmt::Display for ClassLoadError {
             Self::InvalidClassFile(name, source) => {
                 write!(formatter, "invalid class file for {name}: {source}")
             }
+            Self::MalformedReference(name, source) => {
+                write!(
+                    formatter,
+                    "malformed reference in class file for {name}: {source}"
+                )
+            }
             Self::NameMismatch { requested, actual } => write!(
                 formatter,
                 "requested class {requested} but its class file declares {actual}"
@@ -73,6 +84,7 @@ impl std::error::Error for ClassLoadError {
             Self::NotFound(_) | Self::NameMismatch { .. } | Self::CircularInheritance(_) => None,
             Self::Io(_, source) => Some(source.as_ref()),
             Self::InvalidClassFile(_, source) => Some(source),
+            Self::MalformedReference(_, source) => Some(source),
             Self::DependencyFailure { source, .. } => Some(source.as_ref()),
         }
     }
@@ -114,6 +126,23 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "class PoolSample failed to load because java/lang/Object failed: class not found: java/lang/Object"
+        );
+    }
+
+    #[test]
+    fn malformed_reference_displays_the_pool_error() {
+        use dotty_classfile::constant_pool::ConstantPoolIndex;
+
+        let error = ClassLoadError::MalformedReference(
+            BinaryName::from_internal("PoolSample"),
+            PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(7),
+            },
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "malformed reference in class file for PoolSample: constant pool index 7 does not resolve to any entry"
         );
     }
 
