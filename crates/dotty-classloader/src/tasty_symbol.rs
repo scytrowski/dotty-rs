@@ -3,9 +3,9 @@ use dotty_classfile::access_flags::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PUBLIC, ClassAccessFlags,
 };
 use dotty_tasty::tasty::{
-    ABSTRACT_TAG, AstError, DefinitionBody, DefinitionTail, FINAL_TAG, PRIVATE_TAG, PROTECTED_TAG,
-    RawName, RawTree, StructuredNode, TEMPLATE_TAG, TRAIT_TAG, TYPEDEF_TAG, TastyFile,
-    TastyFileError,
+    ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, AppliedTypeNode, AstError, DefinitionBody,
+    DefinitionTail, FINAL_TAG, PRIVATE_TAG, PROTECTED_TAG, RawName, RawTree, StructuredNode,
+    TEMPLATE_TAG, TRAIT_TAG, TYPEDEF_TAG, TastyFile, TastyFileError,
 };
 use std::fmt;
 
@@ -213,7 +213,7 @@ fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<Bin
         .collect();
 
     if names.is_empty() {
-        return None;
+        return resolve_applied_type_name(file, parent);
     }
 
     names.reverse();
@@ -225,6 +225,31 @@ fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<Bin
     }
 
     Some(BinaryName::from_internal(names.join("/")))
+}
+
+/// A generic mixin (e.g. `Iterable[Char]`) is encoded as an
+/// `AppliedTpt`/`AppliedType` node — a category-5 payload
+/// [`RawTree::name_refs`] deliberately treats as opaque (per its own
+/// doc comment: "structured AST decoders can inspect those payloads
+/// when needed"). This is exactly that: decode it and recurse on its
+/// `tycon` (the applied type's own base reference, e.g. `Iterable`),
+/// ignoring type arguments entirely — this decoder only ever needs a
+/// name, never a semantic (possibly generic) type.
+fn resolve_applied_type_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<BinaryName> {
+    let RawTree::LengthNode(node) = parent else {
+        return None;
+    };
+    if node.tag != APPLIEDTPT_TAG && node.tag != APPLIEDTYPE_TAG {
+        return None;
+    }
+
+    let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+        node.decode_structured().ok()?
+    else {
+        return None;
+    };
+
+    resolve_parent_name(file, &tycon)
 }
 
 /// Reads a raw AST name-table reference directly rather than through
@@ -304,6 +329,75 @@ mod tests {
         );
     }
 
+    /// `scala3-library/scala/io/Source.tasty`'s real `Source` mixes in
+    /// `Iterable[Char]` — a generic mixin encoded as an `AppliedTpt`
+    /// node, not the plain `IdentTpt`/`SelectTpt` the other tests here
+    /// exercise. Without [`resolve_applied_type_name`], this parent's
+    /// `name_refs()` is empty (see its doc comment) and decoding fails
+    /// with `UnresolvedSupertype`.
+    #[test]
+    fn decodes_a_class_with_a_generic_mixin_encoded_as_an_applied_type() {
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/io/Source.tasty"),
+            &BinaryName::from_internal("Source"),
+        )
+        .unwrap();
+
+        assert!(decoded.flags.is_abstract());
+        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        assert_eq!(
+            decoded.interfaces,
+            vec![
+                BinaryName::from_internal("Iterator"),
+                BinaryName::from_internal("Closeable"),
+            ]
+        );
+    }
+
+    /// `scala3-library/scala/math/BigInt.tasty`'s real `BigInt` mixes in
+    /// `Ordered[BigInt]` alongside two plain (non-generic) mixins —
+    /// covering an `AppliedType` mixin that isn't the only, or the
+    /// first, non-superclass parent.
+    #[test]
+    fn decodes_a_final_class_with_a_generic_mixin_among_plain_ones() {
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/math/BigInt.tasty"),
+            &BinaryName::from_internal("BigInt"),
+        )
+        .unwrap();
+
+        assert!(decoded.flags.is_final());
+        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        assert_eq!(
+            decoded.interfaces,
+            vec![
+                BinaryName::from_internal("ScalaNumericConversions"),
+                BinaryName::from_internal("Serializable"),
+                BinaryName::from_internal("Ordered"),
+            ]
+        );
+    }
+
+    /// `scala3-library/scala/math/Ordering.tasty`'s private nested
+    /// `Reverse` mixes in `Ordering[T]` — its own enclosing class,
+    /// applied to a type parameter, still just an `AppliedType` mixin
+    /// resolving to the bare name `Ordering`.
+    #[test]
+    fn decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class() {
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
+            &BinaryName::from_internal("Reverse"),
+        )
+        .unwrap();
+
+        assert!(!decoded.flags.is_public());
+        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        assert_eq!(
+            decoded.interfaces,
+            vec![BinaryName::from_internal("Ordering")]
+        );
+    }
+
     #[test]
     fn missing_type_def_when_no_definition_matches_the_requested_name() {
         let error = decode(
@@ -323,51 +417,16 @@ mod tests {
         assert!(matches!(error, TastyDecodeError::Parse(_)));
     }
 
-    /// `decode_flags` is a pure, narrow mapping function (the tag
-    /// values below are real ones — confirmed against `dotty-tasty`'s
-    /// own `ast.rs` constants and cross-checked by scanning every
-    /// committed real fixture's `TypeDef` modifiers for each tag), so
-    /// its modifier-to-`ClassAccessFlags` mapping is tested directly
-    /// against hand-built `tail` vectors, the same treatment
-    /// `manifest.rs`'s hand-written-input tests give its own narrow
-    /// parsing concern. Full end-to-end `decode()` coverage of a real
-    /// `abstract`/`final`/`private` class is a separate concern — the
-    /// three real `scala3-library` fixtures confirmed to carry these
-    /// modifiers (`scala/io/Source.tasty`'s `Source`, `scala/math/
-    /// BigInt.tasty`'s `BigInt`, `scala/math/Ordering.tasty`'s private
-    /// `Reverse`) all currently fail `decode()` with `UnresolvedSupertype`
-    /// on a later parent, which is a real, disclosed limitation, not a
-    /// missing test.
-    #[test]
-    fn decode_flags_marks_trait_as_interface_and_abstract() {
-        let flags = decode_flags(&[DefinitionTail::Modifier(TRAIT_TAG)]);
-
-        assert!(flags.is_interface());
-        assert!(flags.is_abstract());
-    }
-
-    #[test]
-    fn decode_flags_marks_abstract_classes() {
-        let flags = decode_flags(&[DefinitionTail::Modifier(ABSTRACT_TAG)]);
-
-        assert!(flags.is_abstract());
-        assert!(!flags.is_interface());
-    }
-
-    #[test]
-    fn decode_flags_marks_final_classes() {
-        let flags = decode_flags(&[DefinitionTail::Modifier(FINAL_TAG)]);
-
-        assert!(flags.is_final());
-    }
-
-    #[test]
-    fn decode_flags_clears_public_for_a_private_modifier() {
-        let flags = decode_flags(&[DefinitionTail::Modifier(PRIVATE_TAG)]);
-
-        assert!(!flags.is_public());
-    }
-
+    /// `decode_flags` is a pure, narrow mapping function. `TRAIT_TAG`/
+    /// `ABSTRACT_TAG`/`FINAL_TAG`/`PRIVATE_TAG` are all exercised
+    /// end-to-end above, through real fixtures (`Animal`, `Source`,
+    /// `BigInt`, `Ordering`'s `Reverse`); `PROTECTED_TAG` has no such
+    /// fixture anywhere in `dotty-tasty`'s real `scala3-library` corpus
+    /// (confirmed by scanning every committed fixture's `TypeDef`
+    /// modifiers), so it — and the all-defaults case — are tested
+    /// directly against hand-built `tail` vectors instead, the same
+    /// treatment `manifest.rs`'s hand-written-input tests give its own
+    /// narrow parsing concern.
     #[test]
     fn decode_flags_clears_public_for_a_protected_modifier() {
         let flags = decode_flags(&[DefinitionTail::Modifier(PROTECTED_TAG)]);
