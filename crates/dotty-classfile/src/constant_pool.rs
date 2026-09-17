@@ -193,7 +193,7 @@ impl ConstantPool {
     }
 }
 
-fn read_index(reader: &mut Reader<'_>) -> Result<ConstantPoolIndex, ReadError> {
+pub(crate) fn read_index(reader: &mut Reader<'_>) -> Result<ConstantPoolIndex, ReadError> {
     Ok(ConstantPoolIndex(reader.read_u16()?))
 }
 
