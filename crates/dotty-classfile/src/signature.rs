@@ -20,6 +20,7 @@ pub enum SignatureError {
     UnknownLeadChar { offset: usize, found: char },
     EmptyIdentifier { offset: usize },
     MissingSemicolon { offset: usize },
+    MissingColon { offset: usize },
     TooDeeplyNested { offset: usize },
     TrailingCharacters { offset: usize },
 }
@@ -41,6 +42,9 @@ impl fmt::Display for SignatureError {
             }
             Self::MissingSemicolon { offset } => {
                 write!(formatter, "expected ';' at offset {offset}")
+            }
+            Self::MissingColon { offset } => {
+                write!(formatter, "expected ':' at offset {offset}")
             }
             Self::TooDeeplyNested { offset } => write!(
                 formatter,
@@ -214,6 +218,55 @@ fn parse_type_argument(
     }
 }
 
+fn parse_type_parameters(
+    cursor: &mut Cursor<'_>,
+    depth: usize,
+) -> Result<Vec<TypeParameter>, SignatureError> {
+    if !cursor.eat_ascii(b'<') {
+        return Ok(Vec::new());
+    }
+
+    let mut parameters = Vec::new();
+    while !cursor.eat_ascii(b'>') {
+        parameters.push(parse_type_parameter(cursor, depth)?);
+    }
+    Ok(parameters)
+}
+
+fn parse_type_parameter(
+    cursor: &mut Cursor<'_>,
+    depth: usize,
+) -> Result<TypeParameter, SignatureError> {
+    let name = read_identifier(cursor)?.to_owned();
+
+    let colon_offset = cursor.offset();
+    if !cursor.eat_ascii(b':') {
+        return Err(SignatureError::MissingColon {
+            offset: colon_offset,
+        });
+    }
+
+    // ClassBound's ReferenceTypeSignature is optional: a second ':'
+    // immediately following means the bound was empty (implicit Object),
+    // and what follows is actually the first InterfaceBound.
+    let class_bound = if cursor.peek_ascii() == Some(b':') {
+        None
+    } else {
+        Some(parse_reference_type_signature(cursor, depth + 1)?)
+    };
+
+    let mut interface_bounds = Vec::new();
+    while cursor.eat_ascii(b':') {
+        interface_bounds.push(parse_reference_type_signature(cursor, depth + 1)?);
+    }
+
+    Ok(TypeParameter {
+        name,
+        class_bound,
+        interface_bounds,
+    })
+}
+
 /// A `JavaTypeSignature` (JVMS §4.7.9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeSignature {
@@ -272,6 +325,28 @@ pub struct ClassSignature {
     pub type_parameters: Vec<TypeParameter>,
     pub superclass: ClassTypeSignature,
     pub superinterfaces: Vec<ClassTypeSignature>,
+}
+
+impl ClassSignature {
+    /// Parses a complete `ClassSignature` (JVMS §4.7.9.1): optional
+    /// `TypeParameters`, one `SuperclassSignature`, then
+    /// `SuperinterfaceSignature*` until the input is exhausted.
+    pub fn parse(input: &str) -> Result<Self, SignatureError> {
+        let mut cursor = Cursor::new(input);
+        let type_parameters = parse_type_parameters(&mut cursor, 0)?;
+        let superclass = parse_class_type_signature(&mut cursor, 0)?;
+
+        let mut superinterfaces = Vec::new();
+        while !cursor.is_empty() {
+            superinterfaces.push(parse_class_type_signature(&mut cursor, 0)?);
+        }
+
+        Ok(Self {
+            type_parameters,
+            superclass,
+            superinterfaces,
+        })
+    }
 }
 
 /// A `MethodSignature` (JVMS §4.7.9.1), carried by the `Signature` attribute
@@ -515,5 +590,94 @@ mod tests {
             FieldSignature::parse(""),
             Err(SignatureError::UnexpectedEnd { offset: 0 })
         );
+    }
+
+    fn object_class_type() -> ClassTypeSignature {
+        ClassTypeSignature {
+            package: vec!["java".to_owned(), "lang".to_owned()],
+            simple_name: "Object".to_owned(),
+            type_arguments: vec![],
+            suffix: vec![],
+        }
+    }
+
+    #[test]
+    fn parses_a_type_parameter_with_an_explicit_class_bound() {
+        let signature = ClassSignature::parse("<T:Ljava/lang/Object;>Ljava/lang/Object;").unwrap();
+
+        assert_eq!(
+            signature.type_parameters,
+            vec![TypeParameter {
+                name: "T".to_owned(),
+                class_bound: Some(ReferenceTypeSignature::Class(object_class_type())),
+                interface_bounds: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_a_type_parameter_with_an_empty_class_bound_and_one_interface_bound() {
+        let signature =
+            ClassSignature::parse("<T::Ljava/lang/Comparable<TT;>;>Ljava/lang/Object;").unwrap();
+
+        assert_eq!(
+            signature.type_parameters,
+            vec![TypeParameter {
+                name: "T".to_owned(),
+                class_bound: None,
+                interface_bounds: vec![ReferenceTypeSignature::Class(ClassTypeSignature {
+                    package: vec!["java".to_owned(), "lang".to_owned()],
+                    simple_name: "Comparable".to_owned(),
+                    type_arguments: vec![TypeArgument::Exact(
+                        ReferenceTypeSignature::TypeVariable("T".to_owned())
+                    )],
+                    suffix: vec![],
+                })],
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_a_type_parameter_with_multiple_interface_bounds() {
+        let signature = ClassSignature::parse(
+            "<T:Ljava/lang/Object;:Ljava/lang/Comparable<TT;>;:Ljava/io/Serializable;>Ljava/lang/Object;",
+        )
+        .unwrap();
+
+        let type_parameter = &signature.type_parameters[0];
+        assert_eq!(
+            type_parameter.class_bound,
+            Some(ReferenceTypeSignature::Class(object_class_type()))
+        );
+        assert_eq!(type_parameter.interface_bounds.len(), 2);
+    }
+
+    #[test]
+    fn parses_a_class_signature_with_no_type_parameters_and_one_superinterface() {
+        assert_eq!(
+            ClassSignature::parse("Ljava/lang/Object;Ljava/lang/Runnable;"),
+            Ok(ClassSignature {
+                type_parameters: vec![],
+                superclass: object_class_type(),
+                superinterfaces: vec![ClassTypeSignature {
+                    package: vec!["java".to_owned(), "lang".to_owned()],
+                    simple_name: "Runnable".to_owned(),
+                    type_arguments: vec![],
+                    suffix: vec![],
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_a_class_signature_with_type_parameters_and_multiple_superinterfaces() {
+        let signature = ClassSignature::parse(
+            "<T:Ljava/lang/Object;>Ljava/lang/Object;Ljava/lang/Runnable;Ljava/io/Serializable;",
+        )
+        .unwrap();
+
+        assert_eq!(signature.type_parameters.len(), 1);
+        assert_eq!(signature.superclass, object_class_type());
+        assert_eq!(signature.superinterfaces.len(), 2);
     }
 }
