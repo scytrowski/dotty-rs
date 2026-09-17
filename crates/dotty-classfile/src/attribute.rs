@@ -546,6 +546,57 @@ pub(crate) fn validate_attributes(
     Ok(())
 }
 
+/// The information carried by a `@java.lang.Deprecated` annotation (JVMS
+/// §9.6.4.6), which the legacy `Deprecated` attribute can't express.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeprecationInfo {
+    pub since: Option<String>,
+    pub for_removal: bool,
+}
+
+/// Looks for a `java.lang.Deprecated` annotation among `attributes`'s
+/// `RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations` and, if found,
+/// reads its `since`/`forRemoval` elements. A best-effort lookup rather than
+/// a decoder: an element that doesn't resolve or has an unexpected shape is
+/// skipped rather than erroring, since a malformed `@Deprecated` shouldn't
+/// fail the whole class load.
+pub fn find_deprecated_annotation(
+    attributes: &[Attribute<'_>],
+    pool: &ConstantPool,
+) -> Option<DeprecationInfo> {
+    for attribute in attributes {
+        let annotations = match attribute {
+            Attribute::RuntimeVisibleAnnotations(annotations)
+            | Attribute::RuntimeInvisibleAnnotations(annotations) => annotations,
+            _ => continue,
+        };
+        for annotation in annotations {
+            if pool.utf8(annotation.type_index) != Ok("Ljava/lang/Deprecated;") {
+                continue;
+            }
+
+            let mut info = DeprecationInfo::default();
+            for (name_index, value) in &annotation.element_value_pairs {
+                let Ok(name) = pool.utf8(*name_index) else {
+                    continue;
+                };
+                match (name, value) {
+                    ("since", ElementValue::String(index)) => {
+                        info.since = pool.utf8(*index).ok().map(str::to_owned);
+                    }
+                    ("forRemoval", ElementValue::Boolean(index)) => {
+                        info.for_removal =
+                            matches!(pool.get(*index), Some(ConstantPoolEntry::Integer(1)));
+                    }
+                    _ => {}
+                }
+            }
+            return Some(info);
+        }
+    }
+    None
+}
+
 impl<'a> Attribute<'a> {
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
     /// through `constant_pool` to pick a grammar. An unrecognized name
@@ -1968,6 +2019,81 @@ mod tests {
                 expected: crate::constant_pool::EntryKind::Utf8,
             })
         );
+    }
+
+    fn deprecated_annotation(
+        type_index: ConstantPoolIndex,
+        element_value_pairs: Vec<(ConstantPoolIndex, ElementValue)>,
+    ) -> Attribute<'static> {
+        Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+            type_index,
+            element_value_pairs,
+        }])
+    }
+
+    #[test]
+    fn find_deprecated_annotation_reads_since_and_for_removal() {
+        let pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("Ljava/lang/Deprecated;".to_owned()),
+            ConstantPoolEntry::Utf8("since".to_owned()),
+            ConstantPoolEntry::Utf8("1.0".to_owned()),
+            ConstantPoolEntry::Utf8("forRemoval".to_owned()),
+            ConstantPoolEntry::Integer(1),
+        ]);
+        let attributes = vec![deprecated_annotation(
+            ConstantPoolIndex(1),
+            vec![
+                (
+                    ConstantPoolIndex(2),
+                    ElementValue::String(ConstantPoolIndex(3)),
+                ),
+                (
+                    ConstantPoolIndex(4),
+                    ElementValue::Boolean(ConstantPoolIndex(5)),
+                ),
+            ],
+        )];
+
+        assert_eq!(
+            find_deprecated_annotation(&attributes, &pool),
+            Some(DeprecationInfo {
+                since: Some("1.0".to_owned()),
+                for_removal: true,
+            })
+        );
+    }
+
+    #[test]
+    fn find_deprecated_annotation_defaults_for_removal_to_false_when_absent() {
+        let pool = pool_with(vec![ConstantPoolEntry::Utf8(
+            "Ljava/lang/Deprecated;".to_owned(),
+        )]);
+        let attributes = vec![deprecated_annotation(ConstantPoolIndex(1), vec![])];
+
+        assert_eq!(
+            find_deprecated_annotation(&attributes, &pool),
+            Some(DeprecationInfo {
+                since: None,
+                for_removal: false,
+            })
+        );
+    }
+
+    #[test]
+    fn find_deprecated_annotation_ignores_an_unrelated_annotation_type() {
+        let pool = pool_with(vec![ConstantPoolEntry::Utf8(
+            "Ljava/lang/FunctionalInterface;".to_owned(),
+        )]);
+        let attributes = vec![deprecated_annotation(ConstantPoolIndex(1), vec![])];
+
+        assert_eq!(find_deprecated_annotation(&attributes, &pool), None);
+    }
+
+    #[test]
+    fn find_deprecated_annotation_returns_none_without_any_annotations() {
+        let pool = ConstantPool::from_entries(vec![]);
+
+        assert_eq!(find_deprecated_annotation(&[], &pool), None);
     }
 
     #[test]
