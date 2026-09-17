@@ -547,30 +547,25 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
             has_source_line_break(source, previous.span.end(), tokens[index].span.start())
         });
         let Some(next) = next_real_token(tokens, index) else {
-            tokens[index].kind = if starts_line {
-                TokenKind::EndMarker
-            } else {
-                TokenKind::Identifier
-            };
+            tokens[index].kind = TokenKind::Identifier;
             continue;
         };
 
         let same_line = !has_source_line_break(source, tokens[index].span.end(), next.span.start());
-        let target = same_line && is_end_marker_target(next.kind);
-        let line_ends = if target {
-            match next_real_token_after(tokens, index, next) {
-                None => true,
-                Some(following) if following.kind == TokenKind::Eof => true,
-                Some(following) => {
-                    has_source_line_break(source, next.span.end(), following.span.start())
-                }
+        if !starts_line || !same_line || !is_end_marker_target(next.kind) {
+            tokens[index].kind = TokenKind::Identifier;
+            continue;
+        }
+
+        let line_ends = match next_real_token_after(tokens, index, next) {
+            None => true,
+            Some(following) if following.kind == TokenKind::Eof => true,
+            Some(following) => {
+                has_source_line_break(source, next.span.end(), following.span.start())
             }
-        } else {
-            next.kind == TokenKind::Eof
-                || has_source_line_break(source, tokens[index].span.end(), next.span.start())
         };
 
-        tokens[index].kind = if starts_line && line_ends {
+        tokens[index].kind = if line_ends {
             TokenKind::EndMarker
         } else {
             TokenKind::Identifier
@@ -827,6 +822,19 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::IntegerLiteral,
                 TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_standalone_end_as_an_identifier() {
+        assert_eq!(
+            kinds("end\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof
             ]
         );
     }
