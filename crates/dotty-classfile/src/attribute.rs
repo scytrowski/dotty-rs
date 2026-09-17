@@ -203,6 +203,43 @@ fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameter
     Ok(parameters)
 }
 
+fn read_exception_table(reader: &mut Reader<'_>) -> Result<Vec<ExceptionTableEntry>, ReadError> {
+    let count = reader.read_u16()?;
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let start_pc = reader.read_u16()?;
+        let end_pc = reader.read_u16()?;
+        let handler_pc = reader.read_u16()?;
+        let catch_type = read_optional_index(reader)?;
+        entries.push(ExceptionTableEntry {
+            start_pc,
+            end_pc,
+            handler_pc,
+            catch_type,
+        });
+    }
+    Ok(entries)
+}
+
+fn read_code<'a>(
+    reader: &mut Reader<'a>,
+    constant_pool: &ConstantPool,
+) -> Result<CodeAttribute<'a>, AttributeError> {
+    let max_stack = reader.read_u16()?;
+    let max_locals = reader.read_u16()?;
+    let code_length = reader.read_u32()?;
+    let code = reader.read_bytes(code_length as usize)?;
+    let exception_table = read_exception_table(reader)?;
+    let attributes = decode_attributes(reader, constant_pool)?;
+    Ok(CodeAttribute {
+        max_stack,
+        max_locals,
+        code,
+        exception_table,
+        attributes,
+    })
+}
+
 /// Decodes a `u2` count followed by that many `attribute_info` structures —
 /// the shared shape of `ClassFile`, `field_info`, `method_info`, `Code`, and
 /// `record_component_info`'s attribute lists.
@@ -281,6 +318,7 @@ impl<'a> Attribute<'a> {
                 }
             }
             "Record" => Attribute::Record(read_record_components(&mut sub_reader, constant_pool)?),
+            "Code" => Attribute::Code(read_code(&mut sub_reader, constant_pool)?),
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
                 return Ok(Attribute::Other(RawAttribute { name_index, bytes }));
@@ -680,6 +718,136 @@ mod tests {
                 descriptor_index: ConstantPoolIndex(4),
                 attributes: vec![Attribute::Signature(ConstantPoolIndex(5))],
             }]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_code_attribute_with_no_exceptions_or_nested_attributes() {
+        let pool = pool_with_utf8_name("Code");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // max_stack = 1
+                0x00, 0x02, // max_locals = 2
+                0x00, 0x00, 0x00, 0x01, // code_length = 1
+                0xB1, // code: return
+                0x00, 0x00, // exception_table_length = 0
+                0x00, 0x00, // attributes_count = 0
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Code(CodeAttribute {
+                max_stack: 1,
+                max_locals: 2,
+                code: &[0xB1],
+                exception_table: vec![],
+                attributes: vec![],
+            }))
+        );
+    }
+
+    #[test]
+    fn decodes_a_code_attribute_with_exception_table_entries() {
+        let pool = pool_with_utf8_name("Code");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x02, // max_stack = 2
+                0x00, 0x01, // max_locals = 1
+                0x00, 0x00, 0x00, 0x00, // code_length = 0
+                0x00, 0x02, // exception_table_length = 2
+                0x00, 0x00, 0x00, 0x05, 0x00, 0x08, 0x00, 0x03, // caught: catch_type=#3
+                0x00, 0x05, 0x00, 0x08, 0x00, 0x0B, 0x00, 0x00, // finally: catch_type=0
+                0x00, 0x00, // attributes_count = 0
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Code(CodeAttribute {
+                max_stack: 2,
+                max_locals: 1,
+                code: &[],
+                exception_table: vec![
+                    ExceptionTableEntry {
+                        start_pc: 0,
+                        end_pc: 5,
+                        handler_pc: 8,
+                        catch_type: Some(ConstantPoolIndex(3)),
+                    },
+                    ExceptionTableEntry {
+                        start_pc: 5,
+                        end_pc: 8,
+                        handler_pc: 11,
+                        catch_type: None,
+                    },
+                ],
+                attributes: vec![],
+            }))
+        );
+    }
+
+    #[test]
+    fn decodes_a_code_attribute_with_an_unrecognized_nested_attribute() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Code".to_owned())),
+            Some(ConstantPoolEntry::Utf8("LineNumberTable".to_owned())),
+        ]);
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x00, // max_stack = 0
+                0x00, 0x00, // max_locals = 0
+                0x00, 0x00, 0x00, 0x00, // code_length = 0
+                0x00, 0x00, // exception_table_length = 0
+                0x00, 0x01, // attributes_count = 1
+                0x00, 0x02, // nested attribute_name_index = #2 ("LineNumberTable")
+                0x00, 0x00, 0x00, 0x02, // nested attribute_length = 2
+                0xCA, 0xFE, // opaque nested payload
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Code(CodeAttribute {
+                max_stack: 0,
+                max_locals: 0,
+                code: &[],
+                exception_table: vec![],
+                attributes: vec![Attribute::Other(RawAttribute {
+                    name_index: ConstantPoolIndex(2),
+                    bytes: &[0xCA, 0xFE],
+                })],
+            }))
+        );
+    }
+
+    #[test]
+    fn reports_a_truncated_code_array() {
+        let pool = pool_with_utf8_name("Code");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x00, // max_stack = 0
+                0x00, 0x00, // max_locals = 0
+                0x00, 0x00, 0x00, 0x05, // code_length = 5, but only 1 byte follows
+                0xB1,
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof {
+                offset: 14,
+                needed: 5,
+                remaining: 1,
+            }))
         );
     }
 
