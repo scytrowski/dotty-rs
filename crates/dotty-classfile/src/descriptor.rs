@@ -62,6 +62,42 @@ impl<'a> Cursor<'a> {
         self.remaining = &rest[1..];
         Some(taken)
     }
+
+    /// Consumes characters up to (not including) the first occurrence of
+    /// any byte in `stops`, or to the end of input. `None` if nothing was
+    /// consumed — every JVMS `Identifier` must contain at least one code
+    /// point.
+    pub(crate) fn take_identifier(&mut self, stops: &[u8]) -> Option<&'a str> {
+        let position = self
+            .remaining
+            .as_bytes()
+            .iter()
+            .position(|byte| stops.contains(byte))
+            .unwrap_or(self.remaining.len());
+        if position == 0 {
+            return None;
+        }
+        let (taken, rest) = self.remaining.split_at(position);
+        self.remaining = rest;
+        Some(taken)
+    }
+}
+
+/// Returns the `FieldType` for a `BaseType` letter without consuming it —
+/// used by the signature grammar (`JavaTypeSignature: ReferenceTypeSignature
+/// | BaseType`) to decide whether to fall into the base-type case at all.
+pub(crate) fn peek_base_type(cursor: &Cursor<'_>) -> Option<FieldType> {
+    match cursor.peek_ascii()? {
+        b'B' => Some(FieldType::Byte),
+        b'C' => Some(FieldType::Char),
+        b'D' => Some(FieldType::Double),
+        b'F' => Some(FieldType::Float),
+        b'I' => Some(FieldType::Int),
+        b'J' => Some(FieldType::Long),
+        b'S' => Some(FieldType::Short),
+        b'Z' => Some(FieldType::Boolean),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
