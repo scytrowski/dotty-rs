@@ -272,6 +272,21 @@ fn resolves_method_descriptors_across_fixtures() {
 }
 
 #[test]
+fn validates_references_across_every_real_fixture() {
+    for bytes in [
+        POOL_SAMPLE,
+        NESTED_SAMPLE,
+        NESTED_SAMPLE_INNER,
+        NESTED_SAMPLE_LOCAL_RUNNABLE,
+        SHAPE,
+        SHAPE_CIRCLE,
+    ] {
+        let class_file = decode(bytes);
+        assert_eq!(class_file.validate_references(), Ok(()));
+    }
+}
+
+#[test]
 fn resolves_and_parses_the_real_max_signature() {
     let class_file = decode(NESTED_SAMPLE);
     let pool = &class_file.constant_pool;
