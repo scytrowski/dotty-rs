@@ -238,6 +238,7 @@ fn build_tokens(
                         blank_line && raw.kind == RawTokenKind::Operator;
                     if can_end_statement(previous_kind)
                         && !leading_infix
+                        && !suppresses_statement_separator(raw.kind)
                         && (can_start_statement(raw.kind) || blank_line_before_operator)
                     {
                         let separator = if blank_line {
@@ -491,6 +492,13 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
                     | Punctuation::RightBracket
                     | Punctuation::RightBrace
             )
+    )
+}
+
+fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
+    matches!(
+        kind,
+        RawTokenKind::Keyword(HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally)
     )
 }
 
@@ -1503,6 +1511,71 @@ mod tests {
                 TokenKind::Keyword(HardKeyword::If),
                 TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_a_then_region_without_a_separator_before_else() {
+        assert_eq!(
+            kinds("if condition then\n  first()\nelse\n  second()\nafter()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Else),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_try_regions_without_separators_before_catch_and_finally() {
+        assert_eq!(
+            kinds(
+                "try\n  risky()\ncatch\n  case error => recover()\nfinally\n  cleanup()\nafter_try()"
+            ),
+            vec![
+                TokenKind::Keyword(HardKeyword::Try),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Catch),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Finally),
                 TokenKind::Indent,
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
