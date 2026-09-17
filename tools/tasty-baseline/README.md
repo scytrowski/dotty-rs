@@ -75,6 +75,25 @@ Rust integration coverage discovers every corpus directory below
 corpus therefore gets inventory, semantic-baseline, and wire-baseline checks
 without adding another Rust test target.
 
+## Scala compatibility round-trip
+
+The expensive compiler-side check is intentionally separate from normal Rust
+CI. `verify-roundtrip.sh` re-encodes every `.tasty` file in a manifest corpus
+through the structured Rust encoder, then invokes `TastyInspector` for the
+entire re-encoded corpus. It performs a second, selected-file projection and
+compares that semantic-lite result with the checked-in expectation:
+
+```text
+tools/tasty-baseline/verify-roundtrip.sh \
+  crates/dotty-tasty/tests/fixtures/scala3-library
+```
+
+Use `--classpath=...` when the inspected files require definitions from an
+external artifact. The script uses temporary SBT boot, global, Ivy, Coursier,
+and IPC directories, so it does not modify the user's SDKMAN or SBT state. The GitHub Actions workflow
+`.github/workflows/tasty-compatibility.yml` is manual-only and can verify one
+corpus or both corpora without charging every push or pull request.
+
 ## Wire-aligned Rust baseline
 
 The root Rust package also provides `tasty-wire-baseline`. It reads a

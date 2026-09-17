@@ -1,0 +1,67 @@
+name: TASTy compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: Corpus to verify
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - scala3-library
+          - scala3-compiler
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tasty-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify structured TASTy round-trip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: sbt
+
+      - name: Set up SBT
+        uses: sbt/setup-sbt@v1
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Verify selected corpus
+        env:
+          CORPUS: ${{ inputs.corpus }}
+        run: |
+          case "$CORPUS" in
+            all)
+              tools/tasty-baseline/verify-roundtrip.sh crates/dotty-tasty/tests/fixtures/scala3-library
+              tools/tasty-baseline/verify-roundtrip.sh crates/dotty-tasty/tests/fixtures/scala3-compiler
+              ;;
+            scala3-library)
+              tools/tasty-baseline/verify-roundtrip.sh crates/dotty-tasty/tests/fixtures/scala3-library
+              ;;
+            scala3-compiler)
+              tools/tasty-baseline/verify-roundtrip.sh crates/dotty-tasty/tests/fixtures/scala3-compiler
+              ;;
+            *)
+              echo "unknown corpus: $CORPUS" >&2
+              exit 2
+              ;;
+          esac
