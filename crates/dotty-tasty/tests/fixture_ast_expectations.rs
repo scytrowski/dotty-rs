@@ -2,11 +2,12 @@ use std::fs;
 use std::path::Path;
 
 use dotty_tasty::tasty::{
-    APPLIEDTPT_TAG, APPLIEDTYPE_TAG, BLOCK_TAG, CASE_TAG, CASEDEF_TAG, ConstantValue, DEFDEF_TAG,
-    DefinitionBody, DefinitionTail, EXTENSION_TAG, GIVEN_TAG, IF_TAG, INLINE_TAG, LAMBDA_TAG,
-    LAMBDATPT_TAG, MATCH_TAG, MATCHTPT_TAG, OPAQUE_TAG, PARAM_TAG, REFINEDTPT_TAG, RawNode,
-    RawTree, SELECTIN_TAG, StructuredNode, StructuredTree, TEMPLATE_TAG, TRAIT_TAG, TYPEBOUNDS_TAG,
-    TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TastyFile, UNAPPLY_TAG, VALDEF_TAG,
+    APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLYSIGPOLY_TAG, BLOCK_TAG, CASE_TAG, CASEDEF_TAG,
+    ConstantValue, DEFDEF_TAG, DefinitionBody, DefinitionTail, EXTENSION_TAG, GIVEN_TAG, IF_TAG,
+    INLINE_TAG, LAMBDA_TAG, LAMBDATPT_TAG, MATCH_TAG, MATCHTPT_TAG, OPAQUE_TAG, PARAM_TAG,
+    REFINEDTPT_TAG, RawNode, RawTree, SELECTIN_TAG, SUPERTYPE_TAG, StructuredNode, StructuredTree,
+    TEMPLATE_TAG, TRAIT_TAG, TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG,
+    TYPEPARAM_TAG, TastyFile, UNAPPLY_TAG, VALDEF_TAG,
 };
 
 fn assert_fixture_has_structured_nodes(relative_path: &str, expected_tags: &[u8]) {
@@ -120,6 +121,16 @@ fixture_test!(
 fixture_test!(
     extension_fixture_has_structured_nodes,
     "extension/Extension.tasty"
+);
+fixture_test!(
+    signature_polymorphic_fixture_has_structured_nodes,
+    "signature_polymorphic/SignaturePolymorphic$package.tasty",
+    APPLYSIGPOLY_TAG
+);
+fixture_test!(
+    obscure_tasty_fixture_has_structured_nodes,
+    "obscure_tasty/ObscureTasty.tasty",
+    SUPERTYPE_TAG
 );
 fixture_test!(
     generic_box_fixture_has_structured_nodes,
