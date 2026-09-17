@@ -8,5 +8,8 @@ publish = false
 members = ["crates/dotty-tasty"]
 resolver = "3"
 
+[profile.test]
+opt-level = 1
+
 [dependencies]
 dotty-tasty = { path = "crates/dotty-tasty" }
