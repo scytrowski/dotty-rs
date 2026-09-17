@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_colons_by_their_lexical_predecessor() {
+    fn classifies_colon_after_an_identifier_as_colon_follow() {
         assert_eq!(
             kinds("value: Int"),
             vec![
@@ -766,6 +766,10 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn classifies_colon_after_an_operator_as_colon_op() {
         assert_eq!(
             kinds("+ : Int"),
             vec![
@@ -793,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_end_markers_only_at_the_start_of_a_line() {
+    fn recognizes_an_end_marker_at_the_start_of_a_line() {
         assert_eq!(
             kinds("if ready then\n  run()\nend if"),
             vec![
@@ -811,6 +815,10 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn keeps_end_as_an_identifier_when_used_in_a_declaration() {
         assert_eq!(
             kinds("val end = 1"),
             vec![
