@@ -301,14 +301,16 @@ mod tests {
     /// inside a real JAR (via a `CompositeClassPath` that falls through
     /// to the same synthetic `java/lang/Object`/`java/lang/Runnable`
     /// classes as the directory-based test above) instead of from a
-    /// bare in-memory map.
-    #[test]
-    fn loads_pool_sample_from_a_real_jar_via_composite_class_path() {
+    /// bare in-memory map. Run against both the STORED and the real
+    /// DEFLATE-compressed fixture, since `JarClassPath` must work
+    /// identically either way.
+    fn assert_loads_pool_sample_from_jar(jar_file_name: &str) {
         use crate::class_path::CompositeClassPath;
         use crate::jar_class_path::JarClassPath;
 
         let jar_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/pool_sample_jar/pool_sample_stored.jar");
+            .join("tests/fixtures/pool_sample_jar")
+            .join(jar_file_name);
         let jar_class_path = JarClassPath::new(jar_path).unwrap();
 
         let mut synthetic_classes = HashMap::new();
@@ -342,6 +344,16 @@ mod tests {
             [ClassRef::Resolved(interface_symbol)]
                 if interface_symbol.name().as_internal() == "java/lang/Runnable"
         ));
+    }
+
+    #[test]
+    fn loads_pool_sample_from_a_stored_jar_via_composite_class_path() {
+        assert_loads_pool_sample_from_jar("pool_sample_stored.jar");
+    }
+
+    #[test]
+    fn loads_pool_sample_from_a_real_deflate_compressed_jar_via_composite_class_path() {
+        assert_loads_pool_sample_from_jar("pool_sample_deflate.jar");
     }
 
     #[test]

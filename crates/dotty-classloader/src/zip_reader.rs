@@ -51,14 +51,6 @@ impl fmt::Display for ZipReadError {
 impl std::error::Error for ZipReadError {}
 
 impl<'a> ZipReader<'a> {
-    pub fn new(bytes: &'a [u8]) -> Self {
-        Self {
-            bytes,
-            offset: 0,
-            limit: bytes.len(),
-        }
-    }
-
     pub fn with_range(bytes: &'a [u8], start: usize, end: usize) -> Result<Self, ZipReadError> {
         if start > end || end > bytes.len() {
             return Err(ZipReadError::InvalidRange {
@@ -81,10 +73,6 @@ impl<'a> ZipReader<'a> {
 
     pub fn remaining(&self) -> usize {
         self.limit - self.offset
-    }
-
-    pub fn is_at_end(&self) -> bool {
-        self.offset == self.limit
     }
 
     pub fn read_bytes(&mut self, length: usize) -> Result<&'a [u8], ZipReadError> {
@@ -110,10 +98,6 @@ impl<'a> ZipReader<'a> {
         Ok(bytes)
     }
 
-    pub fn read_u8(&mut self) -> Result<u8, ZipReadError> {
-        Ok(self.read_bytes(1)?[0])
-    }
-
     pub fn read_u16(&mut self) -> Result<u16, ZipReadError> {
         let bytes = self.read_bytes(2)?;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
@@ -131,18 +115,18 @@ mod tests {
 
     #[test]
     fn reads_fixed_width_little_endian_integers() {
-        let mut reader = ZipReader::new(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+        let mut reader = ZipReader::with_range(&bytes, 0, bytes.len()).unwrap();
 
-        assert_eq!(reader.read_u8().unwrap(), 0x01);
-        assert_eq!(reader.read_u16().unwrap(), 0x0302);
-        assert_eq!(reader.read_u32().unwrap(), 0x0706_0504);
-        assert!(reader.is_at_end());
+        assert_eq!(reader.read_u16().unwrap(), 0x0201);
+        assert_eq!(reader.read_u32().unwrap(), 0x0605_0403);
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
     fn reports_eof_at_each_width() {
         assert_eq!(
-            ZipReader::new(&[]).read_u8(),
+            ZipReader::with_range(&[], 0, 0).unwrap().read_bytes(1),
             Err(ZipReadError::UnexpectedEof {
                 offset: 0,
                 needed: 1,
@@ -150,7 +134,7 @@ mod tests {
             })
         );
         assert_eq!(
-            ZipReader::new(&[0x01]).read_u16(),
+            ZipReader::with_range(&[0x01], 0, 1).unwrap().read_u16(),
             Err(ZipReadError::UnexpectedEof {
                 offset: 0,
                 needed: 2,
@@ -158,7 +142,9 @@ mod tests {
             })
         );
         assert_eq!(
-            ZipReader::new(&[0x01, 0x02, 0x03]).read_u32(),
+            ZipReader::with_range(&[0x01, 0x02, 0x03], 0, 3)
+                .unwrap()
+                .read_u32(),
             Err(ZipReadError::UnexpectedEof {
                 offset: 0,
                 needed: 4,

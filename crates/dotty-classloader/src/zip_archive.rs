@@ -1,4 +1,5 @@
 use crate::crc32;
+use crate::inflate::{InflateError, inflate};
 use crate::zip_reader::{ZipReadError, ZipReader};
 use std::collections::HashMap;
 use std::fmt;
@@ -14,6 +15,8 @@ const CENTRAL_DIRECTORY_FILE_HEADER_SIGNATURE: u32 = 0x0201_4B50;
 const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x0403_4B50;
 /// ZIP `compression method` 0 (APPNOTE.TXT §4.4.5): no compression.
 const COMPRESSION_METHOD_STORED: u16 = 0;
+/// ZIP `compression method` 8 (APPNOTE.TXT §4.4.5): DEFLATE (RFC 1951).
+const COMPRESSION_METHOD_DEFLATE: u16 = 8;
 
 /// Errors reading a ZIP (JAR) archive. Crate-private: callers only see
 /// `JarClassPath`, which maps these into [`crate::class_path::ClassPathError`].
@@ -41,6 +44,8 @@ pub(crate) enum ZipError {
     /// The entry uses a compression method this crate does not (yet)
     /// implement.
     UnsupportedCompressionMethod(u16),
+    /// A DEFLATE-compressed entry failed to decompress.
+    Inflate(InflateError),
     /// An entry's decompressed bytes did not match the CRC-32 declared
     /// for it in the central directory.
     CrcMismatch {
@@ -73,6 +78,7 @@ impl fmt::Display for ZipError {
             Self::UnsupportedCompressionMethod(method) => {
                 write!(formatter, "unsupported ZIP compression method {method}")
             }
+            Self::Inflate(error) => write!(formatter, "DEFLATE decompression failed: {error}"),
             Self::CrcMismatch { expected, actual } => write!(
                 formatter,
                 "CRC-32 mismatch: expected {expected:#010x}, computed {actual:#010x}"
@@ -91,8 +97,15 @@ impl std::error::Error for ZipError {
             | Self::InvalidLocalFileHeader { .. }
             | Self::UnsupportedCompressionMethod(_)
             | Self::CrcMismatch { .. } => None,
+            Self::Inflate(error) => Some(error),
             Self::Read(error) => Some(error),
         }
+    }
+}
+
+impl From<InflateError> for ZipError {
+    fn from(error: InflateError) -> Self {
+        Self::Inflate(error)
     }
 }
 
@@ -319,6 +332,7 @@ impl ZipArchive {
 
         match entry.compression_method {
             COMPRESSION_METHOD_STORED => Ok(compressed.to_vec()),
+            COMPRESSION_METHOD_DEFLATE => Ok(inflate(compressed)?),
             other => Err(ZipError::UnsupportedCompressionMethod(other)),
         }
     }
