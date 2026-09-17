@@ -861,6 +861,29 @@ mod tests {
     }
 
     #[test]
+    fn keeps_xml_namespace_separators_as_operators() {
+        assert_eq!(
+            kinds(r#"val xml = <ns:item xml:lang="en"/>"#),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::XmlStart,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::StringLiteral,
+                TokenKind::Operator,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn separates_after_a_closed_xml_literal() {
         assert_eq!(
             kinds("val xml = <tag></tag>\nval next = 1"),

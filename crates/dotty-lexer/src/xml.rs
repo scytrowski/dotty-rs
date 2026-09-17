@@ -59,6 +59,14 @@ impl XmlState {
         self.content == XmlContent::Text && (self.depth == 0 || !self.expressions.is_empty())
     }
 
+    pub(crate) fn is_xml_name_separator(&self) -> bool {
+        (self.pending_tag_name.is_some() && self.current_tag_name.is_some())
+            || (self.tag_open
+                && !self.closing_tag
+                && self.attribute_state == Some(XmlAttributeState::ExpectEquals)
+                && !self.attribute_name_separator)
+    }
+
     pub(crate) fn eof_message(&self) -> Option<&'static str> {
         match self.content {
             XmlContent::Comment => Some("unterminated XML comment"),
@@ -379,7 +387,7 @@ impl XmlState {
             return self.depth == 0;
         }
 
-        if spelling == "-" && self.consume_xml_name_separator(spelling) {
+        if matches!(spelling, "-" | ":" | ".") && self.consume_xml_name_separator(spelling) {
             return false;
         }
 

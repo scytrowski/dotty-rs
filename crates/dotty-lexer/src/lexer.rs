@@ -207,6 +207,13 @@ impl<'source> RawLexer<'source> {
         if character == ':' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
             return Ok(Some(RawItem::Token(self.scan_operator(start)?)));
         }
+        if character == ':' && self.xml.is_xml_name_separator() {
+            let _ = self.cursor.bump();
+            let kind = RawTokenKind::Operator;
+            let span = self.span(start)?;
+            self.update_xml_token(kind, span)?;
+            return Ok(Some(RawItem::Token(RawToken { kind, span })));
+        }
         if let Some(punctuation) = punctuation(character) {
             let _ = self.cursor.bump();
             let kind = RawTokenKind::Punctuation(punctuation);
@@ -1805,6 +1812,36 @@ mod tests {
     fn accepts_namespaced_xml_attribute_names() {
         let (_, diagnostics) = scan(r#"<item xml:lang="en"/>"#);
 
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_xml_namespace_separators_as_operators() {
+        let (items, diagnostics) = scan(r#"<ns:item xml:lang="en"/>"#);
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::StringLiteral,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
         assert!(diagnostics.is_empty());
     }
 
