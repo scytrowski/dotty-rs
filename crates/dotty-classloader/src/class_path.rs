@@ -21,21 +21,43 @@ pub enum ClassOrigin {
     Jmod(PathBuf),
 }
 
+/// Which decoder a [`ClassResource`]'s bytes should go through:
+/// `dotty_classfile::class_file::ClassFile::decode` for [`Self::Class`],
+/// `dotty_tasty::file::TastyFile::parse_scala_3_9` for [`Self::Tasty`].
+///
+/// A classpath entry that finds both a `.tasty` and a `.class` file for
+/// the same name reports [`Self::Tasty`] (see `docs/classloader.md` §9
+/// and this crate's module doc comment: `.tasty` is preferred).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassFormat {
+    Class,
+    Tasty,
+}
+
 /// A decoded-but-not-yet-parsed classpath entry: the raw bytes of a class
-/// file plus where they came from.
+/// file, which decoder they need, and where they came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassResource {
     bytes: Vec<u8>,
+    format: ClassFormat,
     origin: ClassOrigin,
 }
 
 impl ClassResource {
-    pub fn new(bytes: Vec<u8>, origin: ClassOrigin) -> Self {
-        Self { bytes, origin }
+    pub fn new(bytes: Vec<u8>, format: ClassFormat, origin: ClassOrigin) -> Self {
+        Self {
+            bytes,
+            format,
+            origin,
+        }
     }
 
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub fn format(&self) -> ClassFormat {
+        self.format
     }
 
     pub fn origin(&self) -> &ClassOrigin {
@@ -118,7 +140,10 @@ pub trait ClassPathEntry: Send + Sync {
 }
 
 /// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
-/// `BinaryName` to `<root>/<internal name>.class`.
+/// `BinaryName` to `<root>/<internal name>.tasty`, preferred, or
+/// `<root>/<internal name>.class` as a fallback (`docs/classloader.md`
+/// §9: `.tasty` is preferred over `.class` when both exist for the same
+/// name).
 pub struct DirectoryClassPath {
     root: PathBuf,
 }
@@ -128,22 +153,37 @@ impl DirectoryClassPath {
         Self { root: root.into() }
     }
 
-    fn class_file_path(&self, name: &BinaryName) -> PathBuf {
-        self.root.join(format!("{}.class", name.as_internal()))
+    fn resource_path(&self, name: &BinaryName, extension: &str) -> PathBuf {
+        self.root
+            .join(format!("{}.{extension}", name.as_internal()))
+    }
+
+    fn read(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>, ClassPathError> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ClassPathError::from(error)),
+        }
     }
 }
 
 impl ClassPathEntry for DirectoryClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
-        let path = self.class_file_path(name);
-
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(Some(ClassResource::new(
+        if let Some(bytes) = self.read(&self.resource_path(name, "tasty"))? {
+            return Ok(Some(ClassResource::new(
                 bytes,
+                ClassFormat::Tasty,
+                ClassOrigin::Directory(self.root.clone()),
+            )));
+        }
+
+        match self.read(&self.resource_path(name, "class"))? {
+            Some(bytes) => Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
                 ClassOrigin::Directory(self.root.clone()),
             ))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(ClassPathError::from(error)),
+            None => Ok(None),
         }
     }
 }
@@ -194,11 +234,12 @@ mod tests {
     }
 
     #[test]
-    fn class_resource_exposes_its_bytes_and_origin() {
+    fn class_resource_exposes_its_bytes_format_and_origin() {
         let origin = ClassOrigin::Directory(PathBuf::from("/classes"));
-        let resource = ClassResource::new(vec![0xCA, 0xFE], origin.clone());
+        let resource = ClassResource::new(vec![0xCA, 0xFE], ClassFormat::Class, origin.clone());
 
         assert_eq!(resource.bytes(), &[0xCA, 0xFE]);
+        assert_eq!(resource.format(), ClassFormat::Class);
         assert_eq!(resource.origin(), &origin);
     }
 
@@ -216,6 +257,7 @@ mod tests {
     fn found(marker: u8) -> Result<Option<ClassResource>, ()> {
         Ok(Some(ClassResource::new(
             vec![marker],
+            ClassFormat::Class,
             ClassOrigin::Directory(PathBuf::from("/irrelevant")),
         )))
     }

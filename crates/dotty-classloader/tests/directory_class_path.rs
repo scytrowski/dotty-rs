@@ -1,4 +1,4 @@
-use dotty_classloader::classloader::{BinaryName, ClassPathEntry, DirectoryClassPath};
+use dotty_classloader::classloader::{BinaryName, ClassFormat, ClassPathEntry, DirectoryClassPath};
 use std::fs;
 use std::path::PathBuf;
 
@@ -44,6 +44,45 @@ fn finds_a_class_file_present_under_the_root() {
         .expect("class should be found");
 
     assert_eq!(resource.bytes(), pool_sample_bytes().as_slice());
+    assert_eq!(resource.format(), ClassFormat::Class);
+}
+
+fn animal_tasty_bytes() -> Vec<u8> {
+    fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_sample/Animal.tasty"),
+    )
+    .expect("Animal.tasty fixture should exist")
+}
+
+#[test]
+fn prefers_a_tasty_entry_over_a_class_entry_for_the_same_name() {
+    let root = TemporaryDirectory::new("directory-class-path-tasty-preferred");
+    fs::write(root.path().join("Animal.tasty"), animal_tasty_bytes()).unwrap();
+    fs::write(root.path().join("Animal.class"), pool_sample_bytes()).unwrap();
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+    let resource = class_path
+        .find_class(&BinaryName::from_internal("Animal"))
+        .expect("lookup should not fail")
+        .expect("class should be found");
+
+    assert_eq!(resource.bytes(), animal_tasty_bytes().as_slice());
+    assert_eq!(resource.format(), ClassFormat::Tasty);
+}
+
+#[test]
+fn falls_back_to_class_when_no_tasty_entry_exists() {
+    let root = TemporaryDirectory::new("directory-class-path-tasty-fallback");
+    fs::write(root.path().join("PoolSample.class"), pool_sample_bytes()).unwrap();
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+    let resource = class_path
+        .find_class(&BinaryName::from_internal("PoolSample"))
+        .expect("lookup should not fail")
+        .expect("class should be found");
+
+    assert_eq!(resource.bytes(), pool_sample_bytes().as_slice());
+    assert_eq!(resource.format(), ClassFormat::Class);
 }
 
 #[test]

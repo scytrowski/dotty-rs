@@ -1,5 +1,5 @@
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::zip_archive::ZipArchive;
 use std::io;
 use std::path::PathBuf;
@@ -47,6 +47,7 @@ impl ClassPathEntry for JmodClassPath {
         match self.archive.read_entry(&entry_name)? {
             Some(bytes) => Ok(Some(ClassResource::new(
                 bytes,
+                ClassFormat::Class,
                 ClassOrigin::Jmod(self.path.clone()),
             ))),
             None => Ok(None),

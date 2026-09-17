@@ -863,7 +863,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::class_path::{ClassOrigin, ClassPathError, ClassResource};
+    use crate::class_path::{ClassFormat, ClassOrigin, ClassPathError, ClassResource};
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -879,6 +879,7 @@ mod tests {
             Ok(self.0.get(name).map(|bytes| {
                 ClassResource::new(
                     bytes.clone(),
+                    ClassFormat::Class,
                     ClassOrigin::Directory(PathBuf::from("<memory>")),
                 )
             }))

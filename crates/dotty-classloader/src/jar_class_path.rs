@@ -1,5 +1,5 @@
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
 use crate::zip_archive::ZipArchive;
 use std::path::PathBuf;
@@ -83,6 +83,7 @@ impl ClassPathEntry for JarClassPath {
             if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
                 return Ok(Some(ClassResource::new(
                     bytes,
+                    ClassFormat::Class,
                     ClassOrigin::Jar(self.path.clone()),
                 )));
             }
@@ -91,6 +92,7 @@ impl ClassPathEntry for JarClassPath {
         match self.archive.read_entry(&entry_name)? {
             Some(bytes) => Ok(Some(ClassResource::new(
                 bytes,
+                ClassFormat::Class,
                 ClassOrigin::Jar(self.path.clone()),
             ))),
             None => Ok(None),

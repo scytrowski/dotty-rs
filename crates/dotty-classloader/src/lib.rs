@@ -33,8 +33,8 @@ pub mod classloader {
     pub use crate::annotation::{AnnotationValue, SemanticAnnotation};
     pub use crate::binary_name::BinaryName;
     pub use crate::class_path::{
-        ClassOrigin, ClassPathEntry, ClassPathError, ClassResource, CompositeClassPath,
-        DirectoryClassPath,
+        ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
+        CompositeClassPath, DirectoryClassPath,
     };
     pub use crate::error::ClassLoadError;
     pub use crate::field_symbol::FieldSymbol;
