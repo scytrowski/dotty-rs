@@ -161,6 +161,10 @@ pub enum EntryKind {
     Class,
     NameAndType,
     MethodHandle,
+    Integer,
+    Long,
+    Float,
+    Double,
     /// One of the "loadable constant" tags (JVMS §4.4): `Integer`, `Float`,
     /// `Long`, `Double`, `String`, `Class`, `MethodHandle`, `MethodType`, or
     /// `Dynamic`.
@@ -177,6 +181,10 @@ impl fmt::Display for EntryKind {
             Self::Class => "a Class entry",
             Self::NameAndType => "a NameAndType entry",
             Self::MethodHandle => "a MethodHandle entry",
+            Self::Integer => "an Integer entry",
+            Self::Long => "a Long entry",
+            Self::Float => "a Float entry",
+            Self::Double => "a Double entry",
             Self::Loadable => "a loadable constant",
             Self::ConstantValue => "a ConstantValue-compatible constant",
         };
@@ -301,6 +309,56 @@ impl ConstantPool {
             Some(_) => Err(PoolRefError::WrongKind {
                 index,
                 expected: EntryKind::Loadable,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to an `Integer` entry (JVMS §4.4.4) —
+    /// also the required kind for annotation `element_value`s tagged `B`,
+    /// `C`, `I`, `S`, or `Z` (JVMS §4.7.16.1).
+    pub fn check_integer(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Integer(_)) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Integer,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to a `Long` entry (JVMS §4.4.5).
+    pub fn check_long(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Long(_)) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Long,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to a `Float` entry (JVMS §4.4.4).
+    pub fn check_float(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Float(_)) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Float,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Checks that `index` resolves to a `Double` entry (JVMS §4.4.5).
+    pub fn check_double(&self, index: ConstantPoolIndex) -> Result<(), PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Double(_)) => Ok(()),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Double,
             }),
             None => Err(PoolRefError::InvalidIndex { index }),
         }
@@ -878,6 +936,74 @@ mod tests {
             Err(PoolRefError::WrongKind {
                 index: ConstantPoolIndex(1),
                 expected: EntryKind::MethodHandle,
+            })
+        );
+    }
+
+    #[test]
+    fn check_integer_accepts_and_rejects() {
+        let good_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        assert_eq!(good_pool.check_integer(ConstantPoolIndex(1)), Ok(()));
+
+        let bad_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Long(1))]);
+        assert_eq!(
+            bad_pool.check_integer(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Integer,
+            })
+        );
+
+        let empty_pool = ConstantPool::from_entries(vec![]);
+        assert_eq!(
+            empty_pool.check_integer(ConstantPoolIndex(1)),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(1)
+            })
+        );
+    }
+
+    #[test]
+    fn check_long_accepts_and_rejects() {
+        let good_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Long(1))]);
+        assert_eq!(good_pool.check_long(ConstantPoolIndex(1)), Ok(()));
+
+        let bad_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Integer(1))]);
+        assert_eq!(
+            bad_pool.check_long(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Long,
+            })
+        );
+    }
+
+    #[test]
+    fn check_float_accepts_and_rejects() {
+        let good_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Float(1.0))]);
+        assert_eq!(good_pool.check_float(ConstantPoolIndex(1)), Ok(()));
+
+        let bad_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Double(1.0))]);
+        assert_eq!(
+            bad_pool.check_float(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Float,
+            })
+        );
+    }
+
+    #[test]
+    fn check_double_accepts_and_rejects() {
+        let good_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Double(1.0))]);
+        assert_eq!(good_pool.check_double(ConstantPoolIndex(1)), Ok(()));
+
+        let bad_pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Float(1.0))]);
+        assert_eq!(
+            bad_pool.check_double(ConstantPoolIndex(1)),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: EntryKind::Double,
             })
         );
     }

@@ -446,9 +446,11 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
             Ok(())
         }
         Attribute::Deprecated | Attribute::Synthetic => Ok(()),
-        // Reference validation for annotation element values lands in the
-        // next increment (needs new ConstantPool checkers).
-        Attribute::RuntimeVisibleAnnotations(_) | Attribute::RuntimeInvisibleAnnotations(_) => {
+        Attribute::RuntimeVisibleAnnotations(annotations)
+        | Attribute::RuntimeInvisibleAnnotations(annotations) => {
+            for annotation in annotations {
+                validate_annotation(annotation, pool)?;
+            }
             Ok(())
         }
         Attribute::NestHost(index) => pool.class_name(*index).map(|_| ()),
@@ -486,6 +488,49 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
             Ok(())
         }
         Attribute::Other(_) => Ok(()),
+    }
+}
+
+/// Validates an `annotation`'s constant pool references (JVMS §4.7.16):
+/// `type_index`, each `element_name_index`, and each paired `element_value`.
+fn validate_annotation(annotation: &Annotation, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    pool.utf8(annotation.type_index)?;
+    for (element_name_index, value) in &annotation.element_value_pairs {
+        pool.utf8(*element_name_index)?;
+        validate_element_value(value, pool)?;
+    }
+    Ok(())
+}
+
+/// Validates an `element_value`'s constant pool reference(s) against the
+/// exact kind its `tag` mandates (JVMS §4.7.16.1) — notably `String`/`Class`
+/// against `Utf8`, not `CONSTANT_String`/`CONSTANT_Class`.
+fn validate_element_value(value: &ElementValue, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    match value {
+        ElementValue::Byte(index)
+        | ElementValue::Char(index)
+        | ElementValue::Int(index)
+        | ElementValue::Short(index)
+        | ElementValue::Boolean(index) => pool.check_integer(*index),
+        ElementValue::Long(index) => pool.check_long(*index),
+        ElementValue::Float(index) => pool.check_float(*index),
+        ElementValue::Double(index) => pool.check_double(*index),
+        ElementValue::String(index) | ElementValue::Class(index) => pool.utf8(*index).map(|_| ()),
+        ElementValue::Enum {
+            type_name_index,
+            const_name_index,
+        } => {
+            pool.utf8(*type_name_index)?;
+            pool.utf8(*const_name_index)?;
+            Ok(())
+        }
+        ElementValue::Annotation(annotation) => validate_annotation(annotation, pool),
+        ElementValue::Array(values) => {
+            for value in values {
+                validate_element_value(value, pool)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1696,6 +1741,224 @@ mod tests {
         let attribute = Attribute::MethodParameters(vec![MethodParameterEntry {
             name_index: Some(ConstantPoolIndex(1)),
             access_flags: 0,
+        }]);
+
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    fn pool_with(entries: Vec<ConstantPoolEntry>) -> ConstantPool {
+        ConstantPool::from_entries(entries.into_iter().map(Some).collect())
+    }
+
+    #[test]
+    fn validate_element_value_accepts_every_integer_backed_tag() {
+        let pool = pool_with(vec![ConstantPoolEntry::Integer(1)]);
+        let index = ConstantPoolIndex(1);
+
+        for value in [
+            ElementValue::Byte(index),
+            ElementValue::Char(index),
+            ElementValue::Int(index),
+            ElementValue::Short(index),
+            ElementValue::Boolean(index),
+        ] {
+            assert_eq!(validate_element_value(&value, &pool), Ok(()));
+        }
+    }
+
+    #[test]
+    fn validate_element_value_rejects_an_integer_backed_tag_pointing_elsewhere() {
+        let pool = pool_with(vec![ConstantPoolEntry::Long(1)]);
+
+        assert_eq!(
+            validate_element_value(&ElementValue::Int(ConstantPoolIndex(1)), &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Integer,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_element_value_accepts_long_float_and_double() {
+        let pool = pool_with(vec![
+            ConstantPoolEntry::Long(1),
+            ConstantPoolEntry::Float(1.0),
+            ConstantPoolEntry::Double(1.0),
+        ]);
+
+        assert_eq!(
+            validate_element_value(&ElementValue::Long(ConstantPoolIndex(1)), &pool),
+            Ok(())
+        );
+        assert_eq!(
+            validate_element_value(&ElementValue::Float(ConstantPoolIndex(2)), &pool),
+            Ok(())
+        );
+        assert_eq!(
+            validate_element_value(&ElementValue::Double(ConstantPoolIndex(3)), &pool),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_element_value_string_requires_utf8_not_a_string_constant() {
+        let utf8_pool = pool_with(vec![ConstantPoolEntry::Utf8("hi".to_owned())]);
+        assert_eq!(
+            validate_element_value(&ElementValue::String(ConstantPoolIndex(1)), &utf8_pool),
+            Ok(())
+        );
+
+        let string_constant_pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("hi".to_owned()),
+            ConstantPoolEntry::String {
+                string_index: ConstantPoolIndex(1),
+            },
+        ]);
+        assert_eq!(
+            validate_element_value(
+                &ElementValue::String(ConstantPoolIndex(2)),
+                &string_constant_pool
+            ),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_element_value_class_requires_utf8_not_a_class_entry() {
+        let utf8_pool = pool_with(vec![ConstantPoolEntry::Utf8(
+            "Ljava/lang/String;".to_owned(),
+        )]);
+        assert_eq!(
+            validate_element_value(&ElementValue::Class(ConstantPoolIndex(1)), &utf8_pool),
+            Ok(())
+        );
+
+        let class_entry_pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("java/lang/String".to_owned()),
+            ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            },
+        ]);
+        assert_eq!(
+            validate_element_value(
+                &ElementValue::Class(ConstantPoolIndex(2)),
+                &class_entry_pool
+            ),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_element_value_enum_accepts_and_rejects() {
+        let pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("Ljava/time/DayOfWeek;".to_owned()),
+            ConstantPoolEntry::Utf8("MONDAY".to_owned()),
+        ]);
+        let good = ElementValue::Enum {
+            type_name_index: ConstantPoolIndex(1),
+            const_name_index: ConstantPoolIndex(2),
+        };
+        assert_eq!(validate_element_value(&good, &pool), Ok(()));
+
+        let bad = ElementValue::Enum {
+            type_name_index: ConstantPoolIndex(1),
+            const_name_index: ConstantPoolIndex(99),
+        };
+        assert_eq!(
+            validate_element_value(&bad, &pool),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(99)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_element_value_recurses_into_a_nested_annotation() {
+        let good_pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("Ljava/lang/Deprecated;".to_owned()),
+            ConstantPoolEntry::Utf8("since".to_owned()),
+            ConstantPoolEntry::Utf8("1.0".to_owned()),
+        ]);
+        let good = ElementValue::Annotation(Box::new(Annotation {
+            type_index: ConstantPoolIndex(1),
+            element_value_pairs: vec![(
+                ConstantPoolIndex(2),
+                ElementValue::String(ConstantPoolIndex(3)),
+            )],
+        }));
+        assert_eq!(validate_element_value(&good, &good_pool), Ok(()));
+
+        let bad_pool = pool_with(vec![ConstantPoolEntry::Integer(1)]);
+        let bad = ElementValue::Annotation(Box::new(Annotation {
+            type_index: ConstantPoolIndex(1),
+            element_value_pairs: vec![],
+        }));
+        assert_eq!(
+            validate_element_value(&bad, &bad_pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_element_value_recurses_into_an_array() {
+        let good_pool = pool_with(vec![ConstantPoolEntry::Integer(1)]);
+        let good = ElementValue::Array(vec![
+            ElementValue::Int(ConstantPoolIndex(1)),
+            ElementValue::Int(ConstantPoolIndex(1)),
+        ]);
+        assert_eq!(validate_element_value(&good, &good_pool), Ok(()));
+
+        let bad_pool = pool_with(vec![ConstantPoolEntry::Long(1)]);
+        let bad = ElementValue::Array(vec![ElementValue::Int(ConstantPoolIndex(1))]);
+        assert_eq!(
+            validate_element_value(&bad, &bad_pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(1),
+                expected: crate::constant_pool::EntryKind::Integer,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_attribute_accepts_a_well_formed_runtime_visible_annotations_attribute() {
+        let pool = pool_with(vec![
+            ConstantPoolEntry::Utf8("Ljava/lang/Deprecated;".to_owned()),
+            ConstantPoolEntry::Utf8("forRemoval".to_owned()),
+            ConstantPoolEntry::Integer(1),
+        ]);
+        let attribute = Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+            type_index: ConstantPoolIndex(1),
+            element_value_pairs: vec![(
+                ConstantPoolIndex(2),
+                ElementValue::Boolean(ConstantPoolIndex(3)),
+            )],
+        }]);
+
+        assert_eq!(validate_attribute(&attribute, &pool), Ok(()));
+    }
+
+    #[test]
+    fn validate_attribute_propagates_a_bad_reference_in_an_annotation() {
+        let pool = pool_with(vec![ConstantPoolEntry::Integer(1)]);
+        let attribute = Attribute::RuntimeInvisibleAnnotations(vec![Annotation {
+            type_index: ConstantPoolIndex(1),
+            element_value_pairs: vec![],
         }]);
 
         assert_eq!(
