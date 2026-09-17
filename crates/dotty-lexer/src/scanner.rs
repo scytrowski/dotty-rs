@@ -578,7 +578,7 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
             continue;
         }
 
-        let starts_line = previous_real_token(tokens, index).is_some_and(|previous| {
+        let starts_line = previous_real_token(tokens, index).is_none_or(|previous| {
             has_source_line_break(source, previous.span.end(), tokens[index].span.start())
         });
         let Some(next) = next_real_token(tokens, index) else {
@@ -1026,6 +1026,30 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Outdent,
                 TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_at_the_start_of_the_source() {
+        assert_eq!(
+            kinds("end if"),
+            vec![
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_after_a_leading_blank_line() {
+        assert_eq!(
+            kinds("\n\nend if"),
+            vec![
                 TokenKind::EndMarker,
                 TokenKind::Keyword(HardKeyword::If),
                 TokenKind::Eof,
