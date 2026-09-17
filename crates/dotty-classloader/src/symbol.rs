@@ -322,6 +322,7 @@ mod tests {
             FieldType::Int,
             None,
             crate::semantic_type::SemanticFieldType::Int,
+            Vec::new(),
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),
@@ -360,6 +361,7 @@ mod tests {
                 parameters: vec![],
                 return_type: None,
             },
+            Vec::new(),
         );
         let symbol = ClassSymbol::new(
             BinaryName::from_internal("PoolSample"),

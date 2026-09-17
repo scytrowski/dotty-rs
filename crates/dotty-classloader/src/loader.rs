@@ -1,3 +1,4 @@
+use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathEntry;
 use crate::error::ClassLoadError;
@@ -9,9 +10,11 @@ use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
 use dotty_classfile::access_flags::ClassAccessFlags;
-use dotty_classfile::attribute::Attribute;
+use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
-use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolIndex};
+use dotty_classfile::constant_pool::{
+    ConstantPool, ConstantPoolEntry, ConstantPoolIndex, EntryKind, PoolRefError,
+};
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
@@ -133,12 +136,15 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 &field.attributes,
                 &class_file.constant_pool,
             )?;
+            let annotations =
+                self.resolve_annotations(name, &field.attributes, &class_file.constant_pool)?;
             fields.push(FieldSymbol::new(
                 field_name,
                 field.access_flags,
                 field_type,
                 signature,
                 semantic_type,
+                annotations,
             ));
         }
 
@@ -156,12 +162,15 @@ impl<E: ClassPathEntry> ClassLoader<E> {
                 &class_file.constant_pool,
                 MethodSignature::parse,
             )?;
+            let annotations =
+                self.resolve_annotations(name, &method.attributes, &class_file.constant_pool)?;
             methods.push(MethodSymbol::new(
                 method_name,
                 method.access_flags,
                 descriptor,
                 signature,
                 semantic_descriptor,
+                annotations,
             ));
         }
 
@@ -178,6 +187,8 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         let inner_classes = self.resolve_inner_classes(name, &class_file)?;
         let enclosing_method = self.resolve_enclosing_method(name, &class_file)?;
         let record_components = self.resolve_record_components(name, &class_file)?;
+        let annotations =
+            self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
 
         shell.complete(
             super_class,
@@ -191,7 +202,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             inner_classes,
             enclosing_method,
             record_components,
-            Vec::new(),
+            annotations,
         );
         Ok(shell)
     }
@@ -617,6 +628,235 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         }
 
         Ok(Some(resolved))
+    }
+
+    /// Looks for `RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations`
+    /// (JVMS §4.7.16/4.7.17) among `attributes`, flattening both into
+    /// one list — retention visibility isn't modeled, per
+    /// `docs/classloader.md` §9's Milestone 7 scope decision. Shared by
+    /// the class itself, each field, and each method.
+    fn resolve_annotations(
+        &self,
+        owner: &BinaryName,
+        attributes: &[Attribute<'_>],
+        constant_pool: &ConstantPool,
+    ) -> Result<Vec<SemanticAnnotation>, ClassLoadError> {
+        attributes
+            .iter()
+            .filter_map(|attribute| match attribute {
+                Attribute::RuntimeVisibleAnnotations(annotations)
+                | Attribute::RuntimeInvisibleAnnotations(annotations) => Some(annotations),
+                _ => None,
+            })
+            .flatten()
+            .map(|annotation| self.resolve_annotation(owner, annotation, constant_pool))
+            .collect()
+    }
+
+    /// Resolves one decoded [`Annotation`] into a [`SemanticAnnotation`].
+    /// `annotation_type` is kept `Unresolved`, for the same reason as
+    /// every other Milestone 7 class reference (see
+    /// [`Self::resolve_optional_nest_host`]'s doc comment) — it's
+    /// decoded from the annotation's own field descriptor
+    /// (e.g. `Ljava/lang/Deprecated;`), not a `Class` constant pool
+    /// entry, so it's parsed the same way a field's descriptor is.
+    fn resolve_annotation(
+        &self,
+        owner: &BinaryName,
+        annotation: &Annotation,
+        constant_pool: &ConstantPool,
+    ) -> Result<SemanticAnnotation, ClassLoadError> {
+        let type_descriptor_text = constant_pool
+            .utf8(annotation.type_index)
+            .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))?;
+        let parsed_type = FieldType::parse(type_descriptor_text)
+            .map_err(|error| ClassLoadError::MalformedDescriptor(owner.clone(), error.into()))?;
+        let annotation_type = match parsed_type {
+            FieldType::Object(class_name) => {
+                ClassRef::Unresolved(BinaryName::from_internal(&class_name))
+            }
+            // JVMS §4.7.16 guarantees an annotation's own type descriptor
+            // names a class type; a primitive/array shape here can only
+            // come from a malformed class file, not real javac output.
+            _ => {
+                return Err(ClassLoadError::MalformedReference(
+                    owner.clone(),
+                    PoolRefError::WrongKind {
+                        index: annotation.type_index,
+                        expected: EntryKind::Class,
+                    },
+                ));
+            }
+        };
+
+        let elements = annotation
+            .element_value_pairs
+            .iter()
+            .map(|(name_index, value)| {
+                let element_name = self.resolve_member_name(owner, constant_pool, *name_index)?;
+                let element_value = self.resolve_element_value(owner, value, constant_pool)?;
+                Ok((element_name, element_value))
+            })
+            .collect::<Result<Vec<_>, ClassLoadError>>()?;
+
+        Ok(SemanticAnnotation {
+            annotation_type,
+            elements,
+        })
+    }
+
+    /// Resolves one decoded [`ElementValue`] (JVMS §4.7.16.1) into an
+    /// [`AnnotationValue`]. Class names mentioned inside a value
+    /// (`Enum`'s type, `Class`'s payload) are kept as raw strings, not
+    /// resolved — see [`AnnotationValue`]'s doc comment.
+    fn resolve_element_value(
+        &self,
+        owner: &BinaryName,
+        value: &ElementValue,
+        constant_pool: &ConstantPool,
+    ) -> Result<AnnotationValue, ClassLoadError> {
+        let integer =
+            |index: ConstantPoolIndex| self.resolve_pool_integer(owner, constant_pool, index);
+
+        match value {
+            ElementValue::Byte(index) => integer(*index).map(AnnotationValue::Byte),
+            ElementValue::Char(index) => integer(*index).map(AnnotationValue::Char),
+            ElementValue::Int(index) => integer(*index).map(AnnotationValue::Int),
+            ElementValue::Short(index) => integer(*index).map(AnnotationValue::Short),
+            ElementValue::Boolean(index) => {
+                integer(*index).map(|value| AnnotationValue::Boolean(value != 0))
+            }
+            ElementValue::Long(index) => self
+                .resolve_pool_long(owner, constant_pool, *index)
+                .map(AnnotationValue::Long),
+            ElementValue::Float(index) => self
+                .resolve_pool_float(owner, constant_pool, *index)
+                .map(AnnotationValue::Float),
+            ElementValue::Double(index) => self
+                .resolve_pool_double(owner, constant_pool, *index)
+                .map(AnnotationValue::Double),
+            ElementValue::String(index) => constant_pool
+                .utf8(*index)
+                .map(|text| AnnotationValue::String(text.to_owned()))
+                .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error)),
+            ElementValue::Enum {
+                type_name_index,
+                const_name_index,
+            } => {
+                let type_descriptor = constant_pool
+                    .utf8(*type_name_index)
+                    .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))?
+                    .to_owned();
+                let const_name = constant_pool
+                    .utf8(*const_name_index)
+                    .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))?
+                    .to_owned();
+                Ok(AnnotationValue::Enum {
+                    type_descriptor,
+                    const_name,
+                })
+            }
+            ElementValue::Class(index) => constant_pool
+                .utf8(*index)
+                .map(|text| AnnotationValue::Class(text.to_owned()))
+                .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error)),
+            ElementValue::Annotation(nested) => self
+                .resolve_annotation(owner, nested, constant_pool)
+                .map(|annotation| AnnotationValue::Annotation(Box::new(annotation))),
+            ElementValue::Array(values) => values
+                .iter()
+                .map(|value| self.resolve_element_value(owner, value, constant_pool))
+                .collect::<Result<Vec<_>, ClassLoadError>>()
+                .map(AnnotationValue::Array),
+        }
+    }
+
+    fn resolve_pool_integer(
+        &self,
+        owner: &BinaryName,
+        constant_pool: &ConstantPool,
+        index: ConstantPoolIndex,
+    ) -> Result<i32, ClassLoadError> {
+        match constant_pool.get(index) {
+            Some(ConstantPoolEntry::Integer(value)) => Ok(*value),
+            Some(_) => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::WrongKind {
+                    index,
+                    expected: EntryKind::Integer,
+                },
+            )),
+            None => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::InvalidIndex { index },
+            )),
+        }
+    }
+
+    fn resolve_pool_long(
+        &self,
+        owner: &BinaryName,
+        constant_pool: &ConstantPool,
+        index: ConstantPoolIndex,
+    ) -> Result<i64, ClassLoadError> {
+        match constant_pool.get(index) {
+            Some(ConstantPoolEntry::Long(value)) => Ok(*value),
+            Some(_) => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::WrongKind {
+                    index,
+                    expected: EntryKind::Long,
+                },
+            )),
+            None => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::InvalidIndex { index },
+            )),
+        }
+    }
+
+    fn resolve_pool_float(
+        &self,
+        owner: &BinaryName,
+        constant_pool: &ConstantPool,
+        index: ConstantPoolIndex,
+    ) -> Result<f32, ClassLoadError> {
+        match constant_pool.get(index) {
+            Some(ConstantPoolEntry::Float(value)) => Ok(*value),
+            Some(_) => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::WrongKind {
+                    index,
+                    expected: EntryKind::Float,
+                },
+            )),
+            None => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::InvalidIndex { index },
+            )),
+        }
+    }
+
+    fn resolve_pool_double(
+        &self,
+        owner: &BinaryName,
+        constant_pool: &ConstantPool,
+        index: ConstantPoolIndex,
+    ) -> Result<f64, ClassLoadError> {
+        match constant_pool.get(index) {
+            Some(ConstantPoolEntry::Double(value)) => Ok(*value),
+            Some(_) => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::WrongKind {
+                    index,
+                    expected: EntryKind::Double,
+                },
+            )),
+            None => Err(ClassLoadError::MalformedReference(
+                owner.clone(),
+                PoolRefError::InvalidIndex { index },
+            )),
+        }
     }
 }
 
@@ -1958,5 +2198,55 @@ mod tests {
             .expect("Shape should load");
 
         assert!(symbol.record_components().is_none());
+    }
+
+    /// `nested_sample/NestedSample$Inner.class`'s real
+    /// `@Deprecated(since = "1.0", forRemoval = true)` annotation
+    /// (confirmed via `javap -p -v`) exercises `RuntimeVisibleAnnotations`
+    /// (JVMS §4.7.16) end to end: the annotation type resolves to
+    /// `java/lang/Deprecated` (kept `Unresolved`, per
+    /// `resolve_annotation`'s doc comment), and its `String`/`Boolean`
+    /// element values decode correctly.
+    #[test]
+    fn resolves_a_real_annotation_on_a_class() {
+        let mut classes = nested_sample_classpath();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Deprecated"),
+            synthetic_class("java/lang/Deprecated", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample$Inner"))
+            .expect("NestedSample$Inner should load");
+
+        let annotations = symbol.annotations();
+        let deprecated = annotations
+            .iter()
+            .find(|annotation| {
+                matches!(
+                    &annotation.annotation_type,
+                    ClassRef::Unresolved(name) if name.as_internal() == "java/lang/Deprecated"
+                )
+            })
+            .expect("NestedSample$Inner should carry a @Deprecated annotation");
+
+        let element = |name: &str| {
+            deprecated
+                .elements
+                .iter()
+                .find(|(element_name, _)| element_name == name)
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("expected a {name} element"))
+        };
+
+        assert!(matches!(
+            element("since"),
+            AnnotationValue::String(value) if value == "1.0"
+        ));
+        assert!(matches!(
+            element("forRemoval"),
+            AnnotationValue::Boolean(true)
+        ));
     }
 }

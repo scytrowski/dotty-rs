@@ -1,3 +1,4 @@
+use crate::annotation::SemanticAnnotation;
 use crate::semantic_type::SemanticMethodDescriptor;
 use dotty_classfile::access_flags::MethodAccessFlags;
 use dotty_classfile::descriptor::MethodDescriptor;
@@ -33,15 +34,18 @@ pub struct MethodSymbol {
     descriptor: MethodDescriptor,
     signature: Option<MethodSignature>,
     semantic_descriptor: SemanticMethodDescriptor,
+    annotations: Vec<SemanticAnnotation>,
 }
 
 impl MethodSymbol {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         flags: MethodAccessFlags,
         descriptor: MethodDescriptor,
         signature: Option<MethodSignature>,
         semantic_descriptor: SemanticMethodDescriptor,
+        annotations: Vec<SemanticAnnotation>,
     ) -> Self {
         Self {
             name,
@@ -49,6 +53,7 @@ impl MethodSymbol {
             descriptor,
             signature,
             semantic_descriptor,
+            annotations,
         }
     }
 
@@ -71,6 +76,10 @@ impl MethodSymbol {
     pub fn semantic_descriptor(&self) -> &SemanticMethodDescriptor {
         &self.semantic_descriptor
     }
+
+    pub fn annotations(&self) -> &[SemanticAnnotation] {
+        &self.annotations
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +101,7 @@ mod tests {
                 parameters: vec![],
                 return_type: None,
             },
+            Vec::new(),
         );
 
         assert_eq!(symbol.name(), "run");
@@ -131,6 +141,7 @@ mod tests {
                     ),
                 )),
             },
+            Vec::new(),
         );
 
         assert_eq!(symbol.signature(), Some(&signature));
@@ -162,6 +173,7 @@ mod tests {
                     BinaryName::from_internal("Pong"),
                 ))),
             },
+            Vec::new(),
         );
 
         assert!(matches!(

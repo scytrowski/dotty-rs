@@ -1,3 +1,4 @@
+use crate::annotation::SemanticAnnotation;
 use crate::semantic_type::SemanticFieldType;
 use dotty_classfile::access_flags::FieldAccessFlags;
 use dotty_classfile::descriptor::FieldType;
@@ -27,15 +28,18 @@ pub struct FieldSymbol {
     field_type: FieldType,
     signature: Option<FieldSignature>,
     semantic_type: SemanticFieldType,
+    annotations: Vec<SemanticAnnotation>,
 }
 
 impl FieldSymbol {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         flags: FieldAccessFlags,
         field_type: FieldType,
         signature: Option<FieldSignature>,
         semantic_type: SemanticFieldType,
+        annotations: Vec<SemanticAnnotation>,
     ) -> Self {
         Self {
             name,
@@ -43,6 +47,7 @@ impl FieldSymbol {
             field_type,
             signature,
             semantic_type,
+            annotations,
         }
     }
 
@@ -65,6 +70,10 @@ impl FieldSymbol {
     pub fn semantic_type(&self) -> &SemanticFieldType {
         &self.semantic_type
     }
+
+    pub fn annotations(&self) -> &[SemanticAnnotation] {
+        &self.annotations
+    }
 }
 
 #[cfg(test)]
@@ -79,6 +88,7 @@ mod tests {
             FieldType::Int,
             None,
             SemanticFieldType::Int,
+            Vec::new(),
         );
 
         assert_eq!(symbol.name(), "ANSWER");
@@ -86,6 +96,7 @@ mod tests {
         assert_eq!(symbol.field_type(), &FieldType::Int);
         assert_eq!(symbol.signature(), None);
         assert!(matches!(symbol.semantic_type(), SemanticFieldType::Int));
+        assert!(symbol.annotations().is_empty());
     }
 
     #[test]
@@ -101,6 +112,7 @@ mod tests {
             SemanticFieldType::Object(crate::symbol::ClassRef::Unresolved(
                 crate::binary_name::BinaryName::from_internal("java/util/List"),
             )),
+            Vec::new(),
         );
 
         assert_eq!(symbol.signature(), Some(&signature));
@@ -117,6 +129,7 @@ mod tests {
             FieldType::Object("Pong".to_owned()),
             None,
             SemanticFieldType::Object(ClassRef::Unresolved(BinaryName::from_internal("Pong"))),
+            Vec::new(),
         );
 
         assert!(matches!(
