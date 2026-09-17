@@ -28,6 +28,7 @@ pub(crate) struct XmlState {
     expressions: Vec<XmlExpression>,
     content: XmlContent,
     cdata_brackets: u8,
+    pending_error: Option<&'static str>,
 }
 
 impl XmlState {
@@ -42,6 +43,10 @@ impl XmlState {
             XmlContent::Text if !self.expressions.is_empty() => Some("unterminated XML expression"),
             XmlContent::Text => None,
         }
+    }
+
+    pub(crate) fn take_error(&mut self) -> Option<&'static str> {
+        self.pending_error.take()
     }
 
     pub(crate) fn update_token(&mut self, kind: RawTokenKind, spelling: &str) -> bool {
@@ -120,6 +125,10 @@ impl XmlState {
             if spelling.contains("-->") {
                 self.content = XmlContent::Text;
             } else {
+                if spelling.contains("--") {
+                    self.pending_error
+                        .get_or_insert("invalid `--` sequence in XML comment");
+                }
                 return false;
             }
         }

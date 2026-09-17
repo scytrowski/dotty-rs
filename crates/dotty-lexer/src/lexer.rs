@@ -187,10 +187,11 @@ impl<'source> RawLexer<'source> {
                 .is_some_and(crate::identifier::is_identifier_start)
         {
             let _ = self.cursor.bump();
-            self.xml.update_token(RawTokenKind::XmlStart, "<");
+            let span = self.span(start)?;
+            self.update_xml_token(RawTokenKind::XmlStart, span)?;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::XmlStart,
-                span: self.span(start)?,
+                span,
             })));
         }
         if is_identifier_start(character) {
@@ -208,7 +209,7 @@ impl<'source> RawLexer<'source> {
             let _ = self.cursor.bump();
             let kind = RawTokenKind::Punctuation(punctuation);
             let span = self.span(start)?;
-            self.xml.update_token(kind, self.source.slice(span)?);
+            self.update_xml_token(kind, span)?;
             return Ok(Some(RawItem::Token(RawToken { kind, span })));
         }
         if is_operator_character(character) {
@@ -620,9 +621,21 @@ impl<'source> RawLexer<'source> {
             kind: RawTokenKind::Operator,
             span: self.span(start)?,
         };
-        self.xml
-            .update_token(token.kind, self.source.slice(token.span)?);
+        self.update_xml_token(token.kind, token.span)?;
         Ok(token)
+    }
+
+    fn update_xml_token(
+        &mut self,
+        kind: RawTokenKind,
+        span: TextRange,
+    ) -> Result<(), RawLexerError> {
+        let spelling = self.source.slice(span)?;
+        self.xml.update_token(kind, spelling);
+        if let Some(message) = self.xml.take_error() {
+            self.report(span.start(), message)?;
+        }
+        Ok(())
     }
 
     fn looks_like_quote_id(&self) -> bool {
@@ -1831,6 +1844,23 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_invalid_double_hyphen_inside_an_xml_comment() {
+        let source = "<root><!-- bad -- text --></root>";
+        let (_, diagnostics) = scan(source);
+        let invalid_start = 10 + source[10..].find("--").expect("invalid sequence");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "invalid `--` sequence in XML comment"
+        );
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(invalid_start as u32, (invalid_start + 2) as u32).expect("valid range")
+        );
     }
 
     #[test]
