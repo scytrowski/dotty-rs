@@ -60,3 +60,7 @@ after_for()
 given Service with
   service_value
 after_given()
+
+while condition do
+  work()
+after_while()

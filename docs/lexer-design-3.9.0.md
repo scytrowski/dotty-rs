@@ -479,8 +479,9 @@ delimiter interaction, case clauses, multiple pending outdents, and EOF
 cleanup.
 
 Tests include nested regions, tabs/spaces, incomparable prefixes, `match`,
-`catch`, `finally`, `do/while`, `for`/`yield`, `given`/`with`, nested cases,
-explicit delimiters, branch transitions, and malformed indentation.
+`catch`, `finally`, `do/while`, `while`/`do`, `for`/`yield`, `given`/`with`,
+nested cases, explicit delimiters, branch transitions, and malformed
+indentation.
 
 ### Increment 7 — Leading infix and colon protocol
 

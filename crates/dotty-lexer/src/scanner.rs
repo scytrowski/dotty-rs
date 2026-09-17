@@ -1675,6 +1675,28 @@ mod tests {
     }
 
     #[test]
+    fn opens_and_closes_a_while_do_region() {
+        assert_eq!(
+            kinds("while condition do\n  work()\nafter_while()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::While),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Do),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_do_as_a_continuation_before_its_body() {
         assert_eq!(
             kinds("value\n\ndo\n  body()\nwhile condition"),
