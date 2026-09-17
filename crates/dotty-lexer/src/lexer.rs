@@ -1595,8 +1595,8 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_xml_start_before_a_name() {
-        let (items, diagnostics) = scan("<tag");
+    fn recognizes_xml_start_before_a_closed_tag() {
+        let (items, diagnostics) = scan("<tag>");
         let kinds: Vec<_> = items
             .into_iter()
             .filter_map(|item| match item {
@@ -1610,10 +1610,24 @@ mod tests {
             vec![
                 RawTokenKind::XmlStart,
                 RawTokenKind::Identifier,
+                RawTokenKind::Operator,
                 RawTokenKind::Eof
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_xml_tag_at_eof() {
+        let source = "<item id=\"x\"";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
     }
 
     #[test]

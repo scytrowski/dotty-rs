@@ -29,6 +29,7 @@ pub(crate) struct XmlState {
     content: XmlContent,
     cdata_brackets: u8,
     pending_error: Option<&'static str>,
+    tag_open: bool,
 }
 
 impl XmlState {
@@ -41,6 +42,7 @@ impl XmlState {
             XmlContent::Comment => Some("unterminated XML comment"),
             XmlContent::Cdata => Some("unterminated XML CDATA section"),
             XmlContent::Text if !self.expressions.is_empty() => Some("unterminated XML expression"),
+            XmlContent::Text if self.tag_open => Some("unterminated XML tag"),
             XmlContent::Text => None,
         }
     }
@@ -71,6 +73,7 @@ impl XmlState {
             RawTokenKind::XmlStart => {
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
+                self.tag_open = true;
             }
             RawTokenKind::Punctuation(Punctuation::LeftBrace) => self.update_left_brace(),
             RawTokenKind::Punctuation(Punctuation::RightBrace) => self.update_right_brace(),
@@ -141,12 +144,18 @@ impl XmlState {
         }
 
         if spelling.contains("<!--") {
+            self.tag_open = false;
             self.content = XmlContent::Comment;
             return false;
         }
         if spelling.contains("<!") {
+            self.tag_open = false;
             self.content = XmlContent::Cdata;
             return false;
+        }
+
+        if spelling.starts_with('>') || spelling.starts_with("/>") {
+            self.tag_open = false;
         }
 
         match spelling {
@@ -155,19 +164,23 @@ impl XmlState {
                     self.depth -= 1;
                 }
                 self.closing_tag = true;
+                self.tag_open = true;
             }
             "/>" => {
                 self.depth = self.depth.saturating_sub(1);
                 self.closing_tag = false;
+                self.tag_open = false;
                 return self.depth == 0;
             }
             spelling if spelling.ends_with('<') => {
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
+                self.tag_open = true;
             }
             ">" if self.closing_tag => {
                 self.depth = self.depth.saturating_sub(1);
                 self.closing_tag = false;
+                self.tag_open = false;
                 return self.depth == 0;
             }
             _ => {}
