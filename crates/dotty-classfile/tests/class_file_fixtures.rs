@@ -7,8 +7,11 @@
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
+use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
+use dotty_classfile::field::FieldInfo;
 use dotty_classfile::method::MethodInfo;
 use dotty_classfile::reader::Reader;
+use dotty_classfile::signature::{MethodSignature, ReferenceTypeSignature, TypeSignature};
 
 const POOL_SAMPLE: &[u8] = include_bytes!("fixtures/pool_sample/PoolSample.class");
 const NESTED_SAMPLE: &[u8] = include_bytes!("fixtures/nested_sample/NestedSample.class");
@@ -44,6 +47,14 @@ fn find_method<'a, 'b>(class_file: &'b ClassFile<'a>, name: &str) -> &'b MethodI
         .iter()
         .find(|method| utf8_name(&class_file.constant_pool, method.name_index) == name)
         .unwrap_or_else(|| panic!("method {name} not found"))
+}
+
+fn find_field<'a, 'b>(class_file: &'b ClassFile<'a>, name: &str) -> &'b FieldInfo<'a> {
+    class_file
+        .fields
+        .iter()
+        .find(|field| utf8_name(&class_file.constant_pool, field.name_index) == name)
+        .unwrap_or_else(|| panic!("field {name} not found"))
 }
 
 #[test]
@@ -208,4 +219,91 @@ fn decodes_shape_circle_record_component() {
     assert_eq!(components.len(), 1);
     assert_eq!(utf8_name(pool, components[0].name_index), "radius");
     assert_eq!(utf8_name(pool, components[0].descriptor_index), "D");
+}
+
+#[test]
+fn resolves_pool_sample_field_types() {
+    let class_file = decode(POOL_SAMPLE);
+    let pool = &class_file.constant_pool;
+
+    assert_eq!(
+        find_field(&class_file, "ANSWER").field_type(pool),
+        Ok(FieldType::Int)
+    );
+    assert_eq!(
+        find_field(&class_file, "BIG_ANSWER").field_type(pool),
+        Ok(FieldType::Long)
+    );
+    assert_eq!(
+        find_field(&class_file, "HALF").field_type(pool),
+        Ok(FieldType::Float)
+    );
+    assert_eq!(
+        find_field(&class_file, "PI").field_type(pool),
+        Ok(FieldType::Double)
+    );
+    assert_eq!(
+        find_field(&class_file, "GREETING").field_type(pool),
+        Ok(FieldType::Object("java/lang/String".to_owned()))
+    );
+}
+
+#[test]
+fn resolves_method_descriptors_across_fixtures() {
+    let pool_sample = decode(POOL_SAMPLE);
+    let compute_answer = find_method(&pool_sample, "computeAnswer");
+    assert_eq!(
+        compute_answer.descriptor(&pool_sample.constant_pool),
+        Ok(MethodDescriptor {
+            parameters: vec![],
+            return_type: Some(FieldType::Int),
+        })
+    );
+
+    let shape_circle = decode(SHAPE_CIRCLE);
+    let radius = find_method(&shape_circle, "radius");
+    assert_eq!(
+        radius.descriptor(&shape_circle.constant_pool),
+        Ok(MethodDescriptor {
+            parameters: vec![],
+            return_type: Some(FieldType::Double),
+        })
+    );
+}
+
+#[test]
+fn resolves_and_parses_the_real_max_signature() {
+    let class_file = decode(NESTED_SAMPLE);
+    let pool = &class_file.constant_pool;
+    let max_method = find_method(&class_file, "max");
+
+    let signature_index = max_method
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Signature(index) => Some(*index),
+            _ => None,
+        })
+        .expect("expected a Signature attribute");
+
+    let signature = MethodSignature::parse(utf8_name(pool, signature_index)).unwrap();
+
+    assert_eq!(signature.type_parameters.len(), 1);
+    assert_eq!(signature.type_parameters[0].name, "T");
+    assert_eq!(signature.type_parameters[0].class_bound, None);
+    assert_eq!(signature.type_parameters[0].interface_bounds.len(), 1);
+    assert_eq!(
+        signature.parameters,
+        vec![
+            TypeSignature::Reference(ReferenceTypeSignature::TypeVariable("T".to_owned())),
+            TypeSignature::Reference(ReferenceTypeSignature::TypeVariable("T".to_owned())),
+        ]
+    );
+    assert_eq!(
+        signature.result,
+        Some(TypeSignature::Reference(
+            ReferenceTypeSignature::TypeVariable("T".to_owned())
+        ))
+    );
+    assert_eq!(signature.throws, vec![]);
 }
