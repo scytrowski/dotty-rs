@@ -232,9 +232,11 @@ fn build_tokens(
                         )?;
                     }
 
+                    let blank_line_before_operator =
+                        blank_line && raw.kind == RawTokenKind::Operator;
                     if can_end_statement(previous_kind)
-                        && (can_start_statement(raw.kind) || leading_infix)
                         && !leading_infix
+                        && (can_start_statement(raw.kind) || blank_line_before_operator)
                     {
                         let separator = if blank_line {
                             TokenKind::Newlines
@@ -930,6 +932,20 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn separates_a_leading_operator_after_a_blank_line() {
+        assert_eq!(
+            kinds("value\n\n  + other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
