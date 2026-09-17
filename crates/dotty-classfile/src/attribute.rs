@@ -203,6 +203,40 @@ fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameter
     Ok(parameters)
 }
 
+/// Decodes a `u2` count followed by that many `attribute_info` structures —
+/// the shared shape of `ClassFile`, `field_info`, `method_info`, `Code`, and
+/// `record_component_info`'s attribute lists.
+pub(crate) fn decode_attributes<'a>(
+    reader: &mut Reader<'a>,
+    constant_pool: &ConstantPool,
+) -> Result<Vec<Attribute<'a>>, AttributeError> {
+    let count = reader.read_u16()?;
+    let mut attributes = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        attributes.push(Attribute::decode(reader, constant_pool)?);
+    }
+    Ok(attributes)
+}
+
+fn read_record_components<'a>(
+    reader: &mut Reader<'a>,
+    constant_pool: &ConstantPool,
+) -> Result<Vec<RecordComponentInfo<'a>>, AttributeError> {
+    let count = reader.read_u16()?;
+    let mut components = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let name_index = read_index(reader)?;
+        let descriptor_index = read_index(reader)?;
+        let attributes = decode_attributes(reader, constant_pool)?;
+        components.push(RecordComponentInfo {
+            name_index,
+            descriptor_index,
+            attributes,
+        });
+    }
+    Ok(components)
+}
+
 impl<'a> Attribute<'a> {
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
     /// through `constant_pool` to pick a grammar. An unrecognized name
@@ -246,6 +280,7 @@ impl<'a> Attribute<'a> {
                     method_index,
                 }
             }
+            "Record" => Attribute::Record(read_record_components(&mut sub_reader, constant_pool)?),
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
                 return Ok(Attribute::Other(RawAttribute { name_index, bytes }));
@@ -591,6 +626,60 @@ mod tests {
                 class_index: ConstantPoolIndex(2),
                 method_index: None,
             })
+        );
+    }
+
+    #[test]
+    fn decodes_a_record_attribute_with_no_nested_attributes() {
+        let pool = pool_with_utf8_name("Record");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // components_count = 1
+                0x00, 0x03, // name_index = #3
+                0x00, 0x04, // descriptor_index = #4
+                0x00, 0x00, // attributes_count = 0
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Record(vec![RecordComponentInfo {
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(4),
+                attributes: vec![],
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_record_attribute_with_a_nested_signature_attribute() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Record".to_owned())),
+            Some(ConstantPoolEntry::Utf8("Signature".to_owned())),
+        ]);
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // components_count = 1
+                0x00, 0x03, // name_index = #3
+                0x00, 0x04, // descriptor_index = #4
+                0x00, 0x01, // attributes_count = 1
+                0x00, 0x02, // nested attribute_name_index = #2 ("Signature")
+                0x00, 0x00, 0x00, 0x02, // nested attribute_length = 2
+                0x00, 0x05, // signature_index = #5
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Record(vec![RecordComponentInfo {
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(4),
+                attributes: vec![Attribute::Signature(ConstantPoolIndex(5))],
+            }]))
         );
     }
 
