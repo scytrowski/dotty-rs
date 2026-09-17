@@ -1918,11 +1918,30 @@ mod tests {
 
     #[test]
     fn diagnoses_an_unterminated_xml_attribute_expression_at_eof() {
-        let source = "<item enabled={flag}";
+        let source = "<item enabled={flag";
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute expression must be closed"
+        );
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_unterminated_nested_xml_attribute_expression_at_eof() {
+        let source = "<item enabled={flag {nested}";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "XML attribute expression must be closed"
+        );
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")

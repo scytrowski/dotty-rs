@@ -71,6 +71,14 @@ impl XmlState {
         match self.content {
             XmlContent::Comment => Some("unterminated XML comment".to_owned()),
             XmlContent::Cdata => Some("unterminated XML CDATA section".to_owned()),
+            XmlContent::Text
+                if self
+                    .expressions
+                    .last()
+                    .is_some_and(|expression| expression.attribute) =>
+            {
+                Some("XML attribute expression must be closed".to_owned())
+            }
             XmlContent::Text if !self.expressions.is_empty() => {
                 Some("unterminated XML expression".to_owned())
             }
