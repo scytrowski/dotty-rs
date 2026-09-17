@@ -51,3 +51,12 @@ value match
   case next =>
     next()
 after_nested_match()
+
+for item <- items do
+  item
+yield item
+after_for()
+
+given Service with
+  service_value
+after_given()

@@ -499,7 +499,9 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
 fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
     matches!(
         kind,
-        RawTokenKind::Keyword(HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally)
+        RawTokenKind::Keyword(
+            HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally | HardKeyword::Yield
+        )
     )
 }
 
@@ -1618,6 +1620,50 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_a_for_region_without_a_separator_before_yield() {
+        assert_eq!(
+            kinds("for item <- items do\n  item\nyield item\nafter_for()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::For),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Do),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Yield),
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_and_closes_a_given_with_region() {
+        assert_eq!(
+            kinds("given Service with\n  service_value\nafter_given()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Given),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::With),
+                TokenKind::Indent,
+                TokenKind::Identifier,
                 TokenKind::Outdent,
                 TokenKind::Newline,
                 TokenKind::Identifier,

@@ -60,7 +60,7 @@ Implementation status on the current lexer branch:
 - the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
   prefix-based indentation regions for non-colon triggers such as `then`,
   `else`, `match`, `try`, and `do`;
-- branch transitions through `else`, `catch`, and `finally` close the active
+- branch transitions through `else`, `catch`, `finally`, and `yield` close the active
   body region without inserting a statement separator before the clause;
 - parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
@@ -479,8 +479,8 @@ delimiter interaction, case clauses, multiple pending outdents, and EOF
 cleanup.
 
 Tests include nested regions, tabs/spaces, incomparable prefixes, `match`,
-`catch`, `finally`, `do/while`, nested cases, explicit delimiters, branch
-transitions, and malformed indentation.
+`catch`, `finally`, `do/while`, `for`/`yield`, `given`/`with`, nested cases,
+explicit delimiters, branch transitions, and malformed indentation.
 
 ### Increment 7 — Leading infix and colon protocol
 
