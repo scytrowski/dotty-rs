@@ -423,6 +423,32 @@ mod tests {
     /// `TYPEDEF_TAG` regardless of what kind of definition it is (a
     /// type alias included), so requesting one by name reaches this
     /// path instead of `MissingTypeDef`.
+    /// `decode`'s own `?` on `node.decode_structured()`/
+    /// `template_node.decode_structured()` is the only place a
+    /// [`TastyDecodeError::Ast`] can arise (`file.ast_address_index()`'s
+    /// own `AstError`s are converted to [`TastyDecodeError::Parse`], not
+    /// `Ast`, since that call fails before any specific `TypeDef` is
+    /// even found) — but no real fixture happens to be malformed in
+    /// exactly that way. Corrupting one byte of a real, otherwise-valid
+    /// `.tasty` file (`inheritance/Animal.tasty`) is the standard way to
+    /// exercise a decode-time structural error without hand-building a
+    /// whole synthetic wire-format file (mirrors
+    /// `loader.rs::synthetic_malformed_this_class`'s equivalent
+    /// technique for `.class`). This offset was found by flipping each
+    /// byte of the fixture in turn and keeping one whose mutation still
+    /// parses as a `.tasty` file and still indexes successfully (so
+    /// `decode` gets as far as finding the `Animal` `TypeDef`) but fails
+    /// exactly at `decode_structured()`.
+    #[test]
+    fn ast_error_when_a_definitions_body_is_corrupted() {
+        let mut bytes = fixture_bytes("inheritance/Animal.tasty");
+        bytes[343] = bytes[343].wrapping_add(1);
+
+        let error = decode(&bytes, &BinaryName::from_internal("Animal")).unwrap_err();
+
+        assert!(matches!(error, TastyDecodeError::Ast(_)));
+    }
+
     #[test]
     fn no_template_body_when_the_matching_type_def_is_a_type_alias() {
         let error = decode(
