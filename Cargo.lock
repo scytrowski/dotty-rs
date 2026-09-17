@@ -7,12 +7,21 @@ name = "dotty"
 version = "0.1.0"
 dependencies = [
  "dotty-classfile",
+ "dotty-classloader",
  "dotty-tasty",
 ]
 
 [[package]]
 name = "dotty-classfile"
 version = "0.1.0"
+
+[[package]]
+name = "dotty-classloader"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-tasty",
+]
 
 [[package]]
 name = "dotty-tasty"
