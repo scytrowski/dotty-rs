@@ -141,6 +141,15 @@ impl From<ReadError> for AttributeError {
     }
 }
 
+fn read_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, ReadError> {
+    let count = reader.read_u16()?;
+    let mut indices = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        indices.push(read_index(reader)?);
+    }
+    Ok(indices)
+}
+
 impl<'a> Attribute<'a> {
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
     /// through `constant_pool` to pick a grammar. An unrecognized name
@@ -164,6 +173,11 @@ impl<'a> Attribute<'a> {
             "SourceFile" => Attribute::SourceFile(read_index(&mut sub_reader)?),
             "NestHost" => Attribute::NestHost(read_index(&mut sub_reader)?),
             "Deprecated" => Attribute::Deprecated,
+            "Exceptions" => Attribute::Exceptions(read_index_list(&mut sub_reader)?),
+            "NestMembers" => Attribute::NestMembers(read_index_list(&mut sub_reader)?),
+            "PermittedSubclasses" => {
+                Attribute::PermittedSubclasses(read_index_list(&mut sub_reader)?)
+            }
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
                 return Ok(Attribute::Other(RawAttribute { name_index, bytes }));
@@ -299,6 +313,77 @@ mod tests {
                 name: "ConstantValue".to_owned(),
                 unread: 2,
             })
+        );
+    }
+
+    #[test]
+    fn decodes_an_exceptions_attribute() {
+        let pool = pool_with_utf8_name("Exceptions");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x02, 0x00, 0x03, 0x00, 0x04]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Exceptions(vec![
+                ConstantPoolIndex(3),
+                ConstantPoolIndex(4)
+            ]))
+        );
+    }
+
+    #[test]
+    fn decodes_an_empty_exceptions_attribute() {
+        let pool = pool_with_utf8_name("Exceptions");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x00]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Exceptions(vec![]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_nest_members_attribute() {
+        let pool = pool_with_utf8_name("NestMembers");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x01, 0x00, 0x02]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::NestMembers(vec![ConstantPoolIndex(2)]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_permitted_subclasses_attribute() {
+        let pool = pool_with_utf8_name("PermittedSubclasses");
+        let bytes = attribute_info_bytes(1, &[0x00, 0x02, 0x00, 0x05, 0x00, 0x06]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::PermittedSubclasses(vec![
+                ConstantPoolIndex(5),
+                ConstantPoolIndex(6)
+            ]))
+        );
+    }
+
+    #[test]
+    fn reports_a_truncated_index_list_attribute() {
+        let pool = pool_with_utf8_name("Exceptions");
+        // count says 2 entries, but only one index (2 bytes) follows.
+        let bytes = attribute_info_bytes(1, &[0x00, 0x02, 0x00, 0x03]);
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof {
+                offset: 10,
+                needed: 2,
+                remaining: 0,
+            }))
         );
     }
 
