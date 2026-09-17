@@ -150,6 +150,41 @@ fn read_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, Re
     Ok(indices)
 }
 
+/// Reads a `ConstantPoolIndex`, treating `0` as "absent" — the convention
+/// several attributes use for an optional constant pool reference.
+fn read_optional_index(reader: &mut Reader<'_>) -> Result<Option<ConstantPoolIndex>, ReadError> {
+    let index = read_index(reader)?;
+    Ok(if index.0 == 0 { None } else { Some(index) })
+}
+
+fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethodEntry>, ReadError> {
+    let count = reader.read_u16()?;
+    let mut methods = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let method_ref = read_index(reader)?;
+        let arguments = read_index_list(reader)?;
+        methods.push(BootstrapMethodEntry {
+            method_ref,
+            arguments,
+        });
+    }
+    Ok(methods)
+}
+
+fn read_method_parameters(reader: &mut Reader<'_>) -> Result<Vec<MethodParameterEntry>, ReadError> {
+    let count = reader.read_u8()?;
+    let mut parameters = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let name_index = read_optional_index(reader)?;
+        let access_flags = reader.read_u16()?;
+        parameters.push(MethodParameterEntry {
+            name_index,
+            access_flags,
+        });
+    }
+    Ok(parameters)
+}
+
 impl<'a> Attribute<'a> {
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
     /// through `constant_pool` to pick a grammar. An unrecognized name
@@ -177,6 +212,12 @@ impl<'a> Attribute<'a> {
             "NestMembers" => Attribute::NestMembers(read_index_list(&mut sub_reader)?),
             "PermittedSubclasses" => {
                 Attribute::PermittedSubclasses(read_index_list(&mut sub_reader)?)
+            }
+            "BootstrapMethods" => {
+                Attribute::BootstrapMethods(read_bootstrap_methods(&mut sub_reader)?)
+            }
+            "MethodParameters" => {
+                Attribute::MethodParameters(read_method_parameters(&mut sub_reader)?)
             }
             _ => {
                 let bytes = sub_reader.read_bytes(sub_reader.remaining())?;
@@ -366,6 +407,80 @@ mod tests {
             Ok(Attribute::PermittedSubclasses(vec![
                 ConstantPoolIndex(5),
                 ConstantPoolIndex(6)
+            ]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_bootstrap_methods_attribute() {
+        let pool = pool_with_utf8_name("BootstrapMethods");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // num_bootstrap_methods = 1
+                0x00, 0x02, // bootstrap_method_ref = #2
+                0x00, 0x02, // num_bootstrap_arguments = 2
+                0x00, 0x03, 0x00, 0x04, // arguments: #3, #4
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::BootstrapMethods(vec![BootstrapMethodEntry {
+                method_ref: ConstantPoolIndex(2),
+                arguments: vec![ConstantPoolIndex(3), ConstantPoolIndex(4)],
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_bootstrap_method_with_no_arguments() {
+        let pool = pool_with_utf8_name("BootstrapMethods");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x00, 0x01, // num_bootstrap_methods = 1
+                0x00, 0x02, // bootstrap_method_ref = #2
+                0x00, 0x00, // num_bootstrap_arguments = 0
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::BootstrapMethods(vec![BootstrapMethodEntry {
+                method_ref: ConstantPoolIndex(2),
+                arguments: vec![],
+            }]))
+        );
+    }
+
+    #[test]
+    fn decodes_a_method_parameters_attribute() {
+        let pool = pool_with_utf8_name("MethodParameters");
+        let bytes = attribute_info_bytes(
+            1,
+            &[
+                0x02, // parameters_count = 2 (u1!)
+                0x00, 0x05, 0x00, 0x10, // name_index=#5, access_flags=0x0010 (FINAL)
+                0x00, 0x00, 0x80,
+                0x00, // name_index=0 (unnamed), access_flags=0x8000 (MANDATED)
+            ],
+        );
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::MethodParameters(vec![
+                MethodParameterEntry {
+                    name_index: Some(ConstantPoolIndex(5)),
+                    access_flags: 0x0010,
+                },
+                MethodParameterEntry {
+                    name_index: None,
+                    access_flags: 0x8000,
+                },
             ]))
         );
     }
