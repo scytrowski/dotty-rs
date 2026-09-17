@@ -4,6 +4,7 @@ use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
+use crate::record_component::RecordComponentSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassSymbol};
@@ -126,12 +127,11 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             let field_type = field
                 .field_type(&class_file.constant_pool)
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
-            let semantic_type = self.resolve_semantic_field_type(name, &field_type)?;
-            let signature = self.resolve_optional_signature(
+            let (signature, semantic_type) = self.resolve_field_like(
                 name,
+                &field_type,
                 &field.attributes,
                 &class_file.constant_pool,
-                FieldSignature::parse,
             )?;
             fields.push(FieldSymbol::new(
                 field_name,
@@ -177,6 +177,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         let permitted_subclasses = self.resolve_permitted_subclasses(name, &class_file)?;
         let inner_classes = self.resolve_inner_classes(name, &class_file)?;
         let enclosing_method = self.resolve_enclosing_method(name, &class_file)?;
+        let record_components = self.resolve_record_components(name, &class_file)?;
 
         shell.complete(
             super_class,
@@ -189,7 +190,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             permitted_subclasses,
             inner_classes,
             enclosing_method,
-            None,
+            record_components,
             Vec::new(),
         );
         Ok(shell)
@@ -544,6 +545,78 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             parameters,
             return_type,
         })
+    }
+
+    /// Resolves an already-parsed [`FieldType`]'s optional `Signature`
+    /// attribute and semantic type together, in the order both a real
+    /// field and a `Record` component need them. Shared by the
+    /// field-building loop above and [`Self::resolve_record_components`]
+    /// below — the only difference between the two is that a record
+    /// component has no access flags of its own in the class file
+    /// format.
+    fn resolve_field_like(
+        &self,
+        owner: &BinaryName,
+        field_type: &FieldType,
+        attributes: &[Attribute<'_>],
+        constant_pool: &ConstantPool,
+    ) -> Result<(Option<FieldSignature>, SemanticFieldType), ClassLoadError> {
+        let semantic_type = self.resolve_semantic_field_type(owner, field_type)?;
+        let signature = self.resolve_optional_signature(
+            owner,
+            attributes,
+            constant_pool,
+            FieldSignature::parse,
+        )?;
+        Ok((signature, semantic_type))
+    }
+
+    /// Looks for a `Record` attribute (JVMS §4.7.30) — present only on
+    /// a `record` class, listing its components. `None` means the
+    /// class isn't a record at all; `Some(vec![])` means it is a record
+    /// with zero components — both are real, distinguishable states.
+    fn resolve_record_components(
+        &self,
+        owner: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<Vec<RecordComponentSymbol>>, ClassLoadError> {
+        let components = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::Record(components) => Some(components),
+                _ => None,
+            });
+        let Some(components) = components else {
+            return Ok(None);
+        };
+
+        let mut resolved = Vec::with_capacity(components.len());
+        for component in components {
+            let component_name =
+                self.resolve_member_name(owner, &class_file.constant_pool, component.name_index)?;
+            let descriptor_text = class_file
+                .constant_pool
+                .utf8(component.descriptor_index)
+                .map_err(|error| ClassLoadError::MalformedReference(owner.clone(), error))?;
+            let field_type = FieldType::parse(descriptor_text).map_err(|error| {
+                ClassLoadError::MalformedDescriptor(owner.clone(), error.into())
+            })?;
+            let (signature, semantic_type) = self.resolve_field_like(
+                owner,
+                &field_type,
+                &component.attributes,
+                &class_file.constant_pool,
+            )?;
+            resolved.push(RecordComponentSymbol::new(
+                component_name,
+                field_type,
+                signature,
+                semantic_type,
+            ));
+        }
+
+        Ok(Some(resolved))
     }
 }
 
@@ -1818,5 +1891,72 @@ mod tests {
                 "(Ljava/lang/String;)Ljava/lang/Runnable;".to_owned()
             ))
         );
+    }
+
+    /// `sealed_record_sample/Shape$Circle.class` (real `javac` output) is
+    /// `record Circle(double radius) implements Shape` — confirms
+    /// `Record` (JVMS §4.7.30) decodes its one real, non-generic
+    /// component.
+    #[test]
+    fn resolves_the_record_components_of_a_real_record_class() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Shape$Circle"),
+            fixture_bytes("sealed_record_sample/Shape$Circle.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("Shape"),
+            fixture_bytes("sealed_record_sample/Shape.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/String"),
+            synthetic_class("java/lang/String", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Record"),
+            synthetic_class("java/lang/Record", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("Shape$Circle"))
+            .expect("Shape$Circle should load");
+
+        let components = symbol
+            .record_components()
+            .expect("Shape$Circle should have a Record attribute");
+
+        assert!(matches!(
+            components.as_slice(),
+            [only] if only.name() == "radius" && only.field_type() == &FieldType::Double
+        ));
+    }
+
+    /// `sealed_record_sample/Shape.class` is the sealed *interface*, not
+    /// a record — confirms `record_components()` distinguishes "not a
+    /// record" (`None`) from "a record with zero components"
+    /// (`Some(vec![])`).
+    #[test]
+    fn a_non_record_class_has_no_record_components() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("Shape"),
+            fixture_bytes("sealed_record_sample/Shape.class"),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("Shape"))
+            .expect("Shape should load");
+
+        assert!(symbol.record_components().is_none());
     }
 }
