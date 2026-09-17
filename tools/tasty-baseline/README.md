@@ -22,13 +22,23 @@ matched against the logical paths exposed by a directory or JAR input:
 sbt 'run output.json --select=semantic-selection.txt path/to/library.jar'
 ```
 
-For a checked-in corpus, `generate.sh` regenerates the manifest-declared
-expectation after verifying the pinned artifact checksum. It writes through a
-temporary file, so a failed Scala build does not replace the existing
-expectation:
+For a checked-in corpus, `generate-all.sh` is the canonical manifest-driven
+workflow. It verifies the pinned artifact checksum, materializes the TASTy
+entries in a temporary directory, checks the fixture inventory, and generates
+both expectations:
 
 ```text
-tools/tasty-baseline/generate.sh \
+tools/tasty-baseline/generate-all.sh \
+  crates/dotty-tasty/tests/fixtures/scala3-library \
+  path/to/scala-library-3.9.0-bin-SNAPSHOT.jar
+```
+
+Use `--refresh-fixtures` to copy the verified `.tasty` entries into the
+manifest's `tasty_root`. Use `--check` to regenerate both projections in a
+temporary directory and fail if either checked-in expectation differs:
+
+```text
+tools/tasty-baseline/generate-all.sh --check \
   crates/dotty-tasty/tests/fixtures/scala3-library \
   path/to/scala-library-3.9.0-bin-SNAPSHOT.jar
 ```
@@ -64,7 +74,8 @@ It is a semantic-lite oracle, not a Rust semantic model.
 
 The root Rust package also provides `tasty-wire-baseline`. It reads a
 materialized directory of `.tasty` files with the Rust decoder and writes the
-manifest-selected `wire-v1` projection:
+manifest-selected `wire-v1` projection. `generate-wire.sh` remains available
+as a fast low-level command when the fixture directory is already materialized:
 
 ```text
 tools/tasty-baseline/generate-wire.sh \
