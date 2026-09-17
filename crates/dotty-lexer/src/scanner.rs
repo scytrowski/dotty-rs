@@ -307,6 +307,7 @@ fn build_tokens(
 
     fuse_case_declarations(source, &mut tokens)?;
     classify_end_markers(source, &mut tokens);
+    insert_end_marker_separators(source, &mut tokens)?;
 
     Ok(tokens)
 }
@@ -549,6 +550,10 @@ fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
         .find(|token| !is_layout_token(token.kind))
 }
 
+fn next_real_token_index(tokens: &[Token], index: usize) -> Option<usize> {
+    (index + 1..tokens.len()).find(|&candidate| !is_layout_token(tokens[candidate].kind))
+}
+
 fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
     let mut index = 0;
     while index + 1 < tokens.len() {
@@ -586,7 +591,7 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
             continue;
         }
 
-        let starts_line = previous_real_token(tokens, index).is_none_or(|previous| {
+        let starts_line = previous_real_token(tokens, index).is_some_and(|previous| {
             has_source_line_break(source, previous.span.end(), tokens[index].span.start())
         });
         let Some(next) = next_real_token(tokens, index) else {
@@ -616,6 +621,83 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
     }
 }
 
+fn insert_end_marker_separators(
+    source: &str,
+    tokens: &mut Vec<Token>,
+) -> Result<(), TextRangeError> {
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index].kind != TokenKind::EndMarker {
+            index += 1;
+            continue;
+        }
+
+        let Some(target_index) = next_real_token_index(tokens, index) else {
+            index += 1;
+            continue;
+        };
+        if !end_marker_can_end_statement(tokens[target_index].kind) {
+            index += 1;
+            continue;
+        }
+        let Some(following_index) = next_real_token_index(tokens, target_index) else {
+            index += 1;
+            continue;
+        };
+        let following = &tokens[following_index];
+        if following.kind == TokenKind::Eof
+            || !can_start_statement_token(following.kind)
+            || !has_source_line_break(
+                source,
+                tokens[target_index].span.end(),
+                following.span.start(),
+            )
+        {
+            index += 1;
+            continue;
+        }
+
+        let target_end = tokens[target_index].span.end();
+        let separator_kind =
+            if count_line_breaks(&source[target_end as usize..following.span.start() as usize]) > 1
+            {
+                TokenKind::Newlines
+            } else {
+                TokenKind::Newline
+            };
+        tokens.insert(
+            following_index,
+            Token::new(
+                separator_kind,
+                TextRange::new(target_end, following.span.start())?,
+            ),
+        );
+        index = following_index + 1;
+    }
+    Ok(())
+}
+
+fn can_start_statement_token(kind: TokenKind) -> bool {
+    !matches!(
+        kind,
+        TokenKind::Error
+            | TokenKind::Eof
+            | TokenKind::Operator
+            | TokenKind::Punctuation(
+                Punctuation::Comma
+                    | Punctuation::Semicolon
+                    | Punctuation::Dot
+                    | Punctuation::RightParen
+                    | Punctuation::RightBracket
+                    | Punctuation::RightBrace
+            )
+    )
+}
+
+fn end_marker_can_end_statement(kind: TokenKind) -> bool {
+    matches!(kind, TokenKind::Keyword(HardKeyword::Given))
+}
+
 fn next_real_token_after<'tokens>(
     tokens: &'tokens [Token],
     index: usize,
@@ -638,18 +720,10 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
                     | HardKeyword::While
                     | HardKeyword::Match
                     | HardKeyword::Try
-                    | HardKeyword::Catch
-                    | HardKeyword::Finally
-                    | HardKeyword::Class
-                    | HardKeyword::Object
-                    | HardKeyword::Trait
-                    | HardKeyword::Def
-                    | HardKeyword::Val
-                    | HardKeyword::Var
-                    | HardKeyword::Type
-                    | HardKeyword::Package
+                    | HardKeyword::New
+                    | HardKeyword::This
                     | HardKeyword::Given
-                    | HardKeyword::Enum
+                    | HardKeyword::Val
             )
     )
 }
@@ -1083,11 +1157,11 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_an_end_marker_at_the_start_of_the_source() {
+    fn keeps_end_as_an_identifier_at_the_start_of_the_source() {
         assert_eq!(
             kinds("end if"),
             vec![
-                TokenKind::EndMarker,
+                TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::If),
                 TokenKind::Eof,
             ]
@@ -1095,11 +1169,11 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_an_end_marker_after_a_leading_blank_line() {
+    fn keeps_end_as_an_identifier_after_leading_blank_lines() {
         assert_eq!(
             kinds("\n\nend if"),
             vec![
-                TokenKind::EndMarker,
+                TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::If),
                 TokenKind::Eof,
             ]
@@ -1109,8 +1183,10 @@ mod tests {
     #[test]
     fn recognizes_an_end_marker_for_a_given_declaration() {
         assert_eq!(
-            kinds("end given"),
+            kinds("value\nend given"),
             vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
                 TokenKind::EndMarker,
                 TokenKind::Keyword(HardKeyword::Given),
                 TokenKind::Eof,
@@ -1119,11 +1195,156 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_an_end_marker_for_an_enum_declaration() {
+    fn recognizes_an_identifier_as_an_end_marker_target() {
         assert_eq!(
-            kinds("end enum"),
+            kinds("value\nend method"),
             vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
                 TokenKind::EndMarker,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_for_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend for"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::For),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_while_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend while"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::While),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_match_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend match"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_try_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend try"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Try),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_an_end_given_before_the_next_statement() {
+        assert_eq!(
+            kinds("value\nend given\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Given),
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_insert_a_newline_after_an_end_new_before_the_next_statement() {
+        assert_eq!(
+            kinds("value\nend new\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::New),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_new_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend new"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::New),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_this_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend this"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::This),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_val_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend val"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_recognize_an_enum_keyword_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend enum"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Enum),
                 TokenKind::Eof,
             ]
