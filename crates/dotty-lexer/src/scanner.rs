@@ -2532,6 +2532,94 @@ mod tests {
     }
 
     #[test]
+    fn parser_feedback_indent_is_zero_width_at_the_body_start() {
+        let mut scanner = ContextualScanner::new("root:\n  child").expect("source scans");
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+
+        let tokens = scanner.tokens();
+        let indent_index = tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Indent)
+            .expect("indent token");
+        let indent = &tokens[indent_index];
+        let child = &tokens[indent_index + 1];
+
+        assert_eq!(child.kind, TokenKind::Identifier);
+        assert_eq!(
+            indent.span,
+            TextRange::new(child.span.start(), child.span.start()).unwrap()
+        );
+    }
+
+    #[test]
+    fn parser_feedback_outdent_is_zero_width_at_the_closing_token() {
+        let mut scanner = ContextualScanner::new("root:\n  child\nback").expect("source scans");
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+
+        let tokens = scanner.tokens();
+        let outdent_index = tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Outdent)
+            .expect("outdent token");
+        let outdent = &tokens[outdent_index];
+        let back = &tokens[outdent_index + 1];
+
+        assert_eq!(back.kind, TokenKind::Identifier);
+        assert_eq!(
+            outdent.span,
+            TextRange::new(back.span.start(), back.span.start()).unwrap()
+        );
+    }
+
+    #[test]
+    fn parser_feedback_nested_outdents_at_eof_share_the_eof_offset() {
+        let source = "root:\n  child:\n    leaf";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+
+        let eof = scanner
+            .tokens()
+            .iter()
+            .find(|token| token.kind == TokenKind::Eof)
+            .expect("EOF token");
+        let outdents: Vec<_> = scanner
+            .tokens()
+            .iter()
+            .filter(|token| token.kind == TokenKind::Outdent)
+            .collect();
+
+        assert_eq!(outdents.len(), 2);
+        assert!(outdents.iter().all(|token| token.span == eof.span));
+        assert_eq!(
+            eof.span,
+            TextRange::new(source.len() as u32, source.len() as u32).unwrap()
+        );
+    }
+
+    #[test]
     fn forwards_recoverable_raw_diagnostics() {
         let scanner = ContextualScanner::new("\"unclosed").expect("source scans");
 
