@@ -1,7 +1,7 @@
 use std::{env, fs, process};
 
+use dotty_core::token::{HardKeyword, Punctuation, Token, TokenKind};
 use dotty_lexer::ContextualScanner;
-use dotty_token::{HardKeyword, Punctuation, Token, TokenKind};
 
 fn main() {
     let Some(path) = env::args().nth(1) else {

@@ -8,9 +8,6 @@ publish = false
 members = [
     "crates/dotty-tasty",
     "crates/dotty-classfile",
-    "crates/dotty-source",
-    "crates/dotty-diagnostics",
-    "crates/dotty-token",
     "crates/dotty-lexer",
     "crates/dotty-core",
 ]

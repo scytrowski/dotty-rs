@@ -60,7 +60,7 @@ Implementation status on the current lexer branch:
   the final `"""`;
 - character literals enforce the JVM `Char` one-UTF-16-code-unit rule and
   recover supplementary or combining-codepoint cases with bounded diagnostics;
-- `ContextualScanner` maps raw categories to the shared `dotty-token` kinds;
+- `ContextualScanner` maps raw categories to the shared `dotty-core::token` kinds;
 - the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
   prefix-based indentation regions for non-colon triggers such as `then`,
   `else`, `match`, `try`, and `do`;
@@ -142,40 +142,40 @@ types, UTF-8 source ranges, bounded state machines, and lossless raw data.
 
 ## 3. Architectural boundaries
 
-The lexer will live in dedicated workspace crates, separate from the existing
-`dotty-tasty` implementation crate. The current planned crate layout is:
+The lexer lives in a dedicated workspace crate, separate from the existing
+`dotty-tasty` implementation crate. Shared frontend contracts live in
+`dotty-core`, alongside the compiler's semantic model. The current crate
+layout is:
 
 ```text
 crates/
-├── dotty-source
-├── dotty-diagnostics
-├── dotty-token
+├── dotty-core
 └── dotty-lexer
 ```
 
 The root `dotty` crate will later act as the public facade. Parser and AST
 crates are intentionally not part of the current implementation scope.
 
-The planned module layout for the current lexer work is:
+The module layout for the current lexer work is:
 
 ```text
-crates/dotty-source/src/
-├── lib.rs
-├── source_text.rs
-├── span.rs
-└── line_index.rs
-
-crates/dotty-diagnostics/src/
-├── lib.rs
-└── diagnostic.rs
-
-crates/dotty-token/src/
-├── lib.rs
-├── kind.rs
-├── token.rs
-├── value.rs
-├── token_source.rs
-└── scanner_event.rs
+crates/dotty-core/src/
+├── source/
+│   ├── mod.rs
+│   ├── source_text.rs
+│   ├── span.rs
+│   ├── line_index.rs
+│   └── source_span.rs
+├── diagnostics/
+│   ├── mod.rs
+│   └── diagnostic.rs
+└── token/
+    ├── mod.rs
+    ├── kind.rs
+    ├── token_def.rs
+    ├── value.rs
+    ├── token_source.rs
+    └── scanner_event.rs
 
 crates/dotty-lexer/src/
 ├── lib.rs
@@ -196,35 +196,32 @@ crates/dotty-lexer/src/
     └── infix.rs
 ```
 
-The future parser must depend on the shared `source` and `token` contracts, never on
-the concrete `lexer` module. In particular, the parser must not import
+The future parser must depend on the shared `dotty-core::source` and
+`dotty-core::token` contracts, never on the concrete `lexer` module. In
+particular, the parser must not import
 `RawLexer`, `RawToken`, `RawTokenKind`, trivia implementation details, or the
 scanner's region stack.
 
 The intended dependency direction, including future consumers, is:
 
 ```text
-dotty-source ───────► dotty-token
-      │                     │
-      ├────► dotty-diagnostics
-      │                     │
-      └─────────────────────┴────► dotty-lexer
+dotty-core::source ───────┐
+dotty-core::diagnostics ──┼────► dotty-lexer
+dotty-core::token ────────┘
 
-future dotty-parser ─────► dotty-token
-future dotty-parser ─────► dotty-source
-future dotty-parser ─────► dotty-diagnostics
+future dotty-parser ─────► dotty-core
 ```
 
 `RawToken` and `RawTokenKind` are lexer-internal to `dotty-lexer`. `Token`,
-`TokenKind`, `TokenValue`, and `ScannerEvent` belong to `dotty-token`; they are
-the future parser-facing contract shared by the scanner and a future parser.
+`TokenKind`, `TokenValue`, and `ScannerEvent` belong to `dotty-core::token`;
+they are the future parser-facing contract shared by the scanner and a future
+parser.
 
-`dotty-lexer` depends on `dotty-source`, `dotty-token`, and
-`dotty-diagnostics`. No current crate depends on a parser or AST crate.
+`dotty-lexer` depends on `dotty-core`. No current crate depends on a parser or
+AST crate.
 
-When parser work begins, `dotty-parser` will depend on `dotty-source`,
-`dotty-token`, `dotty-ast`, and `dotty-diagnostics`, but not on
-`dotty-lexer`.
+When parser work begins, `dotty-parser` will depend on `dotty-core`, but not
+on `dotty-lexer`.
 
 ## 4. Source model
 

@@ -1,5 +1,5 @@
 use crate::RawTokenKind;
-use dotty_token::Punctuation;
+use dotty_core::token::Punctuation;
 
 #[derive(Debug, Clone, Copy)]
 struct XmlExpression {

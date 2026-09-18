@@ -1,7 +1,9 @@
 use core::fmt;
 
-use dotty_diagnostics::{Diagnostic, DiagnosticSeverity};
-use dotty_source::{SourceText, SourceTextError, TextRange, TextRangeError, is_line_break_char};
+use dotty_core::diagnostics::{Diagnostic, DiagnosticSeverity};
+use dotty_core::source::{
+    SourceText, SourceTextError, TextRange, TextRangeError, is_line_break_char,
+};
 
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
@@ -1246,7 +1248,7 @@ fn classify_keyword(text: &str) -> Option<HardKeyword> {
 
 #[cfg(test)]
 mod tests {
-    use dotty_token::TokenKind;
+    use dotty_core::token::TokenKind;
 
     use super::*;
 

@@ -1,5 +1,5 @@
+use dotty_core::token::TokenKind;
 use dotty_lexer::{ContextualScanner, RawItem, RawLexer, RawTokenKind};
-use dotty_token::TokenKind;
 
 const FRAGMENTS: &[&str] = &[
     "a",
@@ -161,7 +161,7 @@ fn assert_reaches_eof(source: &str) {
 
 fn assert_diagnostics_are_bounded(
     source: &str,
-    diagnostics: &[dotty_diagnostics::Diagnostic],
+    diagnostics: &[dotty_core::diagnostics::Diagnostic],
     seed: u64,
 ) {
     for diagnostic in diagnostics {

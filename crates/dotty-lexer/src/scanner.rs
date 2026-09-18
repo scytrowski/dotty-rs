@@ -1,6 +1,6 @@
-use dotty_diagnostics::Diagnostic;
-use dotty_source::{TextRange, TextRangeError, is_line_break_char};
-use dotty_token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
+use dotty_core::diagnostics::Diagnostic;
+use dotty_core::source::{TextRange, TextRangeError, is_line_break_char};
+use dotty_core::token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
 use crate::xml::XmlState;
 use crate::{RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia};

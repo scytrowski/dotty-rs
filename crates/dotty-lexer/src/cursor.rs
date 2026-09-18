@@ -1,6 +1,6 @@
 use core::fmt;
 
-use dotty_source::{SourceText, SourceTextError, TextRange};
+use dotty_core::source::{SourceText, SourceTextError, TextRange};
 
 /// A UTF-8 source cursor with byte-based positions and character lookahead.
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +161,7 @@ impl<'source> Cursor<'source> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_source::SourceText;
+    use dotty_core::source::SourceText;
 
     #[test]
     fn tracks_utf8_positions_in_bytes() {

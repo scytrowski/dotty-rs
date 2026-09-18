@@ -1,6 +1,6 @@
-use dotty_source::TextRange;
+use crate::source::TextRange;
 
-use crate::{TokenKind, TokenValue};
+use super::{TokenKind, TokenValue};
 
 /// A parser-facing token.
 #[derive(Debug, Clone, PartialEq, Eq)]

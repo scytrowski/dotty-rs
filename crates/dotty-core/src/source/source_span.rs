@@ -5,88 +5,12 @@
 //! pairing a [`Span`] with a [`SourceId`]. Keeping the two separate lets a
 //! tree's position be `Option<SourceSpan>` instead of requiring every tree —
 //! including compiler-generated ones with no real source — to carry a
-//! sentinel `SourceId` (see `docs/dotty-core-design.md`, "source positions
-//! need an explicit no-source/synthetic state").
-//!
-//! [`TextRange`] here is a **temporary stand-in** for `dotty_source::TextRange`,
-//! not a permanent parallel implementation.
-//!
-//! `dotty-core` was branched from `main` while the `dotty-source` crate still
-//! lives only on the not-yet-merged `feature/lexer` branch (still 70+ commits
-//! ahead of `main`, still under active development by another agent as of
-//! this writing), so it cannot be a path dependency yet without coupling
-//! `dotty-core` to another team's in-flight branch.
-//!
-//! `new`/`start`/`end` here match `dotty_source::TextRange`'s signatures
-//! field-for-field and byte-for-byte (verified against
-//! `feature/lexer`'s `crates/dotty-source/src/span.rs`; pinned by
-//! `local_text_range_matches_dotty_sources_public_constructor_shape` below),
-//! so every call site in this crate keeps compiling unchanged after the swap.
-//! The real type additionally has `len`, `is_empty`, `contains`,
-//! `intersects`, and `cover`; this stand-in deliberately does not replicate
-//! them because nothing in `dotty-core` needs them yet — if a caller needs
-//! one before the swap happens, add it here too so the two stay in lockstep.
-//!
-//! **Required once `feature/lexer` merges into `main`:**
-//! 1. Add `dotty-source = { path = "../dotty-source" }` to
-//!    `crates/dotty-core/Cargo.toml`.
-//! 2. Delete `TextRange`/`TextRangeError` from this module and replace them
-//!    with `pub use dotty_source::{TextRange, TextRangeError};`.
-//! 3. Delete the shape-pinning test below (it becomes redundant — the real
-//!    type is now used directly).
-//!
-//! See also `docs/dotty-core-design.md`, "§2 deviations."
+//! sentinel `SourceId`.
 
 use core::fmt;
 
+use super::TextRange;
 use crate::ids::SourceId;
-
-/// A half-open byte range into a UTF-8 source buffer.
-///
-/// Temporary local stand-in for `dotty_source::TextRange` — see the module
-/// documentation above.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TextRange {
-    start: u32,
-    end: u32,
-}
-
-/// Failure while constructing a [`TextRange`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextRangeError {
-    EndBeforeStart { start: u32, end: u32 },
-}
-
-impl fmt::Display for TextRangeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndBeforeStart { start, end } => {
-                write!(formatter, "range end {end} precedes start {start}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for TextRangeError {}
-
-impl TextRange {
-    /// Creates a half-open range `[start, end)`.
-    pub fn new(start: u32, end: u32) -> Result<Self, TextRangeError> {
-        if end < start {
-            return Err(TextRangeError::EndBeforeStart { start, end });
-        }
-
-        Ok(Self { start, end })
-    }
-
-    pub const fn start(self) -> u32 {
-        self.start
-    }
-
-    pub const fn end(self) -> u32 {
-        self.end
-    }
-}
 
 /// A byte range plus an optional diagnostic point, independent of which
 /// source file it is in.
@@ -186,38 +110,6 @@ impl SourceSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Pins this module's `TextRange::new`/`start`/`end` to the exact
-    /// signatures `dotty_source::TextRange` exposes, so this file's module
-    /// documentation stays true and the eventual swap (see above) is a pure
-    /// deletion, not a call-site rewrite. Delete this test as part of that
-    /// swap — see step 3 in the module documentation.
-    #[test]
-    fn local_text_range_matches_dotty_sources_public_constructor_shape() {
-        fn assert_shape(_: fn(u32, u32) -> Result<TextRange, TextRangeError>) {}
-        assert_shape(TextRange::new);
-
-        let range = TextRange::new(5, 12).expect("valid range");
-        let start: u32 = range.start();
-        let end: u32 = range.end();
-        assert_eq!((start, end), (5, 12));
-    }
-
-    #[test]
-    fn text_range_exposes_its_start_and_end() {
-        let range = TextRange::new(3, 9).expect("valid range");
-
-        assert_eq!(range.start(), 3);
-        assert_eq!(range.end(), 9);
-    }
-
-    #[test]
-    fn text_range_rejects_a_range_whose_end_precedes_its_start() {
-        assert_eq!(
-            TextRange::new(5, 2),
-            Err(TextRangeError::EndBeforeStart { start: 5, end: 2 })
-        );
-    }
 
     #[test]
     fn span_without_point_has_no_diagnostic_point() {

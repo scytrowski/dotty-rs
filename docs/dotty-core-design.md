@@ -1,10 +1,11 @@
 # dotty-core Design
 
-Status: proposed design document for the shared semantic foundation. Nothing
-described here is implemented yet; this document is the contract the
-foundation PR (and everything built on top of it) is expected to follow. It
-is self-contained: every type referenced below has its authoritative
-definition in this file, not in chat history or prior drafts.
+Status: design document for the shared compiler foundation. The semantic model
+and the shared source, diagnostics, and token contracts are implemented in
+`dotty-core`; this document describes the intended boundaries for everything
+built on top of them. It is self-contained: every type referenced below has
+its authoritative definition in this file, not in chat history or prior
+drafts.
 
 Revision note: this revision applies a partner review of the first draft.
 Every change below is either a **blocker fix** (the prior draft was
@@ -23,8 +24,8 @@ marked `[MAJOR 1, extended]`.
 
 ## 1. Scope and goal
 
-Today the workspace has a lexer/token pipeline (`dotty-token`, `dotty-lexer`,
-`dotty-diagnostics`, `dotty-source`) and two independent binary codecs
+Today the workspace has a shared frontend foundation (`dotty-core`) with a
+lexer pipeline (`dotty-lexer`) and two independent binary codecs
 (`dotty-tasty`, `dotty-classfile`). There is no parser, no symbol table, no
 type representation, and no typed AST.
 
@@ -72,10 +73,11 @@ drift apart.
                                    Typed AST
 ```
 
-`dotty-core` itself must stay "dumb": it represents the compiler's world
-(symbols, types, trees) but knows nothing about lexical syntax, JVM
-classfiles, TASTy's wire format, or type inference. Those stay in their own
-crates and depend on `dotty-core`, never the other way around.
+`dotty-core` itself must stay foundational: it owns shared source, diagnostic,
+token, symbol, type, and tree contracts, but knows nothing about the concrete
+lexer implementation, JVM classfiles, TASTy's wire format, or type inference.
+Those stay in their own crates and depend on `dotty-core`, never the other way
+around.
 
 This mirrors, at the semantic layer, the layering principle AGENTS.md already
 states for `dotty-tasty`: "Keep the binary, raw AST, structured AST, and
@@ -88,10 +90,8 @@ eventually project onto.
 Current workspace members and their dependency edges:
 
 ```text
-dotty-source   (no deps)
-dotty-token    -> dotty-source
-dotty-diagnostics -> dotty-source
-dotty-lexer    -> dotty-token, dotty-source, dotty-diagnostics
+dotty-core     (shared source, diagnostics, token, and semantic contracts)
+dotty-lexer    -> dotty-core
 dotty-classfile (no deps; raw ClassFile/ConstantPool/etc. type skeleton only)
 dotty-tasty    (no deps; raw + structured wire-format codec)
 dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
@@ -109,25 +109,20 @@ with a dedicated adapter/loader layer between the binary codecs and
 everything that consumes `dotty-core`:
 
 ```text
-dotty-source ──► dotty-core
-                     ▲   ▲   ▲
-                     │   │   │
-      ┌──────────────┘   │   └──────────────┐
-      │                  │                  │
-(future)            dotty-tasty        dotty-classfile
-dotty-parser             │                  │
-      │                  ▼                  ▼
-      │          dotty-tasty-sema   dotty-classfile-sema     (or one
-      │          (or a shared "dotty-loader" crate)           combined crate;
-      │                  │                  │                 naming is open,
-      │                  ▼                  ▼                 see §16)
-      └──────┬───────────┴──────┬───────────┘
-             │                  │
-             ▼                  ▼
-      (future) dotty-typer   other tooling
-             │
-             ▼
-      (future) dotty-compiler
+                         dotty-core
+                       ▲      ▲      ▲
+                       │      │      │
+                (future)   dotty-tasty   dotty-classfile
+                dotty-parser       │          │
+                       │            ▼          ▼
+                       │    dotty-tasty-sema  dotty-classfile-sema
+                       │            │          │
+                       └────────────┴────┬─────┘
+                                         ▼
+                                  (future) dotty-typer
+                                         │
+                                         ▼
+                                  (future) dotty-compiler
 ```
 
 Binary semantic adapters do not belong to the typer implementation, and they
@@ -135,19 +130,13 @@ do not belong inside `dotty-tasty`/`dotty-classfile` either (see below). The
 exact crate/module packaging of the adapter layer is left open (§16); the
 constraint that matters now is the dependency shape, not the file layout.
 
-Two deviations from a "zero-dependency" core, both deliberate:
+The former standalone source, diagnostics, and token crates are now modules of
+`dotty-core`. This gives all frontend components one source-position model,
+diagnostic range type, and parser-facing token contract without conversion
+boundaries between sibling crates.
 
-- **`dotty-core` depends on `dotty-source`.** The original proposal had
-  `dotty-core::source` define its own byte-range type. But `dotty-source`
-  already has a checked, tested `TextRange` (half-open `u32` byte range) used
-  by `dotty-diagnostics` today. Redefining ranges inside `dotty-core` would
-  give the workspace two incompatible span types and a conversion tax at
-  every frontend boundary. `dotty-core::source::Span` wraps
-  `dotty_source::TextRange` (see §6) instead of reinventing start/end fields.
-  `dotty-source` has no dependencies of its own and no semantic knowledge, so
-  this does not violate "core must not know how the parser works."
-- **`dotty-tasty` and `dotty-classfile` do not depend on `dotty-core` today**,
-  and should not gain that dependency as part of this design. Both are
+`dotty-tasty` and `dotty-classfile` do not depend on `dotty-core` today, and
+should not gain that dependency as part of this design. Both are
   described in their own docs (`tasty-api.md`,
   `docs/classfile-format-jdk25.md`) as binary/structural codecs with no
   symbol or type knowledge. The semantic adapters that map their structured
@@ -155,29 +144,6 @@ Two deviations from a "zero-dependency" core, both deliberate:
   dedicated adapter layer above, never inside the codec crates themselves —
   this keeps `dotty-tasty` and `dotty-classfile` independently useful as pure
   codecs, which is an explicit non-goal to disturb.
-
-**Implementation note (temporary, remove once resolved):** `dotty-core` was
-implemented while `dotty-source` (and `dotty-token`/`dotty-diagnostics`/
-`dotty-lexer`) still lived only on the not-yet-merged `feature/lexer` branch,
-worked on independently by another agent. Taking a path dependency on
-`dotty-source` from `dotty-core`'s branch would have coupled it to that
-in-flight branch instead of `main`. `crates/dotty-core/src/source.rs`
-therefore defines its own local `TextRange`/`TextRangeError`, structurally
-identical to `dotty_source`'s, as a stand-in. This does not change the target
-design above — once `feature/lexer` merges into `main`, add the `dotty-source`
-path dependency back to `crates/dotty-core/Cargo.toml`, replace the local
-`TextRange`/`TextRangeError` in `source.rs` with a re-export of
-`dotty_source::TextRange`, and delete this note.
-
-PR #3 review raised this as a blocker; the resolution (kept as documented
-above rather than taking the dependency early) was a deliberate choice —
-`feature/lexer` was still 70+ commits ahead of `main` and under active
-development by another agent at review time, so adding a path dependency on
-it now would reintroduce the exact branch-coupling problem this design
-avoided. `source.rs`'s module documentation now pins the local
-`TextRange`'s public shape against `dotty_source::TextRange`'s real
-definition (verified on `feature/lexer`) with a dedicated test, and spells
-out the swap as three concrete steps.
 
 ## 3. Crate layout
 
@@ -189,7 +155,22 @@ crates/
 │       ├── lib.rs
 │       ├── ids.rs
 │       ├── names.rs
-│       ├── source.rs
+│       ├── source/
+│       │   ├── mod.rs
+│       │   ├── source_text.rs
+│       │   ├── span.rs
+│       │   ├── line_index.rs
+│       │   └── source_span.rs
+│       ├── diagnostics/
+│       │   ├── mod.rs
+│       │   └── diagnostic.rs
+│       ├── token/
+│       │   ├── mod.rs
+│       │   ├── kind.rs
+│       │   ├── token_def.rs
+│       │   ├── value.rs
+│       │   ├── token_source.rs
+│       │   └── scanner_event.rs
 │       │
 │       ├── ast/
 │       │   ├── mod.rs
@@ -229,17 +210,13 @@ crates/
 │
 ├── dotty-tasty/       (unchanged; semantic adapter is future work, not here)
 ├── dotty-classfile/   (unchanged; semantic adapter is future work, not here)
-├── dotty-source/
-├── dotty-diagnostics/
-├── dotty-token/
 └── dotty-lexer/
 ```
 
 Changes from the first draft's layout:
 
-- `source.rs` is back as its own file (the first draft folded it away; see
-  §6 for why a dedicated file earns its place now that `Span` no longer
-  carries `SourceId`).
+- `source/` now contains both the shared source-text/range utilities and the
+  semantic `Span`/`SourceSpan` wrappers.
 - `types/binder.rs` no longer holds a `Binder`/`BinderArena` type — binder
   identity is `TypeId` (`[BLOCKER 1]`, §8) — but the file is kept for the
   `reserve`/`fill` cyclic-construction API that binder-shaped types need.
@@ -252,12 +229,10 @@ instead of a separate arena file — a minor simplification versus scattering
 one-line arena structs across extra files; every arena with a non-trivial
 query API (`AstArena`, `TypeArena`, `SymbolTable`) still gets its own file.
 
-`dotty-core` is added to the workspace `[workspace.members]` in the root
-`Cargo.toml`. Whether the root `dotty` facade re-exports it as `dotty::core`
-(mirroring `dotty::tasty` / `dotty::classfile`) is deferred until a consumer
-exists — an empty re-export with nothing yet calling it adds noise. Add the
-re-export in the same PR that first makes `dotty-parser` or an adapter crate
-depend on `dotty-core`.
+`dotty-core` is a workspace member and the root `dotty` facade exposes its
+shared contracts as `dotty::core`, alongside `dotty::tasty` and
+`dotty::classfile`. This keeps the public entry point stable for the future
+parser and semantic adapters without making them depend on the root facade.
 
 ## 4. `ids.rs` — opaque identities
 
@@ -344,7 +319,7 @@ impl TermName {
 ```
 
 No string-interning type exists anywhere in the workspace today
-(`dotty-token::TokenValue` is currently just `None` — no identifier payload
+(`dotty-core::token::TokenValue` is currently just `None` — no identifier payload
 yet). `names.rs` defines one:
 
 ```rust
@@ -375,7 +350,7 @@ private to symbol/type machinery — the parser is handed `&mut SemanticStore`
 (or just `&mut NameInterner`, if the pipeline wants to construct the interner
 before anything else exists) purely to intern identifiers.
 
-## 6. `source.rs` — positions
+## 6. `source/` — positions
 
 `[BLOCKER 3]` The first draft's `Span { source: SourceId, range, point }`
 assumed every tree has a real source. That is false for a compiler: trees
@@ -391,7 +366,7 @@ tree, not inside `Span` itself:
 
 ```rust
 pub struct Span {
-    pub range: dotty_source::TextRange,
+    pub range: TextRange,
     pub point: Option<u32>,
 }
 
@@ -420,9 +395,9 @@ the primary diagnostic offset inside the enclosing range — e.g., for
 `foo.bar`, `range` covers the whole selection while `point` is the start
 offset of `bar`.
 
-As before: do not store line/column per node. `dotty-source` already has
-`LineIndex` for offset → line/column mapping; `dotty-core` reuses it rather
-than adding a second mapping mechanism.
+As before: do not store line/column per node. `dotty-core::source` provides
+`LineIndex` for offset → line/column mapping; all frontend layers reuse it
+rather than adding a second mapping mechanism.
 
 ## 7. AST phase model
 
@@ -1519,7 +1494,7 @@ Once the foundation lands, the following can proceed in parallel, each
 depending only on `dotty-core`:
 
 - Scala source parser producing `AstArena<Untyped>` (extends today's
-  `dotty-lexer`/`dotty-token` output).
+  `dotty-lexer` output and the shared `dotty-core::token` contracts).
 - Classfile semantic adapter (`dotty-classfile` decoder + loader producing
   `Symbol`/`Type`/`ClassInfo`), in the dedicated adapter layer from §2.
 - TASTy semantic adapter (`dotty-tasty` structured trees →

@@ -1,4 +1,4 @@
-use dotty_source::TextRange;
+use dotty_core::source::TextRange;
 
 /// Source material that is not a parser-facing token.
 #[derive(Debug, Clone, PartialEq, Eq)]

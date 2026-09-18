@@ -1,4 +1,4 @@
-use dotty_source::TextRange;
+use crate::source::TextRange;
 
 /// Diagnostic severity reported by a frontend component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

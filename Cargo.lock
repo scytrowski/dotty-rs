@@ -20,25 +20,12 @@ name = "dotty-core"
 version = "0.1.0"
 
 [[package]]
-name = "dotty-diagnostics"
-version = "0.1.0"
-dependencies = [
- "dotty-source",
-]
-
-[[package]]
 name = "dotty-lexer"
 version = "0.1.0"
 dependencies = [
- "dotty-diagnostics",
- "dotty-source",
- "dotty-token",
+ "dotty-core",
  "unicode-ident",
 ]
-
-[[package]]
-name = "dotty-source"
-version = "0.1.0"
 
 [[package]]
 name = "dotty-tasty"
@@ -46,13 +33,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "dotty-token"
-version = "0.1.0"
-dependencies = [
- "dotty-source",
 ]
 
 [[package]]

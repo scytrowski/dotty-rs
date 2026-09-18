@@ -1,6 +1,6 @@
-use dotty_source::TextRange;
+use dotty_core::source::TextRange;
 
-pub use dotty_token::{HardKeyword, Punctuation};
+pub use dotty_core::token::{HardKeyword, Punctuation};
 
 /// A source item emitted by the raw lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
