@@ -1,0 +1,385 @@
+//! The semantic type model.
+
+use crate::ids::{AnnotationId, NameId, SymbolId, TypeId};
+use crate::names::Name;
+use crate::types::class_info::ClassInfo;
+use crate::types::constant::Constant;
+use crate::types::method::{MethodType, PolyType, TypeLambda};
+
+/// A type-checking failure recorded in place of a real type, so that one
+/// error does not require aborting the rest of type checking.
+///
+/// `message` is an interned diagnostic string; the full diagnostic itself is
+/// reported separately (`dotty-core` does not depend on a diagnostics crate).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorType {
+    pub message: NameId,
+}
+
+/// `[bound] scrutinee match { cases }`, where each case is itself a
+/// `Type::MatchCase` allocated in the same arena.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchType {
+    pub bound: TypeId,
+    pub scrutinee: TypeId,
+    pub cases: Vec<TypeId>,
+}
+
+/// The semantic type model.
+///
+/// `TermRef`/`TypeRef` reference symbols via [`SymbolId`], not [`Name`], so a
+/// symbol rename does not require walking every type that references it.
+/// `ParamRef`/`RecThis` reference their binder via the binder's own
+/// [`TypeId`] rather than a separate `BinderId` — see
+/// `docs/dotty-core-design.md` §8, `[BLOCKER 1]`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Type {
+    NoType,
+    Error(ErrorType),
+    NoPrefix,
+
+    TermRef {
+        prefix: TypeId,
+        symbol: SymbolId,
+    },
+    TypeRef {
+        prefix: TypeId,
+        symbol: SymbolId,
+    },
+
+    ThisType {
+        class: SymbolId,
+    },
+    SuperType {
+        this_type: TypeId,
+        super_type: TypeId,
+    },
+
+    Constant(Constant),
+
+    Applied {
+        tycon: TypeId,
+        args: Vec<TypeId>,
+    },
+    Bounds {
+        low: TypeId,
+        high: TypeId,
+    },
+    ByName {
+        result: TypeId,
+    },
+
+    And {
+        left: TypeId,
+        right: TypeId,
+    },
+    Or {
+        left: TypeId,
+        right: TypeId,
+    },
+
+    Refined {
+        parent: TypeId,
+        name: Name,
+        info: TypeId,
+    },
+
+    /// `parent` may itself contain `RecThis { binder }` values where
+    /// `binder` is the `TypeId` this very value is stored under.
+    Recursive {
+        parent: TypeId,
+    },
+    RecThis {
+        binder: TypeId,
+    },
+
+    Method(MethodType),
+    Poly(PolyType),
+    TypeLambda(TypeLambda),
+
+    /// `binder` is the `TypeId` of the enclosing `Method`/`Poly`/`TypeLambda`
+    /// value itself.
+    ParamRef {
+        binder: TypeId,
+        index: u32,
+    },
+
+    Match(MatchType),
+    MatchCase {
+        pattern: TypeId,
+        result: TypeId,
+    },
+
+    Annotated {
+        underlying: TypeId,
+        annotation: AnnotationId,
+    },
+
+    Wildcard {
+        bounds: TypeId,
+    },
+
+    JavaArray {
+        element: TypeId,
+    },
+
+    ClassInfo(ClassInfo),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::ScopeId;
+    use crate::names::Namespace;
+    use crate::types::method::{MethodKind, TypeParam, Variance};
+
+    fn name(raw: u32) -> Name {
+        Name::new(NameId::new(raw), Namespace::Term)
+    }
+
+    #[test]
+    fn no_type_and_no_prefix_are_distinct_unit_variants() {
+        assert_ne!(Type::NoType, Type::NoPrefix);
+    }
+
+    #[test]
+    fn error_carries_an_interned_message() {
+        let ty = Type::Error(ErrorType {
+            message: NameId::new(1),
+        });
+
+        assert_eq!(
+            ty,
+            Type::Error(ErrorType {
+                message: NameId::new(1)
+            })
+        );
+    }
+
+    #[test]
+    fn term_ref_and_type_ref_carry_a_prefix_and_symbol() {
+        let prefix = TypeId::new(1);
+        let symbol = SymbolId::new(2);
+
+        assert_ne!(
+            Type::TermRef { prefix, symbol },
+            Type::TypeRef { prefix, symbol }
+        );
+    }
+
+    #[test]
+    fn this_type_and_super_type_carry_their_classes() {
+        let this = Type::ThisType {
+            class: SymbolId::new(1),
+        };
+        let sup = Type::SuperType {
+            this_type: TypeId::new(1),
+            super_type: TypeId::new(2),
+        };
+
+        assert_ne!(this, sup);
+    }
+
+    #[test]
+    fn constant_wraps_a_constant_value() {
+        let ty = Type::Constant(Constant::Int(42));
+
+        assert_eq!(ty, Type::Constant(Constant::Int(42)));
+    }
+
+    #[test]
+    fn applied_carries_a_tycon_and_argument_list() {
+        let ty = Type::Applied {
+            tycon: TypeId::new(1),
+            args: vec![TypeId::new(2), TypeId::new(3)],
+        };
+
+        assert_eq!(
+            ty,
+            Type::Applied {
+                tycon: TypeId::new(1),
+                args: vec![TypeId::new(2), TypeId::new(3)],
+            }
+        );
+    }
+
+    #[test]
+    fn bounds_and_by_name_carry_their_operand_types() {
+        let bounds = Type::Bounds {
+            low: TypeId::new(1),
+            high: TypeId::new(2),
+        };
+        let by_name = Type::ByName {
+            result: TypeId::new(3),
+        };
+
+        assert_ne!(bounds, by_name);
+    }
+
+    #[test]
+    fn and_and_or_are_distinguishable_despite_sharing_shape() {
+        let and = Type::And {
+            left: TypeId::new(1),
+            right: TypeId::new(2),
+        };
+        let or = Type::Or {
+            left: TypeId::new(1),
+            right: TypeId::new(2),
+        };
+
+        assert_ne!(and, or);
+    }
+
+    #[test]
+    fn refined_carries_a_parent_name_and_member_info() {
+        let ty = Type::Refined {
+            parent: TypeId::new(1),
+            name: name(2),
+            info: TypeId::new(3),
+        };
+
+        assert_eq!(
+            ty,
+            Type::Refined {
+                parent: TypeId::new(1),
+                name: name(2),
+                info: TypeId::new(3),
+            }
+        );
+    }
+
+    #[test]
+    fn recursive_and_rec_this_reference_a_binder_type_id() {
+        let recursive = Type::Recursive {
+            parent: TypeId::new(1),
+        };
+        let rec_this = Type::RecThis {
+            binder: TypeId::new(1),
+        };
+
+        assert_ne!(recursive, rec_this);
+    }
+
+    #[test]
+    fn method_poly_and_type_lambda_wrap_their_payload_structs() {
+        let method = Type::Method(MethodType {
+            params: vec![],
+            result: TypeId::new(1),
+            kind: MethodKind::Plain,
+        });
+        let poly = Type::Poly(PolyType {
+            params: vec![],
+            result: TypeId::new(1),
+        });
+        let lambda = Type::TypeLambda(TypeLambda {
+            params: vec![],
+            result: TypeId::new(1),
+        });
+
+        assert_ne!(method, poly);
+        assert_ne!(poly, lambda);
+    }
+
+    #[test]
+    fn param_ref_identifies_a_binder_and_index() {
+        let ty = Type::ParamRef {
+            binder: TypeId::new(1),
+            index: 0,
+        };
+
+        assert_eq!(
+            ty,
+            Type::ParamRef {
+                binder: TypeId::new(1),
+                index: 0
+            }
+        );
+        assert_ne!(
+            ty,
+            Type::ParamRef {
+                binder: TypeId::new(1),
+                index: 1
+            }
+        );
+    }
+
+    #[test]
+    fn match_and_match_case_carry_their_operand_types() {
+        let match_ty = Type::Match(MatchType {
+            bound: TypeId::new(1),
+            scrutinee: TypeId::new(2),
+            cases: vec![TypeId::new(3)],
+        });
+        let case = Type::MatchCase {
+            pattern: TypeId::new(4),
+            result: TypeId::new(5),
+        };
+
+        assert_ne!(match_ty, case);
+    }
+
+    #[test]
+    fn annotated_carries_an_underlying_type_and_annotation() {
+        let ty = Type::Annotated {
+            underlying: TypeId::new(1),
+            annotation: AnnotationId::new(2),
+        };
+
+        assert_eq!(
+            ty,
+            Type::Annotated {
+                underlying: TypeId::new(1),
+                annotation: AnnotationId::new(2),
+            }
+        );
+    }
+
+    #[test]
+    fn wildcard_and_java_array_carry_their_operand_type() {
+        let wildcard = Type::Wildcard {
+            bounds: TypeId::new(1),
+        };
+        let array = Type::JavaArray {
+            element: TypeId::new(1),
+        };
+
+        assert_ne!(wildcard, array);
+    }
+
+    #[test]
+    fn class_info_wraps_its_payload_struct() {
+        let ty = Type::ClassInfo(ClassInfo {
+            prefix: TypeId::new(1),
+            class: SymbolId::new(2),
+            parents: vec![],
+            declarations: ScopeId::new(3),
+            self_type: None,
+        });
+
+        assert_eq!(
+            ty,
+            Type::ClassInfo(ClassInfo {
+                prefix: TypeId::new(1),
+                class: SymbolId::new(2),
+                parents: vec![],
+                declarations: ScopeId::new(3),
+                self_type: None,
+            })
+        );
+    }
+
+    #[test]
+    fn type_param_can_appear_in_poly_and_type_lambda_params() {
+        let param = TypeParam {
+            name: crate::names::TypeName::new(NameId::new(1)),
+            bounds: TypeId::new(2),
+            variance: Variance::Invariant,
+        };
+        let poly = PolyType {
+            params: vec![param],
+            result: TypeId::new(3),
+        };
+
+        assert_eq!(poly.params.len(), 1);
+    }
+}

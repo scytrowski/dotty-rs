@@ -12,6 +12,7 @@ members = [
     "crates/dotty-diagnostics",
     "crates/dotty-token",
     "crates/dotty-lexer",
+    "crates/dotty-core",
 ]
 resolver = "3"
 
@@ -21,3 +22,4 @@ opt-level = 1
 [dependencies]
 dotty-tasty = { path = "crates/dotty-tasty" }
 dotty-classfile = { path = "crates/dotty-classfile" }
+dotty-core = { path = "crates/dotty-core" }
