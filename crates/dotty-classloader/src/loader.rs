@@ -178,6 +178,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 Ok(symbol)
             }
             Err(error) => {
+                // `load_uncached` can fail after `enter_class` already
+                // allocated this class's `SymbolId` (e.g. a later
+                // `DependencyFailure` on its superclass) -- that `Symbol`
+                // is left permanently `SymbolInfo::Missing` (`SemanticStore`
+                // has no removal API to actually roll the allocation
+                // back), and is still reachable by anything holding this
+                // `SymbolId` already: a legitimate mutual member-type
+                // reference (`Self::resolve_member_class`'s `Loading`
+                // tolerance) hands out exactly this `SymbolId` while the
+                // load is in progress, with no way to later learn the load
+                // it was borrowed from went on to fail. Marking it
+                // `SymbolInfo::Error` here -- instead of leaving a
+                // `Failed` repository entry as the only place this
+                // failure is recorded -- makes that already-observable
+                // half-built `Symbol` self-describing instead of silently
+                // looking like a real, merely-not-yet-completed one.
+                if let Some(ClassEntry::Loading(symbol)) = self.repository.get(name) {
+                    self.store.symbols.get_mut(*symbol).info = SymbolInfo::Error;
+                }
                 self.repository.mark_failed(name.clone(), error.clone());
                 Err(error)
             }
@@ -2229,6 +2248,71 @@ mod tests {
         bytes
     }
 
+    /// A hand-built, minimal, synthetic class file like [`synthetic_class`],
+    /// but with one `public` `Object`-typed field per `(name,
+    /// field_type_binary_name)` pair in `fields`, in order — used to
+    /// engineer a specific field-resolution order (e.g. a mutual
+    /// reference that must succeed before a later field that must fail).
+    fn synthetic_class_with_object_fields(
+        this_name: &str,
+        super_name: Option<&str>,
+        fields: &[(&str, &str)],
+    ) -> Vec<u8> {
+        fn push_utf8(pool: &mut Vec<u8>, next_index: &mut u16, value: &str) -> u16 {
+            let index = *next_index;
+            pool.push(1); // CONSTANT_Utf8
+            pool.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            pool.extend_from_slice(value.as_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_class(pool: &mut Vec<u8>, next_index: &mut u16, name_index: u16) -> u16 {
+            let index = *next_index;
+            pool.push(7); // CONSTANT_Class
+            pool.extend_from_slice(&name_index.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+
+        let mut pool = Vec::new();
+        let mut next_index: u16 = 1;
+
+        let this_name_index = push_utf8(&mut pool, &mut next_index, this_name);
+        let this_class_index = push_class(&mut pool, &mut next_index, this_name_index);
+        let super_class_index = super_name.map(|super_name| {
+            let super_name_index = push_utf8(&mut pool, &mut next_index, super_name);
+            push_class(&mut pool, &mut next_index, super_name_index)
+        });
+
+        let mut field_entries = Vec::new();
+        for (field_name, field_type_name) in fields {
+            let name_index = push_utf8(&mut pool, &mut next_index, field_name);
+            let descriptor = format!("L{field_type_name};");
+            let descriptor_index = push_utf8(&mut pool, &mut next_index, &descriptor);
+
+            field_entries.extend_from_slice(&[0x00, 0x01]); // access_flags: PUBLIC
+            field_entries.extend_from_slice(&name_index.to_be_bytes());
+            field_entries.extend_from_slice(&descriptor_index.to_be_bytes());
+            field_entries.extend_from_slice(&[0x00, 0x00]); // attributes_count
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&[0x00, 0x45]);
+        bytes.extend_from_slice(&next_index.to_be_bytes()); // constant_pool_count
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&this_class_index.to_be_bytes());
+        bytes.extend_from_slice(&super_class_index.unwrap_or(0).to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count
+        bytes.extend_from_slice(&(fields.len() as u16).to_be_bytes()); // fields_count
+        bytes.extend_from_slice(&field_entries);
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count
+        bytes
+    }
+
     /// The real `PoolSample.class` fixture references `java/lang/Object`
     /// (superclass) and `java/lang/Runnable` (interface); since
     /// Milestone 6, its `GREETING` field's type also forces resolving
@@ -4040,6 +4124,71 @@ mod tests {
         let pong_other_type = member_type_id(&mut store, pong, "other");
         let ping_again = parent_symbol(&store, pong_other_type);
         assert_eq!(symbol_name(&store, ping_again), "Ping");
+    }
+
+    /// The other half of `resolve_member_class`'s `Loading`-tolerance
+    /// story: `MutA.other: MutB` and `MutB.other: MutA` mutually resolve
+    /// exactly like `Ping`/`Pong` above, and `MutB`'s load completes in
+    /// full -- but `MutA` also has a *second* field, `broken`, typed a
+    /// class that is not on the classpath at all, resolved strictly
+    /// after `other` (`lower_field_type` walks a class's own `fields` in
+    /// order), so `MutA`'s own load fails only after `MutB` has already
+    /// captured `MutA`'s in-progress `SymbolId` in a real,
+    /// fully-completed `Type::TypeRef`. Before this fix, that `SymbolId`
+    /// stayed `SymbolInfo::Missing` forever once `MutA`'s own load
+    /// failed -- reachable through `MutB` (which really did load, and
+    /// whose `Type::TypeRef` really does still point at it) looking
+    /// exactly like a legitimate, merely-not-yet-completed symbol
+    /// instead of a permanently abandoned one.
+    #[test]
+    fn a_dependency_failure_marks_a_symbol_shared_via_mutual_reference_as_error() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("MutA"),
+            synthetic_class_with_object_fields(
+                "MutA",
+                Some("java/lang/Object"),
+                &[("other", "MutB"), ("broken", "DoesNotExist")],
+            ),
+        );
+        classes.insert(
+            BinaryName::from_internal("MutB"),
+            synthetic_class_with_object_fields(
+                "MutB",
+                Some("java/lang/Object"),
+                &[("other", "MutA")],
+            ),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+
+        let mut_a_error = loader
+            .load_class(&BinaryName::from_internal("MutA"))
+            .expect_err("MutA's own load should fail on its second, unresolvable field");
+        assert!(matches!(
+            mut_a_error,
+            ClassLoadError::DependencyFailure { dependency, .. }
+                if dependency.as_internal() == "DoesNotExist"
+        ));
+
+        // MutB's own load already fully succeeded as a side effect of
+        // loading MutA, so this is a cache hit, not a fresh load -- the
+        // only way to reach MutB's already-completed "other" field
+        // through public API alone.
+        let mut_b = loader
+            .load_class(&BinaryName::from_internal("MutB"))
+            .expect("MutB should have already loaded successfully");
+        drop(loader);
+
+        let mut_b_other_type = member_type_id(&mut store, mut_b, "other");
+        let mut_a = parent_symbol(&store, mut_b_other_type);
+        assert_eq!(symbol_name(&store, mut_a), "MutA");
+        assert_eq!(store.symbols.get(mut_a).info, SymbolInfo::Error);
     }
 
     /// `lower_field_type`'s `FieldType::Array` branch recurses into its
