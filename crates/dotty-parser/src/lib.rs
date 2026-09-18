@@ -10,6 +10,8 @@
 
 mod cursor;
 mod parser;
+mod spans;
 
 pub use cursor::Cursor;
 pub use parser::Parser;
+pub use spans::Mark;
