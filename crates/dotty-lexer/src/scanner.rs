@@ -846,6 +846,38 @@ mod tests {
     }
 
     #[test]
+    fn next_yields_eof_once_and_then_stops() {
+        let mut scanner = ContextualScanner::new("value").expect("source should scan");
+        let mut observed = Vec::new();
+
+        while let Some(token) = scanner.next() {
+            observed.push(token.kind);
+        }
+
+        assert_eq!(observed, vec![TokenKind::Identifier, TokenKind::Eof]);
+        assert!(scanner.next().is_none());
+    }
+
+    #[test]
+    fn lookahead_beyond_eof_clamps_to_the_eof_token() {
+        let mut scanner = ContextualScanner::new("value").expect("source should scan");
+
+        assert_eq!(scanner.lookahead(0).kind, TokenKind::Identifier);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Eof);
+        assert_eq!(scanner.lookahead(usize::MAX).kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn advance_does_not_move_past_eof() {
+        let mut scanner = ContextualScanner::new("value").expect("source should scan");
+
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Eof);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn separates_statements_after_a_legacy_quoted_identifier() {
         assert_eq!(
             kinds("val first = 'foo\nval second = 1"),
