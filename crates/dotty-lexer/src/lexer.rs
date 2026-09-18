@@ -3103,7 +3103,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_contextual_lexers_terminate_on_short_ascii_inputs() {
+    fn raw_lexer_preserves_contiguous_spans_for_short_ascii_inputs() {
         let alphabet = [
             ' ', '\t', '\n', '\r', 'a', '1', '\'', '"', '$', '{', '}', '/', '*',
         ];
@@ -3124,6 +3124,25 @@ mod tests {
                 offset = span.end();
             }
             assert_eq!(offset, source.len() as u32, "raw span gap for {source:?}");
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
+    }
+
+    #[test]
+    fn contextual_scanner_reaches_eof_for_short_ascii_inputs() {
+        let alphabet = [
+            ' ', '\t', '\n', '\r', 'a', '1', '\'', '"', '$', '{', '}', '/', '*',
+        ];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_ascii_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
 
             let scanner = crate::ContextualScanner::new(source)
                 .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
@@ -3132,7 +3151,33 @@ mod tests {
                 Some(TokenKind::Eof),
                 "scanner did not reach EOF for {source:?}"
             );
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
+    }
+
+    #[test]
+    fn contextual_scanner_keeps_token_spans_within_source_for_short_ascii_inputs() {
+        let alphabet = [
+            ' ', '\t', '\n', '\r', 'a', '1', '\'', '"', '$', '{', '}', '/', '*',
+        ];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_ascii_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+
             for token in scanner.tokens() {
+                assert!(
+                    token.span.start() <= token.span.end(),
+                    "invalid scanner span for {source:?}"
+                );
                 assert!(
                     token.span.end() <= source.len() as u32,
                     "scanner span exceeds source for {source:?}"
