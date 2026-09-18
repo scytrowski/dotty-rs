@@ -9,5 +9,7 @@
 //! workspace and dependency boundary.
 
 mod cursor;
+mod parser;
 
 pub use cursor::Cursor;
+pub use parser::Parser;
