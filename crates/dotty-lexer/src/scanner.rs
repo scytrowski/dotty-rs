@@ -17,6 +17,7 @@ pub struct ContextualScanner {
     tokens: Vec<Token>,
     position: usize,
     diagnostics: Vec<Diagnostic>,
+    feedback_regions: usize,
 }
 
 impl ContextualScanner {
@@ -48,6 +49,7 @@ impl ContextualScanner {
             tokens,
             position: 0,
             diagnostics,
+            feedback_regions: 0,
         })
     }
 
@@ -92,7 +94,7 @@ impl ContextualScanner {
         is_prefix(&current_indent, &next_indent) && current_indent != next_indent
     }
 
-    fn insert_indent_after_current(&mut self) {
+    fn insert_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
         if !self.next_line_is_indented(index)
             || self
@@ -100,7 +102,7 @@ impl ContextualScanner {
                 .get(index + 1)
                 .is_some_and(|token| token.kind == TokenKind::Indent)
         {
-            return;
+            return false;
         }
         let offset = self.tokens[index + 1].span.start();
         self.tokens.insert(
@@ -110,16 +112,17 @@ impl ContextualScanner {
                 TextRange::new(offset, offset).expect("synthetic range is valid"),
             ),
         );
+        true
     }
 
-    fn insert_outdent_before_current(&mut self) {
+    fn insert_outdent_before_current(&mut self) -> bool {
         let index = self.current_index();
         if self
             .tokens
             .get(index)
             .is_some_and(|token| token.kind == TokenKind::Outdent)
         {
-            return;
+            return false;
         }
         let depth = self.tokens[..index]
             .iter()
@@ -129,7 +132,7 @@ impl ContextualScanner {
                 _ => depth,
             });
         if depth == 0 {
-            return;
+            return false;
         }
         let offset = self.tokens[index].span.start();
         self.tokens.insert(
@@ -139,6 +142,7 @@ impl ContextualScanner {
                 TextRange::new(offset, offset).expect("synthetic range is valid"),
             ),
         );
+        true
     }
 }
 
@@ -171,11 +175,21 @@ impl TokenSource for ContextualScanner {
                     self.tokens[index].kind = TokenKind::ColonEol;
                 }
             }
-            ScannerEvent::Indented => self.insert_indent_after_current(),
-            ScannerEvent::Outdented => self.insert_outdent_before_current(),
+            ScannerEvent::Indented => {
+                if self.insert_indent_after_current() {
+                    self.feedback_regions += 1;
+                }
+            }
+            ScannerEvent::Outdented => {
+                if self.feedback_regions > 0 && self.insert_outdent_before_current() {
+                    self.feedback_regions -= 1;
+                }
+            }
             ScannerEvent::ArrowIndented => {
                 if self.current().kind == TokenKind::Operator {
-                    self.insert_indent_after_current();
+                    if self.insert_indent_after_current() {
+                        self.feedback_regions += 1;
+                    }
                 }
             }
         }
@@ -1796,6 +1810,82 @@ mod tests {
                 .filter(|token| token.kind == TokenKind::Outdent)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn parser_outdent_does_not_close_an_automatic_region() {
+        let mut scanner = ContextualScanner::new("if ready then\n  body").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
+
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_outdent_closes_a_feedback_region_after_an_automatic_nested_region() {
+        let mut scanner = ContextualScanner::new("root:\n  if ready then\n    leaf\n  back")
+            .expect("source scans");
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+
+        while scanner.current().kind != TokenKind::Identifier
+            || scanner
+                .tokens()
+                .get(scanner.current_index())
+                .and_then(|token| {
+                    scanner
+                        .source
+                        .get(token.span.start() as usize..token.span.end() as usize)
+                })
+                != Some("back")
+        {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
         );
     }
 
