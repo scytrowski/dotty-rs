@@ -193,13 +193,7 @@ impl<'source> RawLexer<'source> {
             self.update_xml_token(token.kind, token.span)?;
             return Ok(Some(RawItem::Token(token)));
         }
-        if self.xml.can_start_literal()
-            && character == '<'
-            && self
-                .cursor
-                .peek_nth(1)
-                .is_some_and(|next| crate::identifier::is_identifier_start(next) || next == '!')
-        {
+        if self.can_start_xml_literal(character) {
             let _ = self.cursor.bump();
             let span = self.span(start)?;
             self.update_xml_token(RawTokenKind::XmlStart, span)?;
@@ -248,6 +242,22 @@ impl<'source> RawLexer<'source> {
             kind: RawTokenKind::Error,
             span,
         })))
+    }
+
+    fn can_start_xml_literal(&self, character: char) -> bool {
+        if !self.xml.can_start_literal() || character != '<' {
+            return false;
+        }
+
+        let offset = self.cursor.position() as usize;
+        let previous = self.source.as_str()[..offset].chars().next_back();
+        let valid_context = previous
+            .is_none_or(|character| matches!(character, ' ' | '\t' | '\n' | '{' | '(' | '>'));
+
+        valid_context
+            && self.cursor.peek_nth(1).is_some_and(|next| {
+                crate::identifier::is_identifier_start(next) || next == '!' || next == '?'
+            })
     }
 
     fn next_expression(&mut self) -> Result<Option<RawItem>, RawLexerError> {
@@ -1848,6 +1858,29 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_a_less_than_after_an_identifier_as_an_operator() {
+        let (items, diagnostics) = scan("a<b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 1),
+                token(RawTokenKind::Operator, 1, 2),
+                token(RawTokenKind::Identifier, 2, 3),
+                token(RawTokenKind::Eof, 3, 3),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_an_xml_processing_instruction_start() {
+        let (items, _) = scan("<?xml version=\"1.0\"?>");
+
+        assert_eq!(items.first(), Some(&token(RawTokenKind::XmlStart, 0, 1)));
     }
 
     #[test]
