@@ -24,6 +24,7 @@ mod nesting;
 mod packages;
 mod record_component;
 mod repository;
+mod session;
 mod symbol;
 mod tasty_symbol;
 mod zip_archive;
@@ -46,6 +47,7 @@ pub mod classloader {
     pub use crate::method_symbol::MethodSymbol;
     pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
     pub use crate::record_component::RecordComponentSymbol;
+    pub use crate::session::LoadingSession;
     pub use crate::symbol::{ClassRef, ClassfileMetadata};
     pub use crate::tasty_symbol::TastyDecodeError;
 }

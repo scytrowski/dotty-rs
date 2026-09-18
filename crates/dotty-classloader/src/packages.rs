@@ -28,6 +28,7 @@ use std::collections::HashMap;
 /// "this is a package's own type"), and no code here needs one — the
 /// owner chain alone is enough for `Visibility::Package` and for a
 /// class's `Symbol::owner` to be real and stable.
+#[derive(Debug, Default)]
 pub(crate) struct PackageRegistry {
     packages: HashMap<String, SymbolId>,
 }

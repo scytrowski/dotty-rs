@@ -5,9 +5,9 @@ use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
-use crate::packages::PackageRegistry;
 use crate::record_component::RecordComponentSymbol;
-use crate::repository::{ClassEntry, ClassRepository};
+use crate::repository::ClassEntry;
+use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
@@ -47,9 +47,13 @@ use std::rc::Rc;
 pub struct ClassLoader<'store, E> {
     class_path: E,
     store: &'store mut SemanticStore,
-    repository: ClassRepository,
+    /// The `SymbolId`-allocating state (`ClassRepository`/`PackageRegistry`)
+    /// this loader shares with every other `ClassLoader` sequentially
+    /// loading against the same `store` — see [`LoadingSession`]'s own doc
+    /// comment for why this must be threaded through by value rather than
+    /// each loader owning its own.
+    session: LoadingSession,
     metadata: HashMap<SymbolId, ClassfileMetadata>,
-    packages: PackageRegistry,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -115,29 +119,36 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// `SemanticStore` (e.g. one per classpath root, or one per
     /// incremental recompilation unit), bootstrap [`Definitions`] once
     /// up front and use [`Self::with_definitions`] for every loader
-    /// instead.
+    /// instead — and, to also share ordinary class/package `SymbolId`
+    /// identity (not just the builtins), thread one [`LoadingSession`]
+    /// through every loader's `with_definitions` call via
+    /// [`Self::into_session`], the way this method already threads a
+    /// fresh one through internally for its own single-loader use.
     pub fn new(class_path: E, store: &'store mut SemanticStore) -> Self {
         let definitions = Definitions::bootstrap(store);
-        Self::with_definitions(class_path, store, definitions)
+        Self::with_definitions(class_path, store, definitions, LoadingSession::new())
     }
 
     /// Builds a `ClassLoader` against an already-bootstrapped, shared
-    /// [`Definitions`] — the construction path multiple `ClassLoader`s
-    /// sharing one `SemanticStore` must use, so every one of them
-    /// resolves `Object`/`Any`/`Nothing`/primitives to the exact same
-    /// canonical `SymbolId`s/`TypeId`s instead of each minting its own
-    /// (see [`Self::new`]'s doc comment).
+    /// [`Definitions`] and [`LoadingSession`] — the construction path
+    /// multiple `ClassLoader`s sharing one `SemanticStore` must use, so
+    /// every one of them resolves `Object`/`Any`/`Nothing`/primitives (via
+    /// `definitions`) and ordinary classes/packages (via `session`) to the
+    /// exact same canonical `SymbolId`s/`TypeId`s instead of each minting
+    /// its own (see [`Self::new`]'s doc comment). Get `session` back out
+    /// via [`Self::into_session`] once this loader is done, to hand to the
+    /// next one.
     pub fn with_definitions(
         class_path: E,
         store: &'store mut SemanticStore,
         definitions: Definitions,
+        session: LoadingSession,
     ) -> Self {
         Self {
             class_path,
             store,
-            repository: ClassRepository::new(),
+            session,
             metadata: HashMap::new(),
-            packages: PackageRegistry::new(),
             definitions,
         }
     }
@@ -148,6 +159,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// one's `store`.
     pub fn definitions(&self) -> Definitions {
         self.definitions
+    }
+
+    /// Hands this loader's [`LoadingSession`] back out, once it is done, so
+    /// a second `ClassLoader` sharing the same `store` can pick up its
+    /// class/package `SymbolId` identities via
+    /// [`Self::with_definitions`] instead of starting a fresh, disagreeing
+    /// session of its own.
+    pub fn into_session(self) -> LoadingSession {
+        self.session
     }
 
     /// JVM-specific metadata for a `.class`-backed symbol previously
@@ -161,7 +181,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Loads (or returns the cached result for) the class named `name`.
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
-        match self.repository.get(name).cloned() {
+        match self.session.repository.get(name).cloned() {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
             Some(ClassEntry::Failed(_, error)) => return Err(error),
             Some(ClassEntry::Loading(symbol)) => {
@@ -173,7 +193,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 // be left looking like a merely-not-yet-completed
                 // `SymbolInfo::Missing` once the repository says `Failed`.
                 self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
-                self.repository
+                self.session
+                    .repository
                     .mark_failed(name.clone(), Some(symbol), error.clone());
                 return Err(error);
             }
@@ -182,7 +203,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         match self.load_uncached(name) {
             Ok(symbol) => {
-                self.repository.mark_loaded(name.clone(), symbol);
+                self.session.repository.mark_loaded(name.clone(), symbol);
                 Ok(symbol)
             }
             Err(error) => {
@@ -207,12 +228,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 // by `enter_class` at the very start of this name's own
                 // `load_uncached` call, above) are reachable here -- `name`
                 // had no repository entry when `load_class` started.
-                let still_loading_symbol = self.repository.get(name).and_then(ClassEntry::symbol);
+                let still_loading_symbol = self
+                    .session
+                    .repository
+                    .get(name)
+                    .and_then(ClassEntry::symbol);
                 if let Some(symbol) = still_loading_symbol {
                     self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
                 }
-                self.repository
-                    .mark_failed(name.clone(), still_loading_symbol, error.clone());
+                self.session.repository.mark_failed(
+                    name.clone(),
+                    still_loading_symbol,
+                    error.clone(),
+                );
                 Err(error)
             }
         }
@@ -244,7 +272,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         flags: ClassAccessFlags,
         origin: SymbolOrigin,
     ) -> (SymbolId, ScopeId) {
-        let owner = self.packages.resolve(self.store, name);
+        let owner = self.session.packages.resolve(self.store, name);
 
         let text = self.store.names.intern(name.simple_name());
         let symbol_name = Name::new(text, Namespace::Type);
@@ -733,7 +761,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
-        self.repository.mark_loading(name.clone(), class_symbol);
+        self.session
+            .repository
+            .mark_loading(name.clone(), class_symbol);
 
         // `enter_class` derives visibility from `ClassAccessFlags` alone,
         // which (correctly, for `.class` — see its own doc comment) can
@@ -916,7 +946,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // rejected as `CircularInheritance`, exactly as before.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
-        self.repository.mark_loading(name.clone(), class_symbol);
+        self.session
+            .repository
+            .mark_loading(name.clone(), class_symbol);
 
         // Patches `Symbol::owner` from the package (set by `enter_class`,
         // and always correct for `Visibility::Package` -- see
@@ -1436,7 +1468,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         dependency: &BinaryName,
     ) -> Result<SymbolId, ClassLoadError> {
-        let loading = match self.repository.get(dependency) {
+        let loading = match self.session.repository.get(dependency) {
             Some(ClassEntry::Loading(symbol)) => Some(*symbol),
             _ => None,
         };
@@ -2415,6 +2447,7 @@ mod tests {
             InMemoryClassPath(HashMap::new()),
             &mut store,
             definitions,
+            LoadingSession::new(),
         );
         let object_a = loader_a.definitions().object_class;
         drop(loader_a);
@@ -2423,6 +2456,7 @@ mod tests {
             InMemoryClassPath(HashMap::new()),
             &mut store,
             definitions,
+            LoadingSession::new(),
         );
         let object_b = loader_b.definitions().object_class;
         drop(loader_b);
@@ -2448,8 +2482,12 @@ mod tests {
             BinaryName::from_internal("java/lang/Object"),
             synthetic_class("java/lang/Object", None),
         );
-        let mut loader_a =
-            ClassLoader::with_definitions(InMemoryClassPath(classes_a), &mut store, definitions);
+        let mut loader_a = ClassLoader::with_definitions(
+            InMemoryClassPath(classes_a),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
         let object_a = loader_a
             .load_class(&BinaryName::from_internal("java/lang/Object"))
             .expect("java/lang/Object should load");
@@ -2465,8 +2503,12 @@ mod tests {
             BinaryName::from_internal("java/lang/Object"),
             synthetic_class("java/lang/Object", None),
         );
-        let mut loader_b =
-            ClassLoader::with_definitions(InMemoryClassPath(classes_b), &mut store, definitions);
+        let mut loader_b = ClassLoader::with_definitions(
+            InMemoryClassPath(classes_b),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
         let a = loader_b
             .load_class(&BinaryName::from_internal("A"))
             .expect("A should load");
@@ -2475,6 +2517,78 @@ mod tests {
 
         assert_eq!(prefix_a, prefix_b);
         assert_eq!(prefix_a, definitions.no_prefix);
+    }
+
+    /// `with_definitions` shares builtin identity, and `no_prefix`
+    /// identity, but each `ClassLoader` used to still allocate its own
+    /// fresh `ClassRepository`/`PackageRegistry` regardless -- so an
+    /// *ordinary* class or package (not a `Definitions` builtin) loaded by
+    /// one loader got a different `SymbolId` than the same class/package
+    /// loaded by a second loader sharing the same `store`, even though
+    /// both name the exact same class. Fixed by threading one
+    /// `LoadingSession` through every loader sharing a `store`, via
+    /// `into_session`/`with_definitions`, instead of each loader minting
+    /// its own.
+    #[test]
+    fn class_loaders_sharing_one_loading_session_agree_on_ordinary_class_and_package_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let mut classes_a = HashMap::new();
+        classes_a.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes_a.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        let mut loader_a = ClassLoader::with_definitions(
+            InMemoryClassPath(classes_a),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let list_a = loader_a
+            .load_class(&BinaryName::from_internal("java/util/List"))
+            .expect("java/util/List should load");
+        let session = loader_a.into_session();
+        let package_a = store.symbols.get(list_a).owner.expect("List has an owner");
+
+        let mut classes_b = HashMap::new();
+        classes_b.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes_b.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        classes_b.insert(
+            BinaryName::from_internal("A"),
+            synthetic_class("A", Some("java/util/List")),
+        );
+        let mut loader_b = ClassLoader::with_definitions(
+            InMemoryClassPath(classes_b),
+            &mut store,
+            definitions,
+            session,
+        );
+        let a = loader_b
+            .load_class(&BinaryName::from_internal("A"))
+            .expect("A should load");
+        drop(loader_b);
+
+        let list_b = parent_symbol(&store, class_info(&store, a).parents[0]);
+        assert_eq!(
+            list_a, list_b,
+            "the second loader should reuse the first loader's List SymbolId, not mint a new one"
+        );
+        let package_b = store.symbols.get(list_b).owner.expect("List has an owner");
+        assert_eq!(
+            package_a, package_b,
+            "the second loader should reuse the first loader's java/util package SymbolId"
+        );
     }
 
     /// `java/lang/Object` is the one `Definitions` builtin with a real,
@@ -4297,11 +4411,19 @@ mod tests {
             .load_class(&BinaryName::from_internal("A"))
             .unwrap_err();
 
-        let a_symbol = match loader.repository.get(&BinaryName::from_internal("A")) {
+        let a_symbol = match loader
+            .session
+            .repository
+            .get(&BinaryName::from_internal("A"))
+        {
             Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
             other => panic!("expected A to be Failed with a Symbol, got {other:?}"),
         };
-        let b_symbol = match loader.repository.get(&BinaryName::from_internal("B")) {
+        let b_symbol = match loader
+            .session
+            .repository
+            .get(&BinaryName::from_internal("B"))
+        {
             Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
             other => panic!("expected B to be Failed with a Symbol, got {other:?}"),
         };
