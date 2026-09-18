@@ -255,6 +255,7 @@ fn build_tokens(
                 );
 
                 if has_line_break && layout_enabled {
+                    let mut closed_same_indent_case = false;
                     if brace_depth == 0 {
                         if has_incomparable_indentation(&indentation_stack, &indentation) {
                             let line_start = line_start_offset(source, raw.span.start());
@@ -263,14 +264,36 @@ fn build_tokens(
                                 "incompatible indentation prefixes",
                             ));
                         }
-                        adjust_indentation(
+                        closed_same_indent_case = adjust_indentation(
                             &mut tokens,
                             &mut indentation_stack,
                             &indentation,
                             previous_kind,
                             previous_opens_indentation,
+                            raw.kind,
+                            leading_infix,
                             raw.span.start(),
                         )?;
+                    }
+
+                    if closed_same_indent_case
+                        && can_end_statement(previous_kind)
+                        && !(previous_kind == Some(TokenKind::Operator)
+                            && previous_opens_indentation)
+                        && !leading_infix
+                        && !suppresses_statement_separator(raw.kind)
+                        && can_start_statement(raw.kind)
+                    {
+                        let separator = if blank_line {
+                            TokenKind::Newlines
+                        } else {
+                            TokenKind::Newline
+                        };
+                        let outdent_index = tokens.len().saturating_sub(1);
+                        tokens.insert(
+                            outdent_index,
+                            Token::new(separator, TextRange::new(previous_end, raw.span.start())?),
+                        );
                     }
 
                     let blank_line_before_operator =
@@ -357,6 +380,7 @@ fn build_tokens(
 enum LayoutRegionOwner {
     Root,
     Implicit,
+    SameIndentCases,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +403,13 @@ impl LayoutRegion {
             owner: LayoutRegionOwner::Implicit,
         }
     }
+
+    fn same_indent_cases(indentation: &str) -> Self {
+        Self {
+            indentation: indentation.to_owned(),
+            owner: LayoutRegionOwner::SameIndentCases,
+        }
+    }
 }
 
 fn adjust_indentation(
@@ -387,14 +418,39 @@ fn adjust_indentation(
     indentation: &str,
     previous_kind: Option<TokenKind>,
     previous_opens_indentation: bool,
+    current_kind: RawTokenKind,
+    leading_infix: bool,
     offset: u32,
-) -> Result<(), TextRangeError> {
+) -> Result<bool, TextRangeError> {
+    let mut closed_same_indent_case = false;
     let current = stack
         .last()
         .map(|region| region.indentation.as_str())
         .unwrap_or("");
     if current == indentation {
-        return Ok(());
+        if opens_same_indent_case_region(previous_kind, current_kind) {
+            stack.push(LayoutRegion::same_indent_cases(indentation));
+            tokens.push(Token::new(
+                TokenKind::Indent,
+                TextRange::new(offset, offset)?,
+            ));
+        } else if current_kind != RawTokenKind::Keyword(HardKeyword::Case)
+            && stack
+                .last()
+                .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+        {
+            stack.pop();
+            tokens.push(Token::new(
+                TokenKind::Outdent,
+                TextRange::new(offset, offset)?,
+            ));
+            closed_same_indent_case = true;
+        }
+        return Ok(closed_same_indent_case);
+    }
+
+    if leading_infix {
+        return Ok(false);
     }
 
     if is_prefix(current, indentation)
@@ -405,7 +461,7 @@ fn adjust_indentation(
             TokenKind::Indent,
             TextRange::new(offset, offset)?,
         ));
-        return Ok(());
+        return Ok(false);
     }
 
     while stack.len() > 1 {
@@ -414,6 +470,19 @@ fn adjust_indentation(
             .map(|region| region.indentation.as_str())
             .unwrap_or("");
         if is_prefix(current, indentation) {
+            if current == indentation
+                && current_kind != RawTokenKind::Keyword(HardKeyword::Case)
+                && stack
+                    .last()
+                    .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+            {
+                stack.pop();
+                tokens.push(Token::new(
+                    TokenKind::Outdent,
+                    TextRange::new(offset, offset)?,
+                ));
+                closed_same_indent_case = true;
+            }
             break;
         }
         stack.pop();
@@ -423,7 +492,20 @@ fn adjust_indentation(
         ));
     }
 
-    Ok(())
+    Ok(closed_same_indent_case)
+}
+
+fn opens_same_indent_case_region(
+    previous_kind: Option<TokenKind>,
+    current_kind: RawTokenKind,
+) -> bool {
+    matches!(
+        (previous_kind, current_kind),
+        (
+            Some(TokenKind::Keyword(HardKeyword::Match | HardKeyword::Catch)),
+            RawTokenKind::Keyword(HardKeyword::Case)
+        )
+    )
 }
 
 fn close_regions_after_delimiter(
@@ -436,9 +518,7 @@ fn close_regions_after_delimiter(
         let Some(region) = stack.last() else {
             break;
         };
-        if region.owner != LayoutRegionOwner::Implicit
-            || is_prefix(&region.indentation, indentation)
-        {
+        if region.owner == LayoutRegionOwner::Root || is_prefix(&region.indentation, indentation) {
             break;
         }
         stack.pop();
@@ -2620,6 +2700,85 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Outdent,
                 TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_a_match_case_region_at_the_match_indentation() {
+        assert_eq!(
+            kinds("value match\ncase first =>\n  one\ncase second =>\n  two\nafter"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_a_catch_case_region_at_the_catch_indentation() {
+        assert_eq!(
+            kinds("try\n  risky()\ncatch\ncase error =>\n  recover()\nafter"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Try),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Catch),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn leading_infix_does_not_close_an_active_assignment_region() {
+        assert_eq!(
+            kinds("value =\n  foo\n  + bar\nafter"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
                 TokenKind::Eof,
             ]
         );
