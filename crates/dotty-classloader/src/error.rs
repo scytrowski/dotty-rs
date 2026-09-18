@@ -1,7 +1,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathError;
 use crate::tasty_symbol::TastyDecodeError;
-use dotty_classfile::class_file::ClassFileError;
+use dotty_classfile::class_file::{ClassFileError, ClassFileVersion};
 use dotty_classfile::constant_pool::PoolRefError;
 use dotty_classfile::descriptor::ResolveDescriptorError;
 use dotty_classfile::signature::SignatureError;
@@ -24,6 +24,15 @@ pub enum ClassLoadError {
     /// The bytes found for this class did not decode as a valid class
     /// file.
     InvalidClassFile(BinaryName, ClassFileError),
+    /// The class file decoded structurally, but its own declared
+    /// `major_version`/`minor_version` falls outside the range this
+    /// decoder can safely give a semantic reading — either newer than
+    /// this project's JDK-25 compatibility ceiling, older than the JVMS
+    /// has ever defined, or a preview-features class this decoder never
+    /// has preview features enabled for (see
+    /// [`ClassFileVersion::is_compatible`] and
+    /// `docs/classfile-format-jdk25.md` §2.1).
+    UnsupportedClassVersion(BinaryName, ClassFileVersion),
     /// The class file decoded structurally, but one of its own
     /// `this_class`/`super_class`/interface constant-pool indices, a
     /// field/method's `name_index`, or a `Signature` attribute's own
@@ -80,6 +89,12 @@ impl fmt::Display for ClassLoadError {
             Self::InvalidClassFile(name, source) => {
                 write!(formatter, "invalid class file for {name}: {source}")
             }
+            Self::UnsupportedClassVersion(name, version) => {
+                write!(
+                    formatter,
+                    "unsupported class file version {version} for {name}"
+                )
+            }
             Self::MalformedReference(name, source) => {
                 write!(
                     formatter,
@@ -130,7 +145,8 @@ impl std::error::Error for ClassLoadError {
             Self::NotFound(_)
             | Self::NameMismatch { .. }
             | Self::CircularInheritance(_)
-            | Self::UnresolvedTypeVariable(_, _) => None,
+            | Self::UnresolvedTypeVariable(_, _)
+            | Self::UnsupportedClassVersion(_, _) => None,
             Self::Io(_, source) => Some(source.as_ref()),
             Self::InvalidClassFile(_, source) => Some(source),
             Self::MalformedReference(_, source) => Some(source),
@@ -150,6 +166,35 @@ mod tests {
     fn not_found_displays_the_missing_class_name() {
         let error = ClassLoadError::NotFound(BinaryName::from_internal("java/lang/Object"));
         assert_eq!(error.to_string(), "class not found: java/lang/Object");
+    }
+
+    #[test]
+    fn unsupported_class_version_displays_the_version_and_name() {
+        let error = ClassLoadError::UnsupportedClassVersion(
+            BinaryName::from_internal("Future"),
+            ClassFileVersion {
+                major: 70,
+                minor: 0,
+            },
+        );
+        assert_eq!(
+            error.to_string(),
+            "unsupported class file version 70.0 for Future"
+        );
+    }
+
+    #[test]
+    fn unsupported_class_version_has_no_further_source() {
+        use std::error::Error;
+
+        let error = ClassLoadError::UnsupportedClassVersion(
+            BinaryName::from_internal("Future"),
+            ClassFileVersion {
+                major: 70,
+                minor: 0,
+            },
+        );
+        assert!(error.source().is_none());
     }
 
     #[test]

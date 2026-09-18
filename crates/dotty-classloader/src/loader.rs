@@ -754,6 +754,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let class_file = ClassFile::decode(&mut reader)
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
 
+        // Checked before any symbol allocation: a version this decoder
+        // cannot safely interpret (newer than the JDK-25 ceiling, older
+        // than the JVMS has ever defined, or preview-features-only) must
+        // not be given a semantic reading at all, not even a partial one.
+        if !class_file.version.is_compatible() {
+            return Err(ClassLoadError::UnsupportedClassVersion(
+                name.clone(),
+                class_file.version,
+            ));
+        }
+
         let actual_name = self.resolve_name(name, &class_file, class_file.this_class)?;
         if actual_name != *name {
             return Err(ClassLoadError::NameMismatch {
@@ -2059,6 +2070,32 @@ mod tests {
         bytes.extend_from_slice(&[0x00, 0x00]); // fields_count = 0
         bytes.extend_from_slice(&[0x00, 0x00]); // methods_count = 0
         bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    /// A hand-built, minimal, synthetic, otherwise-valid class file
+    /// declaring `major_version` 70 (one past this project's JDK-25
+    /// compatibility ceiling) — exercises `UnsupportedClassVersion`
+    /// without needing a real class file from a JDK newer than this
+    /// project targets.
+    fn synthetic_future_version_class(this_name: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 70]); // major = 70 (unsupported)
+        bytes.extend_from_slice(&[0x00, 0x03]); // constant_pool_count = 3
+        bytes.push(1); // #1 CONSTANT_Utf8
+        bytes.extend_from_slice(&(this_name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(this_name.as_bytes());
+        bytes.push(7); // #2 CONSTANT_Class -> #1
+        bytes.extend_from_slice(&[0x00, 0x01]);
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&[0x00, 0x02]); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // fields_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count
         bytes
     }
 
@@ -3429,6 +3466,28 @@ mod tests {
         assert!(matches!(
             error,
             ClassLoadError::InvalidClassFile(name, _) if name.as_internal() == "Broken"
+        ));
+    }
+
+    #[test]
+    fn unsupported_class_version_when_major_version_exceeds_the_compatibility_ceiling() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("FromTheFuture"),
+            synthetic_future_version_class("FromTheFuture"),
+        );
+
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let error = loader
+            .load_class(&BinaryName::from_internal("FromTheFuture"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::UnsupportedClassVersion(name, version)
+                if name.as_internal() == "FromTheFuture" && version.major == 70
         ));
     }
 
