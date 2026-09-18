@@ -97,6 +97,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
     match kind {
         TreeKind::Ident(_) => "Ident",
         TreeKind::Select(_) => "Select",
+        TreeKind::Apply(_) => "Apply",
         TreeKind::This(_) => "This",
         TreeKind::Literal(_) => "Literal",
         TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
@@ -114,6 +115,12 @@ fn child_ids(kind: &TreeKind<Untyped>) -> Vec<TreeId<Untyped>> {
     match kind {
         TreeKind::This(_) => Vec::new(),
         TreeKind::Select(selection) => vec![selection.qualifier],
+        TreeKind::Apply(application) => {
+            let mut children = Vec::with_capacity(application.args.len() + 1);
+            children.push(application.function);
+            children.extend(application.args.iter().copied());
+            children
+        }
         TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => vec![parens.inner],
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => tuple.elements.clone(),
         _ => Vec::new(),

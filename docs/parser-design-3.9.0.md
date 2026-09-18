@@ -111,6 +111,7 @@ string literals
 true, false, null, this
 (expr), (), and (a, b, ...)
 simple selections such as `foo.bar`
+simple applications such as `foo(42)`
 ```
 
 The smoke grammar is plumbing coverage, not a substitute for the Scala

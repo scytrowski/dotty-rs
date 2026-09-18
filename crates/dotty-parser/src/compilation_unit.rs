@@ -1,5 +1,6 @@
 use dotty_core::ast::{
-    Block, Ident, Literal, NumberKind, NumberLiteral, Parens, Select, This, Tuple, UntypedNode,
+    Apply, ApplyKind, Block, Ident, Literal, NumberKind, NumberLiteral, Parens, Select, This,
+    Tuple, UntypedNode,
 };
 use dotty_core::{
     AstArena, Constant, HardKeyword, Punctuation, SourceId, SourceText, TokenKind, TokenSource,
@@ -136,32 +137,78 @@ where
         mark: crate::Mark,
         mut qualifier: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
-        while self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-            let name = match self.current().kind {
-                TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                    match self.intern_current_term_name() {
-                        Ok(name) => name,
-                        Err(_) => return self.unexpected_expression(),
+        loop {
+            if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+                let name = match self.current().kind {
+                    TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                        match self.intern_current_term_name() {
+                            Ok(name) => name,
+                            Err(_) => return self.unexpected_expression(),
+                        }
                     }
-                }
-                _ => {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected an identifier after `.`",
-                    );
-                    return qualifier;
-                }
-            };
-            self.advance();
-            qualifier = self.alloc_from(
-                mark,
-                TreeKind::Select(Select {
-                    qualifier,
-                    name: *name.as_name(),
-                }),
-            );
+                    _ => {
+                        self.report(
+                            crate::ParseDiagnosticKind::ExpectedToken,
+                            "expected an identifier after `.`",
+                        );
+                        return qualifier;
+                    }
+                };
+                self.advance();
+                qualifier = self.alloc_from(
+                    mark,
+                    TreeKind::Select(Select {
+                        qualifier,
+                        name: *name.as_name(),
+                    }),
+                );
+            } else if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftParen))
+            {
+                qualifier = self.parse_application(mark, qualifier);
+            } else {
+                break;
+            }
         }
         qualifier
+    }
+
+    fn parse_application(
+        &mut self,
+        mark: crate::Mark,
+        function: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        self.advance();
+        let mut args = Vec::new();
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+            loop {
+                args.push(self.parse_smoke_expr());
+                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+                    break;
+                }
+                if self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::RightParen))
+                {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedExpression,
+                        "expected an argument after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+            }
+        }
+        self.alloc_from(
+            mark,
+            TreeKind::Apply(Apply {
+                function,
+                args,
+                kind: ApplyKind::Regular,
+            }),
+        )
     }
 
     fn parse_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -632,6 +679,38 @@ mod tests {
 
         assert_eq!(names.resolve(name.text()), "bar");
         assert!(qualifier_is_ident);
+    }
+
+    #[test]
+    fn parses_a_simple_application_with_an_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(42)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::IntegerLiteral, 4, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        assert_eq!(application.args.len(), 1);
+        assert!(matches!(
+            parser.ast().get(application.function).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
