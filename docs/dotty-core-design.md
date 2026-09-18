@@ -702,6 +702,7 @@ pub struct Template<P: AstPhase> {
     pub parents: Vec<TreeId<P>>,
     pub self_val: Option<TreeId<P>>,
     pub body: Vec<TreeId<P>>,
+    pub metadata: P::TemplateMetadata,
 }
 
 pub struct Inlined<P: AstPhase> {
@@ -720,12 +721,18 @@ beyond ordinary `TreeId<P>` child substitution — every child reference is
 `TypeDef<P>` each carry a `metadata: P::DefMetadata` field for the
 `Modifiers`-or-nothing split described above.
 
+`Template<P>` additionally carries `metadata: P::TemplateMetadata`:
+`Template<Untyped>` retains parser-only `derives` and ordered `uses` through
+`UntypedTemplateMetadata`, while `Template<Typed>` carries `()`.
+
 ### `ast/untyped.rs`
 
 `UntypedNode` holds surface-syntax-only constructs:
 
 ```rust
 pub enum UntypedNode {
+    Error(ErrorNode),
+
     ModuleDef(ModuleDef),
 
     Function(Function),
@@ -759,7 +766,6 @@ pub enum UntypedNode {
     Throw(Throw),
 
     ParsedTry(ParsedTry),
-
 }
 ```
 
