@@ -401,16 +401,25 @@ rather than adding a second mapping mechanism.
 
 ## 7. AST phase model
 
+The parser-facing coverage audit is maintained separately in
+[`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md). That
+document is authoritative for the distinction between parser-owned syntax,
+lowered forms, and explicitly feature-gated Scala 3.9 constructs. The AST
+model in this section is the current foundation baseline, not a claim that
+every Dotty `untpd` helper has already been mirrored.
+
 ### `ast/phase.rs`
 
-`[MAJOR 2]` extends this trait with a second associated type, `DefMetadata`,
-to resolve where source-level modifiers live (see "Definitions" below):
+`[MAJOR 2]` extends this trait with phase-specific definition and template
+metadata, resolving where source-level modifiers and parser-only template
+clauses live (see "Definitions" below):
 
 ```rust
 pub trait AstPhase: sealed::Sealed {
     type TypeInfo;
     type ExtraNode;
     type DefMetadata;
+    type TemplateMetadata;
 }
 
 pub enum Untyped {}
@@ -420,12 +429,14 @@ impl AstPhase for Untyped {
     type TypeInfo = ();
     type ExtraNode = UntypedNode;
     type DefMetadata = Modifiers;
+    type TemplateMetadata = UntypedTemplateMetadata;
 }
 
 impl AstPhase for Typed {
     type TypeInfo = TypeId;
     type ExtraNode = std::convert::Infallible;
     type DefMetadata = ();
+    type TemplateMetadata = ();
 }
 ```
 
@@ -440,6 +451,8 @@ Invariants this must enforce:
   cannot appear on a `Typed` definition node — `DefMetadata = ()` makes it
   disappear at the type level once typing has produced `SymbolFlags` and
   resolved annotations instead.
+- `TemplateMetadata` retains untyped `derives` and ordered `uses` clauses,
+  including each `UseRef.initially` bit; it is `()` after typing.
 
 This is a case where Rust can express an invariant Dotty's own `Tree[T]`
 leaves to convention. In real Dotty (`Trees.scala`), `DefTree` stores syntax-
@@ -548,10 +561,9 @@ phase.* Concretely:
 - `Template`: real Dotty's `Template` carries a combined
   parents-followed-by-derived-classes list only pre-typing (`derived` is
   always `Nil` after typing except in the untyped-only `DerivingTemplate`
-  subclass). `dotty-core`'s shared `Template<P>` therefore carries only
-  `parents: Vec<TreeId<P>>`; a `derives` clause is untyped-only surface
-  syntax and lives on `UntypedNode`, not on the shared node, consumed by the
-  namer before a `Template<Typed>` is ever built.
+  subclass). The Rust foundation keeps `parents` separate and stores
+  untyped-only `derives` and Scala 3.9 `uses` in
+  `Template<Untyped>::metadata`; `Template<Typed>::metadata` is `()`.
 - `DefDef`/`ValDef`/`TypeDef` modifiers: resolved above via
   `AstPhase::DefMetadata` (`[MAJOR 2]`).
 
@@ -690,6 +702,7 @@ pub struct Template<P: AstPhase> {
     pub parents: Vec<TreeId<P>>,
     pub self_val: Option<TreeId<P>>,
     pub body: Vec<TreeId<P>>,
+    pub metadata: P::TemplateMetadata,
 }
 
 pub struct Inlined<P: AstPhase> {
@@ -708,15 +721,22 @@ beyond ordinary `TreeId<P>` child substitution — every child reference is
 `TypeDef<P>` each carry a `metadata: P::DefMetadata` field for the
 `Modifiers`-or-nothing split described above.
 
+`Template<P>` additionally carries `metadata: P::TemplateMetadata`:
+`Template<Untyped>` retains parser-only `derives` and ordered `uses` through
+`UntypedTemplateMetadata`, while `Template<Typed>` carries `()`.
+
 ### `ast/untyped.rs`
 
 `UntypedNode` holds surface-syntax-only constructs:
 
 ```rust
 pub enum UntypedNode {
+    Error(ErrorNode),
+
     ModuleDef(ModuleDef),
 
     Function(Function),
+    FunctionWithMods(FunctionWithMods),
     PolyFunction(PolyFunction),
 
     InfixOp(InfixOp),
@@ -739,21 +759,30 @@ pub enum UntypedNode {
     InterpolatedString(InterpolatedString),
 
     ContextBounds(ContextBounds),
+    ContextBoundTypeTree(ContextBoundTypeTree),
 
     Number(NumberLiteral),
 
     Throw(Throw),
 
-    /// A `derives` clause on a class/trait/enum `Template`. See the
-    /// `Template` audit above: real Dotty drops this after typing, so it
-    /// belongs here, not on the shared `Template<P>` node.
-    Derived(Vec<TreeId<Untyped>>),
+    ParsedTry(ParsedTry),
 }
 ```
 
-This set mirrors Dotty's actual `untpd`-only node types (`untpd.scala`:
-`ForYield`, `ForDo`, `GenFrom`, `GenAlias`, `PatDef`, `ExtMethods`, and
-others), plus `Derived` added by the `Template` audit above.
+`GenFrom.check_mode` uses the untyped-only `GenCheckMode` enum to preserve
+Scala 3.9's pattern-checking policy. The parser derives this value from the
+source version and an optional `case` prefix; for-comprehension lowering
+consumes it later.
+
+`NumberLiteral` retains its source-backed `text: NameId` together with a
+`NumberKind`: `Whole(radix)`, `Decimal`, or `Floating`. This mirrors Scala's
+parser distinction before typing; suffixed numeric tokens that Scala converts
+directly to semantic literals are not forced through `NumberKind`.
+
+This is the foundation subset of Dotty's actual `untpd`-only node types. The
+remaining differences called out by the parser-readiness audit are explicit
+lowering or feature-policy decisions, rather than silently dropped source
+payloads.
 
 ### `ast/typed.rs`
 
@@ -803,8 +832,11 @@ pub enum Modifier {
     Final,
     Sealed,
     Case,
+    Var,
+    Update,
     Implicit,
     Given,
+    Impure,
     Lazy,
     Override,
     Inline,
@@ -812,9 +844,17 @@ pub enum Modifier {
     Opaque,
     Open,
     Infix,
+    Tracked,
+    Into,
     Erased,
 }
 ```
+
+`Var` is attached to the existing untyped `PatDef`, matching Scala's
+parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
+`Tracked` and `Update` are retained as modifier values for the
+capture-checking dialect; enabling that dialect still requires its separate
+capture-set AST contract.
 
 `[MAJOR 2]` `Modifiers.annotations: Vec<TreeId<Untyped>>` is safe now that
 `Modifiers` only exists as `Untyped::DefMetadata` — a `Modifiers` value can

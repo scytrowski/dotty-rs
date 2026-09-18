@@ -26,8 +26,11 @@ pub enum Modifier {
     Final,
     Sealed,
     Case,
+    Var,
+    Update,
     Implicit,
     Given,
+    Impure,
     Lazy,
     Override,
     Inline,
@@ -35,6 +38,8 @@ pub enum Modifier {
     Opaque,
     Open,
     Infix,
+    Tracked,
+    Into,
     Erased,
 }
 
@@ -72,5 +77,30 @@ mod tests {
             VisibilitySyntax::Private { qualifier },
             VisibilitySyntax::Protected { qualifier }
         );
+    }
+
+    #[test]
+    fn impure_is_a_distinct_function_type_modifier() {
+        assert_ne!(Modifier::Impure, Modifier::Given);
+    }
+
+    #[test]
+    fn var_is_a_distinct_mutability_modifier() {
+        assert_ne!(Modifier::Var, Modifier::Lazy);
+    }
+
+    #[test]
+    fn update_is_a_distinct_capture_checking_modifier() {
+        assert_ne!(Modifier::Update, Modifier::Var);
+    }
+
+    #[test]
+    fn tracked_is_a_distinct_capture_checking_modifier() {
+        assert_ne!(Modifier::Tracked, Modifier::Into);
+    }
+
+    #[test]
+    fn into_is_a_distinct_source_modifier() {
+        assert_ne!(Modifier::Into, Modifier::Given);
     }
 }

@@ -21,7 +21,8 @@ pub use phase::{AstPhase, Typed, Untyped};
 pub use tree::{Tree, TreeKind};
 pub use typed::{TypedAst, TypedAstBuilder, TypedTree, TypedTreeId};
 pub use untyped::{
-    ContextBounds, ExtensionMethods, ForDo, ForYield, Function, GenAlias, GenFrom, InfixOp,
-    InterpolatedString, ModuleDef, NumberLiteral, Parens, PatDef, PolyFunction, PostfixOp,
-    PrefixOp, Throw, Tuple, UntypedNode,
+    ContextBoundTypeTree, ContextBounds, ErrorNode, ErrorNodeKind, ExtensionMethods, ForDo,
+    ForYield, Function, FunctionWithMods, GenAlias, GenCheckMode, GenFrom, InfixOp,
+    InterpolatedString, ModuleDef, NumberKind, NumberLiteral, Parens, ParsedTry, PatDef,
+    PolyFunction, PostfixOp, PrefixOp, Throw, Tuple, UntypedNode, UntypedTemplateMetadata, UseRef,
 };

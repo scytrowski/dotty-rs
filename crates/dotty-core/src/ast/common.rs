@@ -200,17 +200,17 @@ pub struct TypeDef<P: AstPhase> {
 
 /// `extends parents { self_val => body }`.
 ///
-/// Carries only `parents`, not a `derives` clause: real Dotty's `Template`
-/// only carries a combined parents-then-derived list pre-typing, and drops
-/// the derived half after typing. A `derives` clause is untyped-only surface
-/// syntax and lives on `UntypedNode::Derived` instead — see
-/// `docs/dotty-core-design.md` §7.
+/// Carries parser-only metadata through `P::TemplateMetadata`: untyped
+/// templates retain `derives` and `uses`, while typed templates carry `()`.
+/// The shared `parents` field remains separate because `derives` is not a
+/// parent and is consumed before a typed template is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Template<P: AstPhase> {
     pub constructor: TreeId<P>,
     pub parents: Vec<TreeId<P>>,
     pub self_val: Option<TreeId<P>>,
     pub body: Vec<TreeId<P>>,
+    pub metadata: P::TemplateMetadata,
 }
 
 /// `package name { stats }`.
@@ -374,7 +374,7 @@ pub struct Inlined<P: AstPhase> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::phase::Untyped;
+    use crate::ast::phase::{Typed, Untyped};
     use crate::ids::NameId;
     use crate::names::Namespace;
 
@@ -486,15 +486,46 @@ mod tests {
     }
 
     #[test]
-    fn template_carries_only_parents_not_a_derives_clause() {
-        let template = Template {
+    fn untyped_template_retains_derives_and_uses_metadata() {
+        let template = Template::<Untyped> {
             constructor: tree_id(1),
             parents: vec![tree_id(2)],
             self_val: None,
             body: vec![tree_id(3)],
+            metadata: crate::ast::untyped::UntypedTemplateMetadata {
+                derives: vec![tree_id(4), tree_id(5)],
+                uses: vec![
+                    crate::ast::untyped::UseRef {
+                        reference: tree_id(6),
+                        initially: true,
+                    },
+                    crate::ast::untyped::UseRef {
+                        reference: tree_id(7),
+                        initially: false,
+                    },
+                ],
+            },
         };
 
         assert_eq!(template.parents, vec![tree_id(2)]);
+        assert_eq!(template.metadata.derives, vec![tree_id(4), tree_id(5)]);
+        assert_eq!(template.metadata.uses[0].reference, tree_id(6));
+        assert!(template.metadata.uses[0].initially);
+        assert_eq!(template.metadata.uses[1].reference, tree_id(7));
+        assert!(!template.metadata.uses[1].initially);
+    }
+
+    #[test]
+    fn typed_template_has_no_untyped_template_metadata() {
+        let template = Template::<Typed> {
+            constructor: TreeId::new(1),
+            parents: vec![TreeId::new(2)],
+            self_val: None,
+            body: vec![TreeId::new(3)],
+            metadata: (),
+        };
+
+        assert_eq!(template.metadata, ());
     }
 
     #[test]

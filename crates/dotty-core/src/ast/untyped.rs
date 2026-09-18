@@ -4,7 +4,38 @@
 use crate::ast::modifiers::Modifiers;
 use crate::ast::phase::Untyped;
 use crate::ids::{NameId, TreeId};
-use crate::names::{Name, TermName};
+use crate::names::{Name, TermName, TypeName};
+
+/// One parser-level entry in a template's `uses` clause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UseRef {
+    pub reference: TreeId<Untyped>,
+    pub initially: bool,
+}
+
+/// Syntax-only metadata attached to an untyped template.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct UntypedTemplateMetadata {
+    pub derives: Vec<TreeId<Untyped>>,
+    pub uses: Vec<UseRef>,
+}
+
+/// The parser-level reason an expression, type, or pattern could not be
+/// constructed. Diagnostics remain outside the AST; this enum only lets
+/// recovery produce a structurally valid untyped tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorNodeKind {
+    MissingExpression,
+    MissingType,
+    MissingPattern,
+    UnexpectedToken,
+}
+
+/// A minimal placeholder inserted by parser recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorNode {
+    pub kind: ErrorNodeKind,
+}
 
 /// `object Foo extends ... { ... }`, before desugaring into a synthetic
 /// `ValDef` + module-class `TypeDef` pair.
@@ -19,6 +50,20 @@ pub struct ModuleDef {
 pub struct Function {
     pub params: Vec<TreeId<Untyped>>,
     pub body: TreeId<Untyped>,
+}
+
+/// A function type whose parser-level modifiers or erased parameters must be
+/// retained before typing, such as `(using A) ?=> B` or `(erased A) => B`.
+///
+/// `erased_params` has one entry per parameter and remains separate from
+/// `modifiers`: erasure is positional parameter syntax, not a modifier on the
+/// whole function type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionWithMods {
+    pub params: Vec<TreeId<Untyped>>,
+    pub result: TreeId<Untyped>,
+    pub modifiers: Modifiers,
+    pub erased_params: Vec<bool>,
 }
 
 /// `[type_params] => body`, a polymorphic function literal.
@@ -76,16 +121,28 @@ pub struct ForDo {
     pub body: TreeId<Untyped>,
 }
 
-/// `pattern <- expr`, a for-comprehension generator.
+/// The parser/lowering policy for a for-comprehension generator pattern.
 ///
-/// Dotty's `GenFrom` also carries a `GenCheckMode` (whether the generator's
-/// pattern match may fail and needs a filter inserted); that refinement is
-/// omitted from the foundation model and can be added to this struct once
-/// desugaring is implemented.
+/// The modes mirror Scala 3.9's `untpd.GenCheckMode`. The source version and
+/// an optional `case` prefix determine which mode the parser emits, so this
+/// information must survive the parser boundary until for-comprehension
+/// lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenCheckMode {
+    Ignore,
+    Filtered,
+    Check,
+    CheckAndFilter,
+    FilterNow,
+    FilterAlways,
+}
+
+/// `pattern <- expr`, a for-comprehension generator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenFrom {
     pub pattern: TreeId<Untyped>,
     pub expr: TreeId<Untyped>,
+    pub check_mode: GenCheckMode,
 }
 
 /// `pattern = expr`, a for-comprehension alias binding.
@@ -132,12 +189,37 @@ pub struct ContextBounds {
     pub context_bounds: Vec<TreeId<Untyped>>,
 }
 
+/// One Scala 3.9 context bound, including its optional `as` alias.
+///
+/// For example, `A: Show as show` is retained as a bound tree for `Show`,
+/// `parameter = A`, and `name = Some(show)`. `ContextBounds` owns these
+/// nodes in source order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextBoundTypeTree {
+    pub bound: TreeId<Untyped>,
+    pub parameter: TypeName,
+    pub name: Option<TermName>,
+}
+
+/// The lexical classification of an unsuffixed numeric literal.
+///
+/// `Whole` retains the source radix because Scala's parser passes the token
+/// base through to `untpd.Number`. `Decimal` and `Floating` distinguish the
+/// parser's decimal and exponent forms before typing chooses a numeric type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumberKind {
+    Whole(u32),
+    Decimal,
+    Floating,
+}
+
 /// A raw numeric literal, before the exact numeric type and overflow
-/// checking are resolved. The parser does not own numeric overflow
-/// checking (see `AGENTS.md`); `text` is the literal exactly as written.
+/// checking are resolved. The parser does not own numeric overflow checking
+/// (see `AGENTS.md`); `text` is the literal exactly as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NumberLiteral {
     pub text: NameId,
+    pub kind: NumberKind,
 }
 
 /// `throw expr`.
@@ -146,13 +228,28 @@ pub struct Throw {
     pub expr: TreeId<Untyped>,
 }
 
+/// `try expr` with the parser's catch handler still intact.
+///
+/// The handler may be a single catch expression or a case clause. Converting
+/// it to the shared `Try` node's `Vec<CaseDef>` belongs to a later lowering
+/// step, not to source parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParsedTry {
+    pub expr: TreeId<Untyped>,
+    pub handler: Option<TreeId<Untyped>>,
+    pub finalizer: Option<TreeId<Untyped>>,
+}
+
 /// Surface-syntax-only constructs. This set mirrors Dotty's actual
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UntypedNode {
+    Error(ErrorNode),
+
     ModuleDef(ModuleDef),
 
     Function(Function),
+    FunctionWithMods(FunctionWithMods),
     PolyFunction(PolyFunction),
 
     InfixOp(InfixOp),
@@ -175,17 +272,13 @@ pub enum UntypedNode {
     InterpolatedString(InterpolatedString),
 
     ContextBounds(ContextBounds),
+    ContextBoundTypeTree(ContextBoundTypeTree),
 
     Number(NumberLiteral),
 
     Throw(Throw),
 
-    /// A `derives` clause on a class/trait/enum `Template`. Real Dotty drops
-    /// this after typing (`Template.derived` is always empty except in the
-    /// untyped-only `DerivingTemplate` subclass), so it belongs here rather
-    /// than on the shared `Template<P>` node — see
-    /// `docs/dotty-core-design.md` §7.
-    Derived(Vec<TreeId<Untyped>>),
+    ParsedTry(ParsedTry),
 }
 
 #[cfg(test)]
@@ -199,6 +292,75 @@ mod tests {
 
     fn name(raw: u32) -> Name {
         Name::new(NameId::new(raw), Namespace::Term)
+    }
+
+    #[test]
+    fn error_node_preserves_its_exact_recovery_kind() {
+        let node = UntypedNode::Error(ErrorNode {
+            kind: ErrorNodeKind::MissingExpression,
+        });
+
+        assert_eq!(
+            node,
+            UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::MissingExpression,
+            })
+        );
+        assert_ne!(
+            node,
+            UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })
+        );
+    }
+
+    #[test]
+    fn parsed_try_preserves_absent_handler_and_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: None,
+            finalizer: None,
+        };
+
+        assert_eq!(parsed_try.expr, tree_id(1));
+        assert_eq!(parsed_try.handler, None);
+        assert_eq!(parsed_try.finalizer, None);
+    }
+
+    #[test]
+    fn parsed_try_preserves_a_handler_without_a_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: Some(tree_id(2)),
+            finalizer: None,
+        };
+
+        assert_eq!(parsed_try.handler, Some(tree_id(2)));
+        assert_eq!(parsed_try.finalizer, None);
+    }
+
+    #[test]
+    fn parsed_try_preserves_a_finalizer_without_a_handler() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: None,
+            finalizer: Some(tree_id(3)),
+        };
+
+        assert_eq!(parsed_try.handler, None);
+        assert_eq!(parsed_try.finalizer, Some(tree_id(3)));
+    }
+
+    #[test]
+    fn parsed_try_preserves_both_handler_and_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: Some(tree_id(2)),
+            finalizer: Some(tree_id(3)),
+        };
+
+        assert_eq!(parsed_try.handler, Some(tree_id(2)));
+        assert_eq!(parsed_try.finalizer, Some(tree_id(3)));
     }
 
     #[test]
@@ -229,6 +391,30 @@ mod tests {
         });
 
         assert_ne!(function, poly);
+    }
+
+    #[test]
+    fn function_with_mods_preserves_modifiers_and_erased_parameters() {
+        let node = UntypedNode::FunctionWithMods(FunctionWithMods {
+            params: vec![tree_id(1), tree_id(2)],
+            result: tree_id(3),
+            modifiers: Modifiers {
+                modifiers: vec![crate::ast::modifiers::Modifier::Given],
+                ..Modifiers::default()
+            },
+            erased_params: vec![false, true],
+        });
+
+        let UntypedNode::FunctionWithMods(function) = node else {
+            panic!("expected a FunctionWithMods node");
+        };
+        assert_eq!(function.params, vec![tree_id(1), tree_id(2)]);
+        assert_eq!(function.result, tree_id(3));
+        assert_eq!(
+            function.modifiers.modifiers,
+            vec![crate::ast::modifiers::Modifier::Given]
+        );
+        assert_eq!(function.erased_params, vec![false, true]);
     }
 
     #[test]
@@ -283,6 +469,7 @@ mod tests {
         let from = UntypedNode::GenFrom(GenFrom {
             pattern: tree_id(1),
             expr: tree_id(2),
+            check_mode: GenCheckMode::Check,
         });
         let alias = UntypedNode::GenAlias(GenAlias {
             pattern: tree_id(1),
@@ -290,6 +477,62 @@ mod tests {
         });
 
         assert_ne!(from, alias);
+    }
+
+    fn gen_from_with_mode(check_mode: GenCheckMode) -> GenFrom {
+        GenFrom {
+            pattern: tree_id(1),
+            expr: tree_id(2),
+            check_mode,
+        }
+    }
+
+    #[test]
+    fn gen_from_preserves_ignore_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Ignore).check_mode,
+            GenCheckMode::Ignore
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filtered_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Filtered).check_mode,
+            GenCheckMode::Filtered
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_check_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Check).check_mode,
+            GenCheckMode::Check
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_check_and_filter_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::CheckAndFilter).check_mode,
+            GenCheckMode::CheckAndFilter
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filter_now_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::FilterNow).check_mode,
+            GenCheckMode::FilterNow
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filter_always_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::FilterAlways).check_mode,
+            GenCheckMode::FilterAlways
+        );
     }
 
     #[test]
@@ -309,6 +552,24 @@ mod tests {
                 tpt: tree_id(2),
                 rhs: tree_id(3),
             })
+        );
+    }
+
+    #[test]
+    fn pat_def_preserves_a_var_modifier() {
+        let node = PatDef {
+            modifiers: Modifiers {
+                modifiers: vec![crate::ast::modifiers::Modifier::Var],
+                ..Modifiers::default()
+            },
+            patterns: vec![tree_id(1)],
+            tpt: tree_id(2),
+            rhs: tree_id(3),
+        };
+
+        assert_eq!(
+            node.modifiers.modifiers,
+            vec![crate::ast::modifiers::Modifier::Var]
         );
     }
 
@@ -376,9 +637,37 @@ mod tests {
     }
 
     #[test]
+    fn context_bound_type_tree_preserves_parameter_without_an_alias() {
+        let node = UntypedNode::ContextBoundTypeTree(ContextBoundTypeTree {
+            bound: tree_id(1),
+            parameter: crate::names::TypeName::new(NameId::new(2)),
+            name: None,
+        });
+
+        let UntypedNode::ContextBoundTypeTree(bound) = node else {
+            panic!("expected a ContextBoundTypeTree node");
+        };
+        assert_eq!(bound.bound, tree_id(1));
+        assert_eq!(bound.parameter, crate::names::TypeName::new(NameId::new(2)));
+        assert_eq!(bound.name, None);
+    }
+
+    #[test]
+    fn context_bound_type_tree_preserves_an_as_alias() {
+        let node = ContextBoundTypeTree {
+            bound: tree_id(1),
+            parameter: crate::names::TypeName::new(NameId::new(2)),
+            name: Some(TermName::new(NameId::new(3))),
+        };
+
+        assert_eq!(node.name, Some(TermName::new(NameId::new(3))));
+    }
+
+    #[test]
     fn number_literal_and_throw_carry_their_payload() {
         let number = UntypedNode::Number(NumberLiteral {
             text: NameId::new(1),
+            kind: NumberKind::Whole(10),
         });
         let throw = UntypedNode::Throw(Throw { expr: tree_id(1) });
 
@@ -386,9 +675,32 @@ mod tests {
     }
 
     #[test]
-    fn derived_carries_the_derives_clause_trees() {
-        let node = UntypedNode::Derived(vec![tree_id(1), tree_id(2)]);
+    fn number_literal_preserves_a_non_decimal_whole_radix() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Whole(16),
+        };
 
-        assert_eq!(node, UntypedNode::Derived(vec![tree_id(1), tree_id(2)]));
+        assert_eq!(number.kind, NumberKind::Whole(16));
+    }
+
+    #[test]
+    fn number_literal_preserves_decimal_classification() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Decimal,
+        };
+
+        assert_eq!(number.kind, NumberKind::Decimal);
+    }
+
+    #[test]
+    fn number_literal_preserves_floating_classification() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Floating,
+        };
+
+        assert_eq!(number.kind, NumberKind::Floating);
     }
 }
