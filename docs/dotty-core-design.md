@@ -729,6 +729,7 @@ pub enum UntypedNode {
     ModuleDef(ModuleDef),
 
     Function(Function),
+    FunctionWithMods(FunctionWithMods),
     PolyFunction(PolyFunction),
 
     InfixOp(InfixOp),
@@ -762,10 +763,10 @@ pub enum UntypedNode {
 }
 ```
 
-This is the foundation subset of Dotty's actual `untpd`-only node types. It
-does not yet claim complete parser coverage: `FunctionWithMods` remains the
-concrete parser-facing gap recorded in
-[`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md).
+This is the foundation subset of Dotty's actual `untpd`-only node types. The
+remaining differences called out by the parser-readiness audit are explicit
+lowering or feature-policy decisions, rather than silently dropped source
+payloads.
 
 ### `ast/typed.rs`
 
@@ -817,6 +818,7 @@ pub enum Modifier {
     Case,
     Implicit,
     Given,
+    Impure,
     Lazy,
     Override,
     Inline,

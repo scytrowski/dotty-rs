@@ -28,6 +28,7 @@ pub enum Modifier {
     Case,
     Implicit,
     Given,
+    Impure,
     Lazy,
     Override,
     Inline,
@@ -72,5 +73,10 @@ mod tests {
             VisibilitySyntax::Private { qualifier },
             VisibilitySyntax::Protected { qualifier }
         );
+    }
+
+    #[test]
+    fn impure_is_a_distinct_function_type_modifier() {
+        assert_ne!(Modifier::Impure, Modifier::Given);
     }
 }

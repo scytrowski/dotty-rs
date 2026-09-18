@@ -4,7 +4,7 @@
 use crate::ast::modifiers::Modifiers;
 use crate::ast::phase::Untyped;
 use crate::ids::{NameId, TreeId};
-use crate::names::{Name, TermName};
+use crate::names::{Name, TermName, TypeName};
 
 /// One parser-level entry in a template's `uses` clause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +50,20 @@ pub struct ModuleDef {
 pub struct Function {
     pub params: Vec<TreeId<Untyped>>,
     pub body: TreeId<Untyped>,
+}
+
+/// A function type whose parser-level modifiers or erased parameters must be
+/// retained before typing, such as `(using A) ?=> B` or `(erased A) => B`.
+///
+/// `erased_params` has one entry per parameter and remains separate from
+/// `modifiers`: erasure is positional parameter syntax, not a modifier on the
+/// whole function type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionWithMods {
+    pub params: Vec<TreeId<Untyped>>,
+    pub result: TreeId<Untyped>,
+    pub modifiers: Modifiers,
+    pub erased_params: Vec<bool>,
 }
 
 /// `[type_params] => body`, a polymorphic function literal.
@@ -171,7 +185,7 @@ pub struct ContextBounds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextBoundTypeTree {
     pub bound: TreeId<Untyped>,
-    pub parameter: crate::names::TypeName,
+    pub parameter: TypeName,
     pub name: Option<TermName>,
 }
 
@@ -210,6 +224,7 @@ pub enum UntypedNode {
     ModuleDef(ModuleDef),
 
     Function(Function),
+    FunctionWithMods(FunctionWithMods),
     PolyFunction(PolyFunction),
 
     InfixOp(InfixOp),
@@ -351,6 +366,30 @@ mod tests {
         });
 
         assert_ne!(function, poly);
+    }
+
+    #[test]
+    fn function_with_mods_preserves_modifiers_and_erased_parameters() {
+        let node = UntypedNode::FunctionWithMods(FunctionWithMods {
+            params: vec![tree_id(1), tree_id(2)],
+            result: tree_id(3),
+            modifiers: Modifiers {
+                modifiers: vec![crate::ast::modifiers::Modifier::Given],
+                ..Modifiers::default()
+            },
+            erased_params: vec![false, true],
+        });
+
+        let UntypedNode::FunctionWithMods(function) = node else {
+            panic!("expected a FunctionWithMods node");
+        };
+        assert_eq!(function.params, vec![tree_id(1), tree_id(2)]);
+        assert_eq!(function.result, tree_id(3));
+        assert_eq!(
+            function.modifiers.modifiers,
+            vec![crate::ast::modifiers::Modifier::Given]
+        );
+        assert_eq!(function.erased_params, vec![false, true]);
     }
 
     #[test]

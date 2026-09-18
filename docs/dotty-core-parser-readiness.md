@@ -43,6 +43,7 @@ InfixOp, PrefixOp, PostfixOp,
 Parens, Tuple,
 ForYield, ForDo, GenFrom, GenAlias,
 PatDef, ExtensionMethods, InterpolatedString,
+FunctionWithMods,
 ContextBounds, ContextBoundTypeTree, NumberLiteral, Throw,
 ParsedTry,
 ErrorNode
@@ -65,7 +66,7 @@ out-of-band tree convention or a lossy lowering step.
 | `Function` | `UntypedNode::Function` | REPRESENT | Preserves lambda parameters and body. |
 | `WildcardFunction` | None | LOWER | Placeholder bookkeeping belongs inside the parser. Emit `Function` with generated parameters once the enclosing expression is complete; do not expose Dotty's overlap-testing subclass. |
 | `PolyFunction` | `UntypedNode::PolyFunction` | REPRESENT | The parser must preserve the polymorphic function-literal shape before typing. |
-| `FunctionWithMods` | None | REPRESENT | Current `Function` loses function-type modifiers and erased-parameter information. Add the smallest untyped representation before parser implementation. Scala 3.9 parser creates this for `given`/`implicit`/`erased` function types. |
+| `FunctionWithMods` | `UntypedNode::FunctionWithMods` | REPRESENT | Preserves the result type, whole-function modifiers, and one erased flag per parameter. Scala 3.9 parser creates this for contextual/pure/erased function types. |
 | `InLambdaTypeTree` | None | NOT NEEDED | Dotty's node carries a compiler callback for short-lived typing of lambda definitions; it is not source information that should cross a Rust parser boundary. |
 | `InfixOp` | `UntypedNode::InfixOp` | REPRESENT | Operator spelling and operand grouping must survive until later precedence/desugaring work. |
 | `PrefixOp` | `UntypedNode::PrefixOp` | REPRESENT | Operator spelling must be retained. |
@@ -97,15 +98,13 @@ out-of-band tree convention or a lossy lowering step.
 | `OpTree` | `InfixOp` / `PrefixOp` / `PostfixOp` | NOT NEEDED | Abstract implementation base; the concrete operator nodes carry the required source information. |
 | `TermTree`, `TypTree`, `PatternTree`, `NameTree`, `Tree` | Shared `TreeKind` families | NOT NEEDED | Abstract Dotty inheritance families, not independent parser payloads. |
 | `GenCheckMode` | None | LOWER | Desugaring metadata rather than source syntax. Its eventual owner must be decided before implementing for-comprehension lowering. |
-| `Mod` / `Modifiers` | `Modifier` / `Modifiers` | REPRESENT | Source modifiers belong to untyped definitions and function types. The modifier inventory itself needs a Scala 3.9 completeness check before `FunctionWithMods` is added. |
+| `Mod` / `Modifiers` | `Modifier` / `Modifiers` | REPRESENT | Source modifiers belong to untyped definitions and function types; the function-type-specific `Impure` modifier is retained alongside existing `Given`/`Implicit`/`Erased` support. |
 
 ## Findings requiring follow-up
 
-The audit produces the following concrete follow-up item before the parser
-starts:
-
-1. Add the smallest representation for `FunctionWithMods`, or explicitly
-   narrow the parser dialect so modified/erased function types are rejected.
+The concrete parser-facing gaps identified by this audit are now represented
+in the untyped AST. The remaining items below are policy decisions, not
+missing AST payloads.
 
 The following are policy decisions, not immediate AST additions:
 
