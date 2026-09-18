@@ -2,6 +2,7 @@ use crate::annotation::SemanticAnnotation;
 use dotty_classfile::access_flags::FieldAccessFlags;
 use dotty_classfile::descriptor::FieldType;
 use dotty_classfile::signature::FieldSignature;
+use dotty_core::SymbolId;
 
 /// A loaded class's field: its name, access flags, declared type, and
 /// optional generic signature (JVMS §4.5).
@@ -11,8 +12,10 @@ use dotty_classfile::signature::FieldSignature;
 /// name stays an internal-form string, not a resolved reference. The
 /// resolved semantic type is *not* duplicated here: it is a real
 /// `dotty-core` `Symbol` (`SymbolKind::Field`) entered into the owning
-/// class's `Type::ClassInfo::declarations` scope, findable by this same
-/// `name`. This type stays purely JVM-facing sidecar metadata — see
+/// class's `Type::ClassInfo::declarations` scope — `symbol` names that
+/// same `Symbol` directly, so a caller that already has a `FieldSymbol`
+/// does not have to re-look it up by `name` through the scope to get it.
+/// This type otherwise stays purely JVM-facing sidecar metadata — see
 /// `docs/classloader.md`'s JVM metadata sidecar section.
 ///
 /// `signature` is `None` unless the field carries a `Signature` attribute
@@ -23,6 +26,7 @@ use dotty_classfile::signature::FieldSignature;
 #[derive(Debug, Clone)]
 pub struct FieldSymbol {
     name: String,
+    symbol: SymbolId,
     flags: FieldAccessFlags,
     field_type: FieldType,
     signature: Option<FieldSignature>,
@@ -32,6 +36,7 @@ pub struct FieldSymbol {
 impl FieldSymbol {
     pub fn new(
         name: String,
+        symbol: SymbolId,
         flags: FieldAccessFlags,
         field_type: FieldType,
         signature: Option<FieldSignature>,
@@ -39,6 +44,7 @@ impl FieldSymbol {
     ) -> Self {
         Self {
             name,
+            symbol,
             flags,
             field_type,
             signature,
@@ -48,6 +54,12 @@ impl FieldSymbol {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The real `dotty-core` `Symbol` (`SymbolKind::Field`) this sidecar
+    /// record describes — see this type's own doc comment.
+    pub fn symbol(&self) -> SymbolId {
+        self.symbol
     }
 
     pub fn flags(&self) -> FieldAccessFlags {
@@ -70,11 +82,38 @@ impl FieldSymbol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::SemanticStore;
+
+    /// A `SymbolId` real enough to stand in for a field/method's backing
+    /// `Symbol` in a test — `FieldSymbol`/`MethodSymbol` are pure sidecar
+    /// data with no `SemanticStore` of their own to allocate one from.
+    fn some_symbol_id(store: &mut SemanticStore) -> SymbolId {
+        use dotty_core::{
+            Name, Namespace, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
+            SymbolOrigin, Visibility,
+        };
+
+        let text = store.names.intern("field");
+        store.symbols.alloc(Symbol {
+            name: Name::new(text, Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Field,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        })
+    }
 
     #[test]
     fn exposes_name_flags_and_field_type() {
+        let mut store = SemanticStore::new();
         let symbol = FieldSymbol::new(
             "ANSWER".to_owned(),
+            some_symbol_id(&mut store),
             FieldAccessFlags(0x0019),
             FieldType::Int,
             None,
@@ -89,12 +128,30 @@ mod tests {
     }
 
     #[test]
+    fn exposes_the_real_symbol_it_describes() {
+        let mut store = SemanticStore::new();
+        let symbol_id = some_symbol_id(&mut store);
+        let symbol = FieldSymbol::new(
+            "ANSWER".to_owned(),
+            symbol_id,
+            FieldAccessFlags(0x0019),
+            FieldType::Int,
+            None,
+            Vec::new(),
+        );
+
+        assert_eq!(symbol.symbol(), symbol_id);
+    }
+
+    #[test]
     fn exposes_a_generic_signature_when_present() {
         use dotty_classfile::signature::ReferenceTypeSignature;
 
+        let mut store = SemanticStore::new();
         let signature = FieldSignature(ReferenceTypeSignature::TypeVariable("T".to_owned()));
         let symbol = FieldSymbol::new(
             "items".to_owned(),
+            some_symbol_id(&mut store),
             FieldAccessFlags(0x0001),
             FieldType::Object("java/util/List".to_owned()),
             Some(signature.clone()),

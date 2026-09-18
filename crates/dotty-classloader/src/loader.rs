@@ -922,6 +922,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
             fields.push(FieldSymbol::new(
                 field_name,
+                field_symbol,
                 field.access_flags,
                 field_type,
                 signature,
@@ -947,7 +948,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
             // `<clinit>` is a JVM static-initializer entry point, not a
             // source-level member -- see `enter_method`'s doc comment.
-            if method_name != "<clinit>" {
+            let method_symbol = if method_name != "<clinit>" {
                 let parameter_names = self.resolve_method_parameter_names(
                     name,
                     &method.attributes,
@@ -970,10 +971,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     origin,
                 );
                 self.enter_annotations(method_symbol, &annotations);
-            }
+                Some(method_symbol)
+            } else {
+                None
+            };
 
             methods.push(MethodSymbol::new(
                 method_name,
+                method_symbol,
                 method.access_flags,
                 descriptor,
                 signature,
@@ -2472,6 +2477,51 @@ mod tests {
         );
         assert!(method("computeAnswer").flags().is_private());
         assert!(method("computeAnswer").flags().is_static());
+    }
+
+    /// `FieldSymbol::symbol`/`MethodSymbol::symbol` name the exact same
+    /// `Symbol` a scope lookup by name would find — proving the sidecar
+    /// record's backlink is real, not just present, by cross-checking it
+    /// against the canonical path [`enters_real_fixtures_fields_into_the_class_declarations_scope`]/
+    /// [`loads_a_real_fixtures_methods`] already exercise separately.
+    #[test]
+    fn field_and_method_sidecar_records_carry_their_real_symbol_id() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load");
+
+        let metadata = loader
+            .metadata(symbol)
+            .expect("PoolSample should have classfile metadata");
+        let field_symbol = metadata
+            .fields
+            .iter()
+            .find(|field| field.name() == "ANSWER")
+            .expect("ANSWER should exist")
+            .symbol();
+        let method_symbol = metadata
+            .methods
+            .iter()
+            .find(|method| method.name() == "run")
+            .expect("run should exist")
+            .symbol();
+        drop(loader);
+
+        let declarations = class_info(&store, symbol).declarations;
+        let mut lookup = |member_name: &str| {
+            let text = store.names.intern(member_name);
+            let name = Name::new(text, Namespace::Term);
+            store
+                .scopes
+                .get(declarations)
+                .lookup(&name)
+                .unwrap_or_else(|| panic!("{member_name} should be entered in the class scope"))
+        };
+
+        assert_eq!(field_symbol, lookup("ANSWER"));
+        assert_eq!(method_symbol, Some(lookup("run")));
     }
 
     /// The same 3 methods as [`loads_a_real_fixtures_methods`], now
