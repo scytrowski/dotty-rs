@@ -10,6 +10,12 @@ use std::ops::{BitAnd, BitOr};
 ///
 /// `kind` ([`super::SymbolKind`]) gives a symbol's stable category; flags
 /// give its additional, independently-combinable properties.
+///
+/// Visibility (`public`/`private`/`protected`/package-private) is **not**
+/// one of these flags — "no `PRIVATE` and no `PROTECTED` bit set" cannot
+/// distinguish `public` from package-private, which is real semantic
+/// information loss for JVM members. `Symbol::visibility` (a
+/// [`super::Visibility`]) is the sole source of truth for that instead.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub struct SymbolFlags(u64);
 
@@ -25,25 +31,23 @@ macro_rules! flag_bits {
 }
 
 flag_bits! {
-    PRIVATE = 0;
-    PROTECTED = 1;
-    ABSTRACT = 2;
-    FINAL = 3;
-    SEALED = 4;
-    CASE = 5;
-    IMPLICIT = 6;
-    GIVEN = 7;
-    LAZY = 8;
-    MUTABLE = 9;
-    INLINE = 10;
-    TRANSPARENT = 11;
-    OPAQUE = 12;
-    EXTENSION = 13;
-    STATIC = 14;
-    SYNTHETIC = 15;
-    JAVA_DEFINED = 16;
-    ERASED = 17;
-    OVERRIDE = 18;
+    ABSTRACT = 0;
+    FINAL = 1;
+    SEALED = 2;
+    CASE = 3;
+    IMPLICIT = 4;
+    GIVEN = 5;
+    LAZY = 6;
+    MUTABLE = 7;
+    INLINE = 8;
+    TRANSPARENT = 9;
+    OPAQUE = 10;
+    EXTENSION = 11;
+    STATIC = 12;
+    SYNTHETIC = 13;
+    JAVA_DEFINED = 14;
+    ERASED = 15;
+    OVERRIDE = 16;
 }
 
 impl SymbolFlags {
@@ -100,16 +104,16 @@ mod tests {
 
     #[test]
     fn union_combines_independent_flags() {
-        let combined = SymbolFlags::FINAL | SymbolFlags::PRIVATE;
+        let combined = SymbolFlags::FINAL | SymbolFlags::ABSTRACT;
 
         assert!(combined.contains(SymbolFlags::FINAL));
-        assert!(combined.contains(SymbolFlags::PRIVATE));
+        assert!(combined.contains(SymbolFlags::ABSTRACT));
         assert!(!combined.contains(SymbolFlags::SEALED));
     }
 
     #[test]
     fn intersection_keeps_only_shared_flags() {
-        let a = SymbolFlags::FINAL | SymbolFlags::PRIVATE;
+        let a = SymbolFlags::FINAL | SymbolFlags::ABSTRACT;
         let b = SymbolFlags::FINAL | SymbolFlags::SEALED;
 
         assert_eq!(a & b, SymbolFlags::FINAL);
@@ -117,10 +121,10 @@ mod tests {
 
     #[test]
     fn difference_removes_the_given_flags() {
-        let combined = SymbolFlags::FINAL | SymbolFlags::PRIVATE;
+        let combined = SymbolFlags::FINAL | SymbolFlags::ABSTRACT;
 
         assert_eq!(
-            combined.difference(SymbolFlags::PRIVATE),
+            combined.difference(SymbolFlags::ABSTRACT),
             SymbolFlags::FINAL
         );
     }

@@ -5,6 +5,7 @@ use crate::names::Name;
 use crate::source::SourceSpan;
 use crate::symbols::kind::SymbolKind;
 use crate::symbols::origin::SymbolOrigin;
+use crate::symbols::visibility::Visibility;
 use crate::symbols::{SymbolFlags, SymbolInfo};
 
 /// A class's companion object symbol, or an object's companion class symbol.
@@ -36,6 +37,9 @@ pub struct Symbol {
     pub owner: Option<SymbolId>,
     pub kind: SymbolKind,
     pub flags: SymbolFlags,
+    /// Who can refer to this symbol — see [`Visibility`]'s docs for why this
+    /// is not folded into `flags` as a `PRIVATE`/`PROTECTED` bit pair.
+    pub visibility: Visibility,
     pub info: SymbolInfo,
     pub origin: SymbolOrigin,
     pub annotations: Vec<AnnotationId>,
@@ -55,6 +59,7 @@ mod tests {
             owner: None,
             kind,
             flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Synthetic,
             annotations: Vec::new(),

@@ -199,6 +199,7 @@ mod tests {
             name: TermName::new(NameId::new(1)),
             ty: param_ref,
             erased: false,
+            varargs: false,
         };
         let method = arena.alloc(Type::Method(MethodType {
             params: vec![xs],

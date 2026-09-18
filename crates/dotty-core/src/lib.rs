@@ -12,6 +12,7 @@
 //! The parser and typer that will consume this crate do not exist yet.
 
 pub mod ast;
+pub mod definitions;
 pub mod ids;
 pub mod names;
 pub mod source;
@@ -24,6 +25,8 @@ pub mod types;
 pub mod core {
     pub use super::ast;
     pub use super::ast::*;
+    pub use super::definitions;
+    pub use super::definitions::*;
     pub use super::ids;
     pub use super::ids::*;
     pub use super::names;
@@ -39,6 +42,7 @@ pub mod core {
 }
 
 pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
+pub use definitions::Definitions;
 pub use ids::{
     AnnotationId, ClassfileOriginId, CompletionId, NameId, ScopeId, SourceId, SymbolId,
     TastyOriginId, TreeId, TypeId,
@@ -47,8 +51,8 @@ pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
 pub use source::{SourceSpan, Span, SpanError};
 pub use store::SemanticStore;
 pub use symbols::{
-    Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
-    SymbolTable,
+    OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
+    SymbolOrigin, SymbolTable, Visibility,
 };
 pub use types::{
     Annotation, AnnotationArena, ClassInfo, Constant, ErrorType, MatchType, MethodKind,

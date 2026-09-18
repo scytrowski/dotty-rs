@@ -1,6 +1,6 @@
 use dotty::core::{
     Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
-    SymbolOrigin,
+    SymbolOrigin, Visibility,
 };
 use dotty::tasty::{NodeCategory, SimpleTerm, TastyFile, TermValue, Writer};
 
@@ -47,6 +47,7 @@ fn exposes_the_core_semantic_api_under_the_dotty_namespace() {
         owner: None,
         kind: SymbolKind::Value,
         flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
         info: SymbolInfo::Missing,
         origin: SymbolOrigin::Synthetic,
         annotations: Vec::new(),

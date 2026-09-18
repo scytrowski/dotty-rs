@@ -54,6 +54,7 @@ mod tests {
     use crate::symbols::kind::SymbolKind;
     use crate::symbols::origin::SymbolOrigin;
     use crate::symbols::symbol::SymbolLinks;
+    use crate::symbols::visibility::Visibility;
 
     fn minimal_symbol(owner: Option<SymbolId>) -> Symbol {
         Symbol {
@@ -61,6 +62,7 @@ mod tests {
             owner,
             kind: SymbolKind::Value,
             flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Synthetic,
             annotations: Vec::new(),

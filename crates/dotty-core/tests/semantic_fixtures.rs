@@ -18,7 +18,7 @@
 use dotty_core::{
     Annotation, ClassInfo, MatchType, MethodKind, MethodParam, MethodType, PolyType, Scope,
     SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
-    TermName, Type, TypeLambda, TypeName, TypeParam, Variance,
+    TermName, Type, TypeLambda, TypeName, TypeParam, Variance, Visibility,
 };
 
 /// Allocates a fresh, semantically-opaque placeholder type (standing in for
@@ -37,6 +37,7 @@ fn synthetic_symbol(
         owner: None,
         kind,
         flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
         info: SymbolInfo::Missing,
         origin: SymbolOrigin::Synthetic,
         annotations: Vec::new(),
@@ -64,6 +65,7 @@ fn generic_identity_method() {
             name: x_name,
             ty: param_ref,
             erased: false,
+            varargs: false,
         }],
         result: param_ref,
         kind: MethodKind::Plain,
@@ -317,6 +319,7 @@ fn contextual_parameter() {
             name: given_name,
             ty: show_of_a,
             erased: false,
+            varargs: false,
         }],
         result: string_result,
         kind: MethodKind::Contextual,
@@ -327,6 +330,7 @@ fn contextual_parameter() {
             name: x_name,
             ty: param_ref,
             erased: false,
+            varargs: false,
         }],
         result: contextual_method,
         kind: MethodKind::Plain,

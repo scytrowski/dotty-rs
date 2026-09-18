@@ -14,6 +14,12 @@ pub struct MethodParam {
     pub name: TermName,
     pub ty: TypeId,
     pub erased: bool,
+    /// Whether this is a JVM `ACC_VARARGS` trailing array parameter (Java
+    /// `T... xs`). Without this, `void f(String... xs)` and
+    /// `void f(String[] xs)` would lower to the exact same `MethodParam` and
+    /// become semantically indistinguishable, even though only the former
+    /// permits call sites to pass loose trailing arguments.
+    pub varargs: bool,
 }
 
 /// How a [`MethodType`]'s parameter clause binds its arguments.
@@ -74,10 +80,29 @@ mod tests {
             name: TermName::new(NameId::new(1)),
             ty: TypeId::new(2),
             erased: true,
+            varargs: false,
         };
 
         assert!(param.erased);
         assert_eq!(param.ty, TypeId::new(2));
+    }
+
+    #[test]
+    fn varargs_and_a_plain_array_typed_param_are_distinguishable() {
+        let array_param = MethodParam {
+            name: TermName::new(NameId::new(1)),
+            ty: TypeId::new(2),
+            erased: false,
+            varargs: false,
+        };
+        let varargs_param = MethodParam {
+            varargs: true,
+            ..array_param
+        };
+
+        assert_ne!(array_param, varargs_param);
+        assert!(varargs_param.varargs);
+        assert!(!array_param.varargs);
     }
 
     #[test]
