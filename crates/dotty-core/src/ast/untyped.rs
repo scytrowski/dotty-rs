@@ -556,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn pat_def_preserves_a_var_modifier() {
+        let node = PatDef {
+            modifiers: Modifiers {
+                modifiers: vec![crate::ast::modifiers::Modifier::Var],
+                ..Modifiers::default()
+            },
+            patterns: vec![tree_id(1)],
+            tpt: tree_id(2),
+            rhs: tree_id(3),
+        };
+
+        assert_eq!(
+            node.modifiers.modifiers,
+            vec![crate::ast::modifiers::Modifier::Var]
+        );
+    }
+
+    #[test]
     fn extension_methods_carries_param_clauses_and_methods() {
         let node = UntypedNode::ExtensionMethods(ExtensionMethods {
             param_clauses: vec![vec![tree_id(1)]],

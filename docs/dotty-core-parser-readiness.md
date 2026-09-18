@@ -98,7 +98,7 @@ out-of-band tree convention or a lossy lowering step.
 | `OpTree` | `InfixOp` / `PrefixOp` / `PostfixOp` | NOT NEEDED | Abstract implementation base; the concrete operator nodes carry the required source information. |
 | `TermTree`, `TypTree`, `PatternTree`, `NameTree`, `Tree` | Shared `TreeKind` families | NOT NEEDED | Abstract Dotty inheritance families, not independent parser payloads. |
 | `GenCheckMode` | `GenFrom::check_mode` | REPRESENT | The parser computes this mode from source version and generator syntax. All six Scala 3.9 variants are retained for compatibility with later lowering. |
-| `Mod` / `Modifiers` | `Modifier` / `Modifiers` | REPRESENT | Source modifiers belong to untyped definitions and function types; the function-type-specific `Impure` modifier is retained alongside existing `Given`/`Implicit`/`Erased` support. |
+| `Mod` / `Modifiers` | `Modifier` / `Modifiers` | REPRESENT / FEATURE-GATE | Default Scala 3.9 source modifiers include `Var`, `Into`, `Given`, `Implicit`, `Erased`, and `Impure`; `Tracked` and `Update` are retained for the capture-checking dialect, while `Private`/`Protected` remain `VisibilitySyntax`. |
 
 ## Findings requiring follow-up
 

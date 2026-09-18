@@ -826,6 +826,8 @@ pub enum Modifier {
     Final,
     Sealed,
     Case,
+    Var,
+    Update,
     Implicit,
     Given,
     Impure,
@@ -836,9 +838,17 @@ pub enum Modifier {
     Opaque,
     Open,
     Infix,
+    Tracked,
+    Into,
     Erased,
 }
 ```
+
+`Var` is attached to the existing untyped `PatDef`, matching Scala's
+parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
+`Tracked` and `Update` are retained as modifier values for the
+capture-checking dialect; enabling that dialect still requires its separate
+capture-set AST contract.
 
 `[MAJOR 2]` `Modifiers.annotations: Vec<TreeId<Untyped>>` is safe now that
 `Modifiers` only exists as `Untyped::DefMetadata` — a `Modifiers` value can
