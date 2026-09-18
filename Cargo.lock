@@ -9,6 +9,7 @@ dependencies = [
  "dotty-classfile",
  "dotty-classloader",
  "dotty-core",
+ "dotty-parser",
  "dotty-tasty",
 ]
 
