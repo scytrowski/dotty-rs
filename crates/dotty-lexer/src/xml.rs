@@ -56,7 +56,10 @@ pub(crate) struct XmlState {
 
 impl XmlState {
     pub(crate) fn can_start_literal(&self) -> bool {
-        self.content == XmlContent::Text && (self.depth == 0 || !self.expressions.is_empty())
+        self.content != XmlContent::Cdata
+            && (self.depth == 0
+                || !self.expressions.is_empty()
+                || self.content == XmlContent::Comment)
     }
 
     pub(crate) fn is_xml_name_separator(&self) -> bool {
@@ -136,6 +139,7 @@ impl XmlState {
         }
 
         match kind {
+            RawTokenKind::XmlStart if self.content == XmlContent::Comment => {}
             RawTokenKind::XmlStart => {
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
@@ -529,8 +533,14 @@ impl XmlState {
                 self.finish_self_closing_tag();
                 return self.depth == 0;
             }
-            spelling if spelling.ends_with('<') => {
-                self.finish_opening_tag();
+            spelling if spelling.ends_with("><") => {
+                if spelling.starts_with('>') {
+                    if self.closing_tag {
+                        self.finish_closing_tag();
+                    } else {
+                        self.finish_opening_tag();
+                    }
+                }
                 self.depth = self.depth.saturating_add(1);
                 self.closing_tag = false;
                 self.tag_open = true;
@@ -602,14 +612,32 @@ mod tests {
     }
 
     #[test]
-    fn does_not_start_nested_xml_inside_comment_or_cdata() {
+    fn tracks_nested_xml_starts_in_comments_but_not_cdata() {
         let mut state = XmlState::default();
         state.update_token(RawTokenKind::XmlStart, "<");
         state.update_token(RawTokenKind::Operator, "><!--");
-        assert!(!state.can_start_literal());
+        assert!(state.can_start_literal());
         state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBrace), "{");
+        state.update_token(RawTokenKind::XmlStart, "<");
+        assert!(state.can_start_literal());
         state.update_token(RawTokenKind::Operator, "-->");
         state.update_token(RawTokenKind::Operator, "><!");
         assert!(!state.can_start_literal());
+    }
+
+    #[test]
+    fn ignores_a_bare_less_than_in_xml_text_when_recovering() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Identifier, "root");
+        state.update_token(RawTokenKind::Operator, ">");
+        state.update_token(RawTokenKind::Identifier, "text");
+        assert!(!state.update_token(RawTokenKind::Operator, "<"));
+        state.update_token(RawTokenKind::Identifier, "nested");
+        state.update_token(RawTokenKind::Operator, "</");
+        state.update_token(RawTokenKind::Identifier, "root");
+
+        assert!(state.update_token(RawTokenKind::Operator, ">"));
+        assert!(state.eof_message().is_none());
     }
 }

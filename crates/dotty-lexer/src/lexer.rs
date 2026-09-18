@@ -696,6 +696,15 @@ impl<'source> RawLexer<'source> {
             if character == '/' && matches!(self.cursor.peek_nth(1), Some('/') | Some('*')) {
                 break;
             }
+            if character == '<'
+                && self
+                    .cursor
+                    .peek_nth(1)
+                    .is_some_and(crate::identifier::is_identifier_start)
+                && self.source.slice(self.span(start)?)?.ends_with("<!--")
+            {
+                break;
+            }
             if !is_operator_character(character) {
                 break;
             }
@@ -2893,6 +2902,77 @@ mod tests {
     fn accepts_matching_nested_xml_tag_names() {
         let (_, diagnostics) = scan("<root><child/></root>");
 
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_after_a_bare_less_than_in_xml_text() {
+        let source = "<root>text < nested </root>\n<next/>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| &source[token.span.start() as usize..token.span.end() as usize])
+                .collect::<Vec<_>>(),
+            vec![
+                "<", "root", ">", "text", "<", "nested", "</", "root", ">", "<", "next", "/>", ""
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_nested_xml_start_inside_a_comment_for_lexical_compatibility() {
+        let source = "<root><!--<nested/> --></root>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
         assert!(diagnostics.is_empty());
     }
 
