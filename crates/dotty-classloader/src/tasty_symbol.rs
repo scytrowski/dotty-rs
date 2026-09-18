@@ -6,8 +6,10 @@ use dotty_classfile::access_flags::{
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, AstError,
     CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
-    FINAL_TAG, MUTABLE_TAG, PRIVATE_TAG, PROTECTED_TAG, ParameterNode, RawName, RawTree,
-    STATIC_TAG, SYNTHETIC_TAG, StructuredNode, TEMPLATE_TAG, TRAIT_TAG, TYPEDEF_TAG, TastyFile,
+    FINAL_TAG, IdentNode, MUTABLE_TAG, PRIVATE_TAG, PROTECTED_TAG, ParameterNode, RawName, RawTree,
+    Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG,
+    StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFSYMBOL_TAG, TastyFile,
     TastyFileError, VALDEF_TAG,
 };
 use std::fmt;
@@ -522,6 +524,120 @@ fn decode_visibility(tail: &[DefinitionTail<'_>]) -> Option<DeclaredVisibility> 
     })
 }
 
+/// Resolves a name-table reference into a `/`-joined qualified string,
+/// recursing through [`RawName::Qualified`] entries — unlike [`wire_name`],
+/// which only reads a direct `UTF8` entry (adequate for a plain
+/// `IDENT`/`SELECT` chain's per-segment names, but not for a real
+/// `TERMREFpkg`'s own `NameRef`, which names a whole package and is
+/// commonly a `Qualified` entry itself, e.g. `java.io` is
+/// `Qualified { prefix: "java", selector: "io" }`, not one flat `UTF8`
+/// entry — `docs/tasty-format-3.9.0.md` §4.2).
+fn resolve_qualified_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    match file.names().entries().get(reference as usize)? {
+        RawName::Utf8(text) => Some(text.clone()),
+        RawName::Qualified { prefix, selector } => {
+            let prefix = resolve_qualified_name(file, *prefix)?;
+            let selector = resolve_qualified_name(file, *selector)?;
+            Some(format!("{prefix}/{selector}"))
+        }
+        _ => None,
+    }
+}
+
+/// Decodes a fresh [`RawTree`] starting at `address` in the `ASTs`
+/// section — what a `SHAREDterm`/`SHAREDtype` reference
+/// (`docs/tasty-format-3.9.0.md` §6.5) points at: the compiler serializes
+/// a repeated subtree once and has every other occurrence reference its
+/// address, so following one means decoding a second, independent tree
+/// rooted at that address, not looking anything up in an already-built
+/// one.
+fn decode_shared_tree<'a>(file: &TastyFile<'a>, address: u32) -> Option<RawTree<'a>> {
+    let section = file.section(StandardSection::Asts)?;
+    let mut reader =
+        Reader::with_range(section.payload, address as usize, section.payload.len()).ok()?;
+    RawTree::decode_with_base_offset(&mut reader, 0).ok()
+}
+
+/// Resolves the package path named by a real, post-typecheck `TYPEREF`/
+/// `TERMREF`'s prefix subtree (`docs/tasty-format-3.9.0.md` §6.5's
+/// `Type`/`Path` grammar) — only the shapes this decoder actually
+/// understands:
+///
+/// - `TERMREFpkg`: by far the common case for a reference to another
+///   compiled class — its `NameRef` names the package directly (see
+///   [`resolve_qualified_name`]).
+/// - `SHAREDterm`/`SHAREDtype`: the compiler shares a repeated prefix
+///   subtree by address instead of re-emitting it; followed via
+///   [`decode_shared_tree`] and resolved recursively.
+///
+/// Every other prefix shape — `THIS` (a nested class's own enclosing
+/// instance), `TERMREFin`/`TYPEREFin` (disambiguating an owner from a
+/// name clash), `TERMREFdirect`/`TYPEREFdirect`/`TERMREFsymbol`/
+/// `TYPEREFsymbol` (an AST-address reference to the defining symbol
+/// itself), or a reference nested inside another object/module path —
+/// returns `None`. Resolving those needs either the requested class's
+/// own identity or real symbol resolution (walking a definition's owner
+/// chain), neither of which this best-effort decoder has; `None` here
+/// means the caller falls back to its own pre-existing heuristic exactly
+/// as if this function did not exist, rather than fabricating a
+/// plausible-looking but wrong answer.
+fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Option<String> {
+    match prefix {
+        RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
+            resolve_qualified_name(file, term.name_ref()?)
+        }
+        RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
+            let reference = term.ast_ref()?;
+            let shared = decode_shared_tree(file, reference.address)?;
+            resolve_reference_prefix(file, &shared)
+        }
+        _ => None,
+    }
+}
+
+/// Resolves a real, post-typecheck `TYPEREF`/`TERMREF` node — or one
+/// nested inside the elaborated `IDENTTPT` pretty-print form a `.tasty`
+/// `extends` clause's own reference tree wraps it in — into a fully
+/// qualified [`BinaryName`], using [`resolve_reference_prefix`]'s
+/// prefix/name-table semantics instead of [`resolve_parent_name`]'s
+/// flatten-and-guess fallback.
+///
+/// Returns `None` — never a bare, unqualified name — when the simple
+/// name resolves but the prefix does not: [`resolve_parent_name`]'s own
+/// fallback already produces a same-package guess for a genuinely bare
+/// reference, and a partially-resolved name pretending to be complete
+/// would be strictly worse than that guess, not better.
+///
+/// `TERMREFsymbol`/`TYPEREFsymbol` deliberately do not appear in the
+/// matched tags below: unlike `TERMREF`/`TYPEREF`, their `reference`
+/// field is an AST address naming the defining symbol directly, not a
+/// `NameRef` — resolving one needs the same real symbol resolution
+/// [`resolve_reference_prefix`]'s own doc comment says this decoder does
+/// not have.
+fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<BinaryName> {
+    match tree.decode_structured().ok()? {
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG | TYPEREF_TAG,
+            reference,
+            qualifier,
+        }) => {
+            let simple_name = resolve_qualified_name(file, reference)?;
+            let package = resolve_reference_prefix(file, &qualifier)?;
+            Some(BinaryName::from_internal(format!(
+                "{package}/{simple_name}"
+            )))
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG,
+            ..
+        }) => None,
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            resolve_reference_name(file, &type_tree)
+        }
+        _ => None,
+    }
+}
+
 /// Reconstructs a supertype parent's referenced [`BinaryName`], or
 /// `None` when it can't be — either because the parent carries no name
 /// reference at all (the implicit `Object`/`AnyRef` superclass
@@ -529,6 +645,18 @@ fn decode_visibility(tail: &[DefinitionTail<'_>]) -> Option<DeclaredVisibility> 
 /// entry, JVMS §4.1's implicit interface superclass follows the same
 /// shape), or because every name reference it does carry fails to
 /// render as a plain name.
+///
+/// Tried first, before any of the flatten-based heuristic below: a real
+/// `TYPEREF`/`TERMREF`'s own prefix/name-table semantics
+/// ([`resolve_reference_name`]) — this is what an ordinary post-typecheck
+/// member type (`Point.x: Int`) and an implicit-import parent reference
+/// (`Source`'s `Closeable`, resolved via its `java.io` `TERMREFpkg`
+/// prefix, not the current package) both actually are on the wire, and
+/// the heuristic below cannot see either correctly: `Int`'s own `TYPEREF`
+/// name is invisible to [`RawTree::name_refs`] (`TYPEREF_TAG` is not one
+/// of the tags it visits), and `Closeable`'s bare `IDENTTPT` name has no
+/// way to know it means `java.io.Closeable` rather than the current
+/// package's own `Closeable`.
 ///
 /// [`RawTree::name_refs`] returns every name-table reference visible in
 /// a parent tree in source order; empirically (see this crate's
@@ -566,6 +694,10 @@ fn resolve_parent_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
+    if let Some(resolved) = resolve_reference_name(file, parent) {
+        return Some(resolved);
+    }
+
     let mut names: Vec<String> = parent
         .name_refs()
         .into_iter()
@@ -666,6 +798,11 @@ mod tests {
         assert!(decoded.interfaces.is_empty());
     }
 
+    /// `Dog.tasty`'s `Animal` mixin is a real, post-typecheck reference
+    /// carrying its own compiled `TERMREFpkg` prefix (`me.cytrowski.
+    /// tastyfixtures`, this fixture's real source package) —
+    /// [`resolve_reference_name`] resolves it directly, so it no longer
+    /// matters that `Dog` itself was requested with no package at all.
     #[test]
     fn decodes_a_class_with_a_trait_mixin_as_an_interface() {
         let decoded = decode(
@@ -678,20 +815,22 @@ mod tests {
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
         assert_eq!(
             decoded.interfaces,
-            vec![BinaryName::from_internal("Animal")]
+            vec![BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/Animal"
+            )]
         );
     }
 
-    /// `.tasty` `TypeDef`s carry no package of their own (`decode`'s own
-    /// doc comment), so `Dog.tasty`'s bare `Animal` reference must be
-    /// resolved relative to whatever package `Dog` was actually
-    /// requested under — not left bare, and not the fixture directory's
-    /// name. Requesting a name under a package no real fixture happens
-    /// to live in still exercises exactly this: `decode` still finds
-    /// the `Dog` `TypeDef` by simple name, and `Animal` still resolves,
-    /// now qualified with that same package.
+    /// The same fixture requested under a completely different,
+    /// fictitious package: `Animal`'s reference still resolves to its
+    /// own real compiled package, not `com/example` — a real
+    /// `TERMREFpkg`-qualified reference is authoritative and never
+    /// deferred to the requested class's own package the way a
+    /// genuinely bare (unresolvable) reference is (see
+    /// [`resolve_parent_name`]'s flatten-based fallback, still covered
+    /// by `does_not_requalify_an_already_cross_package_mixin` below).
     #[test]
-    fn qualifies_a_same_package_mixin_with_the_requested_classs_package() {
+    fn a_real_qualified_mixin_resolves_to_its_own_package_not_the_requested_ones() {
         let decoded = decode(
             &fixture_bytes("inheritance/Dog.tasty"),
             &BinaryName::from_internal("com/example/Dog"),
@@ -700,7 +839,9 @@ mod tests {
 
         assert_eq!(
             decoded.interfaces,
-            vec![BinaryName::from_internal("com/example/Animal")]
+            vec![BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/Animal"
+            )]
         );
     }
 
@@ -760,11 +901,17 @@ mod tests {
 
         assert!(decoded.flags.is_abstract());
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        // `Closeable`'s own reference carries a real `TERMREFpkg` prefix
+        // (`java.io`), so `resolve_reference_name` resolves it fully.
+        // `Iterator`'s generic mixin's tycon reference does not (an
+        // implicit-import reference this decoder still cannot see
+        // through — [`resolve_parent_name`]'s own doc comment), so it
+        // still falls back to a bare name, exactly as documented.
         assert_eq!(
             decoded.interfaces,
             vec![
                 BinaryName::from_internal("Iterator"),
-                BinaryName::from_internal("Closeable"),
+                BinaryName::from_internal("java/io/Closeable"),
             ]
         );
     }
@@ -783,12 +930,16 @@ mod tests {
 
         assert!(decoded.flags.is_final());
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        // `ScalaNumericConversions` and `Ordered`'s own references carry
+        // real `TERMREFpkg` prefixes and resolve fully; the synthetic
+        // `Serializable` mixin does not (same known limitation as
+        // `Iterator` above), so it still falls back to a bare name.
         assert_eq!(
             decoded.interfaces,
             vec![
-                BinaryName::from_internal("ScalaNumericConversions"),
+                BinaryName::from_internal("scala/math/ScalaNumericConversions"),
                 BinaryName::from_internal("Serializable"),
-                BinaryName::from_internal("Ordered"),
+                BinaryName::from_internal("scala/math/Ordered"),
             ]
         );
     }
@@ -890,25 +1041,27 @@ mod tests {
     /// `scala3-library/scala/concurrent/impl/CompletionLatch.tasty`'s
     /// real `CompletionLatch` mixes in `Try[T] => Unit` (a function
     /// type, `Function1[Try[T], Unit]` under the hood) — an
-    /// `AppliedType` whose own `tycon` is a bare `TYPEREF` referencing
-    /// its target purely by a prefix-relative name/symbol pair.
-    /// [`RawTree::name_refs`] deliberately does not treat `TYPEREF`'s
-    /// value as a visitable name the way it does `IDENT`/`IDENTTPT` (it
-    /// only whitelists tags for genuine source-level identifier
-    /// occurrences — see `visit_name_refs`'s match arms in
-    /// `dotty-tasty`), so [`resolve_applied_type_name`] correctly gives
-    /// up here rather than guessing. A real, disclosed limitation, not
-    /// a bug: this asserts it surfaces as `UnresolvedSupertype`, not a
-    /// silently dropped interface or a panic.
+    /// `AppliedType` whose own `tycon` is a real, post-typecheck
+    /// `TYPEREF` referencing its target by a prefix/name-table pair
+    /// (`scala`'s `TERMREFpkg` prefix plus `Function1`'s own `NameRef`),
+    /// not a source-level `IDENT`/`SELECT` chain. Before
+    /// [`resolve_reference_name`] existed, [`RawTree::name_refs`]
+    /// couldn't see this shape at all (it only visits `IDENT`/`IDENTTPT`
+    /// occurrences, not a bare `TYPEREF`'s own name), so
+    /// [`resolve_applied_type_name`] gave up and this surfaced as
+    /// `UnresolvedSupertype`. It now resolves correctly.
     #[test]
-    fn unresolved_supertype_when_a_generic_mixins_tycon_is_a_bare_typeref() {
-        let error = decode(
+    fn resolves_a_generic_mixins_bare_typeref_tycon() {
+        let decoded = decode(
             &fixture_bytes("scala3-library/scala/concurrent/impl/CompletionLatch.tasty"),
             &BinaryName::from_internal("CompletionLatch"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
+        assert_eq!(
+            decoded.interfaces,
+            vec![BinaryName::from_internal("scala/Function1")]
+        );
     }
 
     /// `decode_flags` is a pure, narrow mapping function. `TRAIT_TAG`/

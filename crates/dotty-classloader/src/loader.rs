@@ -4010,6 +4010,10 @@ mod tests {
             BinaryName::from_internal("scala/Serializable"),
             synthetic_class("scala/Serializable", None),
         );
+        dependencies.insert(
+            BinaryName::from_internal("scala/Int"),
+            synthetic_class("scala/Int", None),
+        );
 
         // `Point` is `.tasty`-backed but its dependencies are plain
         // `.class` bytes here -- `InMemoryTastyClassPath` tags every
@@ -4071,13 +4075,19 @@ mod tests {
         // (see `ClassLoader::lower_tasty_member_type`'s doc comment).
         // Closing the underlying best-effort-reduction gap is a
         // documented follow-up, not silently claimed here.
+        // `x`'s declared type is `Int`, encoded post-typecheck as a real
+        // `TYPEREF_TAG` node with a `scala` `TERMREFpkg` prefix --
+        // `resolve_reference_name` resolves this fully to `scala/Int`
+        // (registered on this test's classpath below), so `x`'s type is
+        // a genuine `Type::TypeRef` now, not a `Type::Error` guess.
         let x_type = member_type_id(&mut store, point, "x");
-        let Type::Error(error) = store.types.get(x_type) else {
-            panic!("expected x's type to be Type::Error");
+        let Type::TypeRef { symbol, .. } = store.types.get(x_type) else {
+            panic!(
+                "expected x's type to be a real Type::TypeRef, got {:?}",
+                store.types.get(x_type)
+            );
         };
-        let message = store.names.resolve(error.message);
-        assert!(message.contains("best-effort name scala failed to load"));
-        assert!(message.contains("class not found: scala"));
+        assert_eq!(symbol_name(&store, *symbol), "Int");
 
         let init_type = member_type_id(&mut store, point, "<init>");
         let Type::Method(init_method) = store.types.get(init_type) else {
@@ -4144,10 +4154,13 @@ mod tests {
         for stub in [
             "java/lang/Object",
             "Comparator",
+            "java/util/Comparator",
             "PartialOrdering",
             "scala/PartialOrdering",
+            "scala/math/PartialOrdering",
             "Serializable",
             "scala/Serializable",
+            "java/io/Serializable",
         ] {
             classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
         }
@@ -4165,6 +4178,61 @@ mod tests {
         drop(loader);
 
         assert_eq!(store.symbols.get(reverse).visibility, Visibility::Private);
+    }
+
+    /// End-to-end regression for `resolve_reference_name`
+    /// (`tasty_symbol.rs`): loads the real `scala/io/Source.tasty`
+    /// fixture through a full `ClassLoader`, with its real dependencies
+    /// on the classpath, and confirms `Closeable` resolves to the real
+    /// `java/io/Closeable` `Symbol` — not a same-package guess, and not
+    /// left as `Type::Error` — while `Iterator`'s own generic-mixin
+    /// reference (an implicit-import reference this decoder still can't
+    /// see through) stays a bare, unqualified dependency, exactly as
+    /// `tasty_symbol::tests::decodes_a_class_with_a_generic_mixin_encoded_as_an_applied_type`
+    /// documents at the decode-only level.
+    #[test]
+    fn loads_source_tasty_and_resolves_its_real_qualified_mixin() {
+        let mut tasty = HashMap::new();
+        tasty.insert(
+            BinaryName::from_internal("Source"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
+        );
+
+        let mut classes = HashMap::new();
+        for stub in ["java/lang/Object", "Iterator", "java/io/Closeable"] {
+            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
+        }
+
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let source = loader
+            .load_class(&BinaryName::from_internal("Source"))
+            .expect("Source should load from its real .tasty fixture");
+        drop(loader);
+
+        let info = class_info(&store, source);
+        let parent_names: Vec<&str> = info
+            .parents
+            .iter()
+            .map(|parent| symbol_name(&store, parent_symbol(&store, *parent)))
+            .collect();
+        assert_eq!(parent_names, vec!["Object", "Iterator", "Closeable"]);
+
+        // `Closeable`'s owner chain is `java -> io`, not the root/
+        // unnamed package `Source` itself lives in -- proving it
+        // resolved to the real classpath `java/io/Closeable`, not a
+        // same-package guess (which `Source`'s own bare, unqualified
+        // request would otherwise produce).
+        let closeable = parent_symbol(&store, info.parents[2]);
+        let io_package = store.symbols.get(closeable).owner.unwrap();
+        assert_eq!(symbol_name(&store, io_package), "io");
+        let java_package = store.symbols.get(io_package).owner.unwrap();
+        assert_eq!(symbol_name(&store, java_package), "java");
     }
 
     #[test]

@@ -109,6 +109,15 @@ fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
     *symbol
 }
 
+/// `Dog.tasty`'s `Animal` mixin is a real, post-typecheck reference
+/// carrying its own compiled `TERMREFpkg` prefix
+/// (`me.cytrowski.tastyfixtures`, this fixture's real source package —
+/// see `tasty_symbol::resolve_reference_name`), so `Animal` is looked up
+/// at that real qualified path, not bare — `tasty_sample/me/cytrowski/
+/// tastyfixtures/Animal.tasty` is a second copy of the same
+/// `Animal.tasty` bytes, alongside the pre-existing root-level
+/// `Animal.tasty`/`Animal.class` the tests below still load directly by
+/// their own bare request.
 #[test]
 fn loads_dog_with_animal_resolved_through_tasty_as_a_real_interface() {
     let mut store = SemanticStore::new();
