@@ -9,15 +9,19 @@
 //!
 //! Only the building blocks exist so far: the error model, the address-keyed
 //! `TastySemanticIndex`, wire-name reading, and the pure mappings from
-//! definition syntax to symbol facts. No pass is implemented yet.
+//! definition syntax to symbol facts, and the first pass of `TastyUnpickler`,
+//! which so far enters package symbols only.
 
 mod error;
 mod index;
 mod mapping;
 mod names;
+mod packages;
+mod unpickler;
 
 /// Semantic TASTy unpickling APIs.
 pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
     pub use crate::index::TastySemanticIndex;
+    pub use crate::unpickler::TastyUnpickler;
 }

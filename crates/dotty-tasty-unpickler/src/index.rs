@@ -55,10 +55,6 @@ impl TastySemanticIndex {
     /// A second symbol for an address that already has one would break the
     /// address-identity invariant, so it is rejected and the existing entry
     /// is kept.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the enter pass once it exists")
-    )]
     pub(crate) fn insert_symbol(
         &mut self,
         address: u32,
@@ -79,10 +75,6 @@ impl TastySemanticIndex {
     ///
     /// A symbol has at most one declaration scope; a second one is rejected
     /// and the existing entry is kept.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the enter pass once it exists")
-    )]
     pub(crate) fn insert_scope(
         &mut self,
         symbol: SymbolId,

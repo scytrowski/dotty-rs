@@ -117,6 +117,17 @@ Qualified access (`private[X]`, `protected[X]`) is reported as
 `UnpickleError::UnsupportedQualifiedModifier`: `Visibility` has no variant
 for it yet, and widening or narrowing it would be a guess.
 
+### Packages
+
+`TastyUnpickler::enter_symbols` enters a package symbol for every segment of a
+`PACKAGE` node's path (`TERMREFpkg`), splitting the qualified name
+structurally. A package is keyed by its path, so repeated `PACKAGE` nodes
+share one symbol, and the `PACKAGE` node address maps to the innermost
+package. Each package owns a declaration scope and is entered into its
+parent's scope. The outermost package has no owner. Any other path form is
+`UnpickleError::UnsupportedPackagePath`. Package symbols are per unpickler;
+see issue #12 for sharing them between units.
+
 ## 5. Errors
 
 Malformed or unsupported TASTy input is reported as a typed `UnpickleError`.

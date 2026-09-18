@@ -30,6 +30,9 @@ pub enum UnpickleError {
     /// has no qualified-access variant yet, so it cannot be represented
     /// faithfully.
     UnsupportedQualifiedModifier { tag: u8 },
+    /// A `PACKAGE` node whose path is not a direct package reference
+    /// (`TERMREFpkg`), which is the only form this unpickler reads.
+    UnsupportedPackagePath { address: u32 },
 }
 
 impl fmt::Display for UnpickleError {
@@ -51,6 +54,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "qualified access modifier (tag {tag}) has no visibility representation"
             ),
+            Self::UnsupportedPackagePath { address } => write!(
+                formatter,
+                "package at address {address} has an unsupported path form"
+            ),
             Self::DuplicateScope { symbol } => write!(
                 formatter,
                 "a declaration scope was already entered for symbol {}",
@@ -69,7 +76,8 @@ impl std::error::Error for UnpickleError {
             | Self::DuplicateScope { .. }
             | Self::InvalidNameReference { .. }
             | Self::UnsupportedName { .. }
-            | Self::UnsupportedQualifiedModifier { .. } => None,
+            | Self::UnsupportedQualifiedModifier { .. }
+            | Self::UnsupportedPackagePath { .. } => None,
         }
     }
 }

@@ -8,10 +8,6 @@
 //! resolves composite names (such as qualified package names) against the
 //! wrong entries. This module therefore reads the table directly and does not
 //! go through `render_name`.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the enter pass once it exists")
-)]
 
 use dotty_tasty::tasty::{NameTable, RawName};
 
@@ -28,6 +24,43 @@ const MAX_NAME_DEPTH: usize = 64;
 /// told apart by definition address, not by signature text.
 pub(crate) fn wire_name(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
     resolve(names, reference, reference, 0)
+}
+
+/// Splits a possibly qualified name into its segments, outermost first.
+///
+/// `me.cytrowski.semantic` becomes `["me", "cytrowski", "semantic"]`. Splitting
+/// the structure rather than the rendered text keeps a segment that itself
+/// contains a dot intact.
+pub(crate) fn qualified_segments(
+    names: &NameTable,
+    reference: u32,
+) -> Result<Vec<String>, UnpickleError> {
+    let mut segments = Vec::new();
+    collect_segments(names, reference, reference, 0, &mut segments)?;
+    Ok(segments)
+}
+
+fn collect_segments(
+    names: &NameTable,
+    root: u32,
+    reference: u32,
+    depth: usize,
+    segments: &mut Vec<String>,
+) -> Result<(), UnpickleError> {
+    if depth > MAX_NAME_DEPTH {
+        return Err(UnpickleError::InvalidNameReference { reference: root });
+    }
+    let entry = usize::try_from(reference)
+        .ok()
+        .and_then(|index| names.entries().get(index));
+    match entry {
+        Some(RawName::Qualified { prefix, selector }) => {
+            collect_segments(names, root, *prefix, depth + 1, segments)?;
+            segments.push(wire_name(names, *selector)?);
+        }
+        _ => segments.push(wire_name(names, reference)?),
+    }
+    Ok(())
 }
 
 fn resolve(
@@ -152,6 +185,59 @@ mod tests {
         ]);
 
         assert_eq!(wire_name(&names, 5).unwrap(), "me.cytrowski.semantic");
+    }
+
+    #[test]
+    fn qualified_segments_split_a_path_outermost_first() {
+        let names = table(vec![
+            utf8("me"),
+            utf8("cytrowski"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            utf8("semantic"),
+            RawName::Qualified {
+                prefix: 3,
+                selector: 4,
+            },
+        ]);
+
+        assert_eq!(
+            qualified_segments(&names, 5).unwrap(),
+            ["me", "cytrowski", "semantic"]
+        );
+    }
+
+    #[test]
+    fn qualified_segments_of_a_simple_name_is_that_name() {
+        let names = table(vec![utf8("scala")]);
+
+        assert_eq!(qualified_segments(&names, 1).unwrap(), ["scala"]);
+    }
+
+    #[test]
+    fn qualified_segments_keep_a_segment_containing_a_dot_whole() {
+        let names = table(vec![
+            utf8("a"),
+            utf8("b.c"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        assert_eq!(qualified_segments(&names, 3).unwrap(), ["a", "b.c"]);
+    }
+
+    #[test]
+    fn qualified_segments_of_a_missing_reference_is_an_invalid_reference() {
+        let names = table(vec![utf8("a")]);
+
+        assert_eq!(
+            qualified_segments(&names, 9),
+            Err(UnpickleError::InvalidNameReference { reference: 9 })
+        );
     }
 
     #[test]
