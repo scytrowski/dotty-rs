@@ -102,9 +102,35 @@ fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryNam
 }
 
 impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
+    /// Convenience for the common case: one `ClassLoader` for the whole
+    /// lifetime of `store`. Bootstraps its own [`Definitions`], which is
+    /// only correct when nothing else ever bootstraps another one
+    /// against the same `store` — [`Definitions::bootstrap`]'s own doc
+    /// comment requires exactly one per `SemanticStore`/session, and
+    /// calling this twice on the same store would silently mint two
+    /// independent, non-`==` sets of `Object`/`Any`/`Nothing`/primitive
+    /// `SymbolId`s in it. When several `ClassLoader`s need to share one
+    /// `SemanticStore` (e.g. one per classpath root, or one per
+    /// incremental recompilation unit), bootstrap [`Definitions`] once
+    /// up front and use [`Self::with_definitions`] for every loader
+    /// instead.
     pub fn new(class_path: E, store: &'store mut SemanticStore) -> Self {
-        let no_prefix = store.types.alloc(Type::NoPrefix);
         let definitions = Definitions::bootstrap(store);
+        Self::with_definitions(class_path, store, definitions)
+    }
+
+    /// Builds a `ClassLoader` against an already-bootstrapped, shared
+    /// [`Definitions`] — the construction path multiple `ClassLoader`s
+    /// sharing one `SemanticStore` must use, so every one of them
+    /// resolves `Object`/`Any`/`Nothing`/primitives to the exact same
+    /// canonical `SymbolId`s/`TypeId`s instead of each minting its own
+    /// (see [`Self::new`]'s doc comment).
+    pub fn with_definitions(
+        class_path: E,
+        store: &'store mut SemanticStore,
+        definitions: Definitions,
+    ) -> Self {
+        let no_prefix = store.types.alloc(Type::NoPrefix);
         Self {
             class_path,
             store,
@@ -114,6 +140,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             definitions,
             no_prefix,
         }
+    }
+
+    /// This loader's canonical [`Definitions`] — cheap to read back
+    /// ([`Definitions`] is `Copy`), e.g. to hand to
+    /// [`Self::with_definitions`] for a second `ClassLoader` sharing this
+    /// one's `store`.
+    pub fn definitions(&self) -> Definitions {
+        self.definitions
     }
 
     /// JVM-specific metadata for a `.class`-backed symbol previously
@@ -2217,6 +2251,54 @@ mod tests {
             synthetic_class("java/lang/String", None),
         );
         classes
+    }
+
+    /// Calling `ClassLoader::new` twice on the same `store` violates
+    /// `Definitions::bootstrap`'s own documented invariant ("exactly one
+    /// `Definitions` per `SemanticStore`") and mints two independent
+    /// builtin identities -- this pins down exactly what that misuse
+    /// looks like, so `with_definitions`'s regression test below has
+    /// something concrete to contrast against.
+    #[test]
+    fn two_class_loaders_bootstrapping_their_own_definitions_on_one_store_diverge() {
+        let mut store = SemanticStore::new();
+
+        let loader_a = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let object_a = loader_a.definitions().object_class;
+        drop(loader_a);
+
+        let loader_b = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let object_b = loader_b.definitions().object_class;
+        drop(loader_b);
+
+        assert_ne!(object_a, object_b);
+    }
+
+    /// The fix for the above: bootstrap `Definitions` once, and give it
+    /// to every `ClassLoader` sharing that `store` via
+    /// `with_definitions` instead of letting each mint its own.
+    #[test]
+    fn class_loaders_sharing_one_bootstrapped_definitions_agree_on_builtin_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let loader_a = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+        );
+        let object_a = loader_a.definitions().object_class;
+        drop(loader_a);
+
+        let loader_b = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+        );
+        let object_b = loader_b.definitions().object_class;
+        drop(loader_b);
+
+        assert_eq!(object_a, object_b);
     }
 
     #[test]
