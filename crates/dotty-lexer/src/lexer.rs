@@ -1383,6 +1383,186 @@ mod tests {
         })
     }
 
+    macro_rules! hard_keyword_tests {
+        ($(($name:ident, $spelling:literal, $keyword:expr)),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let (items, diagnostics) = scan($spelling);
+
+                    assert_eq!(
+                        items,
+                        vec![
+                            token(
+                                RawTokenKind::Keyword($keyword),
+                                0,
+                                $spelling.len() as u32,
+                            ),
+                            token(
+                                RawTokenKind::Eof,
+                                $spelling.len() as u32,
+                                $spelling.len() as u32,
+                            ),
+                        ]
+                    );
+                    assert!(diagnostics.is_empty());
+                }
+            )+
+        };
+    }
+
+    hard_keyword_tests!(
+        (classifies_if_as_a_hard_keyword, "if", HardKeyword::If),
+        (classifies_for_as_a_hard_keyword, "for", HardKeyword::For),
+        (classifies_else_as_a_hard_keyword, "else", HardKeyword::Else),
+        (classifies_this_as_a_hard_keyword, "this", HardKeyword::This),
+        (classifies_null_as_a_hard_keyword, "null", HardKeyword::Null),
+        (classifies_new_as_a_hard_keyword, "new", HardKeyword::New),
+        (
+            classifies_super_as_a_hard_keyword,
+            "super",
+            HardKeyword::Super
+        ),
+        (
+            classifies_abstract_as_a_hard_keyword,
+            "abstract",
+            HardKeyword::Abstract
+        ),
+        (
+            classifies_final_as_a_hard_keyword,
+            "final",
+            HardKeyword::Final
+        ),
+        (
+            classifies_private_as_a_hard_keyword,
+            "private",
+            HardKeyword::Private
+        ),
+        (
+            classifies_protected_as_a_hard_keyword,
+            "protected",
+            HardKeyword::Protected
+        ),
+        (
+            classifies_override_as_a_hard_keyword,
+            "override",
+            HardKeyword::Override
+        ),
+        (
+            classifies_extends_as_a_hard_keyword,
+            "extends",
+            HardKeyword::Extends
+        ),
+        (classifies_true_as_a_hard_keyword, "true", HardKeyword::True),
+        (
+            classifies_false_as_a_hard_keyword,
+            "false",
+            HardKeyword::False
+        ),
+        (
+            classifies_class_as_a_hard_keyword,
+            "class",
+            HardKeyword::Class
+        ),
+        (
+            classifies_import_as_a_hard_keyword,
+            "import",
+            HardKeyword::Import
+        ),
+        (
+            classifies_package_as_a_hard_keyword,
+            "package",
+            HardKeyword::Package
+        ),
+        (classifies_do_as_a_hard_keyword, "do", HardKeyword::Do),
+        (
+            classifies_sealed_as_a_hard_keyword,
+            "sealed",
+            HardKeyword::Sealed
+        ),
+        (
+            classifies_throw_as_a_hard_keyword,
+            "throw",
+            HardKeyword::Throw
+        ),
+        (classifies_try_as_a_hard_keyword, "try", HardKeyword::Try),
+        (
+            classifies_catch_as_a_hard_keyword,
+            "catch",
+            HardKeyword::Catch
+        ),
+        (
+            classifies_finally_as_a_hard_keyword,
+            "finally",
+            HardKeyword::Finally
+        ),
+        (
+            classifies_while_as_a_hard_keyword,
+            "while",
+            HardKeyword::While
+        ),
+        (
+            classifies_return_as_a_hard_keyword,
+            "return",
+            HardKeyword::Return
+        ),
+        (classifies_with_as_a_hard_keyword, "with", HardKeyword::With),
+        (classifies_case_as_a_hard_keyword, "case", HardKeyword::Case),
+        (classifies_val_as_a_hard_keyword, "val", HardKeyword::Val),
+        (
+            classifies_implicit_as_a_hard_keyword,
+            "implicit",
+            HardKeyword::Implicit
+        ),
+        (classifies_var_as_a_hard_keyword, "var", HardKeyword::Var),
+        (classifies_def_as_a_hard_keyword, "def", HardKeyword::Def),
+        (classifies_type_as_a_hard_keyword, "type", HardKeyword::Type),
+        (
+            classifies_object_as_a_hard_keyword,
+            "object",
+            HardKeyword::Object
+        ),
+        (
+            classifies_yield_as_a_hard_keyword,
+            "yield",
+            HardKeyword::Yield
+        ),
+        (
+            classifies_trait_as_a_hard_keyword,
+            "trait",
+            HardKeyword::Trait
+        ),
+        (
+            classifies_match_as_a_hard_keyword,
+            "match",
+            HardKeyword::Match
+        ),
+        (classifies_lazy_as_a_hard_keyword, "lazy", HardKeyword::Lazy),
+        (classifies_then_as_a_hard_keyword, "then", HardKeyword::Then),
+        (
+            classifies_for_some_as_a_hard_keyword,
+            "forSome",
+            HardKeyword::ForSome
+        ),
+        (classifies_enum_as_a_hard_keyword, "enum", HardKeyword::Enum),
+        (
+            classifies_given_as_a_hard_keyword,
+            "given",
+            HardKeyword::Given
+        ),
+        (
+            classifies_export_as_a_hard_keyword,
+            "export",
+            HardKeyword::Export
+        ),
+        (
+            classifies_macro_as_a_hard_keyword,
+            "macro",
+            HardKeyword::Macro
+        ),
+        (classifies_end_as_a_hard_keyword, "end", HardKeyword::End),
+    );
+
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
         RawItem::Trivia(Trivia {
             kind,
