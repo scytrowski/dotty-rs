@@ -156,17 +156,27 @@ impl From<AstError> for TastyDecodeError {
 /// `requested` (matched by its simple name — the part after the last
 /// `/` — since a `.tasty` file's own `TypeDef`s carry no package
 /// qualification of their own).
+///
+/// `requested`'s own package (everything before that last `/`, `""` for
+/// the root package) doubles as the package every bare, unqualified
+/// parent/member-type name reference is resolved relative to — see
+/// [`resolve_parent_name`]'s doc comment for why that's the right
+/// context to use.
 pub(crate) fn decode(
     bytes: &[u8],
     requested: &BinaryName,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
     let file = TastyFile::parse_scala_3_9(bytes)?;
     let index = file.ast_address_index()?;
-    let simple_name = requested
-        .as_internal()
+    let requested_internal = requested.as_internal();
+    let simple_name = requested_internal
         .rsplit('/')
         .next()
-        .unwrap_or(requested.as_internal());
+        .unwrap_or(requested_internal);
+    let package = match requested_internal.rsplit_once('/') {
+        Some((package, _)) => package,
+        None => "",
+    };
 
     let node = index
         .iter()
@@ -204,19 +214,21 @@ pub(crate) fn decode(
 
     let mut parents = template.parents.iter();
     let super_class = match parents.next() {
-        Some(parent) => resolve_parent_name(&file, parent)
+        Some(parent) => resolve_parent_name(&file, parent, package)
             .unwrap_or_else(|| BinaryName::from_internal("java/lang/Object")),
         None => BinaryName::from_internal("java/lang/Object"),
     };
 
     let mut interfaces = Vec::new();
     for parent in parents {
-        interfaces
-            .push(resolve_parent_name(&file, parent).ok_or(TastyDecodeError::UnresolvedSupertype)?);
+        interfaces.push(
+            resolve_parent_name(&file, parent, package)
+                .ok_or(TastyDecodeError::UnresolvedSupertype)?,
+        );
     }
 
-    let mut fields = decode_constructor_accessor_fields(&file, &template.term_params)?;
-    let (stats_fields, methods) = decode_members(&file, &template.stats)?;
+    let mut fields = decode_constructor_accessor_fields(&file, &template.term_params, package)?;
+    let (stats_fields, methods) = decode_members(&file, &template.stats, package)?;
     fields.extend(stats_fields);
 
     Ok(DecodedTastyClass {
@@ -248,6 +260,7 @@ pub(crate) fn decode(
 fn decode_constructor_accessor_fields(
     file: &TastyFile<'_>,
     term_params: &[ParameterNode<'_>],
+    package: &str,
 ) -> Result<Vec<DecodedTastyField>, TastyDecodeError> {
     let mut fields = Vec::new();
 
@@ -271,7 +284,7 @@ fn decode_constructor_accessor_fields(
         fields.push(DecodedTastyField {
             name: field_name,
             flags: decode_field_flags(&body.tail),
-            declared_type: resolve_parent_name(file, &body.type_tree),
+            declared_type: resolve_parent_name(file, &body.type_tree, package),
         });
     }
 
@@ -296,6 +309,7 @@ fn decode_constructor_accessor_fields(
 fn decode_members(
     file: &TastyFile<'_>,
     stats: &[RawTree<'_>],
+    package: &str,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
     let mut methods = Vec::new();
@@ -322,7 +336,7 @@ fn decode_members(
                 fields.push(DecodedTastyField {
                     name: field_name,
                     flags: decode_field_flags(&tail),
-                    declared_type: resolve_parent_name(file, &type_tree),
+                    declared_type: resolve_parent_name(file, &type_tree, package),
                 });
             }
             DEFDEF_TAG => {
@@ -355,7 +369,7 @@ fn decode_members(
                     let declared_type = parameter
                         .decode_body()
                         .ok()
-                        .and_then(|body| resolve_parent_name(file, &body.type_tree));
+                        .and_then(|body| resolve_parent_name(file, &body.type_tree, package));
                     decoded_parameters.push(DecodedTastyParameter {
                         name: parameter_name,
                         declared_type,
@@ -371,7 +385,7 @@ fn decode_members(
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
-                    resolve_parent_name(file, &return_type)
+                    resolve_parent_name(file, &return_type, package)
                 };
 
                 methods.push(DecodedTastyMethod {
@@ -477,11 +491,35 @@ fn decode_flags(tail: &[DefinitionTail<'_>]) -> ClassAccessFlags {
 /// an unrelated symbol reference with no direct UTF-8 name, while a
 /// cross-package mixin (`case class Point`'s implicit `Product`/
 /// `Serializable`) carries a fully-named, reversed qualification chain
-/// (e.g. `["Product", "scala", "_root_"]`). Filtering to only the
-/// references that do resolve to a direct name, in order, handles both
-/// shapes uniformly: reverse them, drop a leading synthetic `_root_`
-/// root-package marker, and join with `/`.
-fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<BinaryName> {
+/// — sometimes rooted with a leading synthetic `_root_` marker (e.g.
+/// `["Product", "scala", "_root_"]`), sometimes not (`Serializable`'s
+/// own chain is just `["Serializable", "scala"]`, no `_root_`) — so
+/// "already fully qualified" is decided by chain *length* (more than
+/// one name-table reference), not by `_root_`'s presence, which is only
+/// ever stripped, never load-bearing for the decision. Filtering to
+/// only the references that do resolve to a direct name, in order,
+/// handles both shapes uniformly: reverse them, and either join a
+/// multi-element chain as-is (dropping a leading `_root_` marker first,
+/// if present) or, for a single bare name, qualify it with `package` —
+/// `.tasty` never repeats the enclosing class's own package for a
+/// reference resolved directly in scope, unlike a cross-package
+/// reference, which always carries its full chain (see [`decode`]'s doc
+/// comment for where `package` comes from).
+///
+/// This is still best-effort, not full scope resolution: a name that's
+/// bare because it comes from an implicit import (`scala._`,
+/// `java.lang._`) rather than genuinely being in the same package (an
+/// import this decoder does not track) is indistinguishable, from the
+/// name table alone, from a genuine same-package reference, and is
+/// qualified with `package` the same way — which is wrong for that
+/// case, exactly as bare (unqualified) resolution was wrong for it
+/// before this fix. Only real symbol resolution can disambiguate the
+/// two.
+fn resolve_parent_name(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+) -> Option<BinaryName> {
     let mut names: Vec<String> = parent
         .name_refs()
         .into_iter()
@@ -489,10 +527,11 @@ fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<Bin
         .collect();
 
     if names.is_empty() {
-        return resolve_applied_type_name(file, parent);
+        return resolve_applied_type_name(file, parent, package);
     }
 
     names.reverse();
+    let already_qualified = names.len() > 1;
     if names.first().map(String::as_str) == Some("_root_") {
         names.remove(0);
     }
@@ -500,7 +539,13 @@ fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<Bin
         return None;
     }
 
-    Some(BinaryName::from_internal(names.join("/")))
+    let joined = names.join("/");
+    let qualified = if already_qualified || package.is_empty() {
+        joined
+    } else {
+        format!("{package}/{joined}")
+    };
+    Some(BinaryName::from_internal(qualified))
 }
 
 /// A generic mixin (e.g. `Iterable[Char]`) is encoded as an
@@ -511,7 +556,11 @@ fn resolve_parent_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<Bin
 /// `tycon` (the applied type's own base reference, e.g. `Iterable`),
 /// ignoring type arguments entirely — this decoder only ever needs a
 /// name, never a semantic (possibly generic) type.
-fn resolve_applied_type_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Option<BinaryName> {
+fn resolve_applied_type_name(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+) -> Option<BinaryName> {
     let RawTree::LengthNode(node) = parent else {
         return None;
     };
@@ -525,7 +574,7 @@ fn resolve_applied_type_name(file: &TastyFile<'_>, parent: &RawTree<'_>) -> Opti
         return None;
     };
 
-    resolve_parent_name(file, &tycon)
+    resolve_parent_name(file, &tycon, package)
 }
 
 /// Reads a raw AST name-table reference directly rather than through
@@ -587,6 +636,28 @@ mod tests {
         );
     }
 
+    /// `.tasty` `TypeDef`s carry no package of their own (`decode`'s own
+    /// doc comment), so `Dog.tasty`'s bare `Animal` reference must be
+    /// resolved relative to whatever package `Dog` was actually
+    /// requested under — not left bare, and not the fixture directory's
+    /// name. Requesting a name under a package no real fixture happens
+    /// to live in still exercises exactly this: `decode` still finds
+    /// the `Dog` `TypeDef` by simple name, and `Animal` still resolves,
+    /// now qualified with that same package.
+    #[test]
+    fn qualifies_a_same_package_mixin_with_the_requested_classs_package() {
+        let decoded = decode(
+            &fixture_bytes("inheritance/Dog.tasty"),
+            &BinaryName::from_internal("com/example/Dog"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            decoded.interfaces,
+            vec![BinaryName::from_internal("com/example/Animal")]
+        );
+    }
+
     #[test]
     fn decodes_a_case_class_with_cross_package_mixins() {
         let decoded = decode(
@@ -596,6 +667,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        assert_eq!(
+            decoded.interfaces,
+            vec![
+                BinaryName::from_internal("scala/Product"),
+                BinaryName::from_internal("scala/Serializable"),
+            ]
+        );
+    }
+
+    /// The same fixture as `decodes_a_case_class_with_cross_package_mixins`,
+    /// but requested under a (fictitious) non-root package — proving the
+    /// requested package only fills in a *bare* reference and is never
+    /// applied on top of `Product`/`Serializable`'s already fully
+    /// `_root_`-qualified chain.
+    #[test]
+    fn does_not_requalify_an_already_cross_package_mixin() {
+        let decoded = decode(
+            &fixture_bytes("case_class/Point.tasty"),
+            &BinaryName::from_internal("geometry/Point"),
+        )
+        .unwrap();
+
         assert_eq!(
             decoded.interfaces,
             vec![
