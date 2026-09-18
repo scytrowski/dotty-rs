@@ -1241,6 +1241,23 @@ mod tests {
         }
     }
 
+    fn visit_short_unicode_inputs(
+        alphabet: &[char],
+        current: &mut String,
+        remaining: usize,
+        visit: &mut impl FnMut(&str),
+    ) {
+        visit(current);
+        if remaining == 0 {
+            return;
+        }
+        for character in alphabet {
+            current.push(*character);
+            visit_short_unicode_inputs(alphabet, current, remaining - 1, visit);
+            current.pop();
+        }
+    }
+
     fn scan(source: &str) -> (Vec<RawItem>, Vec<Diagnostic>) {
         let mut lexer = RawLexer::new(source).expect("valid source");
         let mut items = Vec::new();
@@ -3279,6 +3296,90 @@ mod tests {
         let mut visited = 0;
 
         visit_short_ascii_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+
+            for token in scanner.tokens() {
+                assert!(
+                    token.span.start() <= token.span.end(),
+                    "invalid scanner span for {source:?}"
+                );
+                assert!(
+                    token.span.end() <= source.len() as u32,
+                    "scanner span exceeds source for {source:?}"
+                );
+            }
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
+    }
+
+    #[test]
+    fn raw_lexer_preserves_contiguous_spans_for_short_unicode_inputs() {
+        let alphabet = ['é', '𐐀', '\u{0301}', ' ', '\n', '\'', '"', '$', '{', '}'];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_unicode_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
+
+            let (items, _) = scan(source);
+            let mut offset = 0;
+            for item in items {
+                let span = match item {
+                    RawItem::Token(token) => token.span,
+                    RawItem::Trivia(trivia) => trivia.span,
+                };
+                assert_eq!(span.start(), offset, "raw span gap for {source:?}");
+                offset = span.end();
+            }
+            assert_eq!(offset, source.len() as u32, "raw span gap for {source:?}");
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
+    }
+
+    #[test]
+    fn contextual_scanner_reaches_eof_for_short_unicode_inputs() {
+        let alphabet = ['é', '𐐀', '\u{0301}', ' ', '\n', '\'', '"', '$', '{', '}'];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_unicode_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
+
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+            assert_eq!(
+                scanner.tokens().last().map(|token| token.kind),
+                Some(TokenKind::Eof),
+                "scanner did not reach EOF for {source:?}"
+            );
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
+    }
+
+    #[test]
+    fn contextual_scanner_keeps_token_spans_within_short_unicode_inputs() {
+        let alphabet = ['é', '𐐀', '\u{0301}', ' ', '\n', '\'', '"', '$', '{', '}'];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_unicode_inputs(&alphabet, &mut input, 3, &mut |source| {
             visited += 1;
             let scanner = crate::ContextualScanner::new(source)
                 .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));

@@ -543,11 +543,12 @@ reporting a typed diagnostic. Missing digits after a base prefix and invalid
 digits in hexadecimal/binary literals are diagnosed independently, without
 emitting duplicate errors for the same malformed literal.
 
-The lexer also has a deterministic short-input hardening test that exercises
-2,380 ASCII inputs through both raw and contextual scanning, checking progress,
-EOF reachability, and source-span coverage. Full randomized fuzzing remains a
-separate hardening task. Dedicated EOF-recovery matrices cover truncated
-interpolation, XML, comments, strings, backquoted identifiers, and escapes.
+The lexer also has deterministic short-input hardening tests that exercise
+2,380 ASCII inputs and 1,111 Unicode/multibyte inputs through both raw and
+contextual scanning, checking progress, EOF reachability, and source-span
+coverage. Full randomized fuzzing remains a separate hardening task. Dedicated
+EOF-recovery matrices cover truncated interpolation, XML, comments, strings,
+backquoted identifiers, and escapes.
 
 ## 11. Testing strategy
 
