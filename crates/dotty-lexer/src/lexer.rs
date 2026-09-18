@@ -1313,6 +1313,69 @@ mod tests {
         (items, lexer.diagnostics().to_vec())
     }
 
+    fn assert_raw_recovery_is_bounded(source: &str) {
+        let (items, diagnostics) = scan(source);
+        let mut offset = 0;
+
+        for item in &items {
+            let span = match item {
+                RawItem::Token(token) => token.span,
+                RawItem::Trivia(trivia) => trivia.span,
+            };
+            assert_eq!(span.start(), offset, "raw recovery span gap for {source:?}");
+            assert!(
+                span.end() <= source.len() as u32,
+                "raw recovery span exceeds source for {source:?}"
+            );
+            offset = span.end();
+        }
+
+        assert_eq!(
+            items.last().and_then(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            }),
+            Some(RawTokenKind::Eof),
+            "raw recovery did not reach EOF for {source:?}"
+        );
+        assert_eq!(
+            offset,
+            source.len() as u32,
+            "raw recovery spans did not cover {source:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.span().end() <= source.len() as u32),
+            "raw recovery diagnostic exceeded source for {source:?}"
+        );
+        assert!(
+            !diagnostics.is_empty(),
+            "truncated source produced no recovery diagnostic for {source:?}"
+        );
+    }
+
+    fn assert_scanner_recovery_is_bounded(source: &str) {
+        let scanner = crate::ContextualScanner::new(source)
+            .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+
+        assert_eq!(
+            scanner.tokens().last().map(|token| token.kind),
+            Some(TokenKind::Eof),
+            "scanner recovery did not reach EOF for {source:?}"
+        );
+        for token in scanner.tokens() {
+            assert!(
+                token.span.start() <= token.span.end() && token.span.end() <= source.len() as u32,
+                "scanner recovery span exceeded source for {source:?}"
+            );
+        }
+        assert!(
+            !scanner.diagnostics().is_empty(),
+            "truncated source produced no scanner recovery diagnostic for {source:?}"
+        );
+    }
+
     fn token(kind: RawTokenKind, start: u32, end: u32) -> RawItem {
         RawItem::Token(RawToken {
             kind,
@@ -3864,6 +3927,7 @@ mod tests {
     #[test]
     fn recovers_truncated_interpolation_inputs_at_eof() {
         for source in ["s\"", "s\"$", "s\"${", "s\"${value", "s\"${value + other"] {
+            assert_raw_recovery_is_bounded(source);
             let (items, diagnostics) = scan(source);
             assert_eq!(
                 items.last().and_then(|item| match item {
@@ -3884,11 +3948,17 @@ mod tests {
     fn recovers_truncated_xml_inputs_at_eof() {
         for source in [
             "<root",
+            "<root ",
+            "<root attribute",
+            "<root attribute=",
+            "<root attribute=\"value",
             "<root>",
             "<root>text",
             "<root>{value",
             "<root><!--",
+            "<root><![CDATA[text",
         ] {
+            assert_scanner_recovery_is_bounded(source);
             let scanner = crate::ContextualScanner::new(source)
                 .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
             assert_eq!(
@@ -3905,7 +3975,8 @@ mod tests {
 
     #[test]
     fn recovers_truncated_comments_and_literals_at_eof() {
-        for source in ["/*", "/* outer /* inner", "`name", "\"hello", "'\\"] {
+        for source in ["/*", "/* outer /* inner", "`name", "\"hello", "\"\\", "'\\"] {
+            assert_raw_recovery_is_bounded(source);
             let (items, diagnostics) = scan(source);
             assert_eq!(
                 items.last().and_then(|item| match item {
@@ -3920,5 +3991,39 @@ mod tests {
                 "truncated input produced no diagnostic for {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_empty_source_as_a_single_raw_eof_token() {
+        let (items, diagnostics) = scan("");
+
+        assert_eq!(items, vec![token(RawTokenKind::Eof, 0, 0)]);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_empty_source_as_a_single_scanner_eof_token() {
+        let scanner = crate::ContextualScanner::new("").expect("empty source is valid");
+
+        assert_eq!(scanner.tokens().len(), 1);
+        assert_eq!(scanner.tokens()[0].kind, TokenKind::Eof);
+        assert_eq!(scanner.tokens()[0].span, TextRange::new(0, 0).unwrap());
+        assert!(scanner.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_a_line_comment_ending_at_eof_without_a_diagnostic() {
+        let (items, diagnostics) = scan("// comment");
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0], RawItem::Trivia(_)));
+        assert!(matches!(
+            items[1],
+            RawItem::Token(RawToken {
+                kind: RawTokenKind::Eof,
+                ..
+            })
+        ));
+        assert!(diagnostics.is_empty());
     }
 }
