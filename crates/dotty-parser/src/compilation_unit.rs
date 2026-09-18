@@ -714,6 +714,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_empty_application_with_no_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo()",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        assert!(application.args.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn unsupported_expression_input_produces_an_error_tree_and_diagnostic() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
