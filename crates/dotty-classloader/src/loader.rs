@@ -23,9 +23,10 @@ use dotty_classfile::signature::{
     SignatureError, TypeArgument, TypeSignature,
 };
 use dotty_core::{
-    ClassInfo, Definitions, MethodKind, MethodParam, MethodType, Name, Namespace, PolyType, Scope,
-    ScopeId, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
-    SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Variance, Visibility,
+    Annotation as CoreAnnotation, ClassInfo, Definitions, MethodKind, MethodParam, MethodType,
+    Name, Namespace, PolyType, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam,
+    Variance, Visibility,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -274,7 +275,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         flags: FieldAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
-    ) {
+    ) -> SymbolId {
         // Unlike a top-level class's access_flags, a field's *can* carry
         // ACC_PRIVATE/ACC_PROTECTED (JVMS §4.5 Table 4.5-A), so all four
         // Java visibilities are distinguishable here.
@@ -327,6 +328,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .scopes
             .get_mut(declarations)
             .enter(symbol_name, field_symbol);
+        field_symbol
     }
 
     /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2) into a semantic
@@ -709,7 +711,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let annotations =
                 self.resolve_annotations(name, &field.attributes, &class_file.constant_pool)?;
 
-            self.enter_field(
+            let field_symbol = self.enter_field(
                 class_symbol,
                 declarations,
                 &field_name,
@@ -717,6 +719,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+            self.enter_annotations(field_symbol, &annotations);
 
             fields.push(FieldSymbol::new(
                 field_name,
@@ -759,7 +762,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     &parameter_names,
                     method.access_flags.is_varargs(),
                 )?;
-                self.enter_method(
+                let method_symbol = self.enter_method(
                     class_symbol,
                     declarations,
                     &method_name,
@@ -767,6 +770,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     resolved_type,
                     origin,
                 );
+                self.enter_annotations(method_symbol, &annotations);
             }
 
             methods.push(MethodSymbol::new(
@@ -786,6 +790,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let record_components = self.resolve_record_components(name, declarations, &class_file)?;
         let annotations =
             self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
+        self.enter_annotations(class_symbol, &annotations);
 
         self.metadata.insert(
             class_symbol,
@@ -1355,7 +1360,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         flags: MethodAccessFlags,
         resolved_type: TypeId,
         origin: SymbolOrigin,
-    ) {
+    ) -> SymbolId {
         let visibility = if flags.is_private() {
             Visibility::Private
         } else if flags.is_protected() {
@@ -1412,6 +1417,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .scopes
             .get_mut(declarations)
             .enter(symbol_name, method_symbol);
+        method_symbol
     }
 
     /// Looks for a `Record` attribute (JVMS §4.7.30) — present only on
@@ -1470,7 +1476,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// `docs/classloader.md` §9's Milestone 7 scope decision. Shared by
     /// the class itself, each field, and each method.
     fn resolve_annotations(
-        &self,
+        &mut self,
         owner: &BinaryName,
         attributes: &[Attribute<'_>],
         constant_pool: &ConstantPool,
@@ -1488,14 +1494,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     /// Resolves one decoded [`Annotation`] into a [`SemanticAnnotation`].
-    /// `annotation_type` is kept `Unresolved`, for the same reason as
-    /// every other Milestone 7 class reference (see
-    /// [`Self::resolve_optional_nest_host`]'s doc comment) — it's
-    /// decoded from the annotation's own field descriptor
-    /// (e.g. `Ljava/lang/Deprecated;`), not a `Class` constant pool
-    /// entry, so it's parsed the same way a field's descriptor is.
+    ///
+    /// `annotation_type` is resolved best-effort, the same tolerant way
+    /// [`Self::resolve_member_class`] resolves a member's declared type,
+    /// but — unlike a field/method's declared type — a failure to load it
+    /// does *not* fail the whole class: real-world bytecode routinely
+    /// carries annotations (build/processor-only ones especially) whose
+    /// interface is absent from the runtime classpath, and JVM reflection
+    /// itself only fails lazily when that specific annotation is
+    /// inspected, not at class-load time. So an unresolvable type falls
+    /// back to `ClassRef::Unresolved` here rather than propagating a
+    /// [`ClassLoadError`] — see [`Self::enter_annotations`] for what that
+    /// means for the resulting `dotty_core::Annotation`.
     fn resolve_annotation(
-        &self,
+        &mut self,
         owner: &BinaryName,
         annotation: &Annotation,
         constant_pool: &ConstantPool,
@@ -1507,7 +1519,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map_err(|error| ClassLoadError::MalformedDescriptor(owner.clone(), error.into()))?;
         let annotation_type = match parsed_type {
             FieldType::Object(class_name) => {
-                ClassRef::Unresolved(BinaryName::from_internal(&class_name))
+                let dependency = BinaryName::from_internal(&class_name);
+                match self.resolve_member_class(owner, &dependency) {
+                    Ok(symbol) => ClassRef::Resolved(symbol),
+                    Err(_) => ClassRef::Unresolved(dependency),
+                }
             }
             // JVMS §4.7.16 guarantees an annotation's own type descriptor
             // names a class type; a primitive/array shape here can only
@@ -1539,12 +1555,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })
     }
 
+    /// Allocates a `dotty_core::Annotation`/`AnnotationId` for each of
+    /// `annotations` whose `annotation_type` resolved to a real `SymbolId`
+    /// (see [`Self::resolve_annotation`]'s doc comment on why one that
+    /// could not be loaded is silently skipped here rather than treated as
+    /// an error), and attaches the resulting list to `symbol`'s own
+    /// `Symbol::annotations` — dotty-core's canonical, argument-free "does
+    /// this symbol carry annotation X" list. The full element values stay
+    /// exclusively in `annotations` (the JVM-facing `SemanticAnnotation`/
+    /// `AnnotationValue` sidecar shape already stored on
+    /// [`ClassfileMetadata`]/[`FieldSymbol`]/[`MethodSymbol`]) — a
+    /// classfile-decoded value has no typed source tree to become a
+    /// `dotty_core::Annotation::tree`, so `tree` is always `None` here.
+    fn enter_annotations(&mut self, symbol: SymbolId, annotations: &[SemanticAnnotation]) {
+        let ids = annotations
+            .iter()
+            .filter_map(|annotation| match &annotation.annotation_type {
+                ClassRef::Resolved(annotation_symbol) => {
+                    let ty = self.type_ref(*annotation_symbol);
+                    Some(self.store.annotations.alloc(CoreAnnotation::new(ty, None)))
+                }
+                ClassRef::Unresolved(_) => None,
+            })
+            .collect();
+        self.store.symbols.get_mut(symbol).annotations = ids;
+    }
+
     /// Resolves one decoded [`ElementValue`] (JVMS §4.7.16.1) into an
     /// [`AnnotationValue`]. Class names mentioned inside a value
     /// (`Enum`'s type, `Class`'s payload) are kept as raw strings, not
     /// resolved — see [`AnnotationValue`]'s doc comment.
     fn resolve_element_value(
-        &self,
+        &mut self,
         owner: &BinaryName,
         value: &ElementValue,
         constant_pool: &ConstantPool,
@@ -3842,10 +3884,12 @@ mod tests {
     /// `nested_sample/NestedSample$Inner.class`'s real
     /// `@Deprecated(since = "1.0", forRemoval = true)` annotation
     /// (confirmed via `javap -p -v`) exercises `RuntimeVisibleAnnotations`
-    /// (JVMS §4.7.16) end to end: the annotation type resolves to
-    /// `java/lang/Deprecated` (kept `Unresolved`, per
-    /// `resolve_annotation`'s doc comment), and its `String`/`Boolean`
-    /// element values decode correctly.
+    /// (JVMS §4.7.16) end to end: since `java/lang/Deprecated` is on the
+    /// classpath, its type resolves to a real `SymbolId` (unlike
+    /// `resolves_every_element_value_variant_from_a_synthetic_annotation`'s
+    /// unresolvable annotation type below), so the class's own `Symbol`
+    /// also carries a matching real `dotty_core::Annotation`, and the raw
+    /// sidecar's `String`/`Boolean` element values decode correctly.
     #[test]
     fn resolves_a_real_annotation_on_a_class() {
         let mut classes = nested_sample_classpath();
@@ -3865,14 +3909,16 @@ mod tests {
             .metadata(symbol)
             .expect("NestedSample$Inner should have classfile metadata");
         let annotations = &metadata.annotations;
+        let deprecated_symbol = annotations
+            .iter()
+            .find_map(|annotation| match &annotation.annotation_type {
+                ClassRef::Resolved(annotation_symbol) => Some(*annotation_symbol),
+                ClassRef::Unresolved(_) => None,
+            })
+            .expect("NestedSample$Inner should carry a resolved @Deprecated annotation");
         let deprecated = annotations
             .iter()
-            .find(|annotation| {
-                matches!(
-                    &annotation.annotation_type,
-                    ClassRef::Unresolved(name) if name.as_internal() == "java/lang/Deprecated"
-                )
-            })
+            .find(|annotation| annotation.annotation_type == ClassRef::Resolved(deprecated_symbol))
             .expect("NestedSample$Inner should carry a @Deprecated annotation");
 
         let element = |name: &str| {
@@ -3892,6 +3938,15 @@ mod tests {
             element("forRemoval"),
             AnnotationValue::Boolean(true)
         ));
+
+        drop(loader);
+        assert_eq!(symbol_name(&store, deprecated_symbol), "Deprecated");
+
+        let symbol_annotations = &store.symbols.get(symbol).annotations;
+        assert_eq!(symbol_annotations.len(), 1);
+        let core_annotation = store.annotations.get(symbol_annotations[0]);
+        assert_eq!(core_annotation.tree, None);
+        assert_eq!(parent_symbol(&store, core_annotation.ty), deprecated_symbol);
     }
 
     /// A hand-built, minimal, synthetic class file carrying one
@@ -4170,6 +4225,130 @@ mod tests {
                 assert_eq!(ints, vec![1, 2, 3]);
             }
             unexpected => panic!("expected an array element value, got {unexpected:?}"),
+        }
+
+        // "Tag" is not on this test's classpath, so it stays
+        // `ClassRef::Unresolved` (per `resolve_annotation`'s doc comment)
+        // and never gets a `dotty_core::Annotation` on the class's own
+        // `Symbol` -- an annotation whose interface cannot be loaded is
+        // not a class-load failure, but it also cannot become a real,
+        // typed `Symbol::annotations` entry.
+        drop(loader);
+        assert!(store.symbols.get(symbol).annotations.is_empty());
+    }
+
+    /// A hand-built, minimal, synthetic class file with one field and one
+    /// method, each carrying a single `RuntimeVisibleAnnotations` entry for
+    /// an `Ann` annotation type that *is* on the classpath — exercises
+    /// `ClassLoader::enter_annotations` on a field/method `Symbol`, not
+    /// just a class's (already covered by `resolves_a_real_annotation_on_a_class`).
+    fn synthetic_class_with_field_and_method_annotations() -> Vec<u8> {
+        fn push_utf8(pool: &mut Vec<u8>, next_index: &mut u16, value: &str) -> u16 {
+            let index = *next_index;
+            pool.push(1); // CONSTANT_Utf8
+            pool.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            pool.extend_from_slice(value.as_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_class(pool: &mut Vec<u8>, next_index: &mut u16, name_index: u16) -> u16 {
+            let index = *next_index;
+            pool.push(7); // CONSTANT_Class
+            pool.extend_from_slice(&name_index.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+        fn annotations_attribute_body(type_index: u16) -> Vec<u8> {
+            let mut body = Vec::new();
+            body.extend_from_slice(&1u16.to_be_bytes()); // num_annotations
+            body.extend_from_slice(&type_index.to_be_bytes());
+            body.extend_from_slice(&0u16.to_be_bytes()); // num_element_value_pairs
+            body
+        }
+
+        let mut pool = Vec::new();
+        let mut next_index: u16 = 1;
+        let this_name_index = push_utf8(&mut pool, &mut next_index, "C");
+        let this_class_index = push_class(&mut pool, &mut next_index, this_name_index);
+        let field_name_index = push_utf8(&mut pool, &mut next_index, "field");
+        let field_descriptor_index = push_utf8(&mut pool, &mut next_index, "I");
+        let method_name_index = push_utf8(&mut pool, &mut next_index, "method");
+        let method_descriptor_index = push_utf8(&mut pool, &mut next_index, "()V");
+        let attr_name_index = push_utf8(&mut pool, &mut next_index, "RuntimeVisibleAnnotations");
+        let ann_type_index = push_utf8(&mut pool, &mut next_index, "LAnn;");
+        let annotation_body = annotations_attribute_body(ann_type_index);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&[0x00, 0x45]);
+        bytes.extend_from_slice(&next_index.to_be_bytes()); // constant_pool_count
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&this_class_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // fields_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // field access_flags
+        bytes.extend_from_slice(&field_name_index.to_be_bytes());
+        bytes.extend_from_slice(&field_descriptor_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x01]); // field attributes_count = 1
+        bytes.extend_from_slice(&attr_name_index.to_be_bytes());
+        bytes.extend_from_slice(&(annotation_body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&annotation_body);
+        bytes.extend_from_slice(&[0x00, 0x01]); // methods_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // method access_flags
+        bytes.extend_from_slice(&method_name_index.to_be_bytes());
+        bytes.extend_from_slice(&method_descriptor_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x01]); // method attributes_count = 1
+        bytes.extend_from_slice(&attr_name_index.to_be_bytes());
+        bytes.extend_from_slice(&(annotation_body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&annotation_body);
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0 (class-level)
+        bytes
+    }
+
+    #[test]
+    fn enters_a_resolved_field_and_method_annotation_onto_their_own_symbols() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_field_and_method_annotations(),
+        );
+        classes.insert(
+            BinaryName::from_internal("Ann"),
+            synthetic_class("Ann", None),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .expect("C should load");
+        drop(loader);
+
+        let declarations = class_info(&store, class_symbol).declarations;
+        let mut member_symbol = |member_name: &str| {
+            let text = store.names.intern(member_name);
+            let name = Name::new(text, Namespace::Term);
+            store
+                .scopes
+                .get(declarations)
+                .lookup(&name)
+                .unwrap_or_else(|| panic!("{member_name} should be entered in the class scope"))
+        };
+        let field_symbol = member_symbol("field");
+        let method_symbol = member_symbol("method");
+
+        for symbol in [field_symbol, method_symbol] {
+            let symbol_annotations = &store.symbols.get(symbol).annotations;
+            assert_eq!(symbol_annotations.len(), 1);
+            let core_annotation = store.annotations.get(symbol_annotations[0]);
+            assert_eq!(core_annotation.tree, None);
+            assert_eq!(
+                symbol_name(&store, parent_symbol(&store, core_annotation.ty)),
+                "Ann"
+            );
         }
     }
 }

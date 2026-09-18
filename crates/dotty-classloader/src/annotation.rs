@@ -3,14 +3,23 @@ use crate::symbol::ClassRef;
 /// A resolved annotation (JVMS §4.7.16), attached to a class, field, or
 /// method (`docs/classloader.md` §9, Milestone 7).
 ///
-/// `annotation_type` is the annotation interface itself, resolved the
-/// same tolerant way `docs/classloader.md` §9's Milestone 6 resolves a
-/// member's declared type — it's the load-bearing "this annotation is
-/// an instance of this type" reference, parallel to a field's declared
-/// type. `elements` keeps insertion order from the class file, as a
-/// list of `(element name, value)` pairs rather than a map: JVMS
-/// doesn't require unique names, and preserving source order matters
-/// more than lookup speed here.
+/// `annotation_type` is the annotation interface itself. Unlike a field's
+/// declared type, an annotation's type is *not* load-bearing: real-world
+/// bytecode routinely carries annotations (build/processor-only ones in
+/// particular) whose interface is absent from the runtime classpath, and
+/// that must not fail loading the annotated class itself — so
+/// `ClassLoader::resolve_annotation` resolves it best-effort and falls
+/// back to `ClassRef::Unresolved` rather than propagating a
+/// `ClassLoadError`. When it does resolve, the annotation also gets a real
+/// `dotty_core::Annotation`/`AnnotationId` entered onto the annotated
+/// symbol's own `Symbol::annotations` — see
+/// `ClassLoader::enter_annotations`. `elements` keeps insertion order from
+/// the class file, as a list of `(element name, value)` pairs rather than
+/// a map: JVMS doesn't require unique names, and preserving source order
+/// matters more than lookup speed here. The element values themselves
+/// have no home in `dotty_core::Annotation` (its `tree` is a typed source
+/// AST, which classfile-decoded values aren't), so they stay exclusively
+/// in this JVM-facing sidecar shape.
 ///
 /// Both `RuntimeVisibleAnnotations` and `RuntimeInvisibleAnnotations`
 /// flatten into this one list on their owner — retention visibility is
