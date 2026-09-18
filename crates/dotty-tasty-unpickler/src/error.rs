@@ -1,5 +1,6 @@
 use std::fmt;
 
+use dotty_core::ids::SymbolId;
 use dotty_tasty::tasty::{AstError, TastyFileError};
 
 /// Why semantic unpickling of a TASTy file failed.
@@ -14,6 +15,12 @@ pub enum UnpickleError {
     Tasty(TastyFileError),
     /// An AST node could not be decoded into its structured form.
     Ast(AstError),
+    /// A second symbol was entered for a definition address that already has
+    /// one, which would break the address-identity invariant.
+    DuplicateDefinition { address: u32 },
+    /// A second declaration scope was entered for a symbol that already owns
+    /// one.
+    DuplicateScope { symbol: SymbolId },
 }
 
 impl fmt::Display for UnpickleError {
@@ -21,6 +28,15 @@ impl fmt::Display for UnpickleError {
         match self {
             Self::Tasty(error) => write!(formatter, "invalid TASTy file: {error}"),
             Self::Ast(error) => write!(formatter, "invalid TASTy AST node: {error}"),
+            Self::DuplicateDefinition { address } => write!(
+                formatter,
+                "a symbol was already entered for the definition at address {address}"
+            ),
+            Self::DuplicateScope { symbol } => write!(
+                formatter,
+                "a declaration scope was already entered for symbol {}",
+                symbol.index()
+            ),
         }
     }
 }
@@ -30,6 +46,7 @@ impl std::error::Error for UnpickleError {
         match self {
             Self::Tasty(error) => Some(error),
             Self::Ast(error) => Some(error),
+            Self::DuplicateDefinition { .. } | Self::DuplicateScope { .. } => None,
         }
     }
 }
@@ -61,6 +78,14 @@ mod tests {
         assert_eq!(error, UnpickleError::Tasty(source));
         assert!(std::error::Error::source(&error).is_some());
         assert!(error.to_string().starts_with("invalid TASTy file"));
+    }
+
+    #[test]
+    fn duplicate_definition_names_the_address_and_has_no_source() {
+        let error = UnpickleError::DuplicateDefinition { address: 46 };
+
+        assert!(error.to_string().contains("address 46"));
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

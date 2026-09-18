@@ -7,12 +7,14 @@
 //! one-pass tree decoder, because TASTy has forward references, shared nodes
 //! and recursive binders. See `docs/tasty-semantic-unpickler.md`.
 //!
-//! Only the crate scaffolding and error model exist so far; no pass is
-//! implemented yet.
+//! Only the error model and the address-keyed `TastySemanticIndex` exist so
+//! far; no pass is implemented yet.
 
 mod error;
+mod index;
 
 /// Semantic TASTy unpickling APIs.
 pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
+    pub use crate::index::TastySemanticIndex;
 }

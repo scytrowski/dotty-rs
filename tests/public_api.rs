@@ -85,3 +85,13 @@ fn exposes_the_tasty_unpickler_error_under_the_dotty_namespace() {
         UnpickleError::Ast(AstError::InvalidTag { tag: 1, offset: 7 })
     );
 }
+
+#[test]
+fn exposes_an_empty_tasty_semantic_index_through_the_dotty_namespace() {
+    use dotty::tasty_unpickler::TastySemanticIndex;
+
+    let index = TastySemanticIndex::new();
+
+    assert_eq!(index.symbol_at(0), None);
+    assert_eq!(index.symbol_count(), 0);
+}
