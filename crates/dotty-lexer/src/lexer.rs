@@ -2021,6 +2021,46 @@ mod tests {
         assert!(diagnostics.is_empty());
     }
 
+    macro_rules! soft_keyword_tests {
+        ($(($name:ident, $spelling:literal)),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let (items, diagnostics) = scan($spelling);
+
+                    assert_eq!(
+                        items,
+                        vec![
+                            token(
+                                RawTokenKind::Identifier,
+                                0,
+                                $spelling.len() as u32,
+                            ),
+                            token(
+                                RawTokenKind::Eof,
+                                $spelling.len() as u32,
+                                $spelling.len() as u32,
+                            ),
+                        ]
+                    );
+                    assert!(diagnostics.is_empty());
+                }
+            )+
+        };
+    }
+
+    soft_keyword_tests!(
+        (keeps_using_as_a_raw_identifier, "using"),
+        (keeps_extension_as_a_raw_identifier, "extension"),
+        (keeps_inline_as_a_raw_identifier, "inline"),
+        (keeps_opaque_as_a_raw_identifier, "opaque"),
+        (keeps_open_as_a_raw_identifier, "open"),
+        (keeps_transparent_as_a_raw_identifier, "transparent"),
+        (keeps_as_as_a_raw_identifier, "as"),
+        (keeps_derives_as_a_raw_identifier, "derives"),
+        (keeps_infix_as_a_raw_identifier, "infix"),
+    );
+
     #[test]
     fn emits_a_valid_backquoted_identifier() {
         let (items, diagnostics) = scan("`foo-bar`");
