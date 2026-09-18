@@ -4,8 +4,12 @@ use dotty_core::{
 };
 
 use dotty_core::ScannerEvent;
+use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
 
-use crate::{Cursor, Location, Mark, ParamOwner, ParseContext, ParseKind};
+use crate::{
+    Cursor, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic, ParseDiagnosticKind,
+    ParseKind, RecoverySet,
+};
 
 /// Stateful input and allocation context for the handwritten parser.
 pub struct Parser<'src, 'names, S>
@@ -19,6 +23,7 @@ where
     pub(crate) ast: AstArena<Untyped>,
     pub(crate) last_real_token_end: u32,
     pub(crate) context: ParseContext,
+    pub(crate) diagnostics: Vec<ParseDiagnostic>,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -47,6 +52,7 @@ where
             ast: AstArena::new(),
             last_real_token_end,
             context: ParseContext::default(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -63,6 +69,16 @@ where
     /// Returns the current parser context.
     pub const fn context(&self) -> &ParseContext {
         &self.context
+    }
+
+    /// Returns the diagnostics accumulated by this parser.
+    pub fn diagnostics(&self) -> &[ParseDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Consumes the diagnostics accumulated by this parser.
+    pub fn take_diagnostics(&mut self) -> Vec<ParseDiagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     /// Runs a nested parse with a temporary syntactic location.
@@ -138,6 +154,52 @@ where
         self.cursor.advance();
     }
 
+    /// Consumes the current token when it has `kind`.
+    pub fn accept(&mut self, kind: TokenKind) -> bool {
+        if self.cursor.at(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reports an expected-token diagnostic without consuming unexpected input.
+    pub fn expect(&mut self, kind: TokenKind) -> bool {
+        if self.accept(kind) {
+            return true;
+        }
+
+        self.report(
+            ParseDiagnosticKind::ExpectedToken,
+            format!("expected {kind:?}, found {:?}", self.current().kind),
+        );
+        false
+    }
+
+    /// Adds a parser diagnostic at the current token.
+    pub fn report(&mut self, kind: ParseDiagnosticKind, message: impl Into<String>) {
+        let token_span = self.current().span;
+        let span = SourceSpan::new(self.source_id, Span::without_point(token_span));
+        self.diagnostics
+            .push(ParseDiagnostic::error(kind, span, message));
+    }
+
+    /// Consumes input until a synchronization token or EOF is reached.
+    pub fn recover_until(&mut self, set: RecoverySet) {
+        while !set.contains(self.current().kind) {
+            let before = self.current() as *const Token;
+            self.advance();
+            let after = self.current() as *const Token;
+
+            // A broken TokenSource may fail to advance. Returning here keeps
+            // malformed external input from turning recovery into a hang.
+            if std::ptr::eq(before, after) {
+                return;
+            }
+        }
+    }
+
     /// Creates a mark at the current parser position.
     pub fn mark(&self) -> Mark {
         let start = if is_zero_width_synthetic(self.current().kind) {
@@ -197,6 +259,28 @@ where
     pub fn alloc_from(&mut self, mark: Mark, kind: TreeKind<Untyped>) -> TreeId<Untyped> {
         let position = self.span_from(mark);
         self.alloc(kind, Some(position))
+    }
+
+    /// Allocates an expression error placeholder for parser recovery.
+    pub fn error_expr(&mut self, position: SourceSpan) -> TreeId<Untyped> {
+        self.alloc_error(ErrorNodeKind::MissingExpression, position)
+    }
+
+    /// Allocates a type error placeholder for parser recovery.
+    pub fn error_type(&mut self, position: SourceSpan) -> TreeId<Untyped> {
+        self.alloc_error(ErrorNodeKind::MissingType, position)
+    }
+
+    /// Allocates a pattern error placeholder for parser recovery.
+    pub fn error_pattern(&mut self, position: SourceSpan) -> TreeId<Untyped> {
+        self.alloc_error(ErrorNodeKind::MissingPattern, position)
+    }
+
+    fn alloc_error(&mut self, kind: ErrorNodeKind, position: SourceSpan) -> TreeId<Untyped> {
+        self.alloc(
+            TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode { kind })),
+            Some(position),
+        )
     }
 
     /// Returns the parser's untyped AST arena.
@@ -572,5 +656,105 @@ mod tests {
                 ScannerEvent::ArrowIndented,
             ]
         );
+    }
+
+    #[test]
+    fn expect_reports_an_exact_diagnostic_without_consuming_unexpected_input() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        assert!(!parser.expect(TokenKind::Eof));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(parser.diagnostics()[0].source(), SourceId::from_index(1));
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+    }
+
+    #[test]
+    fn expect_consumes_the_expected_token_without_diagnostic() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        assert!(parser.expect(TokenKind::Identifier));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovery_stops_at_a_statement_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_with_tokens(
+            "x;",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::Semicolon),
+                    1,
+                    2,
+                ),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        parser.recover_until(RecoverySet::Statement);
+
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(dotty_core::Punctuation::Semicolon)
+        );
+    }
+
+    #[test]
+    fn recovery_returns_when_the_token_source_does_not_advance() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        parser.recover_until(RecoverySet::Statement);
+
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn error_helpers_allocate_the_requested_error_node_kind() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+        let position = SourceSpan::new(
+            SourceId::from_index(1),
+            Span::without_point(TextRange::new(0, 0).unwrap()),
+        );
+
+        let expression = parser.error_expr(position);
+        let type_tree = parser.error_type(position);
+        let pattern = parser.error_pattern(position);
+
+        assert!(matches!(
+            parser.ast().get(expression).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::MissingExpression
+            }))
+        ));
+        assert!(matches!(
+            parser.ast().get(type_tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::MissingType
+            }))
+        ));
+        assert!(matches!(
+            parser.ast().get(pattern).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::MissingPattern
+            }))
+        ));
     }
 }

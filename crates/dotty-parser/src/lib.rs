@@ -10,10 +10,14 @@
 
 mod context;
 mod cursor;
+mod diagnostics;
 mod parser;
+mod recovery;
 mod spans;
 
 pub use context::{Location, ParamOwner, ParseContext, ParseKind};
 pub use cursor::Cursor;
+pub use diagnostics::{ParseDiagnostic, ParseDiagnosticKind};
 pub use parser::Parser;
+pub use recovery::RecoverySet;
 pub use spans::Mark;
