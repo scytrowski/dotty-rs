@@ -115,9 +115,16 @@ Not mapped yet: `ENUM`, `ARTIFACT`, `INLINEPROXY`, `MACRO`, `EXPORTED`,
 completed), the accessor roles `FIELDACCESSOR`, `CASEACCESSOR`,
 `PARAMSETTER`, `PARAMALIAS`, `HASDEFAULT`, `STABLE`, and annotations.
 
-Qualified access (`private[X]`, `protected[X]`) is reported as
-`UnpickleError::UnsupportedQualifiedModifier`: `Visibility` has no variant
-for it yet, and widening or narrowing it would be a guess.
+Qualified access maps to `Visibility::PrivateWithin(Q)` /
+`ProtectedWithin(Q)`. The modifier's qualifier tree is one of `TYPEREFpkg`
+(a package by name), `TYPEREFsymbol` (an enclosing definition, by address),
+or a `SHAREDtype` link to either; it is resolved after the definition's own
+symbol exists, since the qualifier may be the definition itself
+(`class A { private[A] ... }`), and an enclosing definition is always entered
+before its members. A package qualifier reuses the unit's package symbol. Any
+other qualifier shape is `UnpickleError::UnsupportedQualifier`, and a
+`TYPEREFsymbol` address with no entered symbol is `InvalidReferenceTarget`.
+`private[this]` is an unqualified `Private` (with `LOCAL`).
 
 ### Packages
 
@@ -192,13 +199,13 @@ addresses map to exactly one `SymbolId`; a second entry for an address is
 Measured on real compiler output: all 37 small `dotty-tasty` fixtures enter
 without error. On the manifest-backed corpora (`scala3-library` and
 `scala3-compiler`, 2089 units, TASTy 28.8 — parsed leniently, outside the 3.9
-target) 1669 units enter; of the 420 that do not, 419 stop at a qualified
-access modifier (`private[X]`, issue #10) and one (`scala/package.tasty`) has a
+target) 2088 units enter; the one that does not (`scala/package.tasty`) has a
 nested `PACKAGE` whose path is a `SHAREDtype` reference.
 
 Deliberately not supported yet:
 
-- qualified access modifiers — `UnsupportedQualifiedModifier`, issue #10;
+- qualified-access qualifiers other than a package name or an enclosing
+  definition — `UnsupportedQualifier` (none occur in the corpora);
 - `PACKAGE` paths other than a direct `TERMREFpkg`, such as a nested package
   whose path is a `SHAREDtype` — `UnsupportedPackagePath`; resolving it needs
   the shared-type resolution of Milestone 2;
@@ -212,7 +219,8 @@ Deliberately not supported yet:
 - sharing package symbols between TASTy units, issue #12.
 
 Known issues in neighbouring crates that this work found: #9 (`render_name`
-one-based), #11 (`.tasty` loading misses `val` constructor parameters), #13
+one-based), #10 (qualified visibility, fixed by `Visibility::PrivateWithin` /
+`ProtectedWithin` in `dotty-core`), #11 (`.tasty` loading misses `val` constructor parameters), #13
 (index payload of parameter nodes omits the name).
 
 ## 9. Review of Milestone 1
@@ -232,8 +240,9 @@ Answers to the review questions asked before Milestone 2:
    module class are three symbols, in distinct term/type namespaces.
 5. **Are scopes populated without duplicating ownership state?** Yes. Symbols
    carry an owner; scopes carry membership; symbols have no `children`.
-6. **Is `dotty-core` still unaware of TASTy?** Yes; this work does not touch
-   `dotty-core` (nor `dotty-tasty` or `dotty-classloader`).
+6. **Is `dotty-core` still unaware of TASTy?** Yes. Its only change is the
+   format-agnostic `Visibility::PrivateWithin` / `ProtectedWithin` (#10);
+   `dotty-tasty` and `dotty-classloader` are untouched.
 7. **Did it avoid name heuristics where an address exists?** Yes. Names are
    read only to name symbols; no reference is resolved by name.
 8. **Is the index sufficient for `TYPEREFsymbol`/`TERMREFsymbol`?** Yes for
@@ -242,10 +251,10 @@ Answers to the review questions asked before Milestone 2:
    address 9, the constructor's to its own copy at 49), and `symbol_at`
    resolves it. Missing: the `types` map for `SHAREDtype` caching and
    references to other units.
-9. **Did real TASTy expose gaps in `dotty-core`?** `Visibility` cannot express
-   `private[X]` (#10); `SymbolKind` has no abstract-type kind; `Definitions`
-   has no root package.
+9. **Did real TASTy expose gaps in `dotty-core`?** `Visibility` could not
+   express `private[X]` (#10, since added); `SymbolKind` has no abstract-type
+   kind; `Definitions` has no root package.
 10. **Can Milestone 2 be implemented without redesigning PR1?** Yes. It adds
-    the `types` map and resolution on top of the existing index. Two
-    dependencies: the nested-package path form needs `SHAREDtype`, and the
-    `private[X]` failures (the bulk of the library corpus) need #10 first.
+    the `types` map and resolution on top of the existing index. The one
+    remaining corpus failure, a nested `PACKAGE` with a `SHAREDtype` path,
+    needs the shared-type resolution of Milestone 2.
