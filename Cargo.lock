@@ -21,6 +21,7 @@ name = "dotty-classloader"
 version = "0.1.0"
 dependencies = [
  "dotty-classfile",
+ "dotty-core",
  "dotty-tasty",
 ]
 

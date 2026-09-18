@@ -5,10 +5,11 @@ use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
+use crate::packages::PackageRegistry;
 use crate::record_component::RecordComponentSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
-use crate::symbol::{ClassRef, ClassSymbol};
+use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::ClassAccessFlags;
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
@@ -19,47 +20,65 @@ use dotty_classfile::constant_pool::{
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
-use std::cell::RefCell;
+use dotty_core::{
+    ClassInfo, Name, Namespace, Scope, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLinks, SymbolOrigin, Type, TypeId, Visibility,
+};
+use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Loads `.class`-backed [`ClassSymbol`]s from a [`ClassPathEntry`],
-/// caching results in a [`ClassRepository`].
+/// Loads `.class`/`.tasty`-backed classes from a [`ClassPathEntry`] into a
+/// [`SemanticStore`], caching results in a [`ClassRepository`].
 ///
-/// Implements the "enter before complete" algorithm from
-/// `docs/classloader.md` §5: a class is marked `Loading` before its
+/// Implements `dotty-core`'s "enter before complete" algorithm
+/// (`docs/classloader.md` §5): a class's `SymbolId` is allocated before its
 /// superclass/interfaces are resolved, so a class that (in)directly
 /// references itself as a supertype is reported as
 /// [`ClassLoadError::CircularInheritance`] instead of recursing forever.
-pub struct ClassLoader<E> {
+///
+/// JVM-specific data that doesn't belong in `dotty-core`'s canonical
+/// semantic model (fields/methods, raw signatures, nesting metadata,
+/// annotations — see [`ClassfileMetadata`]) lives in this loader's own
+/// `SymbolId`-keyed metadata table instead.
+pub struct ClassLoader<'store, E> {
     class_path: E,
-    repository: RefCell<ClassRepository>,
+    store: &'store mut SemanticStore,
+    repository: ClassRepository,
+    metadata: HashMap<SymbolId, ClassfileMetadata>,
+    packages: PackageRegistry,
+    no_prefix: TypeId,
 }
 
-impl<E: ClassPathEntry> ClassLoader<E> {
-    pub fn new(class_path: E) -> Self {
+impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
+    pub fn new(class_path: E, store: &'store mut SemanticStore) -> Self {
+        let no_prefix = store.types.alloc(Type::NoPrefix);
         Self {
             class_path,
-            repository: RefCell::new(ClassRepository::new()),
+            store,
+            repository: ClassRepository::new(),
+            metadata: HashMap::new(),
+            packages: PackageRegistry::new(),
+            no_prefix,
         }
     }
 
-    /// Loads (or returns the cached result for) the class named `name`.
-    pub fn load_class(&self, name: &BinaryName) -> Result<Rc<ClassSymbol>, ClassLoadError> {
-        // Cloned out of its own block so the borrow is dropped before any
-        // of the arms below try to `borrow_mut()` the same repository.
-        let cached = {
-            let repository = self.repository.borrow();
-            repository.get(name).cloned()
-        };
+    /// JVM-specific metadata for a `.class`-backed symbol previously
+    /// returned by [`Self::load_class`] — `None` for a `.tasty`-backed
+    /// symbol (not yet reconstructed from `.tasty`, see
+    /// [`ClassfileMetadata`]'s doc comment), or a `SymbolId` this loader
+    /// did not produce.
+    pub fn metadata(&self, id: SymbolId) -> Option<&ClassfileMetadata> {
+        self.metadata.get(&id)
+    }
 
-        match cached {
+    /// Loads (or returns the cached result for) the class named `name`.
+    pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+        match self.repository.get(name).cloned() {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
             Some(ClassEntry::Failed(error)) => return Err(error),
             Some(ClassEntry::Loading(_)) => {
                 let error = ClassLoadError::CircularInheritance(name.clone());
-                self.repository
-                    .borrow_mut()
-                    .mark_failed(name.clone(), error.clone());
+                self.repository.mark_failed(name.clone(), error.clone());
                 return Err(error);
             }
             None => {}
@@ -67,21 +86,17 @@ impl<E: ClassPathEntry> ClassLoader<E> {
 
         match self.load_uncached(name) {
             Ok(symbol) => {
-                self.repository
-                    .borrow_mut()
-                    .mark_loaded(name.clone(), symbol.clone());
+                self.repository.mark_loaded(name.clone(), symbol);
                 Ok(symbol)
             }
             Err(error) => {
-                self.repository
-                    .borrow_mut()
-                    .mark_failed(name.clone(), error.clone());
+                self.repository.mark_failed(name.clone(), error.clone());
                 Err(error)
             }
         }
     }
 
-    fn load_uncached(&self, name: &BinaryName) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+    fn load_uncached(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
         let resource = self
             .class_path
             .find_class(name)
@@ -94,53 +109,133 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         }
     }
 
+    /// Allocates a class's stable `SymbolId` immediately, before any
+    /// recursive supertype/member resolution — `dotty-core`'s
+    /// enter-before-complete rule (`docs/classloader.md` §5).
+    fn enter_class(
+        &mut self,
+        name: &BinaryName,
+        flags: ClassAccessFlags,
+        origin: SymbolOrigin,
+    ) -> SymbolId {
+        let owner = self.packages.resolve(self.store, name);
+
+        let text = self.store.names.intern(name.simple_name());
+        let symbol_name = Name::new(text, Namespace::Type);
+
+        // A JVM class file's own access_flags carry no ACC_PRIVATE/
+        // ACC_PROTECTED bit (JVMS §4.1 Table 4.1-A) -- those only appear on
+        // a *member* class's InnerClasses entry, not here -- so a top-level
+        // class is only ever public or package-private.
+        let kind = if flags.is_interface() {
+            SymbolKind::Trait
+        } else {
+            SymbolKind::Class
+        };
+        let visibility = if flags.is_public() {
+            Visibility::Public
+        } else {
+            Visibility::Package(owner)
+        };
+
+        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        if flags.is_abstract() {
+            symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
+        }
+        if flags.is_final() {
+            symbol_flags = symbol_flags | SymbolFlags::FINAL;
+        }
+        if flags.is_synthetic() {
+            symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
+        }
+
+        self.store.symbols.alloc(Symbol {
+            name: symbol_name,
+            owner: Some(owner),
+            kind,
+            flags: symbol_flags,
+            visibility,
+            info: SymbolInfo::Missing,
+            origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        })
+    }
+
+    /// Allocates the (for now empty — fields/methods are not yet migrated
+    /// into it, a later migration step) declarations scope, resolves
+    /// `super_class`/`interfaces` into `Type::TypeRef`s, and completes
+    /// `class_symbol`'s `SymbolInfo`.
+    fn complete_class(
+        &mut self,
+        class_symbol: SymbolId,
+        super_class: Option<SymbolId>,
+        interfaces: Vec<SymbolId>,
+    ) {
+        let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
+
+        let mut parents = Vec::with_capacity(interfaces.len() + 1);
+        if let Some(parent) = super_class {
+            parents.push(self.type_ref(parent));
+        }
+        for parent in interfaces {
+            parents.push(self.type_ref(parent));
+        }
+
+        let class_info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: self.no_prefix,
+            class: class_symbol,
+            parents,
+            declarations,
+            self_type: None,
+        }));
+        self.store
+            .symbols
+            .set_info(class_symbol, SymbolInfo::Complete(class_info));
+    }
+
+    fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
+        self.store.types.alloc(Type::TypeRef {
+            prefix: self.no_prefix,
+            symbol,
+        })
+    }
+
     /// `.tasty`-backed loading (`docs/classloader.md` §9): reconstructs
     /// only name/flags/superclass/interfaces via [`tasty_symbol::decode`]
     /// and recurses into the same [`Self::load_dependency`] used by the
-    /// `.class` path, converging on the same [`ClassSymbol`] shape.
-    /// `fields`/`methods`/`signature`/nesting/annotations are left at
-    /// their empty defaults — not yet reconstructed from `.tasty`.
+    /// `.class` path, converging on the same `Symbol`/`Type::ClassInfo`
+    /// shape. No [`ClassfileMetadata`] entry is produced — `fields`/
+    /// `methods`/`signature`/nesting/annotations are not yet reconstructed
+    /// from `.tasty`.
     fn load_uncached_tasty(
-        &self,
+        &mut self,
         name: &BinaryName,
         bytes: &[u8],
-    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+    ) -> Result<SymbolId, ClassLoadError> {
         let decoded = tasty_symbol::decode(bytes, name)
             .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
 
-        let shell = Rc::new(ClassSymbol::new_shell(name.clone(), decoded.flags));
-        self.repository
-            .borrow_mut()
-            .mark_loading(name.clone(), shell.clone());
+        let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
+        let class_symbol = self.enter_class(name, decoded.flags, origin);
+        self.repository.mark_loading(name.clone(), class_symbol);
 
-        let super_class = Some(self.load_dependency(name, decoded.super_class)?);
+        let super_class = self.load_dependency(name, decoded.super_class)?;
         let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
         for dependency in decoded.interfaces {
             interfaces.push(self.load_dependency(name, dependency)?);
         }
 
-        shell.complete(
-            super_class,
-            interfaces,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            Vec::new(),
-        );
-        Ok(shell)
+        self.complete_class(class_symbol, Some(super_class), interfaces);
+        Ok(class_symbol)
     }
 
     fn load_uncached_class(
-        &self,
+        &mut self,
         name: &BinaryName,
         bytes: &[u8],
-    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
+    ) -> Result<SymbolId, ClassLoadError> {
         let mut reader = Reader::new(bytes);
         let class_file = ClassFile::decode(&mut reader)
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
@@ -153,19 +248,15 @@ impl<E: ClassPathEntry> ClassLoader<E> {
             });
         }
 
-        // Registered before any recursive resolution below, so a
-        // legitimate mutual member-type reference back to `name` (see
-        // `resolve_member_class`) can reuse this same shell instead of
+        // Entered before any recursive resolution below, so a legitimate
+        // mutual member-type reference back to `name` (see
+        // `resolve_member_class`) can reuse this same `SymbolId` instead of
         // erroring, and a genuine supertype cycle back to `name` (via
-        // `resolve_dependency` -> `load_class`) still hits `Loading` and
-        // is rejected as `CircularInheritance`, exactly as before.
-        let shell = Rc::new(ClassSymbol::new_shell(
-            name.clone(),
-            class_file.access_flags,
-        ));
-        self.repository
-            .borrow_mut()
-            .mark_loading(name.clone(), shell.clone());
+        // `resolve_dependency` -> `load_class`) still hits `Loading` and is
+        // rejected as `CircularInheritance`, exactly as before.
+        let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
+        let class_symbol = self.enter_class(name, class_file.access_flags, origin);
+        self.repository.mark_loading(name.clone(), class_symbol);
 
         let super_class = class_file
             .super_class
@@ -244,21 +335,26 @@ impl<E: ClassPathEntry> ClassLoader<E> {
         let annotations =
             self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
 
-        shell.complete(
-            super_class,
-            interfaces,
-            fields,
-            methods,
-            signature,
-            nest_host,
-            nest_members,
-            permitted_subclasses,
-            inner_classes,
-            enclosing_method,
-            record_components,
-            annotations,
+        self.metadata.insert(
+            class_symbol,
+            ClassfileMetadata {
+                binary_name: name.clone(),
+                access_flags: class_file.access_flags,
+                fields,
+                methods,
+                signature,
+                nest_host,
+                nest_members,
+                permitted_subclasses,
+                inner_classes,
+                enclosing_method,
+                record_components,
+                annotations,
+            },
         );
-        Ok(shell)
+
+        self.complete_class(class_symbol, super_class, interfaces);
+        Ok(class_symbol)
     }
 
     /// Looks for a `NestHost` attribute (JVMS §4.7.28) — present only on
@@ -508,11 +604,11 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// reference (`docs/classloader.md` §5) — `self.load_class(&dependency)`
     /// reports that as `CircularInheritance`, unchanged.
     fn resolve_dependency(
-        &self,
+        &mut self,
         owner: &BinaryName,
         class_file: &ClassFile<'_>,
         index: ConstantPoolIndex,
-    ) -> Result<ClassRef, ClassLoadError> {
+    ) -> Result<SymbolId, ClassLoadError> {
         let dependency = self.resolve_name(owner, class_file, index)?;
         self.load_dependency(owner, dependency)
     }
@@ -524,12 +620,11 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// resolves a constant-pool index to a name first) and the `.tasty`
     /// path (which already has the name from [`tasty_symbol::decode`]).
     fn load_dependency(
-        &self,
+        &mut self,
         owner: &BinaryName,
         dependency: BinaryName,
-    ) -> Result<ClassRef, ClassLoadError> {
+    ) -> Result<SymbolId, ClassLoadError> {
         self.load_class(&dependency)
-            .map(ClassRef::Resolved)
             .map_err(|source| ClassLoadError::DependencyFailure {
                 owner: owner.clone(),
                 dependency,
@@ -541,33 +636,32 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// or method's `Object`/array-of-`Object` descriptor entry),
     /// tolerant of `owner`'s own load reaching back around to
     /// `dependency` while `dependency` is still `Loading` — the
-    /// "reusing an in-progress shell" technique `docs/classloader.md`
+    /// "reusing an in-progress `SymbolId`" technique `docs/classloader.md`
     /// §5/§9 (Milestone 6) describes: two classes each having a field or
     /// method typed as the other is completely legitimate Java, unlike
     /// a supertype cycle, so hitting `Loading` here returns the
-    /// in-progress shell directly instead of erroring or re-entering
+    /// in-progress `SymbolId` directly instead of erroring or re-entering
     /// [`Self::load_class`]. Every other state (`Loaded`/`Failed`/
     /// absent) just delegates to `load_class` as normal.
     fn resolve_member_class(
-        &self,
+        &mut self,
         owner: &BinaryName,
         dependency: &BinaryName,
-    ) -> Result<Rc<ClassSymbol>, ClassLoadError> {
-        let cached = {
-            let repository = self.repository.borrow();
-            repository.get(dependency).cloned()
+    ) -> Result<SymbolId, ClassLoadError> {
+        let loading = match self.repository.get(dependency) {
+            Some(ClassEntry::Loading(symbol)) => Some(*symbol),
+            _ => None,
         };
-
-        match cached {
-            Some(ClassEntry::Loading(shell)) => Ok(shell),
-            _ => self
-                .load_class(dependency)
-                .map_err(|source| ClassLoadError::DependencyFailure {
-                    owner: owner.clone(),
-                    dependency: dependency.clone(),
-                    source: Rc::new(source),
-                }),
+        if let Some(symbol) = loading {
+            return Ok(symbol);
         }
+
+        self.load_class(dependency)
+            .map_err(|source| ClassLoadError::DependencyFailure {
+                owner: owner.clone(),
+                dependency: dependency.clone(),
+                source: Rc::new(source),
+            })
     }
 
     /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2), resolving
@@ -575,7 +669,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// via [`Self::resolve_member_class`]. Base types map straight
     /// across; `Array` recurses into its component type.
     fn resolve_semantic_field_type(
-        &self,
+        &mut self,
         owner: &BinaryName,
         field_type: &FieldType,
     ) -> Result<SemanticFieldType, ClassLoadError> {
@@ -604,7 +698,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// same way [`Self::resolve_semantic_field_type`] walks a field's
     /// type, applied to every parameter and the return type.
     fn resolve_semantic_method_descriptor(
-        &self,
+        &mut self,
         owner: &BinaryName,
         descriptor: &MethodDescriptor,
     ) -> Result<SemanticMethodDescriptor, ClassLoadError> {
@@ -633,7 +727,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// component has no access flags of its own in the class file
     /// format.
     fn resolve_field_like(
-        &self,
+        &mut self,
         owner: &BinaryName,
         field_type: &FieldType,
         attributes: &[Attribute<'_>],
@@ -654,7 +748,7 @@ impl<E: ClassPathEntry> ClassLoader<E> {
     /// class isn't a record at all; `Some(vec![])` means it is a record
     /// with zero components — both are real, distinguishable states.
     fn resolve_record_components(
-        &self,
+        &mut self,
         owner: &BinaryName,
         class_file: &ClassFile<'_>,
     ) -> Result<Option<Vec<RecordComponentSymbol>>, ClassLoadError> {
@@ -935,6 +1029,33 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// The class's `Type::ClassInfo`, read back through its `Symbol`'s
+    /// `SymbolInfo::Complete` — the sole path to a class's parents/
+    /// declarations scope after `ClassLoader::load_class` returns.
+    fn class_info(store: &SemanticStore, id: SymbolId) -> &ClassInfo {
+        let symbol = store.symbols.get(id);
+        let SymbolInfo::Complete(info_id) = symbol.info else {
+            panic!("expected the class to have complete info");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info_id) else {
+            panic!("expected a ClassInfo");
+        };
+        class_info
+    }
+
+    /// A symbol's resolved (interned) simple name.
+    fn symbol_name(store: &SemanticStore, id: SymbolId) -> &str {
+        store.names.resolve(store.symbols.get(id).name.text())
+    }
+
+    /// The `SymbolId` a `Type::TypeRef` (a `ClassInfo` parent) points at.
+    fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
+        let Type::TypeRef { symbol, .. } = store.types.get(ty) else {
+            panic!("expected a TypeRef");
+        };
+        *symbol
+    }
+
     /// An in-memory classpath backed by a fixed name -> bytes map, for
     /// tests that need full control over what a class's bytes are
     /// (including synthetic, hand-built, invalid, or cyclic class files
@@ -1089,22 +1210,24 @@ mod tests {
 
     #[test]
     fn loads_a_real_fixture_with_a_super_class_and_an_interface() {
-        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load");
+        drop(loader);
 
-        assert_eq!(symbol.name().as_internal(), "PoolSample");
-        assert!(matches!(
-            symbol.super_class(),
-            Some(ClassRef::Resolved(super_symbol))
-                if super_symbol.name().as_internal() == "java/lang/Object"
-        ));
-        assert!(matches!(
-            symbol.interfaces().as_slice(),
-            [ClassRef::Resolved(interface_symbol)]
-                if interface_symbol.name().as_internal() == "java/lang/Runnable"
-        ));
+        assert_eq!(symbol_name(&store, symbol), "PoolSample");
+        let info = class_info(&store, symbol);
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[0])),
+            "Object"
+        );
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[1])),
+            "Runnable"
+        );
     }
 
     /// `pool_sample/PoolSample.class` declares 5 real `public static
@@ -1114,12 +1237,16 @@ mod tests {
     fn loads_a_real_fixtures_fields() {
         use dotty_classfile::descriptor::FieldType;
 
-        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load");
 
-        let all_fields = symbol.fields();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("PoolSample should have classfile metadata");
+        let all_fields = &metadata.fields;
         let field = |name: &str| {
             all_fields
                 .iter()
@@ -1127,7 +1254,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("field {name} should exist"))
         };
 
-        assert_eq!(symbol.fields().len(), 5);
+        assert_eq!(all_fields.len(), 5);
         assert_eq!(field("ANSWER").field_type(), &FieldType::Int);
         assert_eq!(field("BIG_ANSWER").field_type(), &FieldType::Long);
         assert_eq!(field("HALF").field_type(), &FieldType::Float);
@@ -1151,12 +1278,16 @@ mod tests {
     fn loads_a_real_fixtures_methods() {
         use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 
-        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load");
 
-        let all_methods = symbol.methods();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("PoolSample should have classfile metadata");
+        let all_methods = &metadata.methods;
         let method = |name: &str| {
             all_methods
                 .iter()
@@ -1164,7 +1295,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("method {name} should exist"))
         };
 
-        assert_eq!(symbol.methods().len(), 3);
+        assert_eq!(all_methods.len(), 3);
         assert_eq!(
             method("<init>").descriptor(),
             &MethodDescriptor {
@@ -1238,12 +1369,17 @@ mod tests {
             ClassTypeSignature, FieldSignature, ReferenceTypeSignature, TypeArgument,
         };
 
-        let loader = ClassLoader::new(InMemoryClassPath(generic_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("GenericSample"))
             .expect("GenericSample should load");
 
-        let all_fields = symbol.fields();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("GenericSample should have classfile metadata");
+        let all_fields = &metadata.fields;
         let items = all_fields
             .iter()
             .find(|field| field.name() == "items")
@@ -1271,12 +1407,17 @@ mod tests {
     fn loads_a_real_fixtures_method_signature() {
         use dotty_classfile::signature::{MethodSignature, ReferenceTypeSignature, TypeSignature};
 
-        let loader = ClassLoader::new(InMemoryClassPath(generic_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("GenericSample"))
             .expect("GenericSample should load");
 
-        let all_methods = symbol.methods();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("GenericSample should have classfile metadata");
+        let all_methods = &metadata.methods;
         let first = all_methods
             .iter()
             .find(|method| method.name() == "first")
@@ -1304,13 +1445,18 @@ mod tests {
             ClassSignature, ClassTypeSignature, ReferenceTypeSignature, TypeArgument, TypeParameter,
         };
 
-        let loader = ClassLoader::new(InMemoryClassPath(generic_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("GenericSample"))
             .expect("GenericSample should load");
 
+        let metadata = loader
+            .metadata(symbol)
+            .expect("GenericSample should have classfile metadata");
         assert_eq!(
-            symbol.signature(),
+            metadata.signature.clone(),
             Some(ClassSignature {
                 type_parameters: vec![TypeParameter {
                     name: "T".to_owned(),
@@ -1377,7 +1523,9 @@ mod tests {
             synthetic_class_with_malformed_field_descriptor(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("C"))
             .unwrap_err();
@@ -1440,7 +1588,9 @@ mod tests {
             synthetic_class_with_malformed_field_signature(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("C"))
             .unwrap_err();
@@ -1494,7 +1644,9 @@ mod tests {
             synthetic_class_with_malformed_method_descriptor(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("C"))
             .unwrap_err();
@@ -1557,7 +1709,9 @@ mod tests {
             synthetic_class_with_malformed_method_signature(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("C"))
             .unwrap_err();
@@ -1610,7 +1764,9 @@ mod tests {
             synthetic_class_with_malformed_class_signature(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("C"))
             .unwrap_err();
@@ -1657,22 +1813,25 @@ mod tests {
             Box::new(InMemoryClassPath(synthetic_classes)),
         ]);
 
-        let loader = ClassLoader::new(composite);
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(composite, &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("PoolSample"))
             .expect("PoolSample should load from the JAR");
+        drop(loader);
 
-        assert_eq!(symbol.name().as_internal(), "PoolSample");
-        assert!(matches!(
-            symbol.super_class(),
-            Some(ClassRef::Resolved(super_symbol))
-                if super_symbol.name().as_internal() == "java/lang/Object"
-        ));
-        assert!(matches!(
-            symbol.interfaces().as_slice(),
-            [ClassRef::Resolved(interface_symbol)]
-                if interface_symbol.name().as_internal() == "java/lang/Runnable"
-        ));
+        assert_eq!(symbol_name(&store, symbol), "PoolSample");
+        let info = class_info(&store, symbol);
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[0])),
+            "Object"
+        );
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[1])),
+            "Runnable"
+        );
     }
 
     #[test]
@@ -1686,13 +1845,13 @@ mod tests {
     }
 
     /// Confirms Milestone 8's `JarClassPath` release-version selection
-    /// reaches all the way through to a decoded `ClassSymbol`: the real
+    /// reaches all the way through to a decoded class's metadata: the real
     /// multi-release fixture (`tests/fixtures/multi_release_jar/`) has a
     /// distinct `@Deprecated(since = ...)` annotation on its base entry
     /// (none) and its `versions/11`/`versions/17` overrides, so which
-    /// variant `ClassLoader` actually decoded is visible in
-    /// `symbol.annotations()` without needing any new symbol-level
-    /// concept just for this test.
+    /// variant `ClassLoader` actually decoded is visible in the loaded
+    /// symbol's `ClassfileMetadata::annotations` without needing any new
+    /// symbol-level concept just for this test.
     fn assert_loads_mr_sample_annotation_for_release(
         release_version: u16,
         expected_since: Option<&str>,
@@ -1716,12 +1875,17 @@ mod tests {
             Box::new(InMemoryClassPath(synthetic_classes)),
         ]);
 
-        let loader = ClassLoader::new(composite);
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(composite, &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("MrSample"))
             .expect("MrSample should load from the multi-release JAR");
 
-        let since = symbol.annotations().iter().find_map(|annotation| {
+        let metadata = loader
+            .metadata(symbol)
+            .expect("MrSample should have classfile metadata");
+        let since = metadata.annotations.iter().find_map(|annotation| {
             annotation
                 .elements
                 .iter()
@@ -1787,38 +1951,43 @@ mod tests {
             Box::new(InMemoryClassPath(synthetic_classes)),
         ]);
 
-        let loader = ClassLoader::new(composite);
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(composite, &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("pool/PoolSample"))
             .expect("pool/PoolSample should load from the JDK class path");
+        drop(loader);
 
-        assert_eq!(symbol.name().as_internal(), "pool/PoolSample");
-        assert!(matches!(
-            symbol.super_class(),
-            Some(ClassRef::Resolved(super_symbol))
-                if super_symbol.name().as_internal() == "java/lang/Object"
-        ));
-        assert!(matches!(
-            symbol.interfaces().as_slice(),
-            [ClassRef::Resolved(interface_symbol)]
-                if interface_symbol.name().as_internal() == "java/lang/Runnable"
-        ));
+        assert_eq!(symbol_name(&store, symbol), "PoolSample");
+        let info = class_info(&store, symbol);
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[0])),
+            "Object"
+        );
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, info.parents[1])),
+            "Runnable"
+        );
     }
 
     #[test]
     fn returns_the_same_cached_symbol_on_a_second_load() {
-        let loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
         let name = BinaryName::from_internal("PoolSample");
 
         let first = loader.load_class(&name).unwrap();
         let second = loader.load_class(&name).unwrap();
 
-        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(first, second);
     }
 
     #[test]
     fn not_found_when_the_classpath_has_nothing_for_the_name() {
-        let loader = ClassLoader::new(InMemoryClassPath(HashMap::new()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
 
         let error = loader
             .load_class(&BinaryName::from_internal("Missing"))
@@ -1829,7 +1998,8 @@ mod tests {
 
     #[test]
     fn io_error_from_the_classpath_is_wrapped_and_not_cached_as_not_found() {
-        let loader = ClassLoader::new(AlwaysErrors);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(AlwaysErrors, &mut store);
 
         let error = loader
             .load_class(&BinaryName::from_internal("Anything"))
@@ -1843,7 +2013,9 @@ mod tests {
         let mut classes = HashMap::new();
         classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("Broken"))
             .unwrap_err();
@@ -1862,7 +2034,9 @@ mod tests {
             synthetic_malformed_this_class(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("Broken"))
             .unwrap_err();
@@ -1881,7 +2055,9 @@ mod tests {
             fixture_bytes("pool_sample/PoolSample.class"),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("RequestedUnderTheWrongName"))
             .unwrap_err();
@@ -1904,7 +2080,9 @@ mod tests {
         // Deliberately omit java/lang/Object and java/lang/Runnable so
         // resolving PoolSample's superclass fails.
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("PoolSample"))
             .unwrap_err();
@@ -1923,7 +2101,9 @@ mod tests {
         let mut classes = HashMap::new();
         classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
 
-        let loader = ClassLoader::new(InMemoryTastyClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("Broken"))
             .unwrap_err();
@@ -1944,7 +2124,9 @@ mod tests {
         // Deliberately omit java/lang/Object (and Animal) so resolving
         // Dog's implicit superclass fails.
 
-        let loader = ClassLoader::new(InMemoryTastyClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("Dog"))
             .unwrap_err();
@@ -1973,7 +2155,9 @@ mod tests {
             synthetic_class("B", Some("A")),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("A"))
             .unwrap_err();
@@ -2015,35 +2199,42 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load despite the mutual field reference");
 
-        let ping_fields = ping.fields();
-        let ping_other = ping_fields
+        let ping_metadata = loader
+            .metadata(ping)
+            .expect("Ping should have classfile metadata");
+        let ping_other = ping_metadata
+            .fields
             .iter()
             .find(|field| field.name() == "other")
             .expect("Ping.other should exist");
-
         let pong = match ping_other.semantic_type() {
-            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => symbol.clone(),
+            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
             unexpected => panic!("expected Ping.other to resolve to a class, got {unexpected:?}"),
         };
-        assert_eq!(pong.name().as_internal(), "Pong");
 
-        let pong_fields = pong.fields();
-        let pong_other = pong_fields
+        let pong_metadata = loader
+            .metadata(pong)
+            .expect("Pong should have classfile metadata");
+        let pong_other = pong_metadata
+            .fields
             .iter()
             .find(|field| field.name() == "other")
             .expect("Pong.other should exist");
-
-        match pong_other.semantic_type() {
-            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => {
-                assert_eq!(symbol.name().as_internal(), "Ping");
-            }
+        let ping_again = match pong_other.semantic_type() {
+            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
             unexpected => panic!("expected Pong.other to resolve to a class, got {unexpected:?}"),
-        }
+        };
+        drop(loader);
+
+        assert_eq!(symbol_name(&store, pong), "Pong");
+        assert_eq!(symbol_name(&store, ping_again), "Ping");
     }
 
     /// `resolve_semantic_field_type`'s `FieldType::Array` branch
@@ -2069,22 +2260,25 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load");
 
-        let ping_fields = ping.fields();
-        let others = ping_fields
+        let metadata = loader
+            .metadata(ping)
+            .expect("Ping should have classfile metadata");
+        let others = metadata
+            .fields
             .iter()
             .find(|field| field.name() == "others")
             .expect("Ping.others should exist");
 
-        match others.semantic_type() {
+        let pong = match others.semantic_type() {
             SemanticFieldType::Array(component) => match component.as_ref() {
-                SemanticFieldType::Object(ClassRef::Resolved(symbol)) => {
-                    assert_eq!(symbol.name().as_internal(), "Pong");
-                }
+                SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
                 unexpected => {
                     panic!(
                         "expected the array's component to resolve to a class, got {unexpected:?}"
@@ -2092,7 +2286,10 @@ mod tests {
                 }
             },
             unexpected => panic!("expected Ping.others to be an array type, got {unexpected:?}"),
-        }
+        };
+        drop(loader);
+
+        assert_eq!(symbol_name(&store, pong), "Pong");
     }
 
     /// Same "reuse an in-progress shell" technique as the field-level
@@ -2114,27 +2311,34 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load despite the mutual method reference");
 
-        let ping_methods = ping.methods();
-        let exchange = ping_methods
+        let metadata = loader
+            .metadata(ping)
+            .expect("Ping should have classfile metadata");
+        let exchange = metadata
+            .methods
             .iter()
             .find(|method| method.name() == "exchange")
             .expect("Ping.exchange should exist");
 
-        assert!(matches!(
-            exchange.semantic_descriptor().parameters.as_slice(),
-            [SemanticFieldType::Object(ClassRef::Resolved(symbol))]
-                if symbol.name().as_internal() == "Pong"
-        ));
-        assert!(matches!(
-            &exchange.semantic_descriptor().return_type,
-            Some(SemanticFieldType::Object(ClassRef::Resolved(symbol)))
-                if symbol.name().as_internal() == "Pong"
-        ));
+        let parameter_symbol = match exchange.semantic_descriptor().parameters.as_slice() {
+            [SemanticFieldType::Object(ClassRef::Resolved(symbol))] => *symbol,
+            unexpected => panic!("expected a single resolved Object parameter, got {unexpected:?}"),
+        };
+        let return_symbol = match &exchange.semantic_descriptor().return_type {
+            Some(SemanticFieldType::Object(ClassRef::Resolved(symbol))) => *symbol,
+            unexpected => panic!("expected a resolved Object return type, got {unexpected:?}"),
+        };
+        drop(loader);
+
+        assert_eq!(symbol_name(&store, parameter_symbol), "Pong");
+        assert_eq!(symbol_name(&store, return_symbol), "Pong");
     }
 
     /// `nested_sample/NestedSample.class` (real `javac` output, see
@@ -2185,14 +2389,18 @@ mod tests {
     /// the names, not that the members were loaded.
     #[test]
     fn resolves_the_nest_members_of_a_real_nest_host() {
-        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample"))
             .expect("NestedSample should load");
 
-        let mut member_names: Vec<String> = symbol
-            .nest_members()
-            .into_iter()
+        let metadata = loader
+            .metadata(symbol)
+            .expect("NestedSample should have classfile metadata");
+        let mut member_names: Vec<String> = metadata
+            .nest_members
+            .iter()
             .map(|member| match member {
                 ClassRef::Unresolved(name) => name.as_internal().to_owned(),
                 unexpected => panic!("expected an unresolved nest member ref, got {unexpected:?}"),
@@ -2211,13 +2419,17 @@ mod tests {
     /// doc comment for why this attribute is never eagerly loaded.
     #[test]
     fn resolves_the_nest_host_of_a_real_nest_member() {
-        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample$Inner"))
             .expect("NestedSample$Inner should load");
 
+        let metadata = loader
+            .metadata(symbol)
+            .expect("NestedSample$Inner should have classfile metadata");
         assert!(matches!(
-            symbol.nest_host(),
+            &metadata.nest_host,
             Some(ClassRef::Unresolved(name)) if name.as_internal() == "NestedSample"
         ));
     }
@@ -2241,14 +2453,19 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("Shape"))
             .expect("Shape should load");
 
-        let mut permitted_names: Vec<String> = symbol
-            .permitted_subclasses()
-            .into_iter()
+        let metadata = loader
+            .metadata(symbol)
+            .expect("Shape should have classfile metadata");
+        let mut permitted_names: Vec<String> = metadata
+            .permitted_subclasses
+            .iter()
             .map(|permitted| match permitted {
                 ClassRef::Unresolved(name) => name.as_internal().to_owned(),
                 unexpected => {
@@ -2270,12 +2487,16 @@ mod tests {
     /// their own in this attribute).
     #[test]
     fn resolves_the_inner_classes_of_a_real_nest_host() {
-        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample"))
             .expect("NestedSample should load");
 
-        let entries = symbol.inner_classes();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("NestedSample should have classfile metadata");
+        let entries = &metadata.inner_classes;
         let inner = |name: &str| {
             entries
                 .iter()
@@ -2305,17 +2526,22 @@ mod tests {
     /// `NestedSample.makeLocalRunnable(String):Runnable`.
     #[test]
     fn resolves_the_enclosing_method_of_a_real_local_class() {
-        let loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample$1LocalRunnable"))
             .expect("NestedSample$1LocalRunnable should load");
 
-        let enclosing = symbol
-            .enclosing_method()
+        let metadata = loader
+            .metadata(symbol)
+            .expect("NestedSample$1LocalRunnable should have classfile metadata");
+        let enclosing = metadata
+            .enclosing_method
+            .as_ref()
             .expect("NestedSample$1LocalRunnable should have an EnclosingMethod attribute");
 
         assert!(matches!(
-            enclosing.class,
+            &enclosing.class,
             ClassRef::Unresolved(name) if name.as_internal() == "NestedSample"
         ));
         assert_eq!(
@@ -2355,13 +2581,19 @@ mod tests {
             synthetic_class("java/lang/Record", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("Shape$Circle"))
             .expect("Shape$Circle should load");
 
-        let components = symbol
-            .record_components()
+        let metadata = loader
+            .metadata(symbol)
+            .expect("Shape$Circle should have classfile metadata");
+        let components = metadata
+            .record_components
+            .as_ref()
             .expect("Shape$Circle should have a Record attribute");
 
         assert!(matches!(
@@ -2386,12 +2618,17 @@ mod tests {
             synthetic_class("java/lang/Object", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("Shape"))
             .expect("Shape should load");
 
-        assert!(symbol.record_components().is_none());
+        let metadata = loader
+            .metadata(symbol)
+            .expect("Shape should have classfile metadata");
+        assert!(metadata.record_components.is_none());
     }
 
     /// `nested_sample/NestedSample$Inner.class`'s real
@@ -2409,12 +2646,17 @@ mod tests {
             synthetic_class("java/lang/Deprecated", None),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("NestedSample$Inner"))
             .expect("NestedSample$Inner should load");
 
-        let annotations = symbol.annotations();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("NestedSample$Inner should have classfile metadata");
+        let annotations = &metadata.annotations;
         let deprecated = annotations
             .iter()
             .find(|annotation| {
@@ -2637,12 +2879,17 @@ mod tests {
             synthetic_class_with_varied_annotation_element_values(),
         );
 
-        let loader = ClassLoader::new(InMemoryClassPath(classes));
+        let mut store = SemanticStore::new();
+
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let symbol = loader
             .load_class(&BinaryName::from_internal("C"))
             .expect("C should load");
 
-        let annotations = symbol.annotations();
+        let metadata = loader
+            .metadata(symbol)
+            .expect("C should have classfile metadata");
+        let annotations = &metadata.annotations;
         let tag = annotations
             .first()
             .expect("C should carry the synthetic annotation");

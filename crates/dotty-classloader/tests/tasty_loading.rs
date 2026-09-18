@@ -8,8 +8,9 @@
 //! in isolation.
 
 use dotty_classloader::classloader::{
-    BinaryName, ClassLoader, ClassRef, CompositeClassPath, DirectoryClassPath,
+    BinaryName, ClassLoader, CompositeClassPath, DirectoryClassPath,
 };
+use dotty_core::{ClassInfo, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -73,9 +74,10 @@ fn write_synthetic_object_class(root: &Path) {
     fs::write(root.join("java/lang/Object.class"), bytes).unwrap();
 }
 
-fn class_loader_over_tasty_sample(
+fn class_loader_over_tasty_sample<'store>(
     name: &str,
-) -> (ClassLoader<CompositeClassPath>, TemporaryDirectory) {
+    store: &'store mut SemanticStore,
+) -> (ClassLoader<'store, CompositeClassPath>, TemporaryDirectory) {
     let synthetic_jdk = TemporaryDirectory::new(name);
     write_synthetic_object_class(synthetic_jdk.path());
 
@@ -83,30 +85,61 @@ fn class_loader_over_tasty_sample(
         Box::new(DirectoryClassPath::new(tasty_sample_dir())),
         Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
     ]);
-    (ClassLoader::new(class_path), synthetic_jdk)
+    (ClassLoader::new(class_path, store), synthetic_jdk)
+}
+
+/// The class's `Type::ClassInfo`, read back through its `Symbol`'s
+/// `SymbolInfo::Complete`.
+fn class_info(store: &SemanticStore, id: SymbolId) -> &ClassInfo {
+    let symbol = store.symbols.get(id);
+    let SymbolInfo::Complete(info_id) = symbol.info else {
+        panic!("expected the class to have complete info");
+    };
+    let Type::ClassInfo(class_info) = store.types.get(info_id) else {
+        panic!("expected a ClassInfo");
+    };
+    class_info
+}
+
+/// The `SymbolId` a `Type::TypeRef` (a `ClassInfo` parent) points at.
+fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
+    let Type::TypeRef { symbol, .. } = store.types.get(ty) else {
+        panic!("expected a TypeRef");
+    };
+    *symbol
 }
 
 #[test]
 fn loads_dog_with_animal_resolved_through_tasty_as_a_real_interface() {
-    let (loader, _synthetic_jdk) =
-        class_loader_over_tasty_sample("tasty-loading-dog-synthetic-jdk");
+    let mut store = SemanticStore::new();
+    let (mut loader, _synthetic_jdk) =
+        class_loader_over_tasty_sample("tasty-loading-dog-synthetic-jdk", &mut store);
 
     let dog = loader
         .load_class(&BinaryName::from_internal("Dog"))
         .expect("Dog should load from its real .tasty fixture");
+    drop(loader);
 
-    assert!(!dog.flags().is_interface());
-    assert!(matches!(
-        dog.super_class(),
-        Some(ClassRef::Resolved(super_symbol))
-            if super_symbol.name().as_internal() == "java/lang/Object"
-    ));
-    assert!(matches!(
-        dog.interfaces().as_slice(),
-        [ClassRef::Resolved(interface_symbol)]
-            if interface_symbol.name().as_internal() == "Animal"
-                && interface_symbol.flags().is_interface()
-    ));
+    assert_eq!(store.symbols.get(dog).kind, SymbolKind::Class);
+    let info = class_info(&store, dog);
+    assert_eq!(info.parents.len(), 2);
+
+    let super_symbol = parent_symbol(&store, info.parents[0]);
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(super_symbol).name.text()),
+        "Object"
+    );
+
+    let interface_symbol = parent_symbol(&store, info.parents[1]);
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(interface_symbol).name.text()),
+        "Animal"
+    );
+    assert_eq!(store.symbols.get(interface_symbol).kind, SymbolKind::Trait);
 }
 
 /// `tasty_sample/` also has a co-located dummy `Animal.class` (real
@@ -119,18 +152,24 @@ fn loads_dog_with_animal_resolved_through_tasty_as_a_real_interface() {
 /// just `ClassPathEntry::find_class` in isolation.
 #[test]
 fn loads_animal_directly_as_an_interface_with_no_declared_interfaces() {
-    let (loader, _synthetic_jdk) =
-        class_loader_over_tasty_sample("tasty-loading-animal-synthetic-jdk");
+    let mut store = SemanticStore::new();
+    let (mut loader, _synthetic_jdk) =
+        class_loader_over_tasty_sample("tasty-loading-animal-synthetic-jdk", &mut store);
 
     let animal = loader
         .load_class(&BinaryName::from_internal("Animal"))
         .expect("Animal should load from its real .tasty fixture, not the co-located dummy .class");
+    drop(loader);
 
-    assert!(animal.flags().is_interface());
-    assert!(animal.interfaces().is_empty());
-    assert!(matches!(
-        animal.super_class(),
-        Some(ClassRef::Resolved(super_symbol))
-            if super_symbol.name().as_internal() == "java/lang/Object"
-    ));
+    assert_eq!(store.symbols.get(animal).kind, SymbolKind::Trait);
+    let info = class_info(&store, animal);
+    assert_eq!(info.parents.len(), 1);
+
+    let super_symbol = parent_symbol(&store, info.parents[0]);
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(super_symbol).name.text()),
+        "Object"
+    );
 }

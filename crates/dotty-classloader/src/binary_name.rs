@@ -30,6 +30,20 @@ impl BinaryName {
     pub fn to_qualified(&self) -> String {
         self.0.replace('/', ".")
     }
+
+    /// The unqualified simple name: the part after the last `/`, or the
+    /// whole name if there is none (a class in the unnamed package).
+    pub fn simple_name(&self) -> &str {
+        self.0
+            .rsplit_once('/')
+            .map_or(self.0.as_str(), |(_, simple)| simple)
+    }
+
+    /// The containing package, in internal form (`java/util`), or empty
+    /// for the unnamed package.
+    pub fn package_path(&self) -> &str {
+        self.0.rsplit_once('/').map_or("", |(package, _)| package)
+    }
 }
 
 impl fmt::Display for BinaryName {
@@ -80,5 +94,36 @@ mod tests {
     fn display_renders_internal_form() {
         let name = BinaryName::from_internal("java/lang/Runnable");
         assert_eq!(name.to_string(), "java/lang/Runnable");
+    }
+
+    #[test]
+    fn simple_name_is_the_part_after_the_last_slash() {
+        let name = BinaryName::from_internal("java/lang/Object");
+        assert_eq!(name.simple_name(), "Object");
+    }
+
+    #[test]
+    fn simple_name_is_the_whole_name_in_the_unnamed_package() {
+        let name = BinaryName::from_internal("PoolSample");
+        assert_eq!(name.simple_name(), "PoolSample");
+    }
+
+    #[test]
+    fn package_path_is_everything_before_the_last_slash() {
+        let name = BinaryName::from_internal("java/lang/Object");
+        assert_eq!(name.package_path(), "java/lang");
+    }
+
+    #[test]
+    fn package_path_is_empty_in_the_unnamed_package() {
+        let name = BinaryName::from_internal("PoolSample");
+        assert_eq!(name.package_path(), "");
+    }
+
+    #[test]
+    fn nested_class_names_keep_dollar_in_their_simple_name() {
+        let name = BinaryName::from_internal("com/example/Outer$Inner");
+        assert_eq!(name.simple_name(), "Outer$Inner");
+        assert_eq!(name.package_path(), "com/example");
     }
 }

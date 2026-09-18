@@ -21,6 +21,7 @@ mod loader;
 mod manifest;
 mod method_symbol;
 mod nesting;
+mod packages;
 mod record_component;
 mod repository;
 mod semantic_type;
@@ -47,6 +48,6 @@ pub mod classloader {
     pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
     pub use crate::record_component::RecordComponentSymbol;
     pub use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
-    pub use crate::symbol::{ClassRef, ClassSymbol};
+    pub use crate::symbol::{ClassRef, ClassfileMetadata};
     pub use crate::tasty_symbol::TastyDecodeError;
 }

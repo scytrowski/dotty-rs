@@ -9,14 +9,14 @@ use dotty_tasty::tasty::{
 };
 use std::fmt;
 
-/// The class-level facts reconstructable from a `.tasty` file without
-/// full type-checking: enough to build a `ClassSymbol` shell and recurse
-/// into its supertypes, mirroring what `.class` decoding gives
-/// (`docs/classloader.md` §9). `fields`/`methods`/`signature`/
-/// `nest_host`/etc. are not reconstructed from `.tasty` yet — the
-/// caller passes empty/`None` for those, the same "not yet populated"
-/// shape earlier `.class` milestones used before their corresponding
-/// feature landed.
+/// The class-level facts reconstructable from a `.tasty` file without full
+/// type-checking: enough to enter a `dotty-core` `Symbol` and recurse into
+/// its supertypes, mirroring what `.class` decoding gives
+/// (`docs/classloader.md` §9). `fields`/`methods`/`signature`/`nest_host`/
+/// etc. are not reconstructed from `.tasty` yet, so a `.tasty`-backed
+/// symbol gets no `ClassfileMetadata` entry at all — the same "not yet
+/// populated" gap earlier `.class` milestones had before their
+/// corresponding feature landed.
 #[derive(Debug)]
 pub(crate) struct DecodedTastyClass {
     pub flags: ClassAccessFlags,
