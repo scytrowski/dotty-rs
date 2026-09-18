@@ -3191,4 +3191,65 @@ mod tests {
             1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
         );
     }
+
+    #[test]
+    fn recovers_truncated_interpolation_inputs_at_eof() {
+        for source in ["s\"", "s\"$", "s\"${", "s\"${value", "s\"${value + other"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items.last().and_then(|item| match item {
+                    RawItem::Token(token) => Some(token.kind),
+                    RawItem::Trivia(_) => None,
+                }),
+                Some(RawTokenKind::Eof),
+                "interpolation did not reach EOF for {source:?}"
+            );
+            assert!(
+                !diagnostics.is_empty(),
+                "truncated interpolation produced no diagnostic for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovers_truncated_xml_inputs_at_eof() {
+        for source in [
+            "<root",
+            "<root>",
+            "<root>text",
+            "<root>{value",
+            "<root><!--",
+        ] {
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+            assert_eq!(
+                scanner.tokens().last().map(|token| token.kind),
+                Some(TokenKind::Eof),
+                "XML did not reach EOF for {source:?}"
+            );
+            assert!(
+                !scanner.diagnostics().is_empty(),
+                "truncated XML produced no diagnostic for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovers_truncated_comments_and_literals_at_eof() {
+        for source in ["/*", "/* outer /* inner", "`name", "\"hello", "'\\"] {
+            let (items, diagnostics) = scan(source);
+            assert_eq!(
+                items.last().and_then(|item| match item {
+                    RawItem::Token(token) => Some(token.kind),
+                    RawItem::Trivia(_) => None,
+                }),
+                Some(RawTokenKind::Eof),
+                "truncated input did not reach EOF for {source:?}"
+            );
+            assert!(
+                !diagnostics.is_empty(),
+                "truncated input produced no diagnostic for {source:?}"
+            );
+        }
+    }
 }

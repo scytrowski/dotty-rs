@@ -537,7 +537,8 @@ emitting duplicate errors for the same malformed literal.
 The lexer also has a deterministic short-input hardening test that exercises
 2,380 ASCII inputs through both raw and contextual scanning, checking progress,
 EOF reachability, and source-span coverage. Full randomized fuzzing remains a
-separate hardening task.
+separate hardening task. Dedicated EOF-recovery matrices cover truncated
+interpolation, XML, comments, strings, backquoted identifiers, and escapes.
 
 ## 11. Testing strategy
 
