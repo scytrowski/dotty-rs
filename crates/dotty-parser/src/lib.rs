@@ -8,6 +8,7 @@
 //! Until its public entry point is added, this crate only establishes the
 //! workspace and dependency boundary.
 
+mod compilation_unit;
 mod context;
 mod cursor;
 mod diagnostics;

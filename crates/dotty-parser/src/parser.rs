@@ -69,6 +69,11 @@ where
         self.cursor.current()
     }
 
+    /// Returns the current token's source span.
+    pub fn current_span(&self) -> SourceSpan {
+        SourceSpan::new(self.source_id, Span::without_point(self.current().span))
+    }
+
     /// Returns the current parser context.
     pub const fn context(&self) -> &ParseContext {
         &self.context
