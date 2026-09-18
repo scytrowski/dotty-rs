@@ -3,9 +3,9 @@
 //! `dotty-core` represents symbols, types, and syntax/typed trees as one
 //! model shared by the source parser, the classfile loader, the TASTy
 //! unpickler, and the namer/typer, instead of each of them inventing its own.
-//! It knows nothing about lexical syntax, JVM classfiles, TASTy's wire
-//! format, or type inference — see `docs/dotty-core-design.md` for the full
-//! design and the boundary with those crates.
+//! It knows nothing about the concrete lexer implementation, JVM classfiles,
+//! TASTy's wire format, or type inference — see `docs/dotty-core-design.md`
+//! for the full design and the boundary with those crates.
 //!
 //! This crate is under active construction; the identity, name,
 //! source-position, type, symbol/scope, and AST phase layers exist so far.
@@ -13,20 +13,25 @@
 
 pub mod ast;
 pub mod definitions;
+pub mod diagnostics;
 pub mod ids;
 pub mod names;
 pub mod source;
 pub mod store;
 pub mod symbols;
+pub mod token;
 pub mod types;
 
-/// Shared semantic foundation: identity, names, source positions, the type
-/// and symbol/scope model, and phase-indexed syntax/typed trees.
+/// Shared compiler foundation: source text, diagnostics, parser-facing token
+/// contracts, identity, names, the type and symbol/scope model, and
+/// phase-indexed syntax/typed trees.
 pub mod core {
     pub use super::ast;
     pub use super::ast::*;
     pub use super::definitions;
     pub use super::definitions::*;
+    pub use super::diagnostics;
+    pub use super::diagnostics::*;
     pub use super::ids;
     pub use super::ids::*;
     pub use super::names;
@@ -37,22 +42,31 @@ pub mod core {
     pub use super::store::*;
     pub use super::symbols;
     pub use super::symbols::*;
+    pub use super::token;
+    pub use super::token::*;
     pub use super::types;
     pub use super::types::*;
 }
 
 pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
 pub use definitions::Definitions;
+pub use diagnostics::{Diagnostic, DiagnosticSeverity};
 pub use ids::{
     AnnotationId, ClassfileOriginId, CompletionId, NameId, ScopeId, SourceId, SymbolId,
     TastyOriginId, TreeId, TypeId,
 };
 pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
-pub use source::{SourceSpan, Span, SpanError};
+pub use source::{
+    LineIndex, SourceSpan, SourceText, SourceTextError, Span, SpanError, TextRange, TextRangeError,
+    is_line_break_char,
+};
 pub use store::SemanticStore;
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
     SymbolOrigin, SymbolTable, Visibility,
+};
+pub use token::{
+    HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource, TokenValue,
 };
 pub use types::{
     Annotation, AnnotationArena, ClassInfo, Constant, ErrorType, MatchType, MethodKind,

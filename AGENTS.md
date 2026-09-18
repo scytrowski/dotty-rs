@@ -53,6 +53,14 @@ or changed by that increment before it is considered complete.
 - Test names should describe one observable behavior.
 - When a feature has several independent supported variants, prefer separate
   tests or a clearly scoped table-driven group with per-case failure context.
+- For every compiler component, add focused tests for each independent
+  supported variant and meaningful malformed, truncated, or recovery case.
+  Keep distinct behaviors in distinct tests; one representative test, broad
+  scenario, or integration fixture does not establish sufficient coverage.
+- Treat tests as regression protection for the compiler: when a behavior can
+  regress independently, make that behavior directly observable in a test at
+  the lowest relevant layer and add integration coverage when it crosses
+  module boundaries.
 - Add assertions for exact error variants and important offsets/references,
   not only `is_err()`.
 - Keep test counts meaningful: adding coverage should normally add a test or
