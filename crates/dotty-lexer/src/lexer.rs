@@ -776,6 +776,7 @@ impl<'source> RawLexer<'source> {
     fn scan_number(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         let mut kind = RawTokenKind::IntegerLiteral;
         let mut base = 10;
+        let mut invalid_suffix = false;
 
         if self.cursor.peek() == Some('.') {
             let _ = self.cursor.bump();
@@ -846,7 +847,8 @@ impl<'source> RawLexer<'source> {
             }
             Some('l' | 'L') => {
                 self.report(start, "long suffix is only valid on an integer literal")?;
-                let _ = self.cursor.bump();
+                kind = RawTokenKind::Error;
+                invalid_suffix = true;
             }
             _ => {}
         }
@@ -856,7 +858,10 @@ impl<'source> RawLexer<'source> {
                 .cursor
                 .peek()
                 .is_some_and(|character| character.is_ascii_alphanumeric());
-        if self.cursor.peek().is_some_and(is_identifier_part) && !invalid_non_decimal_digit {
+        if self.cursor.peek().is_some_and(is_identifier_part)
+            && !invalid_non_decimal_digit
+            && !invalid_suffix
+        {
             self.report(start, "invalid literal number")?;
         }
 
@@ -890,10 +895,9 @@ impl<'source> RawLexer<'source> {
             self.report(start, "numeric literal must not end with a separator")?;
         }
         let invalid_non_decimal_digit = base != 10
-            && self
-                .cursor
-                .peek()
-                .is_some_and(|character| character.is_ascii_alphanumeric());
+            && self.cursor.peek().is_some_and(|character| {
+                character.is_ascii_alphanumeric() && !(saw_digit && matches!(character, 'l' | 'L'))
+            });
         if invalid_non_decimal_digit {
             self.report(start, "invalid digit in non-decimal literal")?;
         } else if !saw_digit {
@@ -1871,6 +1875,80 @@ mod tests {
             ]
         );
         assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_float_suffix_after_an_exponent() {
+        let (items, diagnostics) = scan("1e2f");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::FloatLiteral, 0, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_double_suffix_after_an_exponent() {
+        let (items, diagnostics) = scan("1e2d");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::DoubleLiteral, 0, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_long_suffix_after_an_uppercase_hex_literal() {
+        let (items, diagnostics) = scan("0XFFL");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::LongLiteral, 0, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_long_suffix_on_a_decimal_literal_as_an_error_token() {
+        let (items, diagnostics) = scan("1.0L");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 3),
+                token(RawTokenKind::Identifier, 3, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("long suffix"));
+    }
+
+    #[test]
+    fn reports_a_long_suffix_on_an_exponent_literal_as_an_error_token() {
+        let (items, diagnostics) = scan("1e2L");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 3),
+                token(RawTokenKind::Identifier, 3, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("long suffix"));
     }
 
     #[test]

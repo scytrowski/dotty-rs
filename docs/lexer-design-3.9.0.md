@@ -541,7 +541,10 @@ compatibility words are covered by a dedicated oracle fixture.
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid
 digits in hexadecimal/binary literals are diagnosed independently, without
-emitting duplicate errors for the same malformed literal.
+emitting duplicate errors for the same malformed literal. A long suffix on a
+decimal or exponent literal produces an error token for the numeric portion and
+leaves the suffix available as a following identifier, matching Scala's
+recovery boundary.
 
 The lexer also has deterministic short-input hardening tests that exercise
 2,380 ASCII inputs and 1,111 Unicode/multibyte inputs through both raw and
