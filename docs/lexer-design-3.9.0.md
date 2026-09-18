@@ -505,8 +505,9 @@ closures, and exact EOF behavior. The current increment covers same-line token
 fusion,
 basic end-marker recognition, line-start markers, non-panicking EOF
 classification, `new`/`this`/`given`/`val` targets, and closure of implicit
-regions after dedented closing delimiters. More precise region ownership and
-grammar-driven closures remain to be refined.
+regions after dedented closing delimiters, and nested regions closed before
+their matching end markers. More precise region ownership and grammar-driven
+closures remain to be refined.
 
 ### Increment 9 — Quotes, legacy syntax, and XML
 
