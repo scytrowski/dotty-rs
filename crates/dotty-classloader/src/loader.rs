@@ -184,7 +184,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // A JVM class file's own access_flags carry no ACC_PRIVATE/
         // ACC_PROTECTED bit (JVMS §4.1 Table 4.1-A) -- those only appear on
         // a *member* class's InnerClasses entry, not here -- so a top-level
-        // class is only ever public or package-private.
+        // class is only ever public or package-private. `flags` is shaped
+        // exactly like a real `.class` file's access_flags for both
+        // callers (`load_uncached_class` and, via
+        // `tasty_symbol::decode_flags`, `load_uncached_tasty`), so this is
+        // correct and complete for `.class` but not the final word for
+        // `.tasty` -- see `load_uncached_tasty`'s own visibility patch,
+        // right after it calls this, for where a `.tasty` class's real
+        // (potentially more restrictive) `private`/`protected` visibility
+        // is corrected in.
         let kind = if flags.is_interface() {
             SymbolKind::Trait
         } else {
@@ -633,6 +641,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
         self.repository.mark_loading(name.clone(), class_symbol);
+
+        // `enter_class` derives visibility from `ClassAccessFlags` alone,
+        // which (correctly, for `.class` — see its own doc comment) can
+        // only ever produce `Public`/`Package` here. `.tasty` actually
+        // knows the real, more restrictive `private`/`protected`
+        // distinction (see `tasty_symbol::DeclaredVisibility`'s doc
+        // comment for why `flags` itself can't carry it), so patch it in
+        // now — the same "allocate first, correct once known" pattern
+        // `resolve_semantic_owner`'s owner patch (`.class`'s nested-class
+        // path) already uses.
+        match decoded.visibility {
+            Some(tasty_symbol::DeclaredVisibility::Private) => {
+                self.store.symbols.get_mut(class_symbol).visibility = Visibility::Private;
+            }
+            Some(tasty_symbol::DeclaredVisibility::Protected) => {
+                self.store.symbols.get_mut(class_symbol).visibility = Visibility::Protected;
+            }
+            None => {}
+        }
 
         let super_class = self.load_dependency(name, decoded.super_class)?;
         let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
@@ -3751,6 +3778,60 @@ mod tests {
         };
         let message = store.names.resolve(error.message);
         assert!(message.contains("could not reduce the declared type tree to a name"));
+    }
+
+    /// `scala3-library/scala/math/Ordering.tasty`'s real private nested
+    /// `Reverse` (already used by
+    /// `tasty_symbol::decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class`
+    /// to prove `tasty_symbol::decode` preserves its real
+    /// `PRIVATE_TAG` — this proves the loader actually *uses* that:
+    /// without `load_uncached_tasty`'s visibility patch,
+    /// `enter_class` can only default a non-public `.tasty` class to
+    /// `Visibility::Package`, which would make `Reverse` look no more
+    /// restricted than ordinary Java package-private, silently widening
+    /// its real, more restrictive Scala `private` access boundary.
+    /// `Reverse extends Ordering[T]`, so loading it for real also loads
+    /// `Ordering` itself (a large trait with its own further
+    /// dependencies) — every stub below is a minimal `.class` dependency
+    /// this pulls in transitively, found by loading with progressively
+    /// fewer gaps until nothing was left unresolved.
+    #[test]
+    fn a_private_tasty_classs_visibility_is_not_widened_to_package() {
+        let mut tasty = HashMap::new();
+        tasty.insert(
+            BinaryName::from_internal("Reverse"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
+        );
+        tasty.insert(
+            BinaryName::from_internal("Ordering"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/math/Ordering.tasty"),
+        );
+
+        let mut classes = HashMap::new();
+        for stub in [
+            "java/lang/Object",
+            "Comparator",
+            "PartialOrdering",
+            "scala/PartialOrdering",
+            "Serializable",
+            "scala/Serializable",
+        ] {
+            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
+        }
+
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let reverse = loader
+            .load_class(&BinaryName::from_internal("Reverse"))
+            .expect("Reverse should load from its real .tasty fixture");
+        drop(loader);
+
+        assert_eq!(store.symbols.get(reverse).visibility, Visibility::Private);
     }
 
     #[test]

@@ -34,10 +34,36 @@ use std::fmt;
 #[derive(Debug)]
 pub(crate) struct DecodedTastyClass {
     pub flags: ClassAccessFlags,
+    /// The class's real `PRIVATE_TAG`/`PROTECTED_TAG` modifier, kept
+    /// separately from `flags` — see [`DeclaredVisibility`]'s doc
+    /// comment for why `ClassAccessFlags` alone cannot carry this.
+    /// `None` covers both "no visibility modifier at all" (Scala's
+    /// default: public) and any other modifier tag this decoder does
+    /// not track.
+    pub visibility: Option<DeclaredVisibility>,
     pub super_class: BinaryName,
     pub interfaces: Vec<BinaryName>,
     pub fields: Vec<DecodedTastyField>,
     pub methods: Vec<DecodedTastyMethod>,
+}
+
+/// A `.tasty` class-level visibility modifier that `ClassAccessFlags`
+/// (`flags`) cannot represent: JVMS Table 4.1-A defines no
+/// `ACC_PRIVATE`/`ACC_PROTECTED` bit for a *top-level* class's own
+/// `access_flags` (only a *nested* class's `InnerClasses` entry carries
+/// one — see `ClassLoader::enter_class`'s doc comment) — so
+/// `ClassAccessFlags`, being JVM-shaped, only ever distinguishes public
+/// from "not public", the same way it does for a real `.class` file.
+/// `.tasty` actually knows the difference (Scala's `private`/`protected`
+/// are real, distinct access levels — `Visibility::Private` is far more
+/// restrictive than package-private, and `Visibility::Protected` is not
+/// the same access boundary as either), so it is threaded through here
+/// instead of being collapsed the way [`decode_flags`] collapses it for
+/// `ClassAccessFlags`'s sake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclaredVisibility {
+    Private,
+    Protected,
 }
 
 /// One `ValDef` reconstructed from a class's `Template.stats`.
@@ -201,6 +227,7 @@ pub(crate) fn decode(
     };
 
     let flags = decode_flags(&tail);
+    let visibility = decode_visibility(&tail);
 
     let RawTree::LengthNode(template_node) = &type_or_template else {
         return Err(TastyDecodeError::NoTemplateBody);
@@ -233,6 +260,7 @@ pub(crate) fn decode(
 
     Ok(DecodedTastyClass {
         flags,
+        visibility,
         super_class,
         interfaces,
         fields,
@@ -474,6 +502,24 @@ fn decode_flags(tail: &[DefinitionTail<'_>]) -> ClassAccessFlags {
     }
 
     ClassAccessFlags(bits)
+}
+
+/// The `.tasty` counterpart of [`decode_flags`]'s `PRIVATE_TAG`/
+/// `PROTECTED_TAG` handling, kept as a real [`DeclaredVisibility`]
+/// instead of being collapsed into `ClassAccessFlags`'s single "not
+/// public" bit — see [`DeclaredVisibility`]'s doc comment.
+fn decode_visibility(tail: &[DefinitionTail<'_>]) -> Option<DeclaredVisibility> {
+    tail.iter().find_map(|item| {
+        let DefinitionTail::Modifier(tag) = item else {
+            return None;
+        };
+
+        match *tag {
+            PRIVATE_TAG => Some(DeclaredVisibility::Private),
+            PROTECTED_TAG => Some(DeclaredVisibility::Protected),
+            _ => None,
+        }
+    })
 }
 
 /// Reconstructs a supertype parent's referenced [`BinaryName`], or
@@ -760,11 +806,23 @@ mod tests {
         .unwrap();
 
         assert!(!decoded.flags.is_public());
+        assert_eq!(decoded.visibility, Some(DeclaredVisibility::Private));
         assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
         assert_eq!(
             decoded.interfaces,
             vec![BinaryName::from_internal("Ordering")]
         );
+    }
+
+    #[test]
+    fn decodes_a_public_classs_visibility_as_none() {
+        let decoded = decode(
+            &fixture_bytes("inheritance/Dog.tasty"),
+            &BinaryName::from_internal("Dog"),
+        )
+        .unwrap();
+
+        assert_eq!(decoded.visibility, None);
     }
 
     #[test]
@@ -875,6 +933,28 @@ mod tests {
         let flags = decode_flags(&[]);
 
         assert!(flags.is_public());
+    }
+
+    /// [`decode_flags`] collapses `PRIVATE_TAG`/`PROTECTED_TAG` down to
+    /// the same "not public" `ClassAccessFlags` bit (correct for
+    /// `.class`, which has no other way to represent a top-level class's
+    /// visibility — see [`DeclaredVisibility`]'s doc comment), but
+    /// [`decode_visibility`] must keep them apart.
+    #[test]
+    fn decode_visibility_distinguishes_private_from_protected() {
+        assert_eq!(
+            decode_visibility(&[DefinitionTail::Modifier(PRIVATE_TAG)]),
+            Some(DeclaredVisibility::Private)
+        );
+        assert_eq!(
+            decode_visibility(&[DefinitionTail::Modifier(PROTECTED_TAG)]),
+            Some(DeclaredVisibility::Protected)
+        );
+    }
+
+    #[test]
+    fn decode_visibility_is_none_with_no_modifiers() {
+        assert_eq!(decode_visibility(&[]), None);
     }
 
     /// `case_class/Point.tasty`'s real `case class Point(x: Int, y: Int)`
