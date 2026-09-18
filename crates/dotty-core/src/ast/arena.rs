@@ -70,6 +70,25 @@ mod tests {
     }
 
     #[test]
+    fn an_error_node_can_be_allocated_in_an_untyped_arena() {
+        let mut arena: AstArena<Untyped> = AstArena::new();
+        let id = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(crate::ast::UntypedNode::Error(crate::ast::ErrorNode {
+                kind: crate::ast::ErrorNodeKind::MissingType,
+            })),
+            position: None,
+            ty: (),
+        });
+
+        assert!(matches!(
+            arena.get(id).kind,
+            TreeKind::PhaseSpecific(crate::ast::UntypedNode::Error(crate::ast::ErrorNode {
+                kind: crate::ast::ErrorNodeKind::MissingType
+            }))
+        ));
+    }
+
+    #[test]
     fn distinct_allocations_get_distinct_ids() {
         let mut arena: AstArena<Untyped> = AstArena::new();
         let first = arena.alloc(ident_tree(1));

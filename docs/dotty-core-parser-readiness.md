@@ -1,7 +1,7 @@
 # `dotty-core` parser-readiness audit
 
-Status: documentation-only audit. This document does not implement
-`dotty-parser` or change the AST.
+Status: parser-readiness audit and implementation tracker. This document does
+not implement `dotty-parser`.
 
 The compatibility target is Scala 3.9.0. The audit compares the current Rust
 model with the parser-facing untyped tree families in Scala 3.9.0's

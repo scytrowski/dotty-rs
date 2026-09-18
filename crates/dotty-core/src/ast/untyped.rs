@@ -6,6 +6,23 @@ use crate::ast::phase::Untyped;
 use crate::ids::{NameId, TreeId};
 use crate::names::{Name, TermName};
 
+/// The parser-level reason an expression, type, or pattern could not be
+/// constructed. Diagnostics remain outside the AST; this enum only lets
+/// recovery produce a structurally valid untyped tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorNodeKind {
+    MissingExpression,
+    MissingType,
+    MissingPattern,
+    UnexpectedToken,
+}
+
+/// A minimal placeholder inserted by parser recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorNode {
+    pub kind: ErrorNodeKind,
+}
+
 /// `object Foo extends ... { ... }`, before desugaring into a synthetic
 /// `ValDef` + module-class `TypeDef` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +167,8 @@ pub struct Throw {
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UntypedNode {
+    Error(ErrorNode),
+
     ModuleDef(ModuleDef),
 
     Function(Function),
@@ -199,6 +218,26 @@ mod tests {
 
     fn name(raw: u32) -> Name {
         Name::new(NameId::new(raw), Namespace::Term)
+    }
+
+    #[test]
+    fn error_node_preserves_its_exact_recovery_kind() {
+        let node = UntypedNode::Error(ErrorNode {
+            kind: ErrorNodeKind::MissingExpression,
+        });
+
+        assert_eq!(
+            node,
+            UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::MissingExpression,
+            })
+        );
+        assert_ne!(
+            node,
+            UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })
+        );
     }
 
     #[test]

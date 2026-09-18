@@ -79,9 +79,11 @@ pub enum TreeKind<P: AstPhase> {
     /// tree cannot be built from a real `UntypedNode` value:
     ///
     /// ```compile_fail
-    /// use dotty_core::ast::{Throw, Typed, TreeKind, UntypedNode};
+    /// use dotty_core::ast::{ErrorNode, ErrorNodeKind, Typed, TreeKind, UntypedNode};
     ///
-    /// let node = UntypedNode::Throw(Throw { expr: todo!() });
+    /// let node = UntypedNode::Error(ErrorNode {
+    ///     kind: ErrorNodeKind::UnexpectedToken,
+    /// });
     /// let _: TreeKind<Typed> = TreeKind::PhaseSpecific(node);
     /// ```
     PhaseSpecific(P::ExtraNode),
