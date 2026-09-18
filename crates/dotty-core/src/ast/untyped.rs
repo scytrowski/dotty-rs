@@ -121,16 +121,28 @@ pub struct ForDo {
     pub body: TreeId<Untyped>,
 }
 
-/// `pattern <- expr`, a for-comprehension generator.
+/// The parser/lowering policy for a for-comprehension generator pattern.
 ///
-/// Dotty's `GenFrom` also carries a `GenCheckMode` (whether the generator's
-/// pattern match may fail and needs a filter inserted); that refinement is
-/// omitted from the foundation model and can be added to this struct once
-/// desugaring is implemented.
+/// The modes mirror Scala 3.9's `untpd.GenCheckMode`. The source version and
+/// an optional `case` prefix determine which mode the parser emits, so this
+/// information must survive the parser boundary until for-comprehension
+/// lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenCheckMode {
+    Ignore,
+    Filtered,
+    Check,
+    CheckAndFilter,
+    FilterNow,
+    FilterAlways,
+}
+
+/// `pattern <- expr`, a for-comprehension generator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GenFrom {
     pub pattern: TreeId<Untyped>,
     pub expr: TreeId<Untyped>,
+    pub check_mode: GenCheckMode,
 }
 
 /// `pattern = expr`, a for-comprehension alias binding.
@@ -444,6 +456,7 @@ mod tests {
         let from = UntypedNode::GenFrom(GenFrom {
             pattern: tree_id(1),
             expr: tree_id(2),
+            check_mode: GenCheckMode::Check,
         });
         let alias = UntypedNode::GenAlias(GenAlias {
             pattern: tree_id(1),
@@ -451,6 +464,62 @@ mod tests {
         });
 
         assert_ne!(from, alias);
+    }
+
+    fn gen_from_with_mode(check_mode: GenCheckMode) -> GenFrom {
+        GenFrom {
+            pattern: tree_id(1),
+            expr: tree_id(2),
+            check_mode,
+        }
+    }
+
+    #[test]
+    fn gen_from_preserves_ignore_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Ignore).check_mode,
+            GenCheckMode::Ignore
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filtered_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Filtered).check_mode,
+            GenCheckMode::Filtered
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_check_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::Check).check_mode,
+            GenCheckMode::Check
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_check_and_filter_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::CheckAndFilter).check_mode,
+            GenCheckMode::CheckAndFilter
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filter_now_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::FilterNow).check_mode,
+            GenCheckMode::FilterNow
+        );
+    }
+
+    #[test]
+    fn gen_from_preserves_filter_always_mode() {
+        assert_eq!(
+            gen_from_with_mode(GenCheckMode::FilterAlways).check_mode,
+            GenCheckMode::FilterAlways
+        );
     }
 
     #[test]

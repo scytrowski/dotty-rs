@@ -74,7 +74,7 @@ out-of-band tree convention or a lossy lowering step.
 | `Parens` | `UntypedNode::Parens` | REPRESENT | Parentheses can affect parsing, positions, and later diagnostics. |
 | `Tuple` | `UntypedNode::Tuple` | REPRESENT | Tuple grouping is parser output, not an early application rewrite. |
 | `ForYield` / `ForDo` | `UntypedNode::ForYield` / `ForDo` | REPRESENT | Yield-versus-do is syntactically observable before for-comprehension lowering. |
-| `GenFrom` / `GenAlias` | `UntypedNode::GenFrom` / `GenAlias` | REPRESENT | Generator and alias forms must remain distinct. `GenCheckMode` is a lowering concern and is intentionally not part of the first core model; this must be revisited when for-comprehension desugaring is implemented. |
+| `GenFrom` / `GenAlias` | `UntypedNode::GenFrom` / `GenAlias` | REPRESENT | Generator and alias forms remain distinct; `GenFrom.check_mode` preserves the parser's source-version and `case`-pattern policy until for-comprehension lowering. |
 | `PatDef` | `UntypedNode::PatDef` | REPRESENT | Pattern definitions retain modifiers, patterns, type ascription, and RHS. |
 | `ExtMethods` | `UntypedNode::ExtensionMethods` | REPRESENT | The local name differs, but the parser-facing information is present. |
 | `InterpolatedString` | `UntypedNode::InterpolatedString` | REPRESENT | Interpolator name and interpolation parts remain available to later lowering. |
@@ -97,7 +97,7 @@ out-of-band tree convention or a lossy lowering step.
 | `WildcardTypeBoundsTree` | None | NOT NEEDED | Dotty helper/extractor for wildcard bounds, not a required standalone source node. |
 | `OpTree` | `InfixOp` / `PrefixOp` / `PostfixOp` | NOT NEEDED | Abstract implementation base; the concrete operator nodes carry the required source information. |
 | `TermTree`, `TypTree`, `PatternTree`, `NameTree`, `Tree` | Shared `TreeKind` families | NOT NEEDED | Abstract Dotty inheritance families, not independent parser payloads. |
-| `GenCheckMode` | None | LOWER | Desugaring metadata rather than source syntax. Its eventual owner must be decided before implementing for-comprehension lowering. |
+| `GenCheckMode` | `GenFrom::check_mode` | REPRESENT | The parser computes this mode from source version and generator syntax. All six Scala 3.9 variants are retained for compatibility with later lowering. |
 | `Mod` / `Modifiers` | `Modifier` / `Modifiers` | REPRESENT | Source modifiers belong to untyped definitions and function types; the function-type-specific `Impure` modifier is retained alongside existing `Given`/`Implicit`/`Erased` support. |
 
 ## Findings requiring follow-up

@@ -763,6 +763,11 @@ pub enum UntypedNode {
 }
 ```
 
+`GenFrom.check_mode` uses the untyped-only `GenCheckMode` enum to preserve
+Scala 3.9's pattern-checking policy. The parser derives this value from the
+source version and an optional `case` prefix; for-comprehension lowering
+consumes it later.
+
 This is the foundation subset of Dotty's actual `untpd`-only node types. The
 remaining differences called out by the parser-readiness audit are explicit
 lowering or feature-policy decisions, rather than silently dropped source
