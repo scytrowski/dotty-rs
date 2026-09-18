@@ -3,8 +3,9 @@ use dotty_core::{
     TextRange, Token, TokenKind, TokenSource, Tree, TreeId, TreeKind, TypeName, Untyped,
 };
 
-use crate::Cursor;
-use crate::Mark;
+use dotty_core::ScannerEvent;
+
+use crate::{Cursor, Location, Mark, ParamOwner, ParseContext, ParseKind};
 
 /// Stateful input and allocation context for the handwritten parser.
 pub struct Parser<'src, 'names, S>
@@ -17,6 +18,7 @@ where
     pub(crate) names: &'names mut NameInterner,
     pub(crate) ast: AstArena<Untyped>,
     pub(crate) last_real_token_end: u32,
+    pub(crate) context: ParseContext,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -44,6 +46,7 @@ where
             names,
             ast: AstArena::new(),
             last_real_token_end,
+            context: ParseContext::default(),
         }
     }
 
@@ -55,6 +58,75 @@ where
     /// Returns the current parser-facing token.
     pub fn current(&self) -> &Token {
         self.cursor.current()
+    }
+
+    /// Returns the current parser context.
+    pub const fn context(&self) -> &ParseContext {
+        &self.context
+    }
+
+    /// Runs a nested parse with a temporary syntactic location.
+    pub fn with_location<T>(
+        &mut self,
+        location: Location,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.location;
+        self.context.location = location;
+        let result = parse(self);
+        self.context.location = previous;
+        result
+    }
+
+    /// Runs a nested parse with a temporary grammar category.
+    pub fn with_parse_kind<T>(
+        &mut self,
+        parse_kind: ParseKind,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.parse_kind;
+        self.context.parse_kind = parse_kind;
+        let result = parse(self);
+        self.context.parse_kind = previous;
+        result
+    }
+
+    /// Runs a nested parse with a temporary parameter owner.
+    pub fn with_param_owner<T>(
+        &mut self,
+        param_owner: Option<ParamOwner>,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.param_owner;
+        self.context.param_owner = param_owner;
+        let result = parse(self);
+        self.context.param_owner = previous;
+        result
+    }
+
+    /// Forwards a scanner feedback event.
+    pub fn observe(&mut self, event: ScannerEvent) {
+        self.cursor.observe(event);
+    }
+
+    /// Tells the scanner that a colon ended the current line.
+    pub fn observe_colon_eol(&mut self, in_template: bool) {
+        self.observe(ScannerEvent::ColonEol { in_template });
+    }
+
+    /// Tells the scanner that an indented region was entered.
+    pub fn observe_indented(&mut self) {
+        self.observe(ScannerEvent::Indented);
+    }
+
+    /// Tells the scanner that an indented region was exited.
+    pub fn observe_outdented(&mut self) {
+        self.observe(ScannerEvent::Outdented);
+    }
+
+    /// Tells the scanner that an indented arrow body was entered.
+    pub fn observe_arrow_indented(&mut self) {
+        self.observe(ScannerEvent::ArrowIndented);
     }
 
     /// Advances the parser and records the end of a real token.
@@ -141,6 +213,8 @@ const fn is_zero_width_synthetic(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use dotty_core::{TextRange, TokenKind, TokenValue};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     struct SingleTokenSource {
         token: Token,
@@ -149,6 +223,11 @@ mod tests {
     struct SequenceTokenSource {
         tokens: Vec<Token>,
         index: usize,
+    }
+
+    struct RecordingTokenSource {
+        token: Token,
+        observed: Rc<RefCell<Vec<ScannerEvent>>>,
     }
 
     impl TokenSource for SingleTokenSource {
@@ -185,6 +264,22 @@ mod tests {
         }
 
         fn observe(&mut self, _event: dotty_core::ScannerEvent) {}
+    }
+
+    impl TokenSource for RecordingTokenSource {
+        fn current(&self) -> &Token {
+            &self.token
+        }
+
+        fn advance(&mut self) {}
+
+        fn lookahead(&mut self, _n: usize) -> &Token {
+            &self.token
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            self.observed.borrow_mut().push(event);
+        }
     }
 
     fn token(kind: TokenKind, start: u32, end: u32) -> Token {
@@ -408,6 +503,74 @@ mod tests {
         assert_eq!(
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn with_location_restores_the_previous_location() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        let observed_inside =
+            parser.with_location(Location::InPattern, |parser| parser.context().location);
+
+        assert_eq!(observed_inside, Location::InPattern);
+        assert_eq!(parser.context().location, Location::Elsewhere);
+    }
+
+    #[test]
+    fn with_parse_kind_restores_the_previous_kind() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        let observed_inside =
+            parser.with_parse_kind(ParseKind::Type, |parser| parser.context().parse_kind);
+
+        assert_eq!(observed_inside, ParseKind::Type);
+        assert_eq!(parser.context().parse_kind, ParseKind::Expr);
+    }
+
+    #[test]
+    fn with_param_owner_restores_the_previous_owner() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        let observed_inside = parser.with_param_owner(Some(ParamOwner::Given), |parser| {
+            parser.context().param_owner
+        });
+
+        assert_eq!(observed_inside, Some(ParamOwner::Given));
+        assert_eq!(parser.context().param_owner, None);
+    }
+
+    #[test]
+    fn parser_scanner_helpers_forward_the_existing_feedback_protocol() {
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let mut names = NameInterner::new();
+        let token = token(TokenKind::Eof, 0, 0);
+        let mut parser = Parser::new(
+            SourceText::new("").expect("valid source"),
+            SourceId::from_index(1),
+            RecordingTokenSource {
+                token,
+                observed: Rc::clone(&observed),
+            },
+            &mut names,
+        );
+
+        parser.observe_colon_eol(true);
+        parser.observe_indented();
+        parser.observe_outdented();
+        parser.observe_arrow_indented();
+
+        assert_eq!(
+            *observed.borrow(),
+            vec![
+                ScannerEvent::ColonEol { in_template: true },
+                ScannerEvent::Indented,
+                ScannerEvent::Outdented,
+                ScannerEvent::ArrowIndented,
+            ]
         );
     }
 }

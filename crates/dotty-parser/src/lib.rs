@@ -8,10 +8,12 @@
 //! Until its public entry point is added, this crate only establishes the
 //! workspace and dependency boundary.
 
+mod context;
 mod cursor;
 mod parser;
 mod spans;
 
+pub use context::{Location, ParamOwner, ParseContext, ParseKind};
 pub use cursor::Cursor;
 pub use parser::Parser;
 pub use spans::Mark;
