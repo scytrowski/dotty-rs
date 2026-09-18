@@ -1632,6 +1632,55 @@ mod tests {
         ),
     );
 
+    macro_rules! trivia_tests {
+        ($(($name:ident, $spelling:literal, $trivia:expr)),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let (items, diagnostics) = scan($spelling);
+
+                    assert_eq!(
+                        items,
+                        vec![
+                            trivia($trivia, 0, $spelling.len() as u32),
+                            token(
+                                RawTokenKind::Eof,
+                                $spelling.len() as u32,
+                                $spelling.len() as u32,
+                            ),
+                        ]
+                    );
+                    assert!(diagnostics.is_empty());
+                }
+            )+
+        };
+    }
+
+    trivia_tests!(
+        (classifies_spaces_as_trivia, " ", TriviaKind::Spaces),
+        (classifies_tabs_as_trivia, "\t", TriviaKind::Tabs),
+        (
+            classifies_other_whitespace_as_trivia,
+            "\u{000c}",
+            TriviaKind::OtherWhitespace
+        ),
+        (
+            classifies_crlf_as_one_newline_trivia,
+            "\r\n",
+            TriviaKind::Newline
+        ),
+        (
+            classifies_line_comment_as_trivia,
+            "// comment",
+            TriviaKind::LineComment
+        ),
+        (
+            classifies_block_comment_as_trivia,
+            "/* comment */",
+            TriviaKind::BlockComment
+        ),
+    );
+
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
         RawItem::Trivia(Trivia {
             kind,
