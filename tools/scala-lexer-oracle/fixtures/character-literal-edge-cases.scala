@@ -1,0 +1,7 @@
+val ascii = 'a'
+val escaped = '\\'
+val unicode = '\u0041'
+val repeatedUnicode = '\uuuu0041'
+val uppercaseUnicode = '\U0041'
+val escapedQuote = '\''
+val escapedTab = '\t'

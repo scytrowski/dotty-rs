@@ -58,6 +58,8 @@ Implementation status on the current lexer branch:
   multiline strings, and basic string interpolation; multiline terminators
   consume a complete trailing quote run, including quotes immediately before
   the final `"""`;
+- character literals enforce the JVM `Char` one-UTF-16-code-unit rule and
+  recover supplementary or combining-codepoint cases with bounded diagnostics;
 - `ContextualScanner` maps raw categories to the shared `dotty-token` kinds;
 - the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
   prefix-based indentation regions for non-colon triggers such as `then`,

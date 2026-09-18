@@ -2914,6 +2914,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_supplementary_codepoint_in_a_character_literal() {
+        let source = "'𐐀'";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("UTF-16 code unit"));
+    }
+
+    #[test]
+    fn rejects_a_combining_mark_as_an_extra_character() {
+        let source = "'á'";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("more than one character"));
+    }
+
+    #[test]
     fn recognizes_ordinary_and_multiline_strings() {
         let (items, diagnostics) = scan("\"hello\\nworld\" \"\"\"hello\nworld\"\"\"");
         let kinds: Vec<_> = items
