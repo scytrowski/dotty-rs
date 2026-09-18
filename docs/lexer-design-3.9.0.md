@@ -509,6 +509,14 @@ Tests include nested regions, tabs/spaces, incomparable prefixes, `match`,
 nested cases, explicit delimiters, branch transitions, and malformed
 indentation.
 
+The current implementation uses an explicit prefix-based `IndentWidth`
+ordering (`less`, `equal`, `greater`, or `incomparable`) without expanding
+tabs to a fixed visual column. It synthesizes regions after layout-bearing
+keywords and operators, including `return` and `throw`, closes multiple
+regions before dedented tokens and delimiters, and emits pending outdents at
+EOF. Continuation bodies suppress the separator before their first token only
+when the following line actually has a strictly deeper compatible prefix.
+
 ### Increment 7 — Leading infix and colon protocol
 
 Implement independently testable leading-infix detection and parser/scanner

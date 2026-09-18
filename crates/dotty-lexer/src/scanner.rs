@@ -91,7 +91,7 @@ impl ContextualScanner {
         }
         let current_indent = line_indentation(&self.source, current.span.start());
         let next_indent = line_indentation(&self.source, next.span.start());
-        is_prefix(&current_indent, &next_indent) && current_indent != next_indent
+        current_indent.is_prefix_of(&next_indent) && current_indent != next_indent
     }
 
     fn insert_indent_after_current(&mut self) -> bool {
@@ -230,7 +230,7 @@ fn build_tokens(
     let mut trivia = Vec::new();
     let mut previous_kind = None;
     let mut previous_opens_indentation = false;
-    let mut previous_end = 0;
+    let mut previous_end = 0u32;
     let mut indentation_stack = vec![LayoutRegion::root()];
     let mut paren_depth = 0u32;
     let mut bracket_depth = 0u32;
@@ -244,6 +244,12 @@ fn build_tokens(
                 let has_line_break = trivia_has_line_break(source, &trivia);
                 let blank_line = trivia_line_breaks(source, &trivia) > 1;
                 let indentation = line_indentation(source, raw.span.start());
+                let previous_indentation = line_indentation(source, previous_end.saturating_sub(1));
+                let continues_previous_region = previous_opens_indentation
+                    && (previous_kind == Some(TokenKind::Operator)
+                        || (previous_kind != Some(TokenKind::Operator)
+                            && previous_indentation != indentation
+                            && previous_indentation.is_prefix_of(&indentation)));
                 let layout_enabled = paren_depth == 0 && bracket_depth == 0;
                 let leading_infix = is_leading_infix(
                     source,
@@ -278,8 +284,7 @@ fn build_tokens(
 
                     if closed_same_indent_case
                         && can_end_statement(previous_kind)
-                        && !(previous_kind == Some(TokenKind::Operator)
-                            && previous_opens_indentation)
+                        && !continues_previous_region
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
                         && can_start_statement(raw.kind)
@@ -299,8 +304,7 @@ fn build_tokens(
                     let blank_line_before_operator =
                         blank_line && raw.kind == RawTokenKind::Operator;
                     if can_end_statement(previous_kind)
-                        && !(previous_kind == Some(TokenKind::Operator)
-                            && previous_opens_indentation)
+                        && !continues_previous_region
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
                         && (can_start_statement(raw.kind) || blank_line_before_operator)
@@ -384,29 +388,75 @@ enum LayoutRegionOwner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct IndentWidth {
+    prefix: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndentOrdering {
+    Less,
+    Equal,
+    Greater,
+    Incomparable,
+}
+
+impl IndentWidth {
+    fn empty() -> Self {
+        Self {
+            prefix: String::new(),
+        }
+    }
+
+    fn from_prefix(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.to_owned(),
+        }
+    }
+
+    fn ordering(&self, other: &Self) -> IndentOrdering {
+        if self.prefix == other.prefix {
+            IndentOrdering::Equal
+        } else if other.prefix.starts_with(&self.prefix) {
+            IndentOrdering::Less
+        } else if self.prefix.starts_with(&other.prefix) {
+            IndentOrdering::Greater
+        } else {
+            IndentOrdering::Incomparable
+        }
+    }
+
+    fn is_prefix_of(&self, other: &Self) -> bool {
+        matches!(
+            self.ordering(other),
+            IndentOrdering::Less | IndentOrdering::Equal
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LayoutRegion {
-    indentation: String,
+    indentation: IndentWidth,
     owner: LayoutRegionOwner,
 }
 
 impl LayoutRegion {
     fn root() -> Self {
         Self {
-            indentation: String::new(),
+            indentation: IndentWidth::empty(),
             owner: LayoutRegionOwner::Root,
         }
     }
 
-    fn implicit(indentation: &str) -> Self {
+    fn implicit(indentation: &IndentWidth) -> Self {
         Self {
-            indentation: indentation.to_owned(),
+            indentation: indentation.clone(),
             owner: LayoutRegionOwner::Implicit,
         }
     }
 
-    fn same_indent_cases(indentation: &str) -> Self {
+    fn same_indent_cases(indentation: &IndentWidth) -> Self {
         Self {
-            indentation: indentation.to_owned(),
+            indentation: indentation.clone(),
             owner: LayoutRegionOwner::SameIndentCases,
         }
     }
@@ -415,7 +465,7 @@ impl LayoutRegion {
 fn adjust_indentation(
     tokens: &mut Vec<Token>,
     stack: &mut Vec<LayoutRegion>,
-    indentation: &str,
+    indentation: &IndentWidth,
     previous_kind: Option<TokenKind>,
     previous_opens_indentation: bool,
     current_kind: RawTokenKind,
@@ -425,9 +475,9 @@ fn adjust_indentation(
     let mut closed_same_indent_case = false;
     let current = stack
         .last()
-        .map(|region| region.indentation.as_str())
-        .unwrap_or("");
-    if current == indentation {
+        .map(|region| region.indentation.clone())
+        .unwrap_or_else(IndentWidth::empty);
+    if current == *indentation {
         if opens_same_indent_case_region(previous_kind, current_kind) {
             stack.push(LayoutRegion::same_indent_cases(indentation));
             tokens.push(Token::new(
@@ -453,7 +503,7 @@ fn adjust_indentation(
         return Ok(false);
     }
 
-    if is_prefix(current, indentation)
+    if current.is_prefix_of(indentation)
         && opens_indentation(previous_kind, previous_opens_indentation)
     {
         stack.push(LayoutRegion::implicit(indentation));
@@ -467,10 +517,10 @@ fn adjust_indentation(
     while stack.len() > 1 {
         let current = stack
             .last()
-            .map(|region| region.indentation.as_str())
-            .unwrap_or("");
-        if is_prefix(current, indentation) {
-            if current == indentation
+            .map(|region| region.indentation.clone())
+            .unwrap_or_else(IndentWidth::empty);
+        if current.is_prefix_of(indentation) {
+            if current == *indentation
                 && current_kind != RawTokenKind::Keyword(HardKeyword::Case)
                 && stack
                     .last()
@@ -511,14 +561,14 @@ fn opens_same_indent_case_region(
 fn close_regions_after_delimiter(
     tokens: &mut Vec<Token>,
     stack: &mut Vec<LayoutRegion>,
-    indentation: &str,
+    indentation: &IndentWidth,
     offset: u32,
 ) -> Result<(), TextRangeError> {
     while stack.len() > 1 {
         let Some(region) = stack.last() else {
             break;
         };
-        if region.owner == LayoutRegionOwner::Root || is_prefix(&region.indentation, indentation) {
+        if region.owner == LayoutRegionOwner::Root || region.indentation.is_prefix_of(indentation) {
             break;
         }
         stack.pop();
@@ -530,14 +580,11 @@ fn close_regions_after_delimiter(
     Ok(())
 }
 
-fn has_incomparable_indentation(stack: &[LayoutRegion], indentation: &str) -> bool {
-    let Some(current) = stack.last().map(|region| region.indentation.as_str()) else {
+fn has_incomparable_indentation(stack: &[LayoutRegion], indentation: &IndentWidth) -> bool {
+    let Some(current) = stack.last().map(|region| &region.indentation) else {
         return false;
     };
-    !current.is_empty()
-        && !indentation.is_empty()
-        && !is_prefix(current, indentation)
-        && !is_prefix(indentation, current)
+    current.ordering(indentation) == IndentOrdering::Incomparable
 }
 
 fn opens_indentation(kind: Option<TokenKind>, operator: bool) -> bool {
@@ -558,6 +605,8 @@ fn opens_indentation(kind: Option<TokenKind>, operator: bool) -> bool {
                 | HardKeyword::Match
                 | HardKeyword::With
                 | HardKeyword::Yield
+                | HardKeyword::Return
+                | HardKeyword::Throw
         ))
     )
 }
@@ -663,7 +712,7 @@ fn is_leading_infix(
 
     let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
-    is_prefix(&previous_indent, &operator_indent)
+    previous_indent.is_prefix_of(&operator_indent)
 }
 
 fn next_raw_token(items: &[RawItem], item_index: usize) -> Option<&RawToken> {
@@ -790,10 +839,6 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
     )
 }
 
-fn is_prefix(prefix: &str, value: &str) -> bool {
-    value.starts_with(prefix)
-}
-
 fn update_delimiters(kind: RawTokenKind, parens: &mut u32, brackets: &mut u32, braces: &mut u32) {
     match kind {
         RawTokenKind::Punctuation(Punctuation::LeftParen) => *parens = parens.saturating_add(1),
@@ -850,17 +895,18 @@ fn count_line_breaks(text: &str) -> usize {
     count
 }
 
-fn line_indentation(source: &str, offset: u32) -> String {
+fn line_indentation(source: &str, offset: u32) -> IndentWidth {
     let requested_offset = (offset as usize).min(source.len());
     let safe_offset = (0..=requested_offset)
         .rev()
         .find(|candidate| source.is_char_boundary(*candidate))
         .unwrap_or(0);
     let line_start = line_start_offset(source, safe_offset as u32) as usize;
-    source[line_start..safe_offset]
+    let prefix: String = source[line_start..safe_offset]
         .chars()
         .take_while(|character| matches!(character, ' ' | '\t'))
-        .collect()
+        .collect();
+    IndentWidth::from_prefix(&prefix)
 }
 
 fn line_start_offset(source: &str, offset: u32) -> u32 {
@@ -928,6 +974,40 @@ mod tests {
             .iter()
             .map(|token| token.kind)
             .collect()
+    }
+
+    #[test]
+    fn indentation_width_orders_strict_prefixes() {
+        let shallow = IndentWidth::from_prefix("  ");
+        let deep = IndentWidth::from_prefix("    ");
+
+        assert_eq!(shallow.ordering(&deep), IndentOrdering::Less);
+        assert_eq!(deep.ordering(&shallow), IndentOrdering::Greater);
+    }
+
+    #[test]
+    fn indentation_width_treats_equal_prefixes_as_equal() {
+        let first = IndentWidth::from_prefix("\t\t");
+        let second = IndentWidth::from_prefix("\t\t");
+
+        assert_eq!(first.ordering(&second), IndentOrdering::Equal);
+    }
+
+    #[test]
+    fn indentation_width_does_not_expand_tabs_to_fixed_columns() {
+        let spaces = IndentWidth::from_prefix("    ");
+        let tab = IndentWidth::from_prefix("\t");
+
+        assert_eq!(spaces.ordering(&tab), IndentOrdering::Incomparable);
+        assert_eq!(tab.ordering(&spaces), IndentOrdering::Incomparable);
+    }
+
+    #[test]
+    fn indentation_width_orders_tab_prefixed_extensions_by_prefix() {
+        let shallow = IndentWidth::from_prefix("\t\t");
+        let deep = IndentWidth::from_prefix("\t\t ");
+
+        assert_eq!(shallow.ordering(&deep), IndentOrdering::Less);
     }
 
     fn next_event_value(seed: &mut u64) -> u64 {
@@ -2194,6 +2274,38 @@ mod tests {
                 TokenKind::Keyword(HardKeyword::Val),
                 TokenKind::Identifier,
                 TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_and_closes_an_indentation_region_after_return() {
+        assert_eq!(
+            kinds("return\n  value\nafter"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Return),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_and_closes_an_indentation_region_after_throw() {
+        assert_eq!(
+            kinds("throw\n  failure\nafter"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Throw),
                 TokenKind::Indent,
                 TokenKind::Identifier,
                 TokenKind::Outdent,
