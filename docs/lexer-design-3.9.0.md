@@ -75,7 +75,8 @@ Implementation status on the current lexer branch:
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
   `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
-  plus `{` token sequence;
+  plus `{` token sequence; a bare apostrophe that is not a character literal
+  is emitted as `Quote`;
 - contextual modifier and clause words such as `using`, `extension`, `inline`,
   `opaque`, `open`, `transparent`, `as`, `derives`, and `infix` remain raw
   identifiers until a later contextual phase;

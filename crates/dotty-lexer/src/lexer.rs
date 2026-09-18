@@ -176,6 +176,13 @@ impl<'source> RawLexer<'source> {
             if self.looks_like_quote_id() {
                 return Ok(Some(RawItem::Token(self.scan_quote_id(start)?)));
             }
+            if !self.looks_like_char_literal() {
+                let _ = self.cursor.bump();
+                return Ok(Some(RawItem::Token(RawToken {
+                    kind: RawTokenKind::Quote,
+                    span: self.span(start)?,
+                })));
+            }
             let token = self.scan_char_literal(start)?;
             self.update_xml_token(token.kind, token.span)?;
             return Ok(Some(RawItem::Token(token)));
@@ -731,6 +738,19 @@ impl<'source> RawLexer<'source> {
         }
 
         self.cursor.peek_nth(lookahead) != Some('\'')
+    }
+
+    fn looks_like_char_literal(&self) -> bool {
+        match self.cursor.peek_nth(1) {
+            Some('\\' | '\'') => true,
+            Some(character) if is_identifier_start(character) => true,
+            Some(character) if character.is_whitespace() => false,
+            Some(character) if is_operator_character(character) => {
+                self.cursor.peek_nth(2) == Some('\'')
+            }
+            Some(_) => self.cursor.peek_nth(2) == Some('\''),
+            None => true,
+        }
     }
 
     fn scan_quote(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
@@ -1949,6 +1969,25 @@ mod tests {
                 RawTokenKind::QuoteId,
                 RawTokenKind::CharLiteral,
                 RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_bare_quote_after_an_identifier() {
+        let (items, diagnostics) = scan("x' = 1");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 1),
+                token(RawTokenKind::Quote, 1, 2),
+                trivia(TriviaKind::Spaces, 2, 3),
+                token(RawTokenKind::Operator, 3, 4),
+                trivia(TriviaKind::Spaces, 4, 5),
+                token(RawTokenKind::IntegerLiteral, 5, 6),
+                token(RawTokenKind::Eof, 6, 6),
             ]
         );
         assert!(diagnostics.is_empty());
