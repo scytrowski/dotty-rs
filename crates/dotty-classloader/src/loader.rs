@@ -549,10 +549,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// A `.`-qualified inner-class suffix (`Outer<T>.Inner<U>`) only keeps
     /// the *last* segment's own type arguments (`U`); an outer qualifier's
     /// type arguments are dropped rather than modeled as a fully qualified
-    /// prefix chain. This mirrors the same deliberately partial scope as
-    /// `PackageRegistry` (`docs/classloader.md`) — the common `java.util`-
-    /// style generics this loader actually needs to resolve never use
-    /// qualified inner-class generic syntax.
+    /// prefix chain. This is a deliberately partial scope choice: the
+    /// common `java.util`-style generics this loader actually needs to
+    /// resolve never use qualified inner-class generic syntax.
     fn lower_class_type_signature(
         &mut self,
         owner: &BinaryName,
