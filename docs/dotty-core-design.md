@@ -1,0 +1,1534 @@
+# dotty-core Design
+
+Status: proposed design document for the shared semantic foundation. Nothing
+described here is implemented yet; this document is the contract the
+foundation PR (and everything built on top of it) is expected to follow. It
+is self-contained: every type referenced below has its authoritative
+definition in this file, not in chat history or prior drafts.
+
+Revision note: this revision applies a partner review of the first draft.
+Every change below is either a **blocker fix** (the prior draft was
+internally inconsistent — e.g. an ID type with nowhere to store its payload),
+a **major fix** (underspecified in a way likely to force a rewrite later), or
+a **minor fix/clarification** (wording or a documented, accepted tradeoff).
+Each is called out inline as `[BLOCKER n]` / `[MAJOR n]` / `[MINOR n]` the
+first time it's addressed, so the resolution can be traced back to the
+concern that raised it. A few resolutions go slightly further than the
+review asked, where grounding the review's concern in Dotty's actual
+`compiler/src/dotty/tools/dotc/ast/{Trees,untpd,tpd}.scala` (audited at the
+pinned `3.9.0` tag, commit `777528f19a58e794c9954a42f433373472ec57f8` —
+reproduce with `git clone --branch 3.9.0 https://github.com/scala/scala3.git`)
+surfaced a sharper or more general fix than the one proposed. Those are
+marked `[MAJOR 1, extended]`.
+
+## 1. Scope and goal
+
+Today the workspace has a lexer/token pipeline (`dotty-token`, `dotty-lexer`,
+`dotty-diagnostics`, `dotty-source`) and two independent binary codecs
+(`dotty-tasty`, `dotty-classfile`). There is no parser, no symbol table, no
+type representation, and no typed AST.
+
+`[MINOR 3]` The four future consumers do not all need the same slice of the
+model, and the introduction should not imply they do:
+
+- The **source parser** needs only the shared syntax-tree and name model:
+  `NameInterner`, `Span`/`SourceSpan`, `AstArena<Untyped>`. It has no reason
+  to touch `SymbolTable`, `TypeArena`, or `ScopeArena`.
+- The **classfile loader**, **TASTy semantic unpickler**, **namer**, and
+  **typer** need the full shared semantic model (symbols, types, scopes),
+  because they are the components that give syntax trees meaning.
+
+They belong in one foundational crate because typed trees are exactly the
+place where the syntax layer (owned by the parser) and the semantic layer
+(owned by everything else) connect — a `Tree<Typed>` node carries a `TypeId`
+inline. Building the semantic model four times, once per consumer, would
+duplicate the hardest part of the compiler and guarantee the four copies
+drift apart.
+
+`dotty-core` is a new crate that gives all of them one shared model:
+
+```text
+                             ┌─────────────────────┐
+                             │      dotty-core      │
+                             │  Symbol / Type / AST │
+                             └─────────┬────────────┘
+                                       │
+          ┌────────────────────────────┼────────────────────────────┐
+          │                            │                            │
+          ▼                            ▼                            ▼
+   source frontend              classfile loader             TASTy adapter
+   (dotty-lexer today,          (dotty-classfile               (dotty-tasty
+    future dotty-parser)         today: raw only)               today: raw only)
+          │                            │                            │
+          └────────────────────────────┼────────────────────────────┘
+                                       │
+                                       ▼
+                                  SemanticStore
+                                       │
+                                       ▼
+                                     typer
+                                       │
+                                       ▼
+                                   Typed AST
+```
+
+`dotty-core` itself must stay "dumb": it represents the compiler's world
+(symbols, types, trees) but knows nothing about lexical syntax, JVM
+classfiles, TASTy's wire format, or type inference. Those stay in their own
+crates and depend on `dotty-core`, never the other way around.
+
+This mirrors, at the semantic layer, the layering principle AGENTS.md already
+states for `dotty-tasty`: "Keep the binary, raw AST, structured AST, and
+file-level APIs deliberately separated." `dotty-core` is the structured
+*semantic* layer that source, classfile, and TASTy structured/raw layers will
+eventually project onto.
+
+## 2. Where this sits in the existing workspace
+
+Current workspace members and their dependency edges:
+
+```text
+dotty-source   (no deps)
+dotty-token    -> dotty-source
+dotty-diagnostics -> dotty-source
+dotty-lexer    -> dotty-token, dotty-source, dotty-diagnostics
+dotty-classfile (no deps; raw ClassFile/ConstantPool/etc. type skeleton only)
+dotty-tasty    (no deps; raw + structured wire-format codec)
+dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
+```
+
+`dotty-parser`, `dotty-typer`, and `dotty-compiler` do not exist yet. Only
+lexing/tokenizing is implemented; nothing today builds an AST.
+
+`[MAJOR 6]` The prior draft left it open whether classfile/TASTy semantic
+adapters live inside the future `dotty-typer` crate or in a dedicated module.
+They must not live in the typer: the typer consumes an already-populated
+`SemanticStore` and must not know how a `.class` or `.tasty` file is decoded,
+the same way it must not know how source text is lexed. `dotty-core` slots in
+with a dedicated adapter/loader layer between the binary codecs and
+everything that consumes `dotty-core`:
+
+```text
+dotty-source ──► dotty-core
+                     ▲   ▲   ▲
+                     │   │   │
+      ┌──────────────┘   │   └──────────────┐
+      │                  │                  │
+(future)            dotty-tasty        dotty-classfile
+dotty-parser             │                  │
+      │                  ▼                  ▼
+      │          dotty-tasty-sema   dotty-classfile-sema     (or one
+      │          (or a shared "dotty-loader" crate)           combined crate;
+      │                  │                  │                 naming is open,
+      │                  ▼                  ▼                 see §16)
+      └──────┬───────────┴──────┬───────────┘
+             │                  │
+             ▼                  ▼
+      (future) dotty-typer   other tooling
+             │
+             ▼
+      (future) dotty-compiler
+```
+
+Binary semantic adapters do not belong to the typer implementation, and they
+do not belong inside `dotty-tasty`/`dotty-classfile` either (see below). The
+exact crate/module packaging of the adapter layer is left open (§16); the
+constraint that matters now is the dependency shape, not the file layout.
+
+Two deviations from a "zero-dependency" core, both deliberate:
+
+- **`dotty-core` depends on `dotty-source`.** The original proposal had
+  `dotty-core::source` define its own byte-range type. But `dotty-source`
+  already has a checked, tested `TextRange` (half-open `u32` byte range) used
+  by `dotty-diagnostics` today. Redefining ranges inside `dotty-core` would
+  give the workspace two incompatible span types and a conversion tax at
+  every frontend boundary. `dotty-core::source::Span` wraps
+  `dotty_source::TextRange` (see §6) instead of reinventing start/end fields.
+  `dotty-source` has no dependencies of its own and no semantic knowledge, so
+  this does not violate "core must not know how the parser works."
+- **`dotty-tasty` and `dotty-classfile` do not depend on `dotty-core` today**,
+  and should not gain that dependency as part of this design. Both are
+  described in their own docs (`tasty-api.md`,
+  `docs/classfile-format-jdk25.md`) as binary/structural codecs with no
+  symbol or type knowledge. The semantic adapters that map their structured
+  output onto `dotty-core::Symbol`/`Type` are new code living in the
+  dedicated adapter layer above, never inside the codec crates themselves —
+  this keeps `dotty-tasty` and `dotty-classfile` independently useful as pure
+  codecs, which is an explicit non-goal to disturb.
+
+**Implementation note (temporary, remove once resolved):** `dotty-core` was
+implemented while `dotty-source` (and `dotty-token`/`dotty-diagnostics`/
+`dotty-lexer`) still lived only on the not-yet-merged `feature/lexer` branch,
+worked on independently by another agent. Taking a path dependency on
+`dotty-source` from `dotty-core`'s branch would have coupled it to that
+in-flight branch instead of `main`. `crates/dotty-core/src/source.rs`
+therefore defines its own local `TextRange`/`TextRangeError`, structurally
+identical to `dotty_source`'s, as a stand-in. This does not change the target
+design above — once `feature/lexer` merges into `main`, add the `dotty-source`
+path dependency back to `crates/dotty-core/Cargo.toml`, replace the local
+`TextRange`/`TextRangeError` in `source.rs` with a re-export of
+`dotty_source::TextRange`, and delete this note.
+
+PR #3 review raised this as a blocker; the resolution (kept as documented
+above rather than taking the dependency early) was a deliberate choice —
+`feature/lexer` was still 70+ commits ahead of `main` and under active
+development by another agent at review time, so adding a path dependency on
+it now would reintroduce the exact branch-coupling problem this design
+avoided. `source.rs`'s module documentation now pins the local
+`TextRange`'s public shape against `dotty_source::TextRange`'s real
+definition (verified on `feature/lexer`) with a dedicated test, and spells
+out the swap as three concrete steps.
+
+## 3. Crate layout
+
+```text
+crates/
+├── dotty-core/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── ids.rs
+│       ├── names.rs
+│       ├── source.rs
+│       │
+│       ├── ast/
+│       │   ├── mod.rs
+│       │   ├── phase.rs
+│       │   ├── arena.rs
+│       │   ├── tree.rs
+│       │   ├── common.rs
+│       │   ├── untyped.rs
+│       │   ├── typed.rs
+│       │   ├── modifiers.rs
+│       │   └── visitor.rs
+│       │
+│       ├── types/
+│       │   ├── mod.rs
+│       │   ├── arena.rs
+│       │   ├── ty.rs
+│       │   ├── binder.rs
+│       │   ├── method.rs
+│       │   ├── class_info.rs
+│       │   ├── annotation.rs
+│       │   ├── constant.rs
+│       │   └── flags.rs
+│       │
+│       ├── symbols/
+│       │   ├── mod.rs
+│       │   ├── table.rs
+│       │   ├── symbol.rs
+│       │   ├── kind.rs
+│       │   ├── scope.rs
+│       │   ├── flags.rs
+│       │   ├── origin.rs
+│       │   └── completion.rs
+│       │
+│       └── store/
+│           ├── mod.rs
+│           └── semantic_store.rs
+│
+├── dotty-tasty/       (unchanged; semantic adapter is future work, not here)
+├── dotty-classfile/   (unchanged; semantic adapter is future work, not here)
+├── dotty-source/
+├── dotty-diagnostics/
+├── dotty-token/
+└── dotty-lexer/
+```
+
+Changes from the first draft's layout:
+
+- `source.rs` is back as its own file (the first draft folded it away; see
+  §6 for why a dedicated file earns its place now that `Span` no longer
+  carries `SourceId`).
+- `types/binder.rs` no longer holds a `Binder`/`BinderArena` type — binder
+  identity is `TypeId` (`[BLOCKER 1]`, §8) — but the file is kept for the
+  `reserve`/`fill` cyclic-construction API that binder-shaped types need.
+- `types/annotation.rs` is added (`[MAJOR 3]`, §8).
+- `context/` is renamed to `store/`, and `SemanticContext` to
+  `SemanticStore` (`[MAJOR 5]`, §10).
+
+`ScopeArena` is still folded into `symbols/scope.rs`, next to `Scope`,
+instead of a separate arena file — a minor simplification versus scattering
+one-line arena structs across extra files; every arena with a non-trivial
+query API (`AstArena`, `TypeArena`, `SymbolTable`) still gets its own file.
+
+`dotty-core` is added to the workspace `[workspace.members]` in the root
+`Cargo.toml`. Whether the root `dotty` facade re-exports it as `dotty::core`
+(mirroring `dotty::tasty` / `dotty::classfile`) is deferred until a consumer
+exists — an empty re-export with nothing yet calling it adds noise. Add the
+re-export in the same PR that first makes `dotty-parser` or an adapter crate
+depend on `dotty-core`.
+
+## 4. `ids.rs` — opaque identities
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SymbolId(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TypeId(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScopeId(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceId(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NameId(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AnnotationId(u32);
+
+/// Opaque handle for "which classpath entry a classfile-derived symbol came
+/// from." `dotty-core` does not know what a classfile is; the adapter that
+/// constructs `SymbolOrigin::Classfile` assigns and interprets this ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ClassfileOriginId(u32);
+
+/// Same idea for `.tasty` files. See `[MINOR 1]` in §9.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TastyOriginId(u32);
+```
+
+`BinderId` from the first draft is removed — see `[BLOCKER 1]` in §8: binder
+identity is `TypeId`, not a separate ID space. `NameId`, `AnnotationId`,
+`ClassfileOriginId`, and `TastyOriginId` are new relative to the original
+proposal (§5, §8/`[MAJOR 3]`, §9/`[MINOR 1]`).
+
+For AST nodes, the phase-indexed identity is a distinct Rust type per phase:
+
+```rust
+pub struct TreeId<P> {
+    raw: u32,
+    _phase: PhantomData<P>,
+}
+```
+
+so `TreeId<Untyped>` and `TreeId<Typed>` cannot be confused at a call site —
+`fn typecheck(tree: TreeId<Untyped>) -> TreeId<Typed>` rejects a typed tree
+passed by mistake at compile time, not at runtime.
+
+**Invariant that must be documented on every ID type:** an ID is only valid
+relative to the arena that allocated it. Nothing prevents constructing a
+`SymbolId` from one `SymbolTable` and indexing a different one; that is a
+logic bug, not a memory-safety issue, and it is the same tradeoff every
+arena-based compiler makes (`id-arena`, `la-arena`, etc.). `SemanticStore`
+(§10) exists specifically so a compilation session has exactly one instance
+of each arena, minimizing the chance of mixing IDs across arenas.
+
+## 5. `names.rs` — interned, namespaced names
+
+Scala distinguishes the term and type namespaces (`class Foo` / `val Foo` can
+coexist). Do not use raw `String` for names anywhere in `dotty-core`.
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Namespace {
+    Term,
+    Type,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Name {
+    text: NameId,
+    namespace: Namespace,
+}
+
+pub struct TermName(Name);
+pub struct TypeName(Name);
+
+impl TermName {
+    pub fn as_name(&self) -> &Name;
+}
+```
+
+No string-interning type exists anywhere in the workspace today
+(`dotty-token::TokenValue` is currently just `None` — no identifier payload
+yet). `names.rs` defines one:
+
+```rust
+pub struct NameInterner {
+    strings: Vec<Box<str>>,
+    lookup: std::collections::HashMap<Box<str>, NameId>,
+}
+
+impl NameInterner {
+    pub fn intern(&mut self, text: &str) -> NameId;
+    pub fn resolve(&self, id: NameId) -> &str;
+}
+```
+
+`[MINOR 2]` This stores the interned bytes twice (once in `strings`, once as
+the `HashMap` key). That is an accepted, conscious simplicity tradeoff for
+the foundation PR, not an oversight — do not "fix" it preemptively. If
+profiling later shows the interner matters, the options are, in increasing
+order of effort: `HashMap<Arc<str>, NameId>` sharing the allocation with
+`strings`; a `hashbrown` raw-entry lookup into the backing `strings` storage
+directly; or an existing interning crate (`lasso`, `string-interner`).
+
+This needs to be usable before a full `SemanticStore` exists, because the
+future parser interns identifier text while building `AstArena<Untyped>`,
+long before a namer or typer runs. So `NameInterner` is a standalone type
+that `SemanticStore` *owns* (as its `names` field) rather than something
+private to symbol/type machinery — the parser is handed `&mut SemanticStore`
+(or just `&mut NameInterner`, if the pipeline wants to construct the interner
+before anything else exists) purely to intern identifiers.
+
+## 6. `source.rs` — positions
+
+`[BLOCKER 3]` The first draft's `Span { source: SourceId, range, point }`
+assumed every tree has a real source. That is false for a compiler: trees
+can come from parsed source, from a `.tasty` file, or from a compiler-
+generated transform (default getters, generated accessors, closure methods,
+lowering phases) — none of which necessarily have a meaningful `SourceId`.
+Introducing a sentinel (`SourceId::NONE`, `SourceId(u32::MAX)`) would leak an
+"is this actually valid?" check into every consumer that reads a span.
+
+The fix is to separate "a range, optionally with a diagnostic point" from
+"which source that range is in," and make the *source* part optional at the
+tree, not inside `Span` itself:
+
+```rust
+pub struct Span {
+    pub range: dotty_source::TextRange,
+    pub point: Option<u32>,
+}
+
+pub struct SourceSpan {
+    pub source: SourceId,
+    pub span: Span,
+}
+
+pub struct Tree<P: AstPhase> {
+    pub kind: TreeKind<P>,
+    pub position: Option<SourceSpan>,
+    pub ty: P::TypeInfo,
+}
+```
+
+`Option<SourceSpan>` is sufficient for the foundation PR. A stronger
+three-way `enum Position { Source(SourceSpan), Synthetic, None }` is
+possible later if "no position because compiler-generated" ever needs to be
+distinguished from "no position because not yet assigned" for diagnostics;
+nothing in the foundation PR needs that distinction yet, so it is not
+introduced speculatively.
+
+`[BLOCKER 3]` terminology fix: `point` is a single `u32` offset, not a range,
+so it cannot "mark" a sub-span. The corrected description: `point` identifies
+the primary diagnostic offset inside the enclosing range — e.g., for
+`foo.bar`, `range` covers the whole selection while `point` is the start
+offset of `bar`.
+
+As before: do not store line/column per node. `dotty-source` already has
+`LineIndex` for offset → line/column mapping; `dotty-core` reuses it rather
+than adding a second mapping mechanism.
+
+## 7. AST phase model
+
+### `ast/phase.rs`
+
+`[MAJOR 2]` extends this trait with a second associated type, `DefMetadata`,
+to resolve where source-level modifiers live (see "Definitions" below):
+
+```rust
+pub trait AstPhase: sealed::Sealed {
+    type TypeInfo;
+    type ExtraNode;
+    type DefMetadata;
+}
+
+pub enum Untyped {}
+pub enum Typed {}
+
+impl AstPhase for Untyped {
+    type TypeInfo = ();
+    type ExtraNode = UntypedNode;
+    type DefMetadata = Modifiers;
+}
+
+impl AstPhase for Typed {
+    type TypeInfo = TypeId;
+    type ExtraNode = std::convert::Infallible;
+    type DefMetadata = ();
+}
+```
+
+Invariants this must enforce:
+
+- `Tree<Untyped>` carries no semantic type.
+- `Tree<Typed>` always carries a `TypeId`.
+- `UntypedNode` variants (surface-syntax-only constructs) cannot appear in a
+  `Typed` tree — `ExtraNode = Infallible` makes constructing
+  `TreeKind::PhaseSpecific` on the typed phase uninhabited.
+- `Modifiers` (syntactic `abstract`/`final`/`override`/annotations-as-written)
+  cannot appear on a `Typed` definition node — `DefMetadata = ()` makes it
+  disappear at the type level once typing has produced `SymbolFlags` and
+  resolved annotations instead.
+
+This is a case where Rust can express an invariant Dotty's own `Tree[T]`
+leaves to convention. In real Dotty (`Trees.scala`), `DefTree` stores syntax-
+level modifiers as a mutable, untyped attachment (`private var myMods:
+untpd.Modifiers | Null`) on *every* tree regardless of phase, and only
+*restricts the public accessor* to `untpd.DefTree` at the extension-method
+level (`extension (mdef: untpd.DefTree) def mods: untpd.Modifiers`) — the
+storage exists on typed trees too, it's just conventionally unread. `dotty-
+core` makes the stronger choice available in Rust: `Modifiers` is physically
+absent from a `Tree<Typed>`, not just conventionally unread. This is safe to
+diverge from Dotty on because nothing the foundation PR needs (§15) requires
+recovering original modifier syntax from an already-typed tree; if a later
+tooling use case needs it, it can be added back as an explicit side table
+keyed by `TreeId<Untyped>`, mirroring how `NamerState` already works (§9),
+rather than as a live field on `Tree<Typed>`.
+
+### `ast/arena.rs`
+
+Kept as proposed:
+
+```rust
+pub struct AstArena<P: AstPhase> {
+    nodes: Vec<Tree<P>>,
+}
+
+impl<P: AstPhase> AstArena<P> {
+    pub fn alloc(&mut self, tree: Tree<P>) -> TreeId<P>;
+    pub fn get(&self, id: TreeId<P>) -> &Tree<P>;
+    pub fn get_mut(&mut self, id: TreeId<P>) -> &mut Tree<P>;
+}
+```
+
+No `Box`/`Rc`/`Arc` per node — children are referenced by `TreeId<P>` into
+the same arena.
+
+### `ast/tree.rs` — `TreeKind<P>`
+
+`[MAJOR 7]` The first draft deferred the authoritative node list to "the
+original notes." That makes the document dependent on chat history, which
+defeats its purpose. This section gives the full, final definition.
+
+`[MAJOR 1]` The first draft also said the original node list should be
+"transcribed as-is" without checking which *fields* of each shared node
+differ between untyped and typed trees. That check was done against the
+real Scala 3.9.0 compiler source (`ast/Trees.scala`, `ast/untpd.scala`); the
+findings below are load-bearing, not cosmetic.
+
+**Real Dotty keeps several fields on shared, phase-generic tree classes
+permanently typed as `untpd.*`, regardless of the enclosing phase** — e.g.
+(`Trees.scala`):
+
+```scala
+case class This[+T <: Untyped] private[ast] (qual: untpd.Ident)
+case class Super[+T <: Untyped] private[ast] (qual: Tree[T], mix: untpd.Ident)
+abstract class ImportOrExport[+T <: Untyped] {
+  val expr: Tree[T]
+  val selectors: List[untpd.ImportSelector]
+}
+case class Inlined[+T <: Untyped] private[ast] (call: tpd.Tree, bindings: List[MemberDef[T]], expansion: Tree[T])
+```
+
+`This.qual`/`Super.mix` are always `untpd.Ident` (a `this`/`super` qualifier
+never gets its own semantic type independent of the enclosing class, so
+Dotty never bothers typing it). `Import`/`Export` selectors are always
+`untpd.ImportSelector` (an import selector is pure syntax; it never needs a
+semantic type). `Inlined.call` is always `tpd.Tree` — the *opposite*
+direction, a permanently-typed field on a node that can otherwise appear
+untyped.
+
+`[MAJOR 1, extended]` This is fine in Dotty because Dotty has no arena
+boundary between typed and untyped trees — they are just ordinary heap
+objects, so an `untpd.Ident` living inside a `tpd.This` costs nothing extra
+and creates no dangling-arena risk. `dotty-core` is different: `Tree<Untyped>`
+and `Tree<Typed>` live in **separate arenas**, so a hard-coded `TreeId<Untyped>`
+field inside a node that can appear in `TreeKind<Typed>` is a real hazard
+the review's "Revised Foundation Invariants" list already worried about in
+the abstract (`[MAJOR 2]`) — and it is strictly worse than that for the
+TASTy adapter case: a `.tasty` file is unpickled straight into
+`AstArena<Typed>` with **no corresponding `AstArena<Untyped>` in existence at
+all**, so a field typed `TreeId<Untyped>` would be impossible to populate
+from that path, not just risky.
+
+**Resolution — a general invariant stronger than Dotty's own design needs:**
+*every `TreeId` field inside `TreeKind<P>` is `TreeId<P>`. No shared node
+hard-codes `TreeId<Untyped>` or `TreeId<Typed>` regardless of the enclosing
+phase.* Concretely:
+
+- `This.qual` / `Super.mix`: since all they ever carry is an optional class-
+  name identifier with no children of its own, they are modeled as a plain
+  value (`Option<Name>`) instead of a tree reference at all, sidestepping
+  the arena question entirely.
+- `Import`/`Export` selectors: modeled as an `ImportSelector<P>` whose
+  optional `renamed`/`bound` trees are `TreeId<P>`, not
+  `TreeId<Untyped>`. In the typed phase these get a trivial `TypeId` (the
+  selector's own type is never semantically meaningful); the small
+  "wasted" `ty` field is cheaper than a cross-arena reference.
+- `Inlined.call`: real Dotty's `call: tpd.Tree` is a forward reference used
+  by the inliner to report where an inlined call originated. Inline
+  expansion is out of scope for the foundation PR (§15), so `Inlined.call` is
+  **not included yet** — `TreeKind<P>::Inlined` foundation shape is
+  `{ bindings: Vec<TreeId<P>>, expansion: TreeId<P> }`. Adding call
+  provenance back is deferred to whichever future PR implements the inliner,
+  at which point the always-typed-`call` question can be solved deliberately
+  (e.g. a side table keyed by `TreeId<P>`, the same pattern used for
+  `NamerState`) instead of by copying Dotty's field type under time pressure.
+- `Template`: real Dotty's `Template` carries a combined
+  parents-followed-by-derived-classes list only pre-typing (`derived` is
+  always `Nil` after typing except in the untyped-only `DerivingTemplate`
+  subclass). `dotty-core`'s shared `Template<P>` therefore carries only
+  `parents: Vec<TreeId<P>>`; a `derives` clause is untyped-only surface
+  syntax and lives on `UntypedNode`, not on the shared node, consumed by the
+  namer before a `Template<Typed>` is ever built.
+- `DefDef`/`ValDef`/`TypeDef` modifiers: resolved above via
+  `AstPhase::DefMetadata` (`[MAJOR 2]`).
+
+Definitions:
+
+```rust
+pub enum TreeKind<P: AstPhase> {
+    Ident(Ident),
+    Select(Select<P>),
+
+    This(This),
+    Super(Super<P>),
+
+    Literal(Literal),
+
+    Apply(Apply<P>),
+    TypeApply(TypeApply<P>),
+
+    New(New<P>),
+    Typed(TypedExpr<P>),
+    NamedArg(NamedArg<P>),
+
+    Assign(Assign<P>),
+    Block(Block<P>),
+    If(If<P>),
+
+    Match(Match<P>),
+    CaseDef(CaseDef<P>),
+
+    Return(Return<P>),
+    While(While<P>),
+    Try(Try<P>),
+
+    Closure(Closure<P>),
+
+    ValDef(ValDef<P>),
+    DefDef(DefDef<P>),
+    TypeDef(TypeDef<P>),
+    Template(Template<P>),
+
+    PackageDef(PackageDef<P>),
+
+    Import(Import<P>),
+    Export(Export<P>),
+
+    TypeTree(TypeTree),
+    SingletonTypeTree(SingletonTypeTree<P>),
+    AppliedTypeTree(AppliedTypeTree<P>),
+    RefinedTypeTree(RefinedTypeTree<P>),
+    LambdaTypeTree(LambdaTypeTree<P>),
+    MatchTypeTree(MatchTypeTree<P>),
+    ByNameTypeTree(ByNameTypeTree<P>),
+    TypeBoundsTree(TypeBoundsTree<P>),
+
+    Bind(Bind<P>),
+    Alternative(Alternative<P>),
+    UnApply(UnApply<P>),
+
+    Annotated(Annotated<P>),
+
+    Quote(Quote<P>),
+    Splice(Splice<P>),
+    QuotePattern(QuotePattern<P>),
+    SplicePattern(SplicePattern<P>),
+
+    Inlined(Inlined<P>),
+
+    PhaseSpecific(P::ExtraNode),
+}
+```
+
+Deliberately **not** included yet, matching Dotty's real classification of
+these as internal/derived rather than primary surface or typed-output nodes:
+`Labeled` (used only for desugared `while`/pattern-matching gotos), `Hole`
+(quote-pickling only, "will never be in a TASTy file" per Dotty's own doc
+comment), `SeqLiteral`/`JavaSeqLiteral` (desugared varargs), and the
+`InlineIf`/`InlineMatch`/`SubMatch` boolean-flagged subclasses of
+`If`/`Match` (modeled later as a flag on `If`/`Match` if needed, not as
+separate variants). These can be added incrementally without touching
+`AstPhase` once inline handling and pattern desugaring are in scope.
+
+Shared node payload definitions (`ast/common.rs`, `ast/typed.rs`):
+
+```rust
+pub struct Ident {
+    pub name: Name,
+}
+
+pub struct Select<P: AstPhase> {
+    pub qualifier: TreeId<P>,
+    pub name: Name,
+}
+
+/// `qual` is the optional class-name qualifier of `qual.this`. It is a plain
+/// name, not a tree: seeSyntax audit above for why this isn't `TreeId<P>`.
+pub struct This {
+    pub qual: Option<Name>,
+}
+
+/// `mix` is the optional trait qualifier of `C.super[mix]`; same reasoning
+/// as `This.qual`.
+pub struct Super<P: AstPhase> {
+    pub qual: TreeId<P>,
+    pub mix: Option<Name>,
+}
+
+pub struct Apply<P: AstPhase> {
+    pub function: TreeId<P>,
+    pub args: Vec<TreeId<P>>,
+    pub kind: ApplyKind,
+}
+
+pub enum ApplyKind {
+    Regular,
+    Using,
+}
+
+pub struct Import<P: AstPhase> {
+    pub expr: TreeId<P>,
+    pub selectors: Vec<ImportSelector<P>>,
+}
+
+pub struct Export<P: AstPhase> {
+    pub expr: TreeId<P>,
+    pub selectors: Vec<ImportSelector<P>>,
+}
+
+pub struct ImportSelector<P: AstPhase> {
+    pub imported: Name,
+    pub renamed: Option<TreeId<P>>,
+    pub bound: Option<TreeId<P>>,
+}
+
+pub struct Template<P: AstPhase> {
+    pub constructor: TreeId<P>,
+    pub parents: Vec<TreeId<P>>,
+    pub self_val: Option<TreeId<P>>,
+    pub body: Vec<TreeId<P>>,
+}
+
+pub struct Inlined<P: AstPhase> {
+    pub bindings: Vec<TreeId<P>>,
+    pub expansion: TreeId<P>,
+}
+```
+
+The remaining shared nodes (`Literal`, `New`, `TypedExpr`, `NamedArg`,
+`Assign`, `Block`, `If`, `Match`, `CaseDef`, `Return`, `While`, `Try`,
+`Closure`, `ValDef`, `DefDef`, `TypeDef`, `PackageDef`, the type-tree family,
+`Bind`, `Alternative`, `UnApply`, `Annotated`, `Quote`/`Splice`/
+`QuotePattern`/`SplicePattern`) do not have phase-divergent field *shapes*
+beyond ordinary `TreeId<P>` child substitution — every child reference is
+`TreeId<P>`, matching the general invariant above. `ValDef<P>`/`DefDef<P>`/
+`TypeDef<P>` each carry a `metadata: P::DefMetadata` field for the
+`Modifiers`-or-nothing split described above.
+
+### `ast/untyped.rs`
+
+`UntypedNode` holds surface-syntax-only constructs:
+
+```rust
+pub enum UntypedNode {
+    ModuleDef(ModuleDef),
+
+    Function(Function),
+    PolyFunction(PolyFunction),
+
+    InfixOp(InfixOp),
+    PrefixOp(PrefixOp),
+    PostfixOp(PostfixOp),
+
+    Parens(Parens),
+    Tuple(Tuple),
+
+    ForYield(ForYield),
+    ForDo(ForDo),
+
+    GenFrom(GenFrom),
+    GenAlias(GenAlias),
+
+    PatDef(PatDef),
+
+    ExtensionMethods(ExtensionMethods),
+
+    InterpolatedString(InterpolatedString),
+
+    ContextBounds(ContextBounds),
+
+    Number(NumberLiteral),
+
+    Throw(Throw),
+
+    /// A `derives` clause on a class/trait/enum `Template`. See the
+    /// `Template` audit above: real Dotty drops this after typing, so it
+    /// belongs here, not on the shared `Template<P>` node.
+    Derived(Vec<TreeId<Untyped>>),
+}
+```
+
+This set mirrors Dotty's actual `untpd`-only node types (`untpd.scala`:
+`ForYield`, `ForDo`, `GenFrom`, `GenAlias`, `PatDef`, `ExtMethods`, and
+others), plus `Derived` added by the `Template` audit above.
+
+### `ast/typed.rs`
+
+Does not redeclare node kinds; it only provides
+`TypedTree`/`TypedTreeId`/`TypedAst` type aliases and a `TypedAstBuilder`
+whose constructors all *require* a `TypeId` argument, so a typed tree cannot
+be built without one by construction, not just by convention:
+
+```rust
+pub type TypedTree = Tree<Typed>;
+pub type TypedTreeId = TreeId<Typed>;
+pub type TypedAst = AstArena<Typed>;
+
+pub struct TypedAstBuilder<'a> {
+    arena: &'a mut AstArena<Typed>,
+}
+
+impl TypedAstBuilder<'_> {
+    pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed>;
+    pub fn apply(
+        &mut self,
+        function: TreeId<Typed>,
+        args: Vec<TreeId<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed>;
+}
+```
+
+### `ast/modifiers.rs`
+
+Source modifiers are not the same as semantic symbol flags — a parsed
+`override` keyword and a resolved "this symbol overrides a parent member"
+fact are different things computed at different phases; conflating them
+would force the namer to invent flags for syntax the parser never saw and
+vice versa.
+
+```rust
+pub struct Modifiers {
+    pub visibility: Option<VisibilitySyntax>,
+    pub modifiers: Vec<Modifier>,
+    pub annotations: Vec<TreeId<Untyped>>,
+}
+
+pub enum Modifier {
+    Abstract,
+    Final,
+    Sealed,
+    Case,
+    Implicit,
+    Given,
+    Lazy,
+    Override,
+    Inline,
+    Transparent,
+    Opaque,
+    Open,
+    Infix,
+    Erased,
+}
+```
+
+`[MAJOR 2]` `Modifiers.annotations: Vec<TreeId<Untyped>>` is safe now that
+`Modifiers` only exists as `Untyped::DefMetadata` — a `Modifiers` value can
+only ever be reached from an untyped definition node, so its
+`TreeId<Untyped>` annotation references always point into the same arena
+they were built from. This was the underlying inconsistency `[MAJOR 2]`
+flagged: with `Modifiers` as a plain field of a phase-generic `ValDef<P>`/
+`DefDef<P>`, a *typed* `ValDef<Typed>` would have held it too, forcing
+`Vec<TreeId<Untyped>>` onto a typed tree. Tying `Modifiers` to
+`AstPhase::DefMetadata` closes that gap by construction.
+
+## 8. Type model
+
+### `types/ty.rs`
+
+```rust
+pub enum Type {
+    NoType,
+    Error(ErrorType),
+    NoPrefix,
+
+    TermRef { prefix: TypeId, symbol: SymbolId },
+    TypeRef { prefix: TypeId, symbol: SymbolId },
+
+    ThisType { class: SymbolId },
+    SuperType { this_type: TypeId, super_type: TypeId },
+
+    Constant(Constant),
+
+    Applied { tycon: TypeId, args: Vec<TypeId> },
+    Bounds { low: TypeId, high: TypeId },
+    ByName { result: TypeId },
+
+    And { left: TypeId, right: TypeId },
+    Or { left: TypeId, right: TypeId },
+
+    Refined { parent: TypeId, name: Name, info: TypeId },
+
+    /// `parent` may itself contain `RecThis { binder }` values where `binder`
+    /// is the `TypeId` this very `Type::Recursive` value is stored under.
+    /// See `[BLOCKER 1]` below for how that self-reference is constructed.
+    Recursive { parent: TypeId },
+    RecThis { binder: TypeId },
+
+    Method(MethodType),
+    Poly(PolyType),
+    TypeLambda(TypeLambda),
+
+    /// `binder` is the `TypeId` of the enclosing `Method`/`Poly`/`TypeLambda`
+    /// value itself — not a separate `Binder`/`BinderId`. See `[BLOCKER 1]`.
+    ParamRef { binder: TypeId, index: u32 },
+
+    Match(MatchType),
+    MatchCase { pattern: TypeId, result: TypeId },
+
+    Annotated { underlying: TypeId, annotation: AnnotationId },
+
+    Wildcard { bounds: TypeId },
+
+    JavaArray { element: TypeId },
+
+    ClassInfo(ClassInfo),
+}
+```
+
+`TermRef`/`TypeRef` use `SymbolId`, not the symbol's `Name`, so a symbol
+rename doesn't require walking every type that references it.
+
+### `[BLOCKER 1]` Binder identity is `TypeId`, not a separate `BinderId`
+
+The first draft had `BinderArena`/`Binder { id: BinderId, kind: BinderKind }`
+storing only a *kind*, while the actual parameter/result data lived inside
+`MethodType`/`PolyType`/`TypeLambda`, and `ParamRef { binder: BinderId,
+index }` referenced the empty `Binder` object instead of the type that
+actually owns the parameter. Resolving a `ParamRef` back to its bound
+parameter — which the testing plan (§14) requires — was impossible without
+inventing a second reverse-mapping table the design never defined.
+
+The fix: make the semantic type itself the binder identity, matching how
+Scala 3's actual type model works (a `ParamRef` points at the enclosing
+`MethodType`/`PolyType`/`HKTypeLambda` value directly, not at an auxiliary
+object).
+
+```rust
+pub struct MethodType {
+    pub params: Vec<MethodParam>,
+    pub result: TypeId,
+    pub kind: MethodKind,
+}
+
+pub struct PolyType {
+    pub params: Vec<TypeParam>,
+    pub result: TypeId,
+}
+
+pub struct TypeLambda {
+    pub params: Vec<TypeParam>,
+    pub result: TypeId,
+}
+```
+
+None of these carry their own `binder`/`id` field any more — once one of
+them is allocated in the `TypeArena`, the `TypeId` it was allocated under
+*is* its binder identity, exactly the way `Type::Recursive`'s own `TypeId`
+already serves as the binder identity for any `RecThis` nested inside it.
+`BinderId`, `Binder`, `BinderArena`, and `BinderKind` are removed entirely
+(§3, §4, §10) — matching them against a `Type` variant via `match` already
+tells you the "kind" the old `BinderKind` existed to record.
+
+This requires `TypeArena` to support constructing a self-referential
+structure: the `PolyType`'s `params` need to contain `ParamRef { binder,
+index }` values whose `binder` is the very `TypeId` the `PolyType` is about
+to be stored under, before that `TypeId` exists. `types/arena.rs` gets a
+two-phase allocation API for exactly this:
+
+```rust
+pub struct ReservedTypeId(TypeId);
+
+impl ReservedTypeId {
+    pub fn id(&self) -> TypeId;
+}
+
+impl TypeArena {
+    /// Reserves a slot (backed by a `Type::NoType` placeholder) and returns
+    /// its `TypeId` immediately, before the real value is known.
+    pub fn reserve(&mut self) -> ReservedTypeId;
+
+    /// Overwrites a reserved slot with its real value once all
+    /// self-references to it have been constructed.
+    pub fn fill(&mut self, id: ReservedTypeId, ty: Type) -> TypeId;
+}
+```
+
+Example, for `def head[A](xs: List[A]): A`:
+
+```rust
+let poly_binder = types.reserve();
+let param_a = types.alloc(Type::ParamRef { binder: poly_binder.id(), index: 0 });
+// ... build `List[A]` and the enclosing `MethodType` using `param_a` ...
+let poly = types.fill(poly_binder, Type::Poly(PolyType {
+    params: vec![type_param_a],
+    result: method_type_id,
+}));
+```
+
+**Invariant, consistent with §12's error-handling policy:** every reserved
+`TypeId` must be `fill`-ed before anything other than the code that reserved
+it reads that slot. Reading an unfilled slot (still `Type::NoType`) from
+outside the construction sequence that reserved it is a compiler bug, not a
+recoverable error — the same class of internal invariant as an
+out-of-range arena index.
+
+`types/binder.rs` is kept only for this `reserve`/`fill` API; it no longer
+defines a `Binder` type.
+
+### `types/method.rs`, `types/constant.rs`, `types/class_info.rs`, `types/annotation.rs`
+
+```rust
+pub struct MethodParam {
+    pub name: TermName,
+    pub ty: TypeId,
+    pub erased: bool,
+}
+
+pub enum MethodKind {
+    Plain,
+    Implicit,
+    Contextual,
+}
+
+pub struct TypeParam {
+    pub name: TypeName,
+    pub bounds: TypeId,
+    pub variance: Variance,
+}
+
+pub enum Variance {
+    Invariant,
+    Covariant,
+    Contravariant,
+}
+
+pub enum Constant {
+    Unit,
+    Null,
+    Boolean(bool),
+    Byte(i8),
+    Short(i16),
+    Char(char),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    String(NameId),
+    Class(TypeId),
+}
+```
+
+`Constant::String` uses `NameId` (interned, see §5) rather than an owned
+`String`, so AST literals and future TASTy constant pool entries share one
+string table instead of allocating separately.
+
+```rust
+pub struct ClassInfo {
+    pub prefix: TypeId,
+    pub class: SymbolId,
+    pub parents: Vec<TypeId>,
+    pub declarations: ScopeId,
+    pub self_type: Option<TypeId>,
+}
+```
+
+`[BLOCKER 2]` `declarations: ScopeId` lives **only** here — see §9 for why it
+is removed from `Symbol`.
+
+`[MAJOR 3]` The first draft's `Type::Annotated { underlying, annotation:
+AnnotationId }` referenced an `AnnotationId`/`Annotation`/`AnnotationArena`
+that the document never defined — an enum variant referencing an undefined
+identity type. Real Dotty stores annotations in two places that must not be
+conflated: a `List[Annotation]` directly on the symbol denotation
+(`SymDenotation.myAnnotations`), and a single `Annotation` on
+`AnnotatedType` for type-level annotations (`@unchecked`-style). Both are
+included in the foundation, since `ANNOTATION_TAG` is already common in the
+real TASTy corpus per `docs/category-five-coverage-3.9.0.md` ("Real corpus"
+for tag 173) and deferring it would leave the future TASTy adapter unable to
+represent ordinary annotated code:
+
+```rust
+pub struct Annotation {
+    pub ty: TypeId,
+    pub tree: Option<TreeId<Typed>>,
+}
+
+pub struct AnnotationArena {
+    annotations: Vec<Annotation>,
+}
+
+impl AnnotationArena {
+    pub fn alloc(&mut self, annotation: Annotation) -> AnnotationId;
+    pub fn get(&self, id: AnnotationId) -> &Annotation;
+}
+```
+
+`Annotation.tree` is optional because a foundation-era annotation may be
+known only by its class `TypeId` (e.g. while the classfile/TASTy adapter is
+still being written) before argument trees are modeled; `Symbol` gets a
+matching `annotations: Vec<AnnotationId>` field (§9), mirroring Dotty's
+symbol-level list.
+
+### `types/arena.rs`
+
+```rust
+pub struct TypeArena {
+    types: Vec<Type>,
+}
+
+impl TypeArena {
+    pub fn alloc(&mut self, ty: Type) -> TypeId;
+    pub fn get(&self, id: TypeId) -> &Type;
+    pub fn get_mut(&mut self, id: TypeId) -> &mut Type;
+    pub fn reserve(&mut self) -> ReservedTypeId;
+    pub fn fill(&mut self, id: ReservedTypeId, ty: Type) -> TypeId;
+}
+```
+
+No interning in the foundation PR, as before. A future `intern` method can
+be added once it's clear which `Type` variants are safe to dedupe (structural
+types with binders need care: two `Poly` types are only interchangeable if
+their binders are alpha-equivalent, which plain structural `Eq` won't give
+for free).
+
+## 9. Symbol model
+
+```rust
+pub struct Symbol {
+    pub name: Name,
+    pub owner: Option<SymbolId>,
+    pub kind: SymbolKind,
+    pub flags: SymbolFlags,
+    pub info: SymbolInfo,
+    pub origin: SymbolOrigin,
+    pub annotations: Vec<AnnotationId>,
+    pub position: Option<SourceSpan>,
+    pub links: SymbolLinks,
+}
+```
+
+`[BLOCKER 2]` The first draft had both `Symbol.declarations: Option<ScopeId>`
+and `ClassInfo.declarations: ScopeId` — two independently mutable fields for
+the same fact, able to silently diverge (`Symbol(Foo).declarations =
+Scope#10` while `ClassInfo(Foo).declarations = Scope#12`). `declarations` is
+removed from `Symbol` entirely; `ClassInfo.declarations` (§8) is the sole
+authority. Member/class lookup goes through:
+
+```text
+Symbol -> SymbolInfo::Complete(TypeId) -> Type::ClassInfo -> ScopeId
+```
+
+`Symbol` stays identity-plus-metadata; `Type`/`ClassInfo` stays the carrier
+of semantic structure. A symbol that is not (yet, or ever) a class simply has
+no `ClassInfo` and therefore no declarations to look through.
+
+`[MAJOR 4]` The first draft's `linked: Option<SymbolId>` was meant to cover
+both `class <-> companion object` and `module value <-> module class`, but a
+bare link only answers "linked to something," never "how." Real Dotty stores
+exactly **one** mutable link per class-like denotation —
+`registeredCompanion: Symbol` (`SymDenotations.scala`, default `NoSymbol`) —
+and derives everything else (`companionModule`, `companionClass`,
+`linkedClass`) from that one field plus ordinary `SymbolKind`/name
+navigation; it does not store three separate link fields. `dotty-core`
+follows the same shape, simpler than what the review proposed:
+
+```rust
+#[derive(Default)]
+pub struct SymbolLinks {
+    /// The class's companion object symbol, or the object's companion class
+    /// symbol. Meaningful only when `kind` is `Class`, `Trait`, `Object`, or
+    /// `ModuleClass`.
+    pub companion: Option<SymbolId>,
+}
+```
+
+`module_class`/`source_module`-style navigation (an `Object` symbol's
+backing `ModuleClass`, and vice versa) is a derived query over `owner` +
+`kind` + `companion`, not a stored field — adding it as a free function once
+the namer exists is cheap, and storing it redundantly would reopen exactly
+the two-sources-of-truth problem `[BLOCKER 2]` just closed.
+
+`SymbolKind` gives a stable category:
+
+```rust
+pub enum SymbolKind {
+    Package,
+    Class,
+    Trait,
+    Object,
+    ModuleClass,
+    Method,
+    Constructor,
+    Field,
+    Value,
+    Variable,
+    Parameter,
+    TypeParameter,
+    TypeAlias,
+    Local,
+}
+```
+
+`SymbolFlags` is a bitset of orthogonal properties layered on top —
+deliberately not one flags enum trying to do both jobs:
+
+```rust
+bitflags! {
+    pub struct SymbolFlags: u64 {
+        const PRIVATE      = ...;
+        const PROTECTED    = ...;
+        const ABSTRACT     = ...;
+        const FINAL        = ...;
+        const SEALED       = ...;
+        const CASE         = ...;
+        const IMPLICIT     = ...;
+        const GIVEN        = ...;
+        const LAZY         = ...;
+        const MUTABLE      = ...;
+        const INLINE       = ...;
+        const TRANSPARENT  = ...;
+        const OPAQUE       = ...;
+        const EXTENSION    = ...;
+        const STATIC       = ...;
+        const SYNTHETIC    = ...;
+        const JAVA_DEFINED = ...;
+        const ERASED       = ...;
+        const OVERRIDE     = ...;
+    }
+}
+```
+
+`[MINOR 1]` `SymbolOrigin` as a bare tag enum records only a *category*, not
+enough provenance for future incremental-compilation invalidation (which
+needs to know *which* source file, `.tasty` file, or classpath entry). Give
+the payload-bearing variants opaque, core-owned IDs now rather than
+documenting a false promise:
+
+```rust
+pub enum SymbolOrigin {
+    Source(SourceId),
+    Classfile(ClassfileOriginId),
+    Tasty(TastyOriginId),
+    Synthetic,
+    Builtin,
+}
+```
+
+`ClassfileOriginId`/`TastyOriginId` (§4) are opaque `u32` handles that
+`dotty-core` does not interpret — the classfile/TASTy adapter layer (§2)
+assigns and resolves them against its own classpath-entry or file table, so
+`dotty-core` still does not depend on concrete `dotty-classfile`/
+`dotty-tasty` types.
+
+`SymbolInfo::{Missing, Deferred(CompletionId), Complete(TypeId), Error}`
+bakes in lazy completion from day one — `CompletionId` stays an opaque
+placeholder; no completer engine ships in the foundation PR.
+
+`Scope` uses `HashMap<Name, SmallVec<[SymbolId; 2]>>` because overloaded
+methods (`def foo(x: Int)` / `def foo(x: String)`) are ordinary, not an edge
+case — a bucket of one avoids a heap allocation for the common case:
+
+```rust
+pub struct Scope {
+    pub owner: Option<SymbolId>,
+    entries: std::collections::HashMap<Name, smallvec::SmallVec<[SymbolId; 2]>>,
+}
+
+impl Scope {
+    pub fn enter(&mut self, name: Name, symbol: SymbolId);
+    pub fn remove(&mut self, symbol: SymbolId);
+    pub fn lookup(&self, name: &Name) -> Option<SymbolId>;
+    pub fn lookup_all(&self, name: &Name) -> &[SymbolId];
+}
+```
+
+**Owner vs. scope stay distinct types.** Owner answers "who semantically
+holds this symbol"; scope answers "where can this be found by name lookup."
+They usually agree but are not the same concept (e.g. an imported name is in
+scope somewhere it isn't owned). `Symbol` never gets a `children:
+Vec<SymbolId>` field; child membership is reconstructed via scopes.
+
+`NamerState` (the `TreeId<Untyped> -> SymbolId` side table) explicitly does
+**not** live in `dotty-core`. It belongs to the future `dotty-typer` crate's
+namer, because it is intermediate compiler state, not part of the semantic
+world model. AST nodes are never mutated to carry a `symbol: SymbolId` field
+directly, for the same reason `[BLOCKER 2]` removed `Symbol.declarations`: it
+would create a second, potentially-stale source of truth alongside the
+tree's own `ty`.
+
+## 10. `store/semantic_store.rs`
+
+`[MAJOR 5]` `SemanticContext` is renamed to `SemanticStore`. The prior name
+risked a real collision: the future typer will need an actual dynamic
+context — current owner, current lexical scope, imports in scope, expected
+type/prototype, typing mode, enclosing contexts — which in Dotty is
+literally called `Context`. Naming today's persistent arena aggregate
+`SemanticContext` would force an awkward rename exactly when it's most
+disruptive (once the typer already depends on the old name).
+
+```rust
+pub struct SemanticStore {
+    pub names: NameInterner,
+    pub symbols: SymbolTable,
+    pub types: TypeArena,
+    pub scopes: ScopeArena,
+    pub annotations: AnnotationArena,
+}
+```
+
+`annotations: AnnotationArena` is added versus the first draft, matching
+`[MAJOR 3]`. `binders: BinderArena` is removed, matching `[BLOCKER 1]` — a
+binder is just a `Type` living in `types`, not a separate arena.
+
+This aggregate is intentionally "dumb storage," not a typing context. Once
+the typer exists, it defines its own, separate type for the dynamic parts:
+
+```rust
+pub struct TypingContext<'a> {
+    pub store: &'a mut SemanticStore,
+    pub owner: SymbolId,
+    pub scope: ScopeId,
+    // expected type, typing mode, imports, etc. — defined when the typer is built.
+}
+```
+
+## 11. Boundary with the binary/wire crates
+
+This is the part that most needs to be explicit, since it's where the design
+touches code that already exists.
+
+- **`dotty-tasty`** keeps its own `NameRef` (a one-based wire-table index)
+  and `SignedName`/`NameSignature` types exactly as they are. These are wire
+  concepts — they describe *where a name's bytes live in a `.tasty` file*,
+  not what the name means. A future TASTy semantic adapter, living in the
+  dedicated adapter layer from §2 (not inside `dotty-tasty`, and not inside
+  `dotty-typer` — `[MAJOR 6]`), is responsible for walking
+  `dotty_tasty::name_table` entries and calling `NameInterner::intern` to
+  produce `dotty_core::Name` values, and for turning
+  `dotty_tasty::ast::StructuredNode` trees into `AstArena<Typed>` plus
+  `Symbol`/`Type` entries. `dotty-tasty` itself gains no new dependency and
+  no new knowledge of symbols or types.
+- **`dotty-classfile`** is currently a "type skeleton only" (its own
+  `lib.rs` doc comment says so: no decoder/encoder/bounded reader exists
+  yet). Its raw `ClassFile`/`ConstantPool`/`FieldInfo`/`MethodInfo`/
+  `Attribute` stay exactly as scoped in `docs/classfile-format-jdk25.md`. The
+  semantic loader (raw `ClassFile` → `Symbol`/`ClassInfo`/`Scope`) is new
+  code in the same dedicated adapter layer, added later once `dotty-
+  classfile` actually has a decoder to adapt.
+- **The future parser** produces `AstArena<Untyped>` directly — no
+  intermediate representation. Per `[MINOR 3]`, it needs a `NameInterner`
+  and the `Span`/`SourceSpan` types, but nothing else from `SemanticStore`.
+- **The future typer** is the first component to touch every part of
+  `dotty-core` at once: it reads `AstArena<Untyped>`, populates `symbols`/
+  `types`/`scopes`/`annotations` on a `SemanticStore`, and produces
+  `AstArena<Typed>`. It consumes an already-populated store; it does not
+  decode classfiles or TASTy files itself.
+
+`dotty-core` must not gain a dependency on `dotty-tasty`, `dotty-classfile`,
+a future `dotty-parser`, or a future `dotty-typer`. This is the one hard
+constraint from the original design and nothing above requires relaxing it.
+
+## 12. Error handling policy inside `dotty-core`
+
+AGENTS.md requires that library code "must not panic on malformed TASTy
+input" and return typed errors instead. That rule is scoped to *decoding
+untrusted external bytes* (TASTy files, classfiles, source text). It does not
+translate directly to `dotty-core`'s arenas, whose IDs are never derived from
+untrusted bytes — they are handed out by the same arena that will later
+index with them, so an out-of-range `SymbolId`/`TypeId`/`TreeId<P>` reaching
+`get`/`get_mut` indicates a compiler-internal bug (e.g. an ID leaked across
+two independently constructed arenas), not malformed input.
+
+Given that distinction, the foundation PR should:
+
+- Let `AstArena::get`, `TypeArena::get`, `SymbolTable::get`, `Scope::lookup`,
+  etc. panic (via slice indexing, `expect`, or similar) on an invalid
+  internally-issued ID, exactly like `id-arena`/`la-arena` do. Document this
+  explicitly on each `get`/`get_mut` doc comment so it isn't mistaken for an
+  oversight. The same applies to reading a `TypeArena::reserve`-d slot before
+  it has been `fill`-ed (§8) — that is the same class of internal-invariant
+  violation, not a recoverable error.
+- Reserve `Result`-returning APIs in `dotty-core` for genuinely fallible
+  semantic operations added later (e.g. a future `intern`-with-limits, or a
+  future bounded-recursion tree walk) — none of which are in scope for the
+  foundation PR.
+- Leave AGENTS.md's untrusted-input rule fully binding on the adapters in
+  §11: a TASTy or classfile adapter that maps decoded wire data onto
+  `dotty-core` must itself validate before calling `alloc`/`intern`, the same
+  way `dotty-tasty::ast` already validates AST references before trusting
+  them.
+
+## 13. New dependencies
+
+The workspace is currently dependency-light: `unicode-ident` (lexer),
+`serde`/`serde_json` (dev-only, `dotty-tasty`). This design introduces two
+candidate dependencies that need an explicit decision before the foundation
+PR lands:
+
+| Dependency | Used for | Alternative if declined |
+| --- | --- | --- |
+| `bitflags` | `SymbolFlags`, `types/flags.rs` | Hand-rolled `u64` newtype with `const` associated flags and manual `Debug`; more boilerplate, zero new dependency |
+| `smallvec` | `Scope`'s overload buckets | Plain `Vec<SymbolId>`; simpler, one extra allocation per overloaded name (rare relative to total symbol count) |
+
+Recommendation: take both — they are small, widely used, and remove real
+boilerplate/allocations — but this is a call for whoever reviews the
+foundation PR, not something to slip in silently given the project's
+otherwise deliberate minimalism.
+
+## 14. Testing plan
+
+AGENTS.md's testing requirements ("Add a focused unit test for every new
+parser, encoder, validator, tag, enum variant, or meaningful edge case," "Add
+assertions for exact error variants... not only `is_err()`") apply here as
+much as to `dotty-tasty`. Concretely, for the foundation PR:
+
+```text
+crates/dotty-core/tests/
+├── ast_phase_safety.rs
+├── ast_structure.rs
+├── types.rs
+├── binders.rs
+├── symbols.rs
+├── scopes.rs
+└── semantic_fixtures.rs
+```
+
+- **Phase safety** (`ast_phase_safety.rs`): the interesting assertion is
+  "this does not compile," which needs `compile_fail` doctests on
+  `ast/phase.rs` and `ast/tree.rs` rather than the `trybuild` crate — this
+  keeps the phase-safety proof dependency-free, consistent with §13's
+  minimalism concern. Cover, as `compile_fail` cases: constructing
+  `TreeKind::PhaseSpecific(..)` on `Typed`; constructing a `ValDef<Typed>`
+  with a `Modifiers` value as its `metadata`. Runtime tests in the same file
+  cover the parts that *do* need to compile: a `Tree<Typed>` always has a
+  real `TypeId` after `TypedAstBuilder::ident`/`apply`/etc.
+- **`binders.rs`**: build a `Poly`/`Method`/`TypeLambda` via
+  `TypeArena::reserve`/`fill`, resolve a nested `ParamRef` back through its
+  `binder: TypeId`, and assert it round-trips to the exact `TypeParam`/
+  `MethodParam` it was bound to — this is the guarantee `[BLOCKER 1]` exists
+  to make possible. Also test the unfilled-reservation-is-a-bug invariant
+  (§12) with a `#[should_panic]` test, not a `Result`.
+- **One test per remaining `Type` variant construction**, matching the "one
+  test per enum variant" rule already applied to TASTy tags in
+  `docs/testing-strategy.md`.
+- **`symbols.rs`**: one test asserting `Symbol` has no `declarations` field
+  (i.e. lookup only works through `ClassInfo`, `[BLOCKER 2]`); one test
+  building a class + companion pair and asserting `SymbolLinks::companion`
+  resolves both directions (`[MAJOR 4]`); one test per `SymbolOrigin`
+  variant, including that `Classfile`/`Tasty` carry their opaque origin ID
+  (`[MINOR 1]`).
+- **Scope overload tests**: `enter` two symbols under one name, assert
+  `lookup_all` returns both in insertion order; `remove` one, assert
+  `lookup` still resolves the other.
+- **Semantic fixtures** (`semantic_fixtures.rs`): small, named Scala
+  fragments building the intended symbol/type shape by hand (not by parsing
+  — no parser exists yet): generic identity method, overloads, class +
+  companion via `SymbolLinks`, path-dependent type (`trait Foo { type T };
+  def f(x: Foo): x.T`), higher-kinded type parameter
+  (`trait Functor[F[_]]`), contextual parameter
+  (`def show[A](x: A)(using Show[A]): String`), type lambda
+  (`[X] =>> Either[String, X]`), match type, and one fixture with an
+  annotation (`@deprecated class Foo`) exercising `Symbol.annotations` +
+  `AnnotationArena`. Each fixture test builds the `SemanticStore` state a
+  namer/typer *would* produce and asserts its shape — this both documents
+  the intended shape and pins it before any namer exists to produce it
+  automatically.
+
+`cargo fmt`, `cargo test --workspace --all-targets`, `cargo clippy
+--workspace --all-targets -- -D warnings`, and `git diff --check` (the
+existing CI job in `.github/workflows/ci.yml`) all apply unchanged to the new
+crate; no new CI job is needed for the foundation PR.
+
+## 15. Definition of done for the foundation PR
+
+- `TreeId<Untyped>` and `TreeId<Typed>` are statically distinct types.
+- A `Tree<Typed>` always carries a `TypeId`; a `Tree<Untyped>` never does.
+- Untyped-only syntax (`UntypedNode`) cannot type-check as part of a `Typed`
+  tree, and `Modifiers` cannot appear as a typed definition's metadata.
+- Every `TreeId` field inside `TreeKind<P>` is `TreeId<P>` — no shared node
+  hard-codes a reference into the other phase's arena.
+- A tree's source position is `Option<SourceSpan>`; nothing depends on a
+  `SourceId` sentinel value to mean "no source."
+- `TermRef`/`TypeRef` reference symbols via `SymbolId`, and every `Type`
+  variant that needs one carries a `prefix`.
+- `MethodType`, `PolyType`, and `TypeLambda` are binders via their own
+  `TypeId`; `ParamRef` identifies `(binder: TypeId, index)` and resolves back
+  to the exact bound parameter, with a test proving it.
+- `Type::Annotated` and `Symbol.annotations` both resolve through a defined
+  `AnnotationId`/`AnnotationArena`.
+- `Scope` supports overloads (`SmallVec`/`Vec` bucket per name) and keeps
+  term/type namespaces distinct via `Name`.
+- `Symbol` has an `owner`, may have `SymbolInfo::Deferred`, has no
+  `declarations` field of its own, and `ClassInfo` is the sole authority for
+  a class's `ScopeId`.
+- `Symbol`'s companion/module relationship is an explicit `SymbolLinks`
+  field, never a bare `Option<SymbolId>` with unstated meaning.
+- `SymbolOrigin`'s classfile/TASTy variants carry an opaque, core-owned
+  origin ID rather than claiming untraceable provenance.
+- Nothing in `dotty-core` depends on `dotty-tasty`, `dotty-classfile`, or any
+  future parser/typer/compiler crate.
+- The crate builds, is added to `[workspace.members]`, and passes the
+  existing CI job (`fmt`, `test`, `clippy -D warnings`, `cargo doc`,
+  `git diff --check`) with the test layout from §14 in place.
+
+Not in scope for the foundation PR: the typer itself, subtyping, inference,
+lookup through inheritance, implicit resolution, classfile → symbol
+conversion, TASTy → `dotty-core` conversion, inline-call provenance on
+`Inlined`, and the parser itself.
+
+## 16. Open decisions for review
+
+1. `bitflags` and `smallvec` as new dependencies (§13).
+2. Whether `dotty::core` is re-exported from the root facade now or deferred
+   until a real consumer exists (§3). This document defaults to "defer."
+3. Confirm `compile_fail` doctests are an acceptable substitute for a
+   `trybuild`-based phase-safety test suite (§14).
+4. Naming/packaging of the classfile/TASTy adapter layer introduced in §2 —
+   candidates include a single `dotty-loader` crate, or two crates
+   (`dotty-classfile-sema`, `dotty-tasty-sema`) mirroring the existing
+   `dotty-classfile`/`dotty-tasty` split. Only the dependency direction
+   (outside the codec crates, outside the typer) is fixed by this document.
+5. Whether `Annotation.tree: Option<TreeId<Typed>>` is enough for the
+   foundation PR, or whether annotation *arguments* need their own
+   lighter-weight representation before the typer exists to produce full
+   typed trees for them (§8, `[MAJOR 3]`).
+
+## 17. Suggested follow-up work after the foundation PR
+
+Once the foundation lands, the following can proceed in parallel, each
+depending only on `dotty-core`:
+
+- Scala source parser producing `AstArena<Untyped>` (extends today's
+  `dotty-lexer`/`dotty-token` output).
+- Classfile semantic adapter (`dotty-classfile` decoder + loader producing
+  `Symbol`/`Type`/`ClassInfo`), in the dedicated adapter layer from §2.
+- TASTy semantic adapter (`dotty-tasty` structured trees →
+  `Symbol`/`Type`/`AstArena<Typed>`), in the same adapter layer.
+- Namer (`Untyped AST` → symbols entered into scopes).
+- Typer skeleton (`AstArena<Untyped>` → `AstArena<Typed>`), including
+  finally deciding `Inlined.call`'s representation once inline expansion is
+  in scope.
+
+At that point `dotty-rs` has one stable semantic core that every compiler
+component builds against, instead of renegotiating the boundary between
+modules on every new component.

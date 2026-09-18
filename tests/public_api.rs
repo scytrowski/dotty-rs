@@ -1,3 +1,7 @@
+use dotty::core::{
+    Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
+    SymbolOrigin,
+};
 use dotty::tasty::{NodeCategory, SimpleTerm, TastyFile, TermValue, Writer};
 
 #[test]
@@ -31,6 +35,26 @@ fn validates_and_reencodes_a_file_through_the_public_facade() {
 
     assert!(!file.asts().unwrap().is_empty());
     assert_eq!(file.encode().unwrap(), bytes);
+}
+
+#[test]
+fn exposes_the_core_semantic_api_under_the_dotty_namespace() {
+    let mut store = SemanticStore::new();
+    let text = store.names.intern("x");
+    let name = Name::new(text, Namespace::Term);
+    let symbol = store.symbols.alloc(Symbol {
+        name,
+        owner: None,
+        kind: SymbolKind::Value,
+        flags: SymbolFlags::EMPTY,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+
+    assert_eq!(store.symbols.get(symbol).name, name);
 }
 
 #[test]
