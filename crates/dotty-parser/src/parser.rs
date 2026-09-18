@@ -7,8 +7,8 @@ use dotty_core::ScannerEvent;
 use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
 
 use crate::{
-    Cursor, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic, ParseDiagnosticKind,
-    ParseKind, RecoverySet,
+    Cursor, KnownNames, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic,
+    ParseDiagnosticKind, ParseKind, RecoverySet,
 };
 
 /// Stateful input and allocation context for the handwritten parser.
@@ -24,6 +24,7 @@ where
     pub(crate) last_real_token_end: u32,
     pub(crate) context: ParseContext,
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
+    pub(crate) known_names: KnownNames,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -38,6 +39,7 @@ where
         names: &'names mut NameInterner,
     ) -> Self {
         let cursor = Cursor::new(tokens);
+        let known_names = KnownNames::new(names);
         let last_real_token_end = if is_zero_width_synthetic(cursor.kind()) {
             cursor.current().span.start()
         } else {
@@ -53,6 +55,7 @@ where
             last_real_token_end,
             context: ParseContext::default(),
             diagnostics: Vec::new(),
+            known_names,
         }
     }
 
@@ -74,6 +77,16 @@ where
     /// Returns the diagnostics accumulated by this parser.
     pub fn diagnostics(&self) -> &[ParseDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns parser-known soft keyword names.
+    pub const fn known_names(&self) -> &KnownNames {
+        &self.known_names
+    }
+
+    /// Checks the current source spelling against a parser-known name.
+    pub fn current_is_known_name(&mut self, expected: TermName) -> Result<bool, SourceTextError> {
+        Ok(self.intern_current_term_name()? == expected)
     }
 
     /// Consumes the diagnostics accumulated by this parser.
@@ -447,6 +460,20 @@ mod tests {
 
         assert!(name.as_name().is_type());
         assert_eq!(names.resolve(name.as_name().text()), "Value");
+    }
+
+    #[test]
+    fn parser_recognizes_a_soft_keyword_by_interned_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("using", TextRange::new(0, 5).unwrap(), &mut names);
+        let expected = parser.known_names().using;
+
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert!(
+            parser
+                .current_is_known_name(expected)
+                .expect("valid token span")
+        );
     }
 
     #[test]
