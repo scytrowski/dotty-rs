@@ -1883,6 +1883,36 @@ mod tests {
     }
 
     #[test]
+    fn accepts_repeated_unicode_escape_prefixes_in_strings() {
+        let source = r#""\uuuu0041""#;
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_uppercase_unicode_escape_prefixes_in_strings() {
+        let source = r#""\U0041""#;
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn recognizes_term_and_type_quote_markers() {
         let (items, diagnostics) = scan("'{ '[List[Int]]");
         let kinds: Vec<_> = items
@@ -2890,6 +2920,38 @@ mod tests {
 
         assert_eq!(error_count, 1);
         assert_eq!(diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn reports_an_incomplete_unicode_escape_without_losing_the_string() {
+        let source = r#""\u12""#;
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("Unicode escape"));
+    }
+
+    #[test]
+    fn recovers_a_backslash_before_a_line_break_inside_a_string() {
+        let source = "\"left\\\nright\"";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("escape"));
     }
 
     #[test]

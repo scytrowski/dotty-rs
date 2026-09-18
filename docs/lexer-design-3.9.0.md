@@ -83,6 +83,9 @@ Implementation status on the current lexer branch:
   `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
   plus `{` token sequence; a bare apostrophe that is not a character literal
   is emitted as `Quote`;
+- escape handling accepts repeated and uppercase Unicode prefixes, preserves
+  recoverable string tokens for incomplete escapes, and reports malformed
+  escapes without losing the remainder of the source;
 - contextual modifier and clause words such as `using`, `extension`, `inline`,
   `opaque`, `open`, `transparent`, `as`, `derives`, and `infix` remain raw
   identifiers until a later contextual phase;
