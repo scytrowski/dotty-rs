@@ -3315,6 +3315,83 @@ mod tests {
     }
 
     #[test]
+    fn diagnoses_malformed_cdata_and_recovers_at_the_following_xml_literal() {
+        let source = "<root><![CDATA[text]]x></root>\n<ok/>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+        let malformed_end = source.find("></").expect("malformed CDATA close") as u32;
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "unterminated XML CDATA section");
+        assert_eq!(
+            diagnostics[0].span(),
+            TextRange::new(malformed_end, malformed_end + 3).expect("valid range")
+        );
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::LeftBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Punctuation(Punctuation::RightBracket),
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::XmlStart,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            tokens[13].span.start(),
+            source.find("<ok/>").expect("following XML literal") as u32
+        );
+    }
+
+    #[test]
+    fn diagnoses_an_invalid_xml_comment_and_recovers_at_the_following_xml_literal() {
+        let source = "<root><!-- bad -- text --></root>\n<ok/>";
+        let (items, diagnostics) = scan(source);
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message(),
+            "invalid `--` sequence in XML comment"
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == RawTokenKind::XmlStart)
+                .map(|token| token.span.start())
+                .collect::<Vec<_>>(),
+            vec![
+                0,
+                source.find("<ok/>").expect("following XML literal") as u32
+            ]
+        );
+    }
+
+    #[test]
     fn diagnoses_an_unterminated_xml_expression_at_eof() {
         let source = "<root>{flag";
         let (_, diagnostics) = scan(source);

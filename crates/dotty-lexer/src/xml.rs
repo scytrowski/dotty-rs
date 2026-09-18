@@ -113,6 +113,11 @@ impl XmlState {
                     self.content = XmlContent::Text;
                     self.cdata_brackets = 0;
                 }
+                RawTokenKind::Operator if spelling.ends_with("</") => {
+                    self.report_error("unterminated XML CDATA section");
+                    self.content = XmlContent::Text;
+                    self.cdata_brackets = 0;
+                }
                 _ => {
                     self.cdata_brackets = 0;
                     return false;
@@ -639,5 +644,29 @@ mod tests {
 
         assert!(state.update_token(RawTokenKind::Operator, ">"));
         assert!(state.eof_message().is_none());
+    }
+
+    #[test]
+    fn recovers_from_cdata_without_a_valid_terminator_before_the_closing_tag() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Identifier, "root");
+        state.update_token(RawTokenKind::Operator, "><!");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBracket), "[");
+        state.update_token(RawTokenKind::Identifier, "CDATA");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBracket), "[");
+        state.update_token(RawTokenKind::Identifier, "text");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+        state.update_token(RawTokenKind::Identifier, "x");
+        state.update_token(RawTokenKind::Operator, "></");
+        state.update_token(RawTokenKind::Identifier, "root");
+        state.update_token(RawTokenKind::Operator, ">");
+
+        assert_eq!(
+            state.take_error().as_deref(),
+            Some("unterminated XML CDATA section")
+        );
+        assert!(state.can_start_literal());
     }
 }

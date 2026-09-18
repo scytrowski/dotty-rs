@@ -3081,6 +3081,30 @@ mod tests {
     }
 
     #[test]
+    fn forwards_malformed_cdata_diagnostic_and_reaches_the_following_xml_literal() {
+        let source = "<root><![CDATA[text]]x></root>\n<ok/>";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let following_xml = source.find("<ok/>").expect("following XML literal") as u32;
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(
+            scanner.diagnostics()[0].message(),
+            "unterminated XML CDATA section"
+        );
+        assert!(
+            scanner
+                .tokens()
+                .iter()
+                .any(|token| token.kind == TokenKind::XmlStart
+                    && token.span.start() == following_xml)
+        );
+        assert_eq!(
+            scanner.tokens().last().map(|token| token.kind),
+            Some(TokenKind::Eof)
+        );
+    }
+
+    #[test]
     fn forwards_an_invalid_xml_closing_tag_diagnostic() {
         let source = "<root></root id>";
         let scanner = ContextualScanner::new(source).expect("source scans");
