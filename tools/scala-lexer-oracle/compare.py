@@ -106,7 +106,16 @@ def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) ->
 
 
 def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
+    return [
+        (start, end)
+        for start, end, _ in find_interpolation_ranges_with_quotes(source)
+    ]
+
+
+def find_interpolation_ranges_with_quotes(
+    source: str,
+) -> list[tuple[int, int, str]]:
+    ranges: list[tuple[int, int, str]] = []
     pattern = re.compile(r'(?<![\w$])(?:[A-Za-z_][A-Za-z0-9_]*)("""|")')
     for match in pattern.finditer(source):
         if is_inside_string_literal(source, match.start()):
@@ -117,13 +126,13 @@ def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
         if closing is None:
             continue
         content = source[content_start:closing]
-        if "\n" in content or "\r" in content:
+        if quote == '"' and ("\n" in content or "\r" in content):
             continue
         if has_invalid_simple_splice(content):
             continue
         start = len(source[:content_start - len(quote)].encode("utf-8"))
         end = len(source[: closing + len(quote)].encode("utf-8"))
-        ranges.append((start, end))
+        ranges.append((start, end, quote))
     return ranges
 
 
@@ -184,7 +193,11 @@ def is_inside_string_literal(source: str, offset: int) -> bool:
             continue
 
         if source.startswith(in_string, index):
-            index += len(in_string)
+            if in_string == '"""':
+                while index < offset and source[index] == '"':
+                    index += 1
+            else:
+                index += len(in_string)
             in_string = None
         elif source[index] == "\\" and in_string == '"':
             index += 2

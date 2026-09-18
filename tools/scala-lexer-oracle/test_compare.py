@@ -33,8 +33,31 @@ class NormalizationTests(unittest.TestCase):
 
     def test_maps_parser_colon_protocol_to_an_operator_for_raw_comparison(self):
         self.assertEqual(
-            compare.normalize_rust(["kind\tstart\tend", "':'\t8\t9"]),
+            compare.normalize_rust(
+                ["kind\tstart\tend", "':'\t8\t9"]
+            ),
             [("operator", 8)],
+        )
+
+    def test_maps_multiline_oracle_string_literals_to_string_parts(self):
+        source = 's"""text $value"""'
+
+        self.assertEqual(
+            compare.normalize_oracle(
+                [
+                    "string interpolator\t0\t1\t0\ts\t\t",
+                    "string literal\t1\t10\t0\t\t\t",
+                    "identifier\t10\t16\t0\tvalue\t\t",
+                    "string literal\t16\t19\t0\t\t\t",
+                ],
+                source,
+            ),
+            [
+                ("string interpolator", 0),
+                ("string part", 1),
+                ("identifier", 10),
+                ("string part", 16),
+            ],
         )
 
     def test_marks_an_interpolated_string_body_as_string_part(self):
