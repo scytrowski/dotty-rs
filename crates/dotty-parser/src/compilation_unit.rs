@@ -737,6 +737,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_application_with_multiple_arguments_in_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(1, 2)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::IntegerLiteral, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::IntegerLiteral, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        assert_eq!(application.args.len(), 2);
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(application.args[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn unsupported_expression_input_produces_an_error_tree_and_diagnostic() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
