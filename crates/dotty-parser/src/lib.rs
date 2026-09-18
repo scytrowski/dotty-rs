@@ -7,3 +7,7 @@
 //! The handwritten recursive-descent parser is introduced incrementally.
 //! Until its public entry point is added, this crate only establishes the
 //! workspace and dependency boundary.
+
+mod cursor;
+
+pub use cursor::Cursor;
