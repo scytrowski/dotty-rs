@@ -1447,6 +1447,61 @@ mod tests {
     }
 
     #[test]
+    fn colon_eol_feedback_reclassifies_colon_after_an_operator() {
+        let mut scanner = ContextualScanner::new("value + : next").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::ColonOp);
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        assert_eq!(scanner.current().kind, TokenKind::ColonEol);
+    }
+
+    #[test]
+    fn repeated_indented_feedback_does_not_duplicate_an_indent_token() {
+        let mut scanner = ContextualScanner::new("object Foo:\n  val x = 1").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        scanner.observe(ScannerEvent::Indented);
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .filter(|token| token.kind == TokenKind::Indent)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn repeated_outdented_feedback_does_not_duplicate_an_outdent_token() {
+        let mut scanner =
+            ContextualScanner::new("object Foo:\n  val x = 1\nnext").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::Indented);
+        for _ in 0..7 {
+            scanner.advance();
+        }
+
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
+        scanner.observe(ScannerEvent::Outdented);
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .filter(|token| token.kind == TokenKind::Outdent)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn arrow_indented_feedback_opens_a_body_region() {
         let mut scanner = ContextualScanner::new("case 1 =>\n  body").expect("source scans");
         scanner.advance();

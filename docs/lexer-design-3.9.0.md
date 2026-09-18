@@ -70,7 +70,7 @@ Implementation status on the current lexer branch:
   even after blank lines;
 - parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
-  scanner event contract;
+  scanner event contract; repeated indentation events are idempotent;
 - leading-infix continuation is recognized for line-start symbolic and
   backquoted operators, while an operator after a blank line starts a new
   logical statement;
