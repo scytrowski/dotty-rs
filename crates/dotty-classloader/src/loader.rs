@@ -682,25 +682,40 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// fails the class load. `None` (the decoder could not name the type)
     /// or a name that fails to load (a class this best-effort reduction
     /// got wrong, or one genuinely missing from the classpath) both fall
-    /// back to `Type::Error` alike, rather than propagating a
-    /// [`ClassLoadError`] the way an unresolvable `.class` member type
-    /// does.
+    /// back to `Type::Error` rather than propagating a [`ClassLoadError`]
+    /// the way an unresolvable `.class` member type does — but, unlike a
+    /// single shared generic message, each `ErrorType::message` names
+    /// exactly which of the two happened and, for the second, carries the
+    /// real underlying [`ClassLoadError`] (an ordinary
+    /// [`ClassLoadError::NotFound`] on a genuinely missing dependency
+    /// reads the same as any other class's, but an I/O error, a malformed
+    /// class file, or a circular/dependency failure on a name this
+    /// best-effort reduction actually got *right* is no longer
+    /// indistinguishable from "the reduction guessed a name that doesn't
+    /// exist" — both used to collapse into the exact same opaque string).
     fn lower_tasty_member_type(
         &mut self,
         owner: &BinaryName,
         declared_type: Option<&BinaryName>,
     ) -> TypeId {
-        if let Some(dependency) = declared_type
-            && let Ok(symbol) = self.resolve_member_class(owner, dependency)
-        {
-            return self.type_ref(symbol);
-        }
+        let Some(dependency) = declared_type else {
+            let message = self.store.names.intern(
+                "unresolved .tasty member type: tasty_symbol::decode could not reduce the \
+                 declared type tree to a name",
+            );
+            return self.store.types.alloc(Type::Error(ErrorType { message }));
+        };
 
-        let message = self
-            .store
-            .names
-            .intern("unresolved .tasty member type (see ClassLoader::lower_tasty_member_type)");
-        self.store.types.alloc(Type::Error(ErrorType { message }))
+        match self.resolve_member_class(owner, dependency) {
+            Ok(symbol) => self.type_ref(symbol),
+            Err(error) => {
+                let text = format!(
+                    "unresolved .tasty member type: best-effort name {dependency} failed to load: {error}"
+                );
+                let message = self.store.names.intern(&text);
+                self.store.types.alloc(Type::Error(ErrorType { message }))
+            }
+        }
     }
 
     /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into a `Type::Method`'s
@@ -3682,15 +3697,27 @@ mod tests {
         );
 
         // `x`'s declared type is `Int`, encoded post-typecheck as a
-        // `TYPEREF_TAG` node -- a shape `tasty_symbol::resolve_parent_name`
-        // does not resolve (it targets the pre-typecheck `IdentTpt`/
-        // `SelectTpt` shapes a supertype's `extends` clause uses), so
-        // this falls back to `Type::Error`, honestly, rather than a wrong
-        // guess -- see `ClassLoader::lower_tasty_member_type`'s doc
-        // comment. Closing this gap is a documented follow-up, not
-        // silently claimed here.
+        // `TYPEREF_TAG` node. `RawTree::name_refs` only picks up that
+        // node's qualifier prefix ("scala", a plain UTF8 name-table
+        // entry), never its own leaf name ("Int", which lives behind a
+        // signature-shaped name-table entry `wire_name` doesn't render)
+        // -- so `resolve_parent_name` reduces it to the bare, wrong name
+        // "scala", not `None`. `lower_tasty_member_type` still tries to
+        // load that guess, it just doesn't exist as a class on this
+        // classpath (or anywhere), so this falls back to `Type::Error`
+        // either way -- but the message below names exactly what was
+        // guessed and why loading it failed, instead of the same opaque
+        // string a genuinely un-nameable type tree would also produce
+        // (see `ClassLoader::lower_tasty_member_type`'s doc comment).
+        // Closing the underlying best-effort-reduction gap is a
+        // documented follow-up, not silently claimed here.
         let x_type = member_type_id(&mut store, point, "x");
-        assert!(matches!(store.types.get(x_type), Type::Error(_)));
+        let Type::Error(error) = store.types.get(x_type) else {
+            panic!("expected x's type to be Type::Error");
+        };
+        let message = store.names.resolve(error.message);
+        assert!(message.contains("best-effort name scala failed to load"));
+        assert!(message.contains("class not found: scala"));
 
         let init_type = member_type_id(&mut store, point, "<init>");
         let Type::Method(init_method) = store.types.get(init_type) else {
@@ -3701,6 +3728,29 @@ mod tests {
             symbol_name(&store, parent_symbol(&store, init_method.result)),
             "Unit"
         );
+    }
+
+    /// `lower_tasty_member_type`'s two fallback paths to `Type::Error`
+    /// used to converge on the exact same generic message regardless of
+    /// which one was actually hit; `enters_a_real_tasty_case_classs_...`
+    /// above covers "a name was guessed but failed to load" end to end
+    /// through a real fixture, so this covers the other path directly:
+    /// `declared_type` genuinely `None` (`tasty_symbol::decode` itself
+    /// could not reduce the type tree to any name at all).
+    #[test]
+    fn unresolved_tasty_member_type_names_the_reason_when_no_name_was_reduced_at_all() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+
+        let owner = BinaryName::from_internal("Owner");
+        let error_type = loader.lower_tasty_member_type(&owner, None);
+        drop(loader);
+
+        let Type::Error(error) = store.types.get(error_type) else {
+            panic!("expected a Type::Error");
+        };
+        let message = store.names.resolve(error.message);
+        assert!(message.contains("could not reduce the declared type tree to a name"));
     }
 
     #[test]
