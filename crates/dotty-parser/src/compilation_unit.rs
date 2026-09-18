@@ -213,7 +213,9 @@ where
 
     fn parse_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let kind = match self.current().kind {
-            TokenKind::IntegerLiteral | TokenKind::LongLiteral => NumberKind::Whole(10),
+            TokenKind::IntegerLiteral | TokenKind::LongLiteral => {
+                NumberKind::Whole(integer_radix(self.current_text().ok()))
+            }
             TokenKind::DecimalLiteral => NumberKind::Decimal,
             TokenKind::ExponentLiteral | TokenKind::FloatLiteral | TokenKind::DoubleLiteral => {
                 NumberKind::Floating
@@ -333,6 +335,14 @@ const fn is_statement_separator(kind: TokenKind) -> bool {
             | TokenKind::Punctuation(Punctuation::Semicolon)
             | TokenKind::Outdent
     )
+}
+
+fn integer_radix(text: Option<&str>) -> u32 {
+    match text {
+        Some(text) if text.starts_with("0x") || text.starts_with("0X") => 16,
+        Some(text) if text.starts_with("0b") || text.starts_with("0B") => 2,
+        _ => 10,
+    }
 }
 
 const fn is_unsupported_start(kind: TokenKind) -> bool {
@@ -459,6 +469,46 @@ mod tests {
         };
         assert_eq!(number.kind, NumberKind::Whole(10));
         assert_eq!(names.resolve(number.text), "42");
+    }
+
+    #[test]
+    fn preserves_hexadecimal_integer_radix() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xff",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
+            panic!("expected raw number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(16));
+    }
+
+    #[test]
+    fn preserves_binary_integer_radix() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0b1010",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
+            panic!("expected raw number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(2));
     }
 
     #[test]
