@@ -1748,6 +1748,122 @@ mod tests {
         ),
     );
 
+    #[test]
+    fn emits_a_plain_identifier_with_exact_span() {
+        let (items, diagnostics) = scan("alpha");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_a_backquoted_identifier_with_exact_span() {
+        let (items, diagnostics) = scan("`a-b`");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::BackquotedIdentifier, 0, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_an_ascii_operator_with_exact_span() {
+        let (items, diagnostics) = scan("++");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Operator, 0, 2),
+                token(RawTokenKind::Eof, 2, 2),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_a_unicode_operator_with_exact_span() {
+        let (items, diagnostics) = scan("©");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Operator, 0, 2),
+                token(RawTokenKind::Eof, 2, 2),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_a_quote_marker_with_exact_span() {
+        let (items, diagnostics) = scan("'{");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Quote, 0, 1),
+                token(RawTokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(RawTokenKind::Eof, 2, 2),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_a_legacy_quote_id_with_exact_span() {
+        let (items, diagnostics) = scan("'name");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::QuoteId, 0, 5),
+                token(RawTokenKind::Eof, 5, 5),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_xml_start_with_exact_span() {
+        let (items, diagnostics) = scan("<tag/>");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::XmlStart, 0, 1),
+                token(RawTokenKind::Identifier, 1, 4),
+                token(RawTokenKind::Operator, 4, 6),
+                token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn emits_an_error_token_for_an_unsupported_character() {
+        let (items, diagnostics) = scan("\0");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 1),
+                token(RawTokenKind::Eof, 1, 1),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 1).unwrap());
+    }
+
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
         RawItem::Trivia(Trivia {
             kind,
