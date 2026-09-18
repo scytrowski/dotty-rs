@@ -17,6 +17,14 @@ const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x0403_4B50;
 const COMPRESSION_METHOD_STORED: u16 = 0;
 /// ZIP `compression method` 8 (APPNOTE.TXT §4.4.5): DEFLATE (RFC 1951).
 const COMPRESSION_METHOD_DEFLATE: u16 = 8;
+/// The largest a single entry may declare, or actually decompress to. A
+/// `.class`/`.tasty` entry this crate actually needs to read is at most a
+/// few megabytes; this is a generous but firm ceiling against a crafted
+/// archive's own central-directory `uncompressed_size` field, or a
+/// DEFLATE stream's length/distance back-reference amplification,
+/// claiming or producing far more than that (a "ZIP bomb" — APPNOTE.TXT
+/// places no bound on either at all).
+const MAX_ENTRY_UNCOMPRESSED_SIZE: usize = 256 * 1024 * 1024;
 
 /// Errors reading a ZIP (JAR) archive. Crate-private: callers only see
 /// `JarClassPath`, which maps these into [`crate::class_path::ClassPathError`].
@@ -52,6 +60,23 @@ pub(crate) enum ZipError {
         expected: u32,
         actual: u32,
     },
+    /// The central directory's declared `uncompressed_size` for this
+    /// entry exceeds [`MAX_ENTRY_UNCOMPRESSED_SIZE`] — rejected before
+    /// any decompression was attempted, so a crafted archive can't even
+    /// get as far as allocating a large buffer, let alone decompressing
+    /// into one.
+    EntryTooLarge {
+        declared: u32,
+        limit: usize,
+    },
+    /// An entry's actual extracted/decompressed length did not match the
+    /// `uncompressed_size` declared for it in the central directory —
+    /// either corrupt data, or a stream deliberately crafted to produce
+    /// more or less than what it claims.
+    UncompressedSizeMismatch {
+        declared: u32,
+        actual: usize,
+    },
     Read(ZipReadError),
 }
 
@@ -83,6 +108,14 @@ impl fmt::Display for ZipError {
                 formatter,
                 "CRC-32 mismatch: expected {expected:#010x}, computed {actual:#010x}"
             ),
+            Self::EntryTooLarge { declared, limit } => write!(
+                formatter,
+                "entry's declared uncompressed size ({declared} bytes) exceeds the {limit}-byte limit"
+            ),
+            Self::UncompressedSizeMismatch { declared, actual } => write!(
+                formatter,
+                "entry's actual size ({actual} bytes) does not match its declared uncompressed size ({declared} bytes)"
+            ),
             Self::Read(error) => error.fmt(formatter),
         }
     }
@@ -96,7 +129,9 @@ impl std::error::Error for ZipError {
             | Self::InvalidEntryName { .. }
             | Self::InvalidLocalFileHeader { .. }
             | Self::UnsupportedCompressionMethod(_)
-            | Self::CrcMismatch { .. } => None,
+            | Self::CrcMismatch { .. }
+            | Self::EntryTooLarge { .. }
+            | Self::UncompressedSizeMismatch { .. } => None,
             Self::Inflate(error) => Some(error),
             Self::Read(error) => Some(error),
         }
@@ -305,6 +340,14 @@ impl ZipArchive {
     /// "data descriptor follows" bit is set, so the central directory is
     /// the only field that's always authoritative.
     fn extract_entry(&self, entry: &CentralDirectoryEntry) -> Result<Vec<u8>, ZipError> {
+        let declared_uncompressed_size = entry.uncompressed_size as usize;
+        if declared_uncompressed_size > MAX_ENTRY_UNCOMPRESSED_SIZE {
+            return Err(ZipError::EntryTooLarge {
+                declared: entry.uncompressed_size,
+                limit: MAX_ENTRY_UNCOMPRESSED_SIZE,
+            });
+        }
+
         let header_offset = entry.local_header_offset as usize;
         let mut reader = ZipReader::with_range(&self.bytes, header_offset, self.bytes.len())?;
 
@@ -330,11 +373,20 @@ impl ZipArchive {
 
         let compressed = reader.read_bytes(entry.compressed_size as usize)?;
 
-        match entry.compression_method {
-            COMPRESSION_METHOD_STORED => Ok(compressed.to_vec()),
-            COMPRESSION_METHOD_DEFLATE => Ok(inflate(compressed)?),
-            other => Err(ZipError::UnsupportedCompressionMethod(other)),
+        let decompressed = match entry.compression_method {
+            COMPRESSION_METHOD_STORED => compressed.to_vec(),
+            COMPRESSION_METHOD_DEFLATE => inflate(compressed, declared_uncompressed_size)?,
+            other => return Err(ZipError::UnsupportedCompressionMethod(other)),
+        };
+
+        if decompressed.len() != declared_uncompressed_size {
+            return Err(ZipError::UncompressedSizeMismatch {
+                declared: entry.uncompressed_size,
+                actual: decompressed.len(),
+            });
         }
+
+        Ok(decompressed)
     }
 }
 
@@ -436,6 +488,109 @@ mod tests {
         bytes.extend_from_slice(&local_header_offset.to_le_bytes());
         bytes.extend_from_slice(name.as_bytes());
         bytes
+    }
+
+    /// Builds a complete, minimal single-entry ZIP archive: a local file
+    /// header (mirroring the fields `extract_entry` reads) immediately
+    /// followed by `compressed_data`, then a matching central directory
+    /// entry and end-of-central-directory record.
+    ///
+    /// `declared_uncompressed_size` is passed straight through to the
+    /// central directory, independent of `compressed_data`'s own length
+    /// or what it actually decompresses to — letting a test build an
+    /// entry whose declared size doesn't match reality, the same way a
+    /// crafted or corrupted archive could.
+    fn minimal_zip_with_entry(
+        name: &str,
+        compression_method: u16,
+        crc32: u32,
+        compressed_data: &[u8],
+        declared_uncompressed_size: u32,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        bytes.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local file header signature
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // version needed to extract
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // general purpose bit flag
+        bytes.extend_from_slice(&compression_method.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file time
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file date
+        bytes.extend_from_slice(&crc32.to_le_bytes());
+        bytes.extend_from_slice(&(compressed_data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&declared_uncompressed_size.to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(compressed_data);
+
+        let central_directory_offset = bytes.len() as u32;
+        bytes.extend(minimal_central_directory_header(
+            name,
+            compression_method,
+            crc32,
+            compressed_data.len() as u32,
+            declared_uncompressed_size,
+            0,
+        ));
+        let central_directory_size = bytes.len() as u32 - central_directory_offset;
+
+        bytes.extend(minimal_eocd(
+            1,
+            central_directory_size,
+            central_directory_offset,
+            &[],
+        ));
+        bytes
+    }
+
+    #[test]
+    fn rejects_a_declared_uncompressed_size_above_the_limit() {
+        let compressed_data = b"tiny".as_slice();
+        let crc = crate::crc32::checksum(compressed_data);
+        let declared = MAX_ENTRY_UNCOMPRESSED_SIZE as u32 + 1;
+        let archive_bytes = minimal_zip_with_entry(
+            "Bomb.class",
+            COMPRESSION_METHOD_STORED,
+            crc,
+            compressed_data,
+            declared,
+        );
+
+        let archive = ZipArchive::open(archive_bytes).unwrap();
+
+        assert_eq!(
+            archive.read_entry("Bomb.class"),
+            Err(ZipError::EntryTooLarge {
+                declared,
+                limit: MAX_ENTRY_UNCOMPRESSED_SIZE,
+            })
+        );
+    }
+
+    /// A synthetic "declared size lies" regression: a crafted (or
+    /// corrupted) archive can declare a small `uncompressed_size` for an
+    /// entry that actually holds more data than that — the mismatch must
+    /// be rejected, not silently truncated or passed through, regardless
+    /// of compression method.
+    #[test]
+    fn rejects_an_entry_whose_actual_size_does_not_match_its_declared_size() {
+        // STORED, so the "compressed" bytes are also the real
+        // decompressed output — no DEFLATE encoding needed to prove the
+        // declared-size check fires.
+        let data = b"ABABAB".as_slice();
+        let crc = crate::crc32::checksum(data);
+        let archive_bytes =
+            minimal_zip_with_entry("Lying.class", COMPRESSION_METHOD_STORED, crc, data, 1);
+
+        let archive = ZipArchive::open(archive_bytes).unwrap();
+
+        assert_eq!(
+            archive.read_entry("Lying.class"),
+            Err(ZipError::UncompressedSizeMismatch {
+                declared: 1,
+                actual: 6,
+            })
+        );
     }
 
     #[test]

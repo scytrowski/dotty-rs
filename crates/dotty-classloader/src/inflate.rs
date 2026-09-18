@@ -23,6 +23,13 @@ pub(crate) enum InflateError {
     /// A length/distance back-reference pointed at or before the start
     /// of the output produced so far.
     InvalidBackReference,
+    /// Decompressed output exceeded the caller-supplied limit before the
+    /// stream finished — DEFLATE's length/distance back-references can
+    /// amplify a small compressed input into an enormous output (a "ZIP
+    /// bomb"), so [`inflate`] enforces this limit incrementally, aborting
+    /// as soon as it's crossed rather than after allocating the full
+    /// output.
+    OutputTooLarge { limit: usize },
 }
 
 impl fmt::Display for InflateError {
@@ -41,6 +48,10 @@ impl fmt::Display for InflateError {
             Self::InvalidBackReference => write!(
                 formatter,
                 "back-reference distance points before the start of the output"
+            ),
+            Self::OutputTooLarge { limit } => write!(
+                formatter,
+                "decompressed output exceeded the {limit}-byte limit"
             ),
         }
     }
@@ -295,6 +306,7 @@ fn decode_dynamic_tables(
 fn decode_stored_block(
     reader: &mut BitReader<'_>,
     output: &mut Vec<u8>,
+    max_output_len: usize,
 ) -> Result<(), InflateError> {
     reader.align_to_byte();
 
@@ -305,6 +317,11 @@ fn decode_stored_block(
     }
 
     output.extend_from_slice(reader.read_aligned_bytes(usize::from(length))?);
+    if output.len() > max_output_len {
+        return Err(InflateError::OutputTooLarge {
+            limit: max_output_len,
+        });
+    }
     Ok(())
 }
 
@@ -317,6 +334,7 @@ fn decode_huffman_block(
     literal_length_table: &HuffmanTable,
     distance_table: &HuffmanTable,
     output: &mut Vec<u8>,
+    max_output_len: usize,
 ) -> Result<(), InflateError> {
     loop {
         match literal_length_table.decode(reader)? {
@@ -349,12 +367,33 @@ fn decode_huffman_block(
             }
             _ => return Err(InflateError::InvalidHuffmanCode), // 286/287: unused
         }
+
+        // Checked once per decoded token (a single literal, or a single
+        // length/distance back-reference of at most 258 bytes per RFC
+        // 1951 §3.2.5) rather than per byte pushed: a DEFLATE stream's
+        // whole point is that a handful of tokens can encode a very
+        // large output, so this is the earliest point at which growth is
+        // cheap to observe without adding a check inside the innermost
+        // copy loop.
+        if output.len() > max_output_len {
+            return Err(InflateError::OutputTooLarge {
+                limit: max_output_len,
+            });
+        }
     }
 }
 
 /// Decompresses a raw DEFLATE (RFC 1951) stream — the format ZIP's
 /// compression method 8 uses, with no zlib or gzip framing around it.
-pub(crate) fn inflate(compressed: &[u8]) -> Result<Vec<u8>, InflateError> {
+///
+/// `max_output_len` bounds decompressed output incrementally, checked as
+/// it's produced rather than only once the whole stream has been
+/// decoded — DEFLATE's length/distance back-references let a small
+/// compressed input expand into an enormous output (a "ZIP bomb"), so
+/// waiting until the end to check would already have paid the memory/CPU
+/// cost this bound exists to avoid. See [`crate::zip_archive::ZipArchive::
+/// extract_entry`] for how the caller picks this value.
+pub(crate) fn inflate(compressed: &[u8], max_output_len: usize) -> Result<Vec<u8>, InflateError> {
     let mut reader = BitReader::new(compressed);
     let mut output = Vec::new();
 
@@ -367,12 +406,13 @@ pub(crate) fn inflate(compressed: &[u8]) -> Result<Vec<u8>, InflateError> {
         let block_type = reader.read_bits(2)?;
 
         match block_type {
-            0 => decode_stored_block(&mut reader, &mut output)?,
+            0 => decode_stored_block(&mut reader, &mut output, max_output_len)?,
             1 => decode_huffman_block(
                 &mut reader,
                 &fixed_literal_length_table,
                 &fixed_distance_table,
                 &mut output,
+                max_output_len,
             )?,
             2 => {
                 let (literal_length_table, distance_table) = decode_dynamic_tables(&mut reader)?;
@@ -381,6 +421,7 @@ pub(crate) fn inflate(compressed: &[u8]) -> Result<Vec<u8>, InflateError> {
                     &literal_length_table,
                     &distance_table,
                     &mut output,
+                    max_output_len,
                 )?;
             }
             _ => return Err(InflateError::InvalidBlockType),
@@ -529,7 +570,34 @@ mod tests {
         // "AB" + a length-4/distance-2 back-reference, copied byte by
         // byte (the copy source overlaps the destination, since
         // distance < length): A,B,A,B,A,B -> "ABABAB".
-        assert_eq!(inflate(&bytes).unwrap(), b"ABABAB");
+        assert_eq!(inflate(&bytes, usize::MAX).unwrap(), b"ABABAB");
+    }
+
+    /// A synthetic decompression-bomb regression: the same tiny fixed-
+    /// Huffman stream as
+    /// `inflate_decodes_a_fixed_huffman_block_with_a_back_reference`
+    /// (whose whole point is that its back-reference token expands to
+    /// more output bytes than its own encoding takes on the wire) must
+    /// be rejected, not silently truncated or fully decoded, once its
+    /// real output (6 bytes) would cross a caller-supplied limit.
+    #[test]
+    fn inflate_rejects_output_that_would_exceed_the_caller_supplied_limit() {
+        let mut writer = BitWriter::new();
+        writer.write_bits(1, 1); // BFINAL = 1
+        writer.write_bits(0b01, 2); // BTYPE = 01 (fixed Huffman)
+        writer.write_huffman_code(0x30 + u16::from(b'A'), 8); // literal 'A'
+        writer.write_huffman_code(0x30 + u16::from(b'B'), 8); // literal 'B'
+        writer.write_huffman_code(2, 7); // length code 258 -> length 4
+        writer.write_huffman_code(1, 5); // distance code 1 -> distance 2
+        writer.write_huffman_code(0, 7); // end-of-block (symbol 256)
+        let bytes = writer.finish();
+
+        // The stream's real output is 6 bytes ("ABABAB"); a limit of 3
+        // is crossed by the back-reference token alone.
+        assert_eq!(
+            inflate(&bytes, 3),
+            Err(InflateError::OutputTooLarge { limit: 3 })
+        );
     }
 
     fn extract_raw_deflate_bytes(jar_bytes: &[u8], entry_name: &str) -> Vec<u8> {
@@ -586,7 +654,7 @@ mod tests {
         .expect("pool_sample_deflate.jar fixture should exist");
         let compressed = extract_raw_deflate_bytes(&jar_bytes, "PoolSample.class");
 
-        let decompressed = inflate(&compressed).unwrap();
+        let decompressed = inflate(&compressed, usize::MAX).unwrap();
 
         let expected = std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
