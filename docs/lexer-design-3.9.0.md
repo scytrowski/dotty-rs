@@ -558,11 +558,13 @@ leaves the suffix available as a following identifier, matching Scala's
 recovery boundary.
 
 The lexer also has deterministic short-input hardening tests that exercise
-2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 4,096 seeded mixed
-inputs through both raw and contextual scanning, checking progress, EOF
-reachability, and source-span coverage. Full randomized fuzzing remains a
-separate hardening task. Dedicated EOF-recovery matrices cover truncated
-interpolation, XML, comments, strings, backquoted identifiers, and escapes.
+2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 8,192 seeded mixed
+inputs containing whitespace, operators, delimiters, XML/comment markers,
+escape characters, combining marks, and supplementary Unicode through both
+raw and contextual scanning. These cases check progress, EOF reachability,
+and source-span coverage. Full randomized fuzzing remains a separate
+hardening task. Dedicated EOF-recovery matrices cover truncated interpolation,
+XML, comments, strings, backquoted identifiers, and escapes.
 
 ## 11. Testing strategy
 

@@ -1282,16 +1282,26 @@ mod tests {
 
     fn generated_source(seed: &mut u64) -> String {
         const ALPHABET: &[char] = &[
-            ' ', '\t', '\n', '\r', 'a', 'Z', '0', '_', '$', '\'', '"', '`', '\\', '/', '*', ':',
-            '=', '<', '>', '+', '-', '{', '}', '[', ']', '(', ')', '#', 'é', '𐐀', '\u{0301}',
+            ' ', '\t', '\n', '\r', '\u{000c}', 'a', 'Z', '0', '_', '$', '\'', '"', '`', '\\', '/',
+            '*', ':', '=', '<', '>', '+', '-', '!', '?', '|', '&', '^', '~', '@', '%', ';', ',',
+            '.', '{', '}', '[', ']', '(', ')', '#', 'é', '𐐀', '\u{0301}', '⇒', '©', '🂡',
         ];
-        let length = (next_generated_value(seed) % 96) as usize;
+        let length = (next_generated_value(seed) % 128) as usize;
         (0..length)
             .map(|_| {
                 let index = (next_generated_value(seed) as usize) % ALPHABET.len();
                 ALPHABET[index]
             })
             .collect()
+    }
+
+    fn for_seeded_mixed_source(mut assertion: impl FnMut(usize, &str)) {
+        let mut seed = 0xD077_7E57_u64;
+
+        for case in 0..8_192 {
+            let source = generated_source(&mut seed);
+            assertion(case, &source);
+        }
     }
 
     fn scan(source: &str) -> (Vec<RawItem>, Vec<Diagnostic>) {
@@ -3781,11 +3791,8 @@ mod tests {
     }
 
     #[test]
-    fn survives_deterministic_mixed_unicode_and_delimiter_inputs() {
-        let mut seed = 0xD077_7E57_u64;
-
-        for case in 0..4_096 {
-            let source = generated_source(&mut seed);
+    fn raw_lexer_covers_seeded_mixed_inputs_without_gaps() {
+        for_seeded_mixed_source(|case, source| {
             let mut lexer = RawLexer::new(&source).expect("generated UTF-8 source is valid");
             let mut offset = 0;
             let mut reached_eof = false;
@@ -3823,14 +3830,27 @@ mod tests {
                 source.len() as u32,
                 "raw spans did not cover generated case {case}, source {source:?}"
             );
+        });
+    }
 
-            let scanner = crate::ContextualScanner::new(&source)
+    #[test]
+    fn contextual_scanner_reaches_eof_for_seeded_mixed_inputs() {
+        for_seeded_mixed_source(|case, source| {
+            let scanner = crate::ContextualScanner::new(source)
                 .unwrap_or_else(|error| panic!("scanner rejected generated case {case}: {error}"));
             assert_eq!(
                 scanner.tokens().last().map(|token| token.kind),
                 Some(TokenKind::Eof),
                 "scanner did not reach EOF for generated case {case}, source {source:?}"
             );
+        });
+    }
+
+    #[test]
+    fn contextual_scanner_keeps_seeded_mixed_spans_within_source() {
+        for_seeded_mixed_source(|case, source| {
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected generated case {case}: {error}"));
             for token in scanner.tokens() {
                 assert!(
                     token.span.start() <= token.span.end()
@@ -3838,7 +3858,7 @@ mod tests {
                     "scanner span exceeds source for generated case {case}, source {source:?}"
                 );
             }
-        }
+        });
     }
 
     #[test]
