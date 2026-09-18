@@ -471,6 +471,7 @@ fn can_end_statement(kind: Option<TokenKind>) -> bool {
                         | HardKeyword::Null
                         | HardKeyword::True
                         | HardKeyword::False
+                        | HardKeyword::Type
                         | HardKeyword::End
                 )
                 | TokenKind::EndMarker
@@ -1395,6 +1396,22 @@ mod tests {
                 TokenKind::Newline,
                 TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Enum),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_a_type_keyword() {
+        assert_eq!(
+            kinds("value\nend type\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Type),
+                TokenKind::Newline,
+                TokenKind::Identifier,
                 TokenKind::Eof,
             ]
         );

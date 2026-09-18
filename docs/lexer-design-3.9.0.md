@@ -476,7 +476,8 @@ statement-end sets. Implement `NEWLINE`, `NEWLINES`, and semicolon inference
 before full indentation handling.
 
 Tests compare continuation, statement separation, blank lines, delimiters,
-comments, and leading infix candidates against the oracle.
+comments, declaration-ending keyword boundaries such as `type`, and leading
+infix candidates against the oracle.
 
 ### Increment 6 — Regions and indentation
 
