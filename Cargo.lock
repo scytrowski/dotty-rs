@@ -7,6 +7,7 @@ name = "dotty"
 version = "0.1.0"
 dependencies = [
  "dotty-classfile",
+ "dotty-classloader",
  "dotty-core",
  "dotty-tasty",
 ]
@@ -14,6 +15,15 @@ dependencies = [
 [[package]]
 name = "dotty-classfile"
 version = "0.1.0"
+
+[[package]]
+name = "dotty-classloader"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-core",
+ "dotty-tasty",
+]
 
 [[package]]
 name = "dotty-core"
@@ -110,9 +120,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.6"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -121,9 +131,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.26"
+version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "zmij"

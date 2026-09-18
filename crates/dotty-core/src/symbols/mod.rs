@@ -7,11 +7,13 @@ mod origin;
 mod scope;
 mod symbol;
 mod table;
+mod visibility;
 
 pub use completion::SymbolInfo;
 pub use flags::SymbolFlags;
 pub use kind::SymbolKind;
-pub use origin::SymbolOrigin;
+pub use origin::{OriginTable, SymbolOrigin};
 pub use scope::{Scope, ScopeArena};
 pub use symbol::{Symbol, SymbolLinks};
 pub use table::SymbolTable;
+pub use visibility::Visibility;
