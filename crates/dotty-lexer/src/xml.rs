@@ -52,6 +52,7 @@ pub(crate) struct XmlState {
     closing_tag_name: Option<String>,
     attribute_state: Option<XmlAttributeState>,
     attribute_name_separator: bool,
+    bang_declaration: bool,
 }
 
 impl XmlState {
@@ -91,6 +92,9 @@ impl XmlState {
             XmlContent::Text if self.attribute_state == Some(XmlAttributeState::ExpectValue) => {
                 Some("XML attribute value expected after `=`".to_owned())
             }
+            XmlContent::Text if self.bang_declaration => {
+                Some("unterminated XML declaration".to_owned())
+            }
             XmlContent::Text if self.tag_open || self.depth > 0 => {
                 Some("unterminated XML tag".to_owned())
             }
@@ -103,6 +107,16 @@ impl XmlState {
     }
 
     pub(crate) fn update_token(&mut self, kind: RawTokenKind, spelling: &str) -> bool {
+        if self.bang_declaration {
+            if kind == RawTokenKind::Punctuation(Punctuation::LeftBracket) {
+                self.bang_declaration = false;
+                self.content = XmlContent::Cdata;
+                self.cdata_brackets = 0;
+                return false;
+            }
+            self.bang_declaration = false;
+        }
+
         if self.content == XmlContent::Cdata {
             match kind {
                 RawTokenKind::Punctuation(Punctuation::RightBracket) => {
@@ -451,6 +465,20 @@ impl XmlState {
             return false;
         }
 
+        if self.tag_open
+            && !self.closing_tag
+            && spelling == "!"
+            && self.pending_tag_name == Some(PendingTagName::Opening)
+            && self.current_tag_name.is_none()
+        {
+            self.depth = self.depth.saturating_sub(1);
+            self.pending_tag_name = None;
+            self.tag_open = false;
+            self.attribute_state = None;
+            self.bang_declaration = true;
+            return false;
+        }
+
         if self.content == XmlContent::Comment {
             if spelling.contains("-->") {
                 self.content = XmlContent::Text;
@@ -668,5 +696,37 @@ mod tests {
             Some("unterminated XML CDATA section")
         );
         assert!(state.can_start_literal());
+    }
+
+    #[test]
+    fn keeps_a_doctype_declaration_out_of_element_depth_tracking() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Operator, "!");
+        state.update_token(RawTokenKind::Identifier, "DOCTYPE");
+        state.update_token(RawTokenKind::Identifier, "note");
+        state.update_token(RawTokenKind::Operator, "><");
+        state.update_token(RawTokenKind::Identifier, "note");
+        state.update_token(RawTokenKind::Operator, "/>");
+
+        assert!(state.can_start_literal());
+        assert!(state.eof_message().is_none());
+    }
+
+    #[test]
+    fn closes_a_standalone_cdata_declaration_at_its_terminator() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Operator, "!");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBracket), "[");
+        state.update_token(RawTokenKind::Identifier, "CDATA");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::LeftBracket), "[");
+        state.update_token(RawTokenKind::Identifier, "text");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+        state.update_token(RawTokenKind::Punctuation(Punctuation::RightBracket), "]");
+
+        assert!(!state.update_token(RawTokenKind::Operator, ">"));
+        assert!(state.can_start_literal());
+        assert!(state.eof_message().is_none());
     }
 }

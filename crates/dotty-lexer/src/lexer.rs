@@ -197,7 +197,7 @@ impl<'source> RawLexer<'source> {
             && self
                 .cursor
                 .peek_nth(1)
-                .is_some_and(crate::identifier::is_identifier_start)
+                .is_some_and(|next| crate::identifier::is_identifier_start(next) || next == '!')
         {
             let _ = self.cursor.bump();
             let span = self.span(start)?;
@@ -694,15 +694,6 @@ impl<'source> RawLexer<'source> {
     fn scan_operator(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
         while let Some(character) = self.cursor.peek() {
             if character == '/' && matches!(self.cursor.peek_nth(1), Some('/') | Some('*')) {
-                break;
-            }
-            if character == '<'
-                && self
-                    .cursor
-                    .peek_nth(1)
-                    .is_some_and(crate::identifier::is_identifier_start)
-                && self.source.slice(self.span(start)?)?.ends_with("<!--")
-            {
                 break;
             }
             if !is_operator_character(character) {
@@ -2899,6 +2890,57 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_xml_start_before_a_bang_declaration() {
+        let (items, diagnostics) = scan("<!DOCTYPE note><note />");
+        let tokens: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tokens.iter().map(|token| token.kind).collect::<Vec<_>>(),
+            vec![
+                RawTokenKind::XmlStart,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Identifier,
+                RawTokenKind::Operator,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn closes_a_standalone_cdata_declaration_before_the_next_literal() {
+        let source = "<![CDATA[text]]>\n<ok/>";
+        let (items, diagnostics) = scan(source);
+        let xml_starts: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) if token.kind == RawTokenKind::XmlStart => {
+                    Some(token.span.start())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            xml_starts,
+            vec![
+                0,
+                source.find("<ok/>").expect("following XML literal") as u32
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn accepts_matching_nested_xml_tag_names() {
         let (_, diagnostics) = scan("<root><child/></root>");
 
@@ -2949,7 +2991,7 @@ mod tests {
 
     #[test]
     fn recognizes_a_nested_xml_start_inside_a_comment_for_lexical_compatibility() {
-        let source = "<root><!--<nested/> --></root>";
+        let source = "<root><!-- <nested/> --></root>";
         let (items, diagnostics) = scan(source);
         let tokens: Vec<_> = items
             .into_iter()

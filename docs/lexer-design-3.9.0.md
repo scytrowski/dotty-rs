@@ -534,7 +534,8 @@ closures remain to be refined.
 The current implementation covers term/type quote markers, legacy quoted
 identifiers, and their interaction with character literals, including
 trailing-apostrophe recovery at line boundaries. It also recognizes
-the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, tracks
+the Scala `XMLSTART` entry point for XML names and declaration markers,
+preserves XML's greedy tag operators, tracks
 opening and closing tag names, validates quoted and expression-valued
 attributes, isolates expression contents from attribute-list validation, and
 tracks XML expression braces and nested XML literals to end layout-sensitive
@@ -544,10 +545,13 @@ comment and CDATA sections and diagnoses those constructs, mismatched closing
 names, invalid attribute structure, unexpected tokens in an open attribute
 list, attributes on closing tags, and unfinished tags when they reach EOF.
 EOF recovery distinguishes a missing attribute `=`, a missing attribute value,
-and an unclosed attribute expression. Remaining work is compatibility syntax
-and broader malformed-input recovery without entangling XML state with normal
-Scala tokenization. The currently supported soft compatibility words are
-covered by a dedicated oracle fixture.
+and an unclosed attribute expression. XML declaration markers such as
+`<!DOCTYPE ...>` and standalone CDATA are kept out of element-depth tracking.
+Malformed body text, invalid comment separators, malformed CDATA terminators,
+and adjacent XML literals recover without preventing following source tokens
+from being scanned. XML tokenization is covered by dedicated compatibility
+and malformed-recovery fixtures against the pinned Scala 3.9.0 oracle. XML
+parsing semantics and AST construction remain outside the lexer scope.
 
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid
