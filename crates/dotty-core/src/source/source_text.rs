@@ -20,6 +20,7 @@ pub enum SourceTextError {
     RangeOutOfBounds { range: TextRange, byte_len: u32 },
     NotUtf8Boundary { offset: u32 },
     OffsetOutOfBounds { offset: u32, byte_len: u32 },
+    LineLayoutMismatch { byte_len: u32 },
 }
 
 impl fmt::Display for SourceTextError {
@@ -44,6 +45,12 @@ impl fmt::Display for SourceTextError {
                 write!(
                     formatter,
                     "byte offset {offset} exceeds source length {byte_len}"
+                )
+            }
+            Self::LineLayoutMismatch { byte_len } => {
+                write!(
+                    formatter,
+                    "source line layout does not match the line index for {byte_len} bytes"
                 )
             }
         }

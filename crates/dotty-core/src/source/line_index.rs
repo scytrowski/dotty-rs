@@ -93,6 +93,12 @@ impl LineIndex {
                 byte_len: self.byte_len,
             });
         }
+        let source_index = Self::new(source)?;
+        if source_index.line_starts != self.line_starts {
+            return Err(SourceTextError::LineLayoutMismatch {
+                byte_len: self.byte_len,
+            });
+        }
         if offset > self.byte_len {
             return Err(SourceTextError::OffsetOutOfBounds {
                 offset,
@@ -205,22 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_utf8_column_when_the_indexed_line_start_is_not_a_boundary() {
+    fn rejects_a_utf8_column_for_a_different_line_layout() {
         let index = LineIndex::new("a\nb").expect("valid source");
 
         assert_eq!(
             index.utf8_column("a\u{0301}", 3),
-            Err(SourceTextError::NotUtf8Boundary { offset: 2 })
+            Err(SourceTextError::LineLayoutMismatch { byte_len: 3 })
         );
     }
 
     #[test]
-    fn rejects_a_utf16_column_when_the_indexed_line_start_is_not_a_boundary() {
+    fn rejects_a_utf16_column_for_a_different_line_layout() {
         let index = LineIndex::new("a\nb").expect("valid source");
 
         assert_eq!(
             index.utf16_column("a\u{0301}", 3),
-            Err(SourceTextError::NotUtf8Boundary { offset: 2 })
+            Err(SourceTextError::LineLayoutMismatch { byte_len: 3 })
         );
     }
 

@@ -247,6 +247,11 @@ allocate a `String` for every lexeme.
 - byte offset to UTF-8 column;
 - byte offset to UTF-16 column for oracle comparison and tooling.
 
+Column queries validate that the supplied source has the same byte length and
+logical line-start layout as the text used to build the index. Reusing an
+index with a different line layout returns a typed error instead of silently
+reporting columns from stale offsets.
+
 The original bytes remain unchanged. Scala 3.9.0 recognizes LF, FF, CR, and SU
 as physical line-break characters; CRLF counts as one logical line break.
 These characters are indexed without rewriting source ranges.
