@@ -1,27 +1,83 @@
 use crate::binary_name::BinaryName;
 use dotty_classfile::access_flags::{
-    ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PUBLIC, ClassAccessFlags,
+    ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+    ACC_SYNTHETIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
 use dotty_tasty::tasty::{
-    ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, AppliedTypeNode, AstError, DefinitionBody,
-    DefinitionTail, FINAL_TAG, PRIVATE_TAG, PROTECTED_TAG, RawName, RawTree, StructuredNode,
-    TEMPLATE_TAG, TRAIT_TAG, TYPEDEF_TAG, TastyFile, TastyFileError,
+    ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, AstError,
+    CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
+    FINAL_TAG, MUTABLE_TAG, PRIVATE_TAG, PROTECTED_TAG, ParameterNode, RawName, RawTree,
+    STATIC_TAG, SYNTHETIC_TAG, StructuredNode, TEMPLATE_TAG, TRAIT_TAG, TYPEDEF_TAG, TastyFile,
+    TastyFileError, VALDEF_TAG,
 };
 use std::fmt;
 
 /// The class-level facts reconstructable from a `.tasty` file without full
 /// type-checking: enough to enter a `dotty-core` `Symbol` and recurse into
 /// its supertypes, mirroring what `.class` decoding gives
-/// (`docs/classloader.md` §9). `fields`/`methods`/`signature`/`nest_host`/
-/// etc. are not reconstructed from `.tasty` yet, so a `.tasty`-backed
-/// symbol gets no `ClassfileMetadata` entry at all — the same "not yet
-/// populated" gap earlier `.class` milestones had before their
-/// corresponding feature landed.
+/// (`docs/classloader.md` §9).
+///
+/// `fields`/`methods` cover ordinary `ValDef`/`DefDef` template members;
+/// each member's own declared type resolves to a name the same
+/// best-effort way a supertype does (see [`resolve_parent_name`]) — a
+/// type shape this decoder does not recognize (anything past a plain or
+/// generic class reference: tuples, function types, refinements,
+/// dependent/path types, ...) is simply `None`, not a decode failure, so
+/// the member itself is still reconstructed with an unknown type rather
+/// than dropped or aborting the whole class. A member's own type
+/// parameters (a generic method or a class's own type/val parameters
+/// beyond a plain reference) are not modeled — see
+/// [`decode_members`]'s doc comment. `signature`/`nest_host`/etc. (JVM
+/// classfile-only concepts) are not reconstructed from `.tasty` at all,
+/// so a `.tasty`-backed symbol still gets no [`crate::symbol::ClassfileMetadata`]
+/// entry.
 #[derive(Debug)]
 pub(crate) struct DecodedTastyClass {
     pub flags: ClassAccessFlags,
     pub super_class: BinaryName,
     pub interfaces: Vec<BinaryName>,
+    pub fields: Vec<DecodedTastyField>,
+    pub methods: Vec<DecodedTastyMethod>,
+}
+
+/// One `ValDef` reconstructed from a class's `Template.stats`.
+#[derive(Debug)]
+pub(crate) struct DecodedTastyField {
+    pub name: String,
+    pub flags: FieldAccessFlags,
+    /// `None` when [`resolve_parent_name`] can't reduce the field's
+    /// declared type tree to a name — see [`DecodedTastyClass`]'s doc
+    /// comment.
+    pub declared_type: Option<BinaryName>,
+}
+
+/// One `DefDef` reconstructed from a class's `Template.stats`.
+#[derive(Debug)]
+pub(crate) struct DecodedTastyMethod {
+    pub name: String,
+    pub flags: MethodAccessFlags,
+    /// Every term parameter across every clause, flattened into one list
+    /// — real Scala erasure already compiles a curried method
+    /// (`def f(x: Int)(y: Int)`) down to one JVM method with every
+    /// parameter concatenated, so this matches what a `.class`-loaded
+    /// version of the same method would show. A parameter clause's own
+    /// type parameters are skipped (generics are not modeled yet).
+    pub parameters: Vec<DecodedTastyParameter>,
+    /// `.tasty` always encodes an explicit return type tree, even for a
+    /// `Unit`-returning method (`Unit` is an ordinary class reference in
+    /// Scala's type system, not a separate "void" encoding the way a
+    /// `.class` descriptor has one) — so `None` here means only "this
+    /// decoder could not reduce the tree to a name", per
+    /// [`DecodedTastyClass`]'s doc comment, exactly like an unresolvable
+    /// field/parameter type; it is never a stand-in for `Unit`.
+    pub return_type: Option<BinaryName>,
+}
+
+/// One term parameter of a [`DecodedTastyMethod`].
+#[derive(Debug)]
+pub(crate) struct DecodedTastyParameter {
+    pub name: String,
+    pub declared_type: Option<BinaryName>,
 }
 
 /// Why decoding a `.tasty` file into a [`DecodedTastyClass`] failed.
@@ -159,11 +215,231 @@ pub(crate) fn decode(
             .push(resolve_parent_name(&file, parent).ok_or(TastyDecodeError::UnresolvedSupertype)?);
     }
 
+    let mut fields = decode_constructor_accessor_fields(&file, &template.term_params)?;
+    let (stats_fields, methods) = decode_members(&file, &template.stats)?;
+    fields.extend(stats_fields);
+
     Ok(DecodedTastyClass {
         flags,
         super_class,
         interfaces,
+        fields,
+        methods,
     })
+}
+
+/// Reconstructs a field for every primary-constructor term parameter
+/// tagged [`FIELDACCESSOR_TAG`] or [`CASEACCESSOR_TAG`] — a `class C(val
+/// x: Int)`/`case class C(x: Int)` parameter that is also a real field.
+///
+/// A `val`/`var`-less constructor parameter (plain `class C(x: Int)`)
+/// carries neither tag and is skipped: it is only ever a constructor-local
+/// binding at the source level, even though real Scala bytecode happens
+/// to also retain it as a private synthetic JVM field to support later
+/// use inside the class body — an implementation detail this reconstructs
+/// the *source-level* member set, not the compiled one, so it stays
+/// unmodeled, mirroring how `.class` loading does not surface a
+/// JVM-only synthetic field as a "real" member either.
+///
+/// `template.stats` never repeats these parameters as separate `ValDef`s
+/// (dotty's own pickler does not duplicate a constructor-parameter field's
+/// declaration), so this is the *only* source of these fields —
+/// [`decode_members`] alone would silently miss every one of them.
+fn decode_constructor_accessor_fields(
+    file: &TastyFile<'_>,
+    term_params: &[ParameterNode<'_>],
+) -> Result<Vec<DecodedTastyField>, TastyDecodeError> {
+    let mut fields = Vec::new();
+
+    for parameter in term_params {
+        let ParameterNode::TermParam { .. } = parameter else {
+            continue;
+        };
+        let body = parameter.decode_body()?;
+        let is_accessor = body.tail.iter().any(|item| {
+            matches!(
+                item,
+                DefinitionTail::Modifier(FIELDACCESSOR_TAG | CASEACCESSOR_TAG)
+            )
+        });
+        if !is_accessor {
+            continue;
+        }
+        let Some(field_name) = wire_name(file, parameter.name()) else {
+            continue;
+        };
+        fields.push(DecodedTastyField {
+            name: field_name,
+            flags: decode_field_flags(&body.tail),
+            declared_type: resolve_parent_name(file, &body.type_tree),
+        });
+    }
+
+    Ok(fields)
+}
+
+/// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
+/// `Template.stats`) into a [`DecodedTastyField`]/[`DecodedTastyMethod`].
+///
+/// Anything else in `stats` — a nested `TypeDef` (an inner class, a type
+/// alias, an abstract type member), an `Import`/`Export`, or a bare term
+/// statement a compiler-generated template can carry — is skipped: a
+/// nested class gets its own top-level `TypeDef` elsewhere in the file
+/// (or another file entirely) and is loaded separately, on demand, the
+/// same way `.class` never eagerly loads an `InnerClasses` entry either.
+///
+/// A `DefDef`/`ValDef`'s own type parameters (a generic method, or a
+/// `TypeParam` entry in its parameter list) are not modeled — every
+/// `ParameterNode::TypeParam` is skipped, matching `.class` loading not
+/// yet lowering `.tasty` generics onto `Type::Poly`/`Type::TypeLambda`
+/// the way a JVM `Signature` attribute is (`docs/classloader.md` §9).
+fn decode_members(
+    file: &TastyFile<'_>,
+    stats: &[RawTree<'_>],
+) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
+    let mut fields = Vec::new();
+    let mut methods = Vec::new();
+
+    for stat in stats {
+        let RawTree::LengthNode(node) = stat else {
+            continue;
+        };
+
+        match node.tag {
+            VALDEF_TAG => {
+                let StructuredNode::ValDef(DefinitionBody::ValDef {
+                    name,
+                    type_tree,
+                    tail,
+                    ..
+                }) = node.decode_structured()?
+                else {
+                    continue;
+                };
+                let Some(field_name) = wire_name(file, name) else {
+                    continue;
+                };
+                fields.push(DecodedTastyField {
+                    name: field_name,
+                    flags: decode_field_flags(&tail),
+                    declared_type: resolve_parent_name(file, &type_tree),
+                });
+            }
+            DEFDEF_TAG => {
+                let StructuredNode::DefDef(DefDefBody {
+                    name,
+                    parameters,
+                    return_type,
+                    tail,
+                    ..
+                }) = node.decode_structured()?
+                else {
+                    continue;
+                };
+                let Some(method_name) = wire_name(file, name) else {
+                    continue;
+                };
+
+                let mut decoded_parameters = Vec::with_capacity(parameters.len());
+                for parameter in &parameters {
+                    let ParameterNode::TermParam {
+                        name: parameter_name,
+                        ..
+                    } = parameter
+                    else {
+                        continue;
+                    };
+                    let Some(parameter_name) = wire_name(file, *parameter_name) else {
+                        continue;
+                    };
+                    let declared_type = parameter
+                        .decode_body()
+                        .ok()
+                        .and_then(|body| resolve_parent_name(file, &body.type_tree));
+                    decoded_parameters.push(DecodedTastyParameter {
+                        name: parameter_name,
+                        declared_type,
+                    });
+                }
+
+                // A constructor's own `return_type` tree is a `This`-typed
+                // constructor-call convention, not a normal value type to
+                // resolve a name from (JVMS agrees: a `.class` constructor
+                // descriptor is always `V`, never resolved either) --
+                // see `ClassLoader::lower_tasty_method`'s doc comment for
+                // where the loader supplies `Unit` instead.
+                let return_type = if method_name == "<init>" {
+                    None
+                } else {
+                    resolve_parent_name(file, &return_type)
+                };
+
+                methods.push(DecodedTastyMethod {
+                    name: method_name,
+                    flags: decode_method_flags(&tail),
+                    parameters: decoded_parameters,
+                    return_type,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok((fields, methods))
+}
+
+/// The `.tasty` counterpart of [`decode_flags`], for one `ValDef`. Unlike
+/// a class, a field has no JVM-only `ACC_INTERFACE`-shaped bit to
+/// translate; instead, `val`/`var` (the *absence*/presence of
+/// [`MUTABLE_TAG`]) maps onto `ACC_FINAL` — Scala has no separate
+/// "final" modifier for a field the way JVMS does, `val` itself already
+/// means it.
+fn decode_field_flags(tail: &[DefinitionTail<'_>]) -> FieldAccessFlags {
+    let mut bits = ACC_PUBLIC;
+    let mut mutable = false;
+
+    for item in tail {
+        let DefinitionTail::Modifier(tag) = item else {
+            continue;
+        };
+
+        match *tag {
+            MUTABLE_TAG => mutable = true,
+            STATIC_TAG => bits |= ACC_STATIC,
+            SYNTHETIC_TAG | ARTIFACT_TAG => bits |= ACC_SYNTHETIC,
+            PRIVATE_TAG => bits = (bits & !ACC_PUBLIC) | ACC_PRIVATE,
+            PROTECTED_TAG => bits = (bits & !ACC_PUBLIC) | ACC_PROTECTED,
+            _ => {}
+        }
+    }
+
+    if !mutable {
+        bits |= ACC_FINAL;
+    }
+    FieldAccessFlags(bits)
+}
+
+/// The `.tasty` counterpart of [`decode_flags`], for one `DefDef`.
+fn decode_method_flags(tail: &[DefinitionTail<'_>]) -> MethodAccessFlags {
+    let mut bits = ACC_PUBLIC;
+
+    for item in tail {
+        let DefinitionTail::Modifier(tag) = item else {
+            continue;
+        };
+
+        match *tag {
+            ABSTRACT_TAG => bits |= ACC_ABSTRACT,
+            FINAL_TAG => bits |= ACC_FINAL,
+            STATIC_TAG => bits |= ACC_STATIC,
+            SYNTHETIC_TAG | ARTIFACT_TAG => bits |= ACC_SYNTHETIC,
+            PRIVATE_TAG => bits = (bits & !ACC_PUBLIC) | ACC_PRIVATE,
+            PROTECTED_TAG => bits = (bits & !ACC_PUBLIC) | ACC_PROTECTED,
+            _ => {}
+        }
+    }
+
+    MethodAccessFlags(bits)
 }
 
 fn decode_flags(tail: &[DefinitionTail<'_>]) -> ClassAccessFlags {
@@ -506,5 +782,62 @@ mod tests {
         let flags = decode_flags(&[]);
 
         assert!(flags.is_public());
+    }
+
+    /// `case_class/Point.tasty`'s real `case class Point(x: Int, y: Int)`
+    /// never repeats `x`/`y` as `ValDef`s in `Template.stats` — they only
+    /// appear as `CASEACCESSOR_TAG`-tagged primary-constructor term
+    /// parameters, which is exactly what
+    /// [`decode_constructor_accessor_fields`] (not [`decode_members`])
+    /// reconstructs.
+    #[test]
+    fn decodes_a_case_classs_constructor_accessor_fields() {
+        let decoded = decode(
+            &fixture_bytes("case_class/Point.tasty"),
+            &BinaryName::from_internal("Point"),
+        )
+        .unwrap();
+
+        let names: Vec<&str> = decoded
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["x", "y"]);
+        for field in &decoded.fields {
+            assert!(field.flags.is_public());
+            assert!(field.flags.is_final());
+        }
+    }
+
+    /// `Point`'s compiler-synthesized case class boilerplate (`copy`,
+    /// `hashCode`, `equals`, ...) alongside its real primary constructor
+    /// — `<init>`'s own `return_type` is always `None` (never a value
+    /// type to resolve a name from), and a synthesized method carries
+    /// `ACC_SYNTHETIC` (from `SYNTHETIC_TAG`/`ARTIFACT_TAG`).
+    #[test]
+    fn decodes_a_case_classs_synthesized_methods_including_the_constructor() {
+        let decoded = decode(
+            &fixture_bytes("case_class/Point.tasty"),
+            &BinaryName::from_internal("Point"),
+        )
+        .unwrap();
+
+        let init = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "<init>")
+            .expect("<init> should be decoded");
+        assert_eq!(init.parameters.len(), 2);
+        assert_eq!(init.return_type, None);
+        assert!(init.flags.is_public());
+
+        let copy = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "copy")
+            .expect("copy should be decoded");
+        assert!(copy.flags.is_synthetic());
+        assert_eq!(copy.parameters.len(), 2);
     }
 }
