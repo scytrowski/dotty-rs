@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regenerates this directory's real Foo.tasty fixture with the Scala 3.9.0
+# Regenerates this directory's real .tasty fixtures (one per top-level
+# definition in the .scala sources) with the Scala 3.9.0
 # compiler, run straight from a Coursier cache (no sbt, no network access).
 # Requires `java` on PATH and the Scala 3.9.0 compiler dependencies already
 # present in the cache; set COURSIER_CACHE to use a non-default cache.
@@ -34,11 +35,14 @@ done
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
-# Compile from the fixture directory so the SourceFile attribute is the
-# stable relative path `Foo.scala`.
+# Compile from the fixture directory so each SourceFile attribute is the
+# stable relative path (`Foo.scala`, ...).
+sources=$(cd "$fixture_dir" && ls -- *.scala)
+# shellcheck disable=SC2086
 (cd "$fixture_dir" && java -cp "$compiler_class_path" dotty.tools.dotc.Main \
-  -usejavacp:false -classpath "$library_class_path" -d "$work_dir" Foo.scala)
+  -usejavacp:false -classpath "$library_class_path" -d "$work_dir" $sources)
 
-cp "$work_dir/me/cytrowski/tastyfixtures/semantic/Foo.tasty" "$fixture_dir/Foo.tasty"
-
-echo "regenerated Foo.tasty"
+for tasty in "$work_dir"/me/cytrowski/tastyfixtures/semantic/*.tasty; do
+  cp "$tasty" "$fixture_dir/"
+  echo "regenerated $(basename "$tasty")"
+done
