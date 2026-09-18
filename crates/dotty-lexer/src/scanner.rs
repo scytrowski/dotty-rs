@@ -845,6 +845,7 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
                     | HardKeyword::This
                     | HardKeyword::Given
                     | HardKeyword::Val
+                    | HardKeyword::Throw
             )
     )
 }
@@ -1732,6 +1733,20 @@ mod tests {
                 TokenKind::Newline,
                 TokenKind::EndMarker,
                 TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_throw_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend throw"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::Throw),
                 TokenKind::Eof,
             ]
         );
