@@ -272,13 +272,10 @@ where
         let Ok(text) = self.current_text() else {
             return self.unexpected_expression();
         };
-        let Some(value) = text
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-        else {
+        let Some(value) = decode_string_literal(text) else {
             return self.unexpected_expression();
         };
-        let value = self.names.intern(value);
+        let value = self.names.intern(&value);
         self.advance();
         self.alloc_from(
             mark,
@@ -406,6 +403,65 @@ fn parse_double_literal(spelling: &str) -> Option<f64> {
         .replace('_', "")
         .parse()
         .ok()
+}
+
+fn decode_string_literal(text: &str) -> Option<String> {
+    let multiline = text.starts_with("\"\"\"");
+    let body = if multiline {
+        text.strip_prefix("\"\"\"")?.strip_suffix("\"\"\"")?
+    } else {
+        text.strip_prefix('"')?.strip_suffix('"')?
+    };
+    let characters: Vec<char> = body.chars().collect();
+    let mut value = String::new();
+    let mut index = 0;
+
+    while index < characters.len() {
+        let character = characters[index];
+        index += 1;
+        if multiline || character != '\\' {
+            value.push(character);
+            continue;
+        }
+
+        let escaped = *characters.get(index)?;
+        index += 1;
+        match escaped {
+            'b' => value.push('\u{0008}'),
+            't' => value.push('\t'),
+            'n' => value.push('\n'),
+            'f' => value.push('\u{000c}'),
+            'r' => value.push('\r'),
+            '\\' => value.push('\\'),
+            '"' => value.push('"'),
+            '\'' => value.push('\''),
+            'u' => {
+                while characters.get(index) == Some(&'u') {
+                    index += 1;
+                }
+                let digits: String = characters.get(index..index + 4)?.iter().collect();
+                let code_point = u32::from_str_radix(&digits, 16).ok()?;
+                value.push(char::from_u32(code_point)?);
+                index += 4;
+            }
+            '0'..='7' => {
+                let mut digits = String::from(escaped);
+                while digits.len() < 3
+                    && characters
+                        .get(index)
+                        .is_some_and(|character| ('0'..='7').contains(character))
+                {
+                    digits.push(characters[index]);
+                    index += 1;
+                }
+                let code_point = u32::from_str_radix(&digits, 8).ok()?;
+                value.push(char::from_u32(code_point)?);
+            }
+            _ => return None,
+        }
+    }
+
+    Some(value)
 }
 
 const fn is_unsupported_start(kind: TokenKind) -> bool {
@@ -685,6 +741,55 @@ mod tests {
             panic!("expected string literal tree");
         };
         assert_eq!(names.resolve(value), "hello");
+    }
+
+    #[test]
+    fn decodes_escaped_characters_in_a_string_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "\"a\\n\"",
+            vec![
+                token(TokenKind::StringLiteral, 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "a\n");
+    }
+
+    #[test]
+    fn preserves_newlines_in_a_triple_quoted_string_literal() {
+        let source = "\"\"\"a\nb\"\"\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "a\nb");
     }
 
     #[test]
