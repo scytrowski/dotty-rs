@@ -1142,6 +1142,67 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_an_end_marker_before_a_trailing_line_comment() {
+        assert_eq!(
+            kinds("value\nend if // trailing comment\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_after_a_multiline_comment() {
+        assert_eq!(
+            kinds("value /* multiline\ncomment */\nend if\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_inside_braces() {
+        assert_eq!(
+            kinds("{\n  value\n  end if\n}"),
+            vec![
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_when_a_comment_splits_the_marker() {
+        assert_eq!(
+            kinds("value\nend /* comment */ if\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn closes_nested_regions_before_their_end_markers() {
         assert_eq!(
             kinds(

@@ -76,7 +76,7 @@ Implementation status on the current lexer branch:
   logical statement;
 - same-line `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker
   recognition are now part of scanner post-processing, including
-  `new`/`this`/`given`/`val` targets;
+  `new`/`this`/`given`/`val` targets, comment boundaries, and explicit braces;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
 - nested `if`/`else`, `try`/`catch`/`finally`, `while`/`do`, and `given`/`with`
   transitions preserve the scanner's exact `INDENT`/`OUTDENT`/`NEWLINE` order;
