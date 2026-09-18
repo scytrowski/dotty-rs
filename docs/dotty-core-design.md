@@ -768,6 +768,11 @@ Scala 3.9's pattern-checking policy. The parser derives this value from the
 source version and an optional `case` prefix; for-comprehension lowering
 consumes it later.
 
+`NumberLiteral` retains its source-backed `text: NameId` together with a
+`NumberKind`: `Whole(radix)`, `Decimal`, or `Floating`. This mirrors Scala's
+parser distinction before typing; suffixed numeric tokens that Scala converts
+directly to semantic literals are not forced through `NumberKind`.
+
 This is the foundation subset of Dotty's actual `untpd`-only node types. The
 remaining differences called out by the parser-readiness audit are explicit
 lowering or feature-policy decisions, rather than silently dropped source

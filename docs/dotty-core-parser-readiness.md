@@ -80,7 +80,7 @@ out-of-band tree convention or a lossy lowering step.
 | `InterpolatedString` | `UntypedNode::InterpolatedString` | REPRESENT | Interpolator name and interpolation parts remain available to later lowering. |
 | `ContextBounds` | `UntypedNode::ContextBounds` | REPRESENT | Multiple bounds and their order are preserved. Individual Scala 3.9 aliases are represented by `ContextBoundTypeTree` entries. |
 | `ContextBoundTypeTree` | `UntypedNode::ContextBoundTypeTree` | REPRESENT | Preserves the bound tree, its type parameter, and the optional Scala 3.9 `as` term name. `ContextBounds` keeps these entries in source order. |
-| `Number` / `NumberKind` | `UntypedNode::Number(NumberLiteral)` | REPRESENT | Exact spelling is retained through `NameId`. The parser contract must document whether numeric kind comes from the token stream or must be added to `NumberLiteral`; it must not rely on semantic numeric conversion. |
+| `Number` / `NumberKind` | `UntypedNode::Number(NumberLiteral)` | REPRESENT | `NumberLiteral` retains exact source-backed text plus `Whole(radix)`, `Decimal`, or `Floating`. Suffixed literals follow Scala's parser path into semantic `Literal` nodes rather than being mislabeled as `Number`. |
 | `Throw` | `UntypedNode::Throw` | REPRESENT | The parser emits a distinct throw expression. |
 | `ErrorNode` (local recovery placeholder) | `UntypedNode::Error` | REPRESENT | Required for parser recovery. It remains untyped-only, carries only a small kind enum, and keeps diagnostics outside the AST. |
 | `ParsedTry` | `UntypedNode::ParsedTry` | REPRESENT | Preserves a catch handler that is either an expression or case clause before conversion to `Vec<CaseDef>`. |

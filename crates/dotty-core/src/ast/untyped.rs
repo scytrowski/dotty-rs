@@ -201,12 +201,25 @@ pub struct ContextBoundTypeTree {
     pub name: Option<TermName>,
 }
 
+/// The lexical classification of an unsuffixed numeric literal.
+///
+/// `Whole` retains the source radix because Scala's parser passes the token
+/// base through to `untpd.Number`. `Decimal` and `Floating` distinguish the
+/// parser's decimal and exponent forms before typing chooses a numeric type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumberKind {
+    Whole(u32),
+    Decimal,
+    Floating,
+}
+
 /// A raw numeric literal, before the exact numeric type and overflow
-/// checking are resolved. The parser does not own numeric overflow
-/// checking (see `AGENTS.md`); `text` is the literal exactly as written.
+/// checking are resolved. The parser does not own numeric overflow checking
+/// (see `AGENTS.md`); `text` is the literal exactly as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NumberLiteral {
     pub text: NameId,
+    pub kind: NumberKind,
 }
 
 /// `throw expr`.
@@ -636,9 +649,40 @@ mod tests {
     fn number_literal_and_throw_carry_their_payload() {
         let number = UntypedNode::Number(NumberLiteral {
             text: NameId::new(1),
+            kind: NumberKind::Whole(10),
         });
         let throw = UntypedNode::Throw(Throw { expr: tree_id(1) });
 
         assert_ne!(number, throw);
+    }
+
+    #[test]
+    fn number_literal_preserves_a_non_decimal_whole_radix() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Whole(16),
+        };
+
+        assert_eq!(number.kind, NumberKind::Whole(16));
+    }
+
+    #[test]
+    fn number_literal_preserves_decimal_classification() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Decimal,
+        };
+
+        assert_eq!(number.kind, NumberKind::Decimal);
+    }
+
+    #[test]
+    fn number_literal_preserves_floating_classification() {
+        let number = NumberLiteral {
+            text: NameId::new(1),
+            kind: NumberKind::Floating,
+        };
+
+        assert_eq!(number.kind, NumberKind::Floating);
     }
 }
