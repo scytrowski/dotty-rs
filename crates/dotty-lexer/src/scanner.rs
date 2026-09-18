@@ -1543,6 +1543,137 @@ mod tests {
     }
 
     #[test]
+    fn parser_feedback_closes_nested_indentation_regions_in_order() {
+        let mut scanner =
+            ContextualScanner::new("root:\n  child:\n    leaf\nback").expect("source scans");
+
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_feedback_does_not_open_indent_for_an_aligned_next_line() {
+        let mut scanner = ContextualScanner::new("root:\nchild").expect("source scans");
+
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_feedback_does_not_emit_outdent_at_root() {
+        let mut scanner = ContextualScanner::new("root\nnext").expect("source scans");
+
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_feedback_closes_nested_regions_before_eof() {
+        let mut scanner =
+            ContextualScanner::new("root:\n  child:\n    leaf").expect("source scans");
+
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+        scanner.advance();
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::ColonEol,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn colon_eol_feedback_reclassifies_colon_after_an_operator() {
         let mut scanner = ContextualScanner::new("value + : next").expect("source scans");
         scanner.advance();
