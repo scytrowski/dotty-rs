@@ -751,7 +751,7 @@ impl<'source> RawLexer<'source> {
             Some('\\' | '\'') => true,
             Some(character) if is_identifier_start(character) => true,
             Some('\n' | '\r') => true,
-            Some(character) if character.is_whitespace() => false,
+            Some(character) if character.is_whitespace() => self.cursor.peek_nth(2) == Some('\''),
             Some(character) if is_operator_character(character) => {
                 self.cursor.peek_nth(2) == Some('\'')
             }
@@ -2598,6 +2598,36 @@ mod tests {
                 RawTokenKind::CharLiteral,
                 RawTokenKind::CharLiteral,
                 RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_space_character_literal() {
+        let source = "' '";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::CharLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recognizes_a_tab_character_literal() {
+        let source = "'\t'";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::CharLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
             ]
         );
         assert!(diagnostics.is_empty());
