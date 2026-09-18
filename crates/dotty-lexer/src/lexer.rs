@@ -1,9 +1,7 @@
 use core::fmt;
 
 use dotty_core::diagnostics::{Diagnostic, DiagnosticSeverity};
-use dotty_core::source::{
-    SourceText, SourceTextError, TextRange, TextRangeError, is_line_break_char,
-};
+use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
@@ -145,14 +143,14 @@ impl<'source> RawLexer<'source> {
                 |character| character == '\t',
             )?)));
         }
-        if character.is_whitespace() && !is_line_break_char(character) {
+        if character.is_whitespace() && !is_lexical_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_whitespace(
                 start,
                 TriviaKind::OtherWhitespace,
-                |character| character.is_whitespace() && !is_line_break_char(character),
+                |character| character.is_whitespace() && !is_lexical_line_break_char(character),
             )?)));
         }
-        if is_line_break_char(character) {
+        if is_lexical_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_newline(start)?)));
         }
         if character == '/' && self.cursor.peek_nth(1) == Some('/') {
@@ -353,7 +351,10 @@ impl<'source> RawLexer<'source> {
                 })));
             }
 
-            if !state.multiline && matches!(self.cursor.peek(), Some('\n' | '\r')) {
+            if self.cursor.peek().is_some_and(|character| {
+                is_substitute(character)
+                    || (!state.multiline && is_literal_line_terminator(character))
+            }) {
                 let start = state.part_start;
                 let _ = self.modes.pop();
                 self.report(start, "unclosed interpolated string literal")?;
@@ -413,7 +414,8 @@ impl<'source> RawLexer<'source> {
                     _ => {
                         let _ = self.cursor.bump();
                         if self.cursor.is_eof()
-                            || (!state.multiline && matches!(self.cursor.peek(), Some('\n' | '\r')))
+                            || (!state.multiline
+                                && self.cursor.peek().is_some_and(is_literal_line_terminator))
                         {
                             return self
                                 .recover_interpolated_string(state.part_start, state.multiline);
@@ -466,7 +468,9 @@ impl<'source> RawLexer<'source> {
                 })));
             }
 
-            if !multiline && matches!(self.cursor.peek(), Some('\n' | '\r')) {
+            if self.cursor.peek().is_some_and(|character| {
+                is_substitute(character) || (!multiline && is_literal_line_terminator(character))
+            }) {
                 let _ = self.modes.pop();
                 self.report(start, "unclosed interpolated string literal")?;
                 return Ok(Some(RawItem::Token(RawToken {
@@ -527,7 +531,7 @@ impl<'source> RawLexer<'source> {
             Some('\r') => {
                 let _ = self.cursor.eat_if('\n');
             }
-            Some('\n' | '\u{000c}' | '\u{001a}') => {}
+            Some('\n' | '\u{000c}') => {}
             Some(_) | None => {
                 return Err(RawLexerError::Cursor(CursorError::InvalidOffset {
                     offset: start,
@@ -545,11 +549,9 @@ impl<'source> RawLexer<'source> {
     fn scan_line_comment(&mut self, start: u32) -> Result<Trivia, RawLexerError> {
         let _ = self.cursor.bump();
         let _ = self.cursor.bump();
-        while self
-            .cursor
-            .peek()
-            .is_some_and(|character| character != '\n' && character != '\r')
-        {
+        while self.cursor.peek().is_some_and(|character| {
+            character != '\n' && character != '\r' && !is_substitute(character)
+        }) {
             let _ = self.cursor.bump();
         }
 
@@ -658,7 +660,7 @@ impl<'source> RawLexer<'source> {
             if character == '`' {
                 break;
             }
-            if character == '\n' || character == '\r' {
+            if is_literal_line_terminator(character) {
                 break;
             }
             let _ = self.cursor.bump();
@@ -966,7 +968,7 @@ impl<'source> RawLexer<'source> {
         let mut valid = true;
 
         match self.cursor.peek() {
-            None | Some('\n' | '\r') => {
+            None | Some('\n' | '\r' | '\u{001a}') => {
                 self.report(start, "unterminated character literal")?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
@@ -995,12 +997,14 @@ impl<'source> RawLexer<'source> {
 
         if self.cursor.peek() == Some('\'') {
             let _ = self.cursor.bump();
-        } else if !self.cursor.is_eof() && !matches!(self.cursor.peek(), Some('\n' | '\r')) {
+        } else if !self.cursor.is_eof()
+            && !self.cursor.peek().is_some_and(is_literal_line_terminator)
+        {
             valid = false;
             self.report(start, "character literal contains more than one character")?;
             while let Some(character) = self.cursor.peek() {
                 let _ = self.cursor.bump();
-                if character == '\'' || character == '\n' || character == '\r' {
+                if character == '\'' || is_literal_line_terminator(character) {
                     break;
                 }
             }
@@ -1039,7 +1043,7 @@ impl<'source> RawLexer<'source> {
                         span: self.span(start)?,
                     });
                 }
-                Some('\n' | '\r') => {
+                Some('\n' | '\r' | '\u{001a}') => {
                     self.report(start, "unclosed string literal")?;
                     return Ok(RawToken {
                         kind: RawTokenKind::Error,
@@ -1072,6 +1076,13 @@ impl<'source> RawLexer<'source> {
                 self.consume_multiline_terminator();
                 return Ok(RawToken {
                     kind: RawTokenKind::StringLiteral,
+                    span: self.span(start)?,
+                });
+            }
+            if self.cursor.peek().is_some_and(is_substitute) {
+                self.report(start, "unclosed multi-line string literal")?;
+                return Ok(RawToken {
+                    kind: RawTokenKind::Error,
                     span: self.span(start)?,
                 });
             }
@@ -1168,6 +1179,18 @@ impl<'source> RawLexer<'source> {
     fn span(&self, start: u32) -> Result<TextRange, RawLexerError> {
         TextRange::new(start, self.cursor.position()).map_err(Into::into)
     }
+}
+
+const fn is_substitute(character: char) -> bool {
+    character == '\u{001a}'
+}
+
+const fn is_lexical_line_break_char(character: char) -> bool {
+    matches!(character, '\n' | '\u{000c}' | '\r')
+}
+
+const fn is_literal_line_terminator(character: char) -> bool {
+    matches!(character, '\n' | '\r') || is_substitute(character)
 }
 
 fn digit_value(character: char) -> Option<u32> {
@@ -1685,11 +1708,6 @@ mod tests {
         (
             classifies_form_feed_as_newline_trivia,
             "\u{000c}",
-            TriviaKind::Newline
-        ),
-        (
-            classifies_substitute_as_newline_trivia,
-            "\u{001a}",
             TriviaKind::Newline
         ),
         (
@@ -2229,19 +2247,82 @@ mod tests {
     }
 
     #[test]
-    fn preserves_substitute_as_newline_trivia() {
+    fn reports_substitute_as_an_illegal_character() {
         let (items, diagnostics) = scan("a\u{001a}b");
 
         assert_eq!(
             items,
             vec![
                 token(RawTokenKind::Identifier, 0, 1),
-                trivia(TriviaKind::Newline, 1, 2),
+                token(RawTokenKind::Error, 1, 2),
                 token(RawTokenKind::Identifier, 2, 3),
                 token(RawTokenKind::Eof, 3, 3),
             ]
         );
-        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 2).unwrap());
+        assert!(
+            diagnostics[0]
+                .message()
+                .contains("unsupported source character")
+        );
+    }
+
+    #[test]
+    fn stops_a_line_comment_before_substitute() {
+        let (items, diagnostics) = scan("a // comment\u{001a}b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 1),
+                trivia(TriviaKind::Spaces, 1, 2),
+                trivia(TriviaKind::LineComment, 2, 12),
+                token(RawTokenKind::Error, 12, 13),
+                token(RawTokenKind::Identifier, 13, 14),
+                token(RawTokenKind::Eof, 14, 14),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(12, 13).unwrap());
+    }
+
+    #[test]
+    fn reports_substitute_as_unclosed_simple_string_content() {
+        let (items, diagnostics) = scan("\"a\u{001a}b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 2),
+                token(RawTokenKind::Error, 2, 3),
+                token(RawTokenKind::Identifier, 3, 4),
+                token(RawTokenKind::Eof, 4, 4),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 2).unwrap());
+        assert!(diagnostics[0].message().contains("unclosed string"));
+        assert_eq!(diagnostics[1].span(), TextRange::new(2, 3).unwrap());
+    }
+
+    #[test]
+    fn reports_substitute_as_unclosed_multiline_string_content() {
+        let (items, diagnostics) = scan("\"\"\"a\u{001a}b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 4),
+                token(RawTokenKind::Error, 4, 5),
+                token(RawTokenKind::Identifier, 5, 6),
+                token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 4).unwrap());
+        assert!(diagnostics[0].message().contains("unclosed multi-line"));
+        assert_eq!(diagnostics[1].span(), TextRange::new(4, 5).unwrap());
     }
 
     #[test]

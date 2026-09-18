@@ -2843,12 +2843,12 @@ mod tests {
     }
 
     #[test]
-    fn treats_substitute_as_a_logical_line_break() {
+    fn preserves_substitute_as_an_error_token() {
         assert_eq!(
             kinds("first\u{001a}second"),
             vec![
                 TokenKind::Identifier,
-                TokenKind::Newline,
+                TokenKind::Error,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
@@ -2874,18 +2874,17 @@ mod tests {
     }
 
     #[test]
-    fn uses_substitute_as_the_start_of_an_indented_line() {
+    fn does_not_use_substitute_as_the_start_of_an_indented_line() {
         assert_eq!(
             kinds("if ready then\u{001a}  run()"),
             vec![
                 TokenKind::Keyword(HardKeyword::If),
                 TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Then),
-                TokenKind::Indent,
+                TokenKind::Error,
                 TokenKind::Identifier,
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
-                TokenKind::Outdent,
                 TokenKind::Eof,
             ]
         );
