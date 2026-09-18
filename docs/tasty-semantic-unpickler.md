@@ -1,7 +1,9 @@
 # TASTy semantic unpickler
 
-Status: in progress (`crates/dotty-tasty-unpickler`). Milestone 1 (semantic
-index and symbol entering) is being implemented; no pass is complete yet.
+Status: Milestone 1 (semantic index and symbol entering) is complete
+(`crates/dotty-tasty-unpickler`). Milestone 2 (core type references) is next.
+Only pass 1 exists: every entered symbol is `SymbolInfo::Missing`; no type is
+decoded.
 
 Target: Scala 3.9.0 / TASTy 28.9.0. The wire format is documented in
 [`tasty-format-3.9.0.md`](tasty-format-3.9.0.md) and the decoding API in
@@ -168,8 +170,8 @@ unpickler crate does not depend on `dotty-classloader`.
 
 ## 7. Milestones
 
-1. **Semantic index and symbol entering** — in progress.
-2. Core type references (`TypeRef`, `TermRef`, prefixes, `ThisType`,
+1. **Semantic index and symbol entering** — complete.
+2. **Core type references** (`TypeRef`, `TermRef`, prefixes, `ThisType`,
    `SuperType`, constants, `Applied`, bounds, `And`/`Or`) — next.
 3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
 4. Advanced types (refinements, recursive, match types, annotations, ...).
@@ -180,10 +182,70 @@ unpickler crate does not depend on `dotty-classloader`.
 Each milestone is delivered as one or more reviewable PRs that keep the whole
 workspace green.
 
-## 8. Known unsupported forms
+## 8. Current state and known unsupported forms
 
-No pass is implemented yet; the building blocks (index, names, mappings) are
-in place. Deferred so far: qualified access modifiers, the modifiers listed in
-§4, abstract-type-member kind, definitions local to method bodies, and sharing
-package symbols between TASTy units. This section will list the concrete
-semantic forms each milestone deliberately defers.
+Milestone 1 delivers `TastyUnpickler::enter_symbols`, `TastySemanticIndex`
+(`symbol_at`, `scope_of`, `symbol_count`) and the mappings of §4. Definition
+addresses map to exactly one `SymbolId`; a second entry for an address is
+`UnpickleError::DuplicateDefinition`.
+
+Measured on real compiler output: all 37 small `dotty-tasty` fixtures enter
+without error. On the manifest-backed corpora (`scala3-library` and
+`scala3-compiler`, 2089 units, TASTy 28.8 — parsed leniently, outside the 3.9
+target) 1669 units enter; of the 420 that do not, 419 stop at a qualified
+access modifier (`private[X]`, issue #10) and one (`scala/package.tasty`) has a
+nested `PACKAGE` whose path is a `SHAREDtype` reference.
+
+Deliberately not supported yet:
+
+- qualified access modifiers — `UnsupportedQualifiedModifier`, issue #10;
+- `PACKAGE` paths other than a direct `TERMREFpkg`, such as a nested package
+  whose path is a `SHAREDtype` — `UnsupportedPackagePath`; resolving it needs
+  the shared-type resolution of Milestone 2;
+- the modifiers listed in §4 (no matching core flag, variance, accessor roles)
+  and annotations;
+- an abstract type member is entered as `TypeAlias`; `SymbolKind` has no
+  abstract-type kind;
+- definitions inside method bodies (locals) and the parameters of type-lambda
+  aliases;
+- companion links (`SymbolLinks::companion`);
+- sharing package symbols between TASTy units, issue #12.
+
+Known issues in neighbouring crates that this work found: #9 (`render_name`
+one-based), #11 (`.tasty` loading misses `val` constructor parameters), #13
+(index payload of parameter nodes omits the name).
+
+## 9. Review of Milestone 1
+
+Answers to the review questions asked before Milestone 2:
+
+1. **Does every TASTy definition have a stable `SymbolId`?** Every package,
+   class, trait, object, module class, type member, `val`/`var`, method,
+   constructor, and type/term parameter reachable from a `PACKAGE` does.
+   Locals in method bodies and type-lambda parameters do not.
+2. **Are forward references possible without duplicate symbols?** Yes. Pass 1
+   enters every definition before any reference is resolved, and the index
+   rejects a second symbol for an address.
+3. **Are nested owners correct?** Yes: `Foo` → package, `A`/`x`/`bar`/`<init>`
+   → `Foo`, `B`/`b` → `bar`, the constructor's copies → `<init>`.
+4. **Are namespaces preserved?** Yes. A class, its companion object and the
+   module class are three symbols, in distinct term/type namespaces.
+5. **Are scopes populated without duplicating ownership state?** Yes. Symbols
+   carry an owner; scopes carry membership; symbols have no `children`.
+6. **Is `dotty-core` still unaware of TASTy?** Yes; this work does not touch
+   `dotty-core` (nor `dotty-tasty` or `dotty-classloader`).
+7. **Did it avoid name heuristics where an address exists?** Yes. Names are
+   read only to name symbols; no reference is resolved by name.
+8. **Is the index sufficient for `TYPEREFsymbol`/`TERMREFsymbol`?** Yes for
+   definitions of this unit: a `TYPEREFsymbol`/`TYPEREFdirect` carries the
+   target's absolute address (in `Foo`, the class parameter type refers to
+   address 9, the constructor's to its own copy at 49), and `symbol_at`
+   resolves it. Missing: the `types` map for `SHAREDtype` caching and
+   references to other units.
+9. **Did real TASTy expose gaps in `dotty-core`?** `Visibility` cannot express
+   `private[X]` (#10); `SymbolKind` has no abstract-type kind; `Definitions`
+   has no root package.
+10. **Can Milestone 2 be implemented without redesigning PR1?** Yes. It adds
+    the `types` map and resolution on top of the existing index. Two
+    dependencies: the nested-package path form needs `SHAREDtype`, and the
+    `private[X]` failures (the bulk of the library corpus) need #10 first.
