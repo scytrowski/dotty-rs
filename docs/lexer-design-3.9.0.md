@@ -90,7 +90,9 @@ Implementation status on the current lexer branch:
   `Quote`;
 - interpolation preserves escaped dollars as string content, supports
   underscore and Unicode simple splices, multiline string parts, braced
-  expressions, and nested interpolators through explicit lexical modes;
+  expressions, and nested interpolators through explicit lexical modes; braced
+  splice spans remain non-overlapping, and EOF recovery after expression
+  tokens produces a bounded terminal error;
 - escape handling accepts repeated and uppercase Unicode prefixes, preserves
   recoverable string tokens for incomplete escapes, and reports malformed
   escapes without losing the remainder of the source;
@@ -556,11 +558,11 @@ leaves the suffix available as a following identifier, matching Scala's
 recovery boundary.
 
 The lexer also has deterministic short-input hardening tests that exercise
-2,380 ASCII inputs and 1,111 Unicode/multibyte inputs through both raw and
-contextual scanning, checking progress, EOF reachability, and source-span
-coverage. Full randomized fuzzing remains a separate hardening task. Dedicated
-EOF-recovery matrices cover truncated interpolation, XML, comments, strings,
-backquoted identifiers, and escapes.
+2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 4,096 seeded mixed
+inputs through both raw and contextual scanning, checking progress, EOF
+reachability, and source-span coverage. Full randomized fuzzing remains a
+separate hardening task. Dedicated EOF-recovery matrices cover truncated
+interpolation, XML, comments, strings, backquoted identifiers, and escapes.
 
 ## 11. Testing strategy
 

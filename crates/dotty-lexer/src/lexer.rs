@@ -252,9 +252,13 @@ impl<'source> RawLexer<'source> {
     fn next_expression(&mut self) -> Result<Option<RawItem>, RawLexerError> {
         if self.cursor.is_eof() {
             let start = self.cursor.position();
+            self.modes.clear();
+            self.modes.push(LexMode::Normal);
             self.report(start, "unterminated interpolation expression")?;
-            let _ = self.modes.pop();
-            return self.next();
+            return Ok(Some(RawItem::Token(RawToken {
+                kind: RawTokenKind::Error,
+                span: self.span(start)?,
+            })));
         }
 
         if self.cursor.peek() == Some('}')
@@ -277,6 +281,10 @@ impl<'source> RawLexer<'source> {
             return Ok(None);
         };
         if let RawItem::Token(token) = &item {
+            if token.kind == RawTokenKind::Error && self.cursor.is_eof() {
+                self.modes.clear();
+                self.modes.push(LexMode::Normal);
+            }
             match token.kind {
                 RawTokenKind::Punctuation(Punctuation::LeftBrace) => {
                     if let Some(LexMode::InterpolationExpression { brace_depth }) = self
@@ -378,7 +386,7 @@ impl<'source> RawLexer<'source> {
                         }));
                         return Ok(Some(RawItem::Token(RawToken {
                             kind: RawTokenKind::StringPart,
-                            span: self.span(state.part_start)?,
+                            span: TextRange::new(state.part_start, brace_start)?,
                         })));
                     }
                     Some(character) if is_identifier_start(character) => {
@@ -1263,6 +1271,27 @@ mod tests {
             visit_short_unicode_inputs(alphabet, current, remaining - 1, visit);
             current.pop();
         }
+    }
+
+    fn next_generated_value(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed
+    }
+
+    fn generated_source(seed: &mut u64) -> String {
+        const ALPHABET: &[char] = &[
+            ' ', '\t', '\n', '\r', 'a', 'Z', '0', '_', '$', '\'', '"', '`', '\\', '/', '*', ':',
+            '=', '<', '>', '+', '-', '{', '}', '[', ']', '(', ')', '#', 'é', '𐐀', '\u{0301}',
+        ];
+        let length = (next_generated_value(seed) % 96) as usize;
+        (0..length)
+            .map(|_| {
+                let index = (next_generated_value(seed) as usize) % ALPHABET.len();
+                ALPHABET[index]
+            })
+            .collect()
     }
 
     fn scan(source: &str) -> (Vec<RawItem>, Vec<Diagnostic>) {
@@ -3237,6 +3266,26 @@ mod tests {
     }
 
     #[test]
+    fn keeps_braced_interpolation_spans_non_overlapping() {
+        let source = "s\"${foo}\"";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 3),
+                token(RawTokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+                token(RawTokenKind::Identifier, 4, 7),
+                token(RawTokenKind::Punctuation(Punctuation::RightBrace), 7, 8),
+                token(RawTokenKind::StringPart, 8, 9),
+                token(RawTokenKind::Eof, 9, 9),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn treats_double_dollar_as_string_content() {
         let (items, diagnostics) = scan("s\"$$$x\"");
         let kinds: Vec<_> = items
@@ -3519,6 +3568,45 @@ mod tests {
     }
 
     #[test]
+    fn keeps_unclosed_interpolation_recovery_after_expression_tokens_non_overlapping() {
+        let source = "s\"${foo";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 3),
+                token(RawTokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+                token(RawTokenKind::Identifier, 4, 7),
+                token(RawTokenKind::Error, 7, 7),
+                token(RawTokenKind::Eof, 7, 7),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(7, 7).unwrap());
+    }
+
+    #[test]
+    fn stops_after_an_eof_consuming_error_inside_interpolation() {
+        let source = "s\"${`foo";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::InterpolationId, 0, 1),
+                token(RawTokenKind::StringPart, 1, 3),
+                token(RawTokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+                token(RawTokenKind::Error, 4, 8),
+                token(RawTokenKind::Eof, 8, 8),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("backquoted identifier"));
+    }
+
+    #[test]
     fn raw_lexer_preserves_contiguous_spans_for_short_ascii_inputs() {
         let alphabet = [
             ' ', '\t', '\n', '\r', 'a', '1', '\'', '"', '$', '{', '}', '/', '*',
@@ -3690,6 +3778,67 @@ mod tests {
             visited,
             1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
         );
+    }
+
+    #[test]
+    fn survives_deterministic_mixed_unicode_and_delimiter_inputs() {
+        let mut seed = 0xD077_7E57_u64;
+
+        for case in 0..4_096 {
+            let source = generated_source(&mut seed);
+            let mut lexer = RawLexer::new(&source).expect("generated UTF-8 source is valid");
+            let mut offset = 0;
+            let mut reached_eof = false;
+            let mut previous_item_debug = String::from("<start>");
+
+            for step in 0..(source.len() * 4 + 32) {
+                let Some(item) = lexer.next().expect("generated input must not fail") else {
+                    reached_eof = true;
+                    break;
+                };
+                let item_debug = format!("{item:?}");
+                let span = match item {
+                    RawItem::Token(token) => token.span,
+                    RawItem::Trivia(trivia) => trivia.span,
+                };
+                assert_eq!(
+                    span.start(),
+                    offset,
+                    "raw span gap for generated case {case}, step {step}, previous {previous_item_debug}, item {item_debug}, source {source:?}"
+                );
+                assert!(
+                    span.end() <= source.len() as u32,
+                    "raw span exceeds source for generated case {case}, source {source:?}"
+                );
+                offset = span.end();
+                previous_item_debug = item_debug;
+            }
+
+            assert!(
+                reached_eof,
+                "raw lexer did not reach EOF for generated case {case}, source {source:?}"
+            );
+            assert_eq!(
+                offset,
+                source.len() as u32,
+                "raw spans did not cover generated case {case}, source {source:?}"
+            );
+
+            let scanner = crate::ContextualScanner::new(&source)
+                .unwrap_or_else(|error| panic!("scanner rejected generated case {case}: {error}"));
+            assert_eq!(
+                scanner.tokens().last().map(|token| token.kind),
+                Some(TokenKind::Eof),
+                "scanner did not reach EOF for generated case {case}, source {source:?}"
+            );
+            for token in scanner.tokens() {
+                assert!(
+                    token.span.start() <= token.span.end()
+                        && token.span.end() <= source.len() as u32,
+                    "scanner span exceeds source for generated case {case}, source {source:?}"
+                );
+            }
+        }
     }
 
     #[test]
