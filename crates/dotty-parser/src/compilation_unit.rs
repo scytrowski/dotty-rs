@@ -1,15 +1,92 @@
 use dotty_core::ast::{
-    Ident, Literal, NumberKind, NumberLiteral, Parens, This, Tuple, UntypedNode,
+    Block, Ident, Literal, NumberKind, NumberLiteral, Parens, This, Tuple, UntypedNode,
 };
-use dotty_core::{Constant, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{
+    AstArena, Constant, HardKeyword, Punctuation, SourceId, SourceText, TokenKind, TokenSource,
+    TreeId, TreeKind, Untyped,
+};
 
-use crate::Parser;
+use crate::{ParseDiagnostic, ParseDiagnosticKind, Parser};
 
-#[allow(dead_code)]
+/// Result of parsing one source compilation unit.
+#[derive(Debug)]
+pub struct ParseResult {
+    pub ast: AstArena<Untyped>,
+    pub root: TreeId<Untyped>,
+    pub diagnostics: Vec<ParseDiagnostic>,
+}
+
+/// Parses a source-backed token stream as a Scala 3.9.0 compilation unit.
+pub fn parse_compilation_unit<S: TokenSource>(
+    source: SourceText<'_>,
+    source_id: SourceId,
+    tokens: S,
+    names: &mut dotty_core::NameInterner,
+) -> ParseResult {
+    Parser::new(source, source_id, tokens, names).compilation_unit()
+}
+
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses the supported expression sequence into a stable synthetic block root.
+    pub fn compilation_unit(mut self) -> ParseResult {
+        let unit_mark = self.mark();
+        let mut trees = Vec::new();
+
+        while self.current().kind != TokenKind::Eof {
+            self.consume_statement_separators();
+            if self.current().kind == TokenKind::Eof {
+                break;
+            }
+
+            let before = self.current() as *const dotty_core::Token;
+            let tree = if is_unsupported_start(self.current().kind) {
+                self.parse_unsupported_syntax()
+            } else {
+                self.parse_smoke_expr()
+            };
+            trees.push(tree);
+
+            let after = self.current() as *const dotty_core::Token;
+            if std::ptr::eq(before, after) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing a compilation unit",
+                );
+                self.advance();
+                if std::ptr::eq(after, self.current() as *const dotty_core::Token) {
+                    break;
+                }
+            }
+
+            if self.current().kind != TokenKind::Eof && !is_statement_separator(self.current().kind)
+            {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "expected a statement separator",
+                );
+                self.recover_until(crate::RecoverySet::Statement);
+            }
+        }
+
+        let (stats, expr) = match trees.pop() {
+            Some(expr) => (trees, expr),
+            None => (Vec::new(), self.error_expr(self.current_span())),
+        };
+        let root = self.alloc(
+            TreeKind::Block(Block { stats, expr }),
+            Some(self.span_from(unit_mark)),
+        );
+
+        ParseResult {
+            ast: self.ast,
+            root,
+            diagnostics: self.diagnostics,
+        }
+    }
+
     /// Parses the deliberately small expression subset used by the smoke milestone.
     pub(crate) fn parse_smoke_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
@@ -144,6 +221,58 @@ where
         }
         self.error_expr(position)
     }
+
+    fn consume_statement_separators(&mut self) {
+        while is_statement_separator(self.current().kind) {
+            self.advance();
+        }
+    }
+
+    fn parse_unsupported_syntax(&mut self) -> TreeId<Untyped> {
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            format!(
+                "syntax beginning with {:?} is not supported by this parser milestone",
+                self.current().kind
+            ),
+        );
+        self.advance();
+        self.recover_until(crate::RecoverySet::Statement);
+        self.error_expr(position)
+    }
+}
+
+const fn is_statement_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Punctuation(Punctuation::Semicolon)
+            | TokenKind::Outdent
+    )
+}
+
+const fn is_unsupported_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Class
+                | HardKeyword::Def
+                | HardKeyword::If
+                | HardKeyword::For
+                | HardKeyword::While
+                | HardKeyword::Try
+                | HardKeyword::Match
+                | HardKeyword::Val
+                | HardKeyword::Var
+                | HardKeyword::Type
+                | HardKeyword::Object
+                | HardKeyword::Trait
+                | HardKeyword::Enum
+                | HardKeyword::Given
+        )
+    )
 }
 
 #[cfg(test)]
@@ -458,5 +587,155 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn compilation_unit_uses_a_stable_block_root_for_one_expression() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert!(stats.is_empty());
+        assert!(matches!(result.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_compilation_unit_still_has_a_block_root_and_error_expression() {
+        let mut names = NameInterner::new();
+        let parser = parser_for("", vec![token(TokenKind::Eof, 0, 0)], &mut names);
+
+        let result = parser.compilation_unit();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert!(stats.is_empty());
+        assert!(matches!(
+            result.ast.get(expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+    }
+
+    #[test]
+    fn compilation_unit_preserves_multiple_expressions_across_newline() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a\nb",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(result.ast.get(stats[0]).kind, TreeKind::Ident(_)));
+        assert!(matches!(result.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn malformed_input_recovers_and_preserves_a_following_valid_expression() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "@\nx",
+            vec![
+                token(TokenKind::Error, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(stats[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(result.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedExpression
+        );
+    }
+
+    #[test]
+    fn unsupported_valid_syntax_gets_an_unsupported_diagnostic() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "class A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Block(Block { .. })
+        ));
+    }
+
+    #[test]
+    fn public_free_function_constructs_the_same_compilation_unit_result() {
+        let mut names = NameInterner::new();
+        let result = parse_compilation_unit(
+            SourceText::new("x").expect("valid source"),
+            SourceId::from_index(2),
+            VecTokenSource {
+                tokens: vec![
+                    token(TokenKind::Identifier, 0, 1),
+                    token(TokenKind::Eof, 1, 1),
+                ],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        assert!(result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Block(Block { .. })
+        ));
     }
 }

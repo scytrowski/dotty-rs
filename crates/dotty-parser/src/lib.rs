@@ -18,6 +18,7 @@ mod parser;
 mod recovery;
 mod spans;
 
+pub use compilation_unit::{ParseResult, parse_compilation_unit};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind};
 pub use cursor::Cursor;
 pub use diagnostics::{ParseDiagnostic, ParseDiagnosticKind};
