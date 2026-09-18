@@ -103,11 +103,17 @@ impl LineIndex {
             return Err(SourceTextError::NotUtf8Boundary { offset });
         }
 
-        self.line_of_offset(offset).map_err(|error| match error {
+        let line = self.line_of_offset(offset).map_err(|error| match error {
             LineIndexError::OffsetOutOfBounds { offset, byte_len } => {
                 SourceTextError::OffsetOutOfBounds { offset, byte_len }
             }
-        })
+        })?;
+        let line_start = self.line_starts[line];
+        if !source.is_char_boundary(line_start as usize) {
+            return Err(SourceTextError::NotUtf8Boundary { offset: line_start });
+        }
+
+        Ok(line)
     }
 }
 
@@ -195,6 +201,26 @@ mod tests {
         assert_eq!(
             index.utf8_column(source, 1),
             Err(SourceTextError::NotUtf8Boundary { offset: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_utf8_column_when_the_indexed_line_start_is_not_a_boundary() {
+        let index = LineIndex::new("a\nb").expect("valid source");
+
+        assert_eq!(
+            index.utf8_column("a\u{0301}", 3),
+            Err(SourceTextError::NotUtf8Boundary { offset: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_a_utf16_column_when_the_indexed_line_start_is_not_a_boundary() {
+        let index = LineIndex::new("a\nb").expect("valid source");
+
+        assert_eq!(
+            index.utf16_column("a\u{0301}", 3),
+            Err(SourceTextError::NotUtf8Boundary { offset: 2 })
         );
     }
 
