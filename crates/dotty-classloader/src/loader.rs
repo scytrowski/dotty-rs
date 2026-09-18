@@ -63,15 +63,6 @@ pub struct ClassLoader<'store, E> {
     /// one-per-classpath-root pattern) doesn't have it either; see
     /// [`LoadingSession`]'s doc comment.
     repository: ClassRepository,
-    metadata: HashMap<SymbolId, ClassfileMetadata>,
-    /// Where each class's bytes were read from (directory root/JAR/JMOD
-    /// path) — the [`ClassResource::origin`](crate::class_path::ClassResource::origin)
-    /// a class's [`ClassOrigin`] was found under, kept for diagnostics and
-    /// duplicate-class detection (`ClassOrigin`'s own doc comment). Entered
-    /// alongside the `Symbol` itself, so it survives even if the load later
-    /// fails (a `Symbol` left `SymbolInfo::Error` by a `DependencyFailure`
-    /// is still worth explaining "this came from here").
-    origins: HashMap<SymbolId, ClassOrigin>,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -167,8 +158,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             store,
             session,
             repository: ClassRepository::new(),
-            metadata: HashMap::new(),
-            origins: HashMap::new(),
             definitions,
         }
     }
@@ -193,17 +182,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// JVM-specific metadata for a `.class`-backed symbol previously
     /// returned by [`Self::load_class`] — `None` for a `.tasty`-backed
     /// symbol (not yet reconstructed from `.tasty`, see
-    /// [`ClassfileMetadata`]'s doc comment), or a `SymbolId` this loader
-    /// did not produce.
+    /// [`ClassfileMetadata`]'s doc comment), or a `SymbolId` no loader
+    /// sharing this `session` has produced. Session-wide, not
+    /// loader-local, like [`Self::origin`] — see [`LoadingSession`]'s own
+    /// doc comment for why that is safe for `SymbolId`-keyed data.
     pub fn metadata(&self, id: SymbolId) -> Option<&ClassfileMetadata> {
-        self.metadata.get(&id)
+        self.session.metadata.get(&id)
     }
 
     /// Where a class's bytes were read from (a directory root/JAR/JMOD
-    /// path) — `None` for a `SymbolId` this loader did not produce (e.g. a
-    /// `Definitions` builtin, which has no backing classpath resource).
+    /// path) — `None` for a `SymbolId` no loader sharing this `session`
+    /// has produced (e.g. a `Definitions` builtin, which has no backing
+    /// classpath resource).
     pub fn origin(&self, id: SymbolId) -> Option<&ClassOrigin> {
-        self.origins.get(&id)
+        self.session.origins.get(&id)
     }
 
     /// Loads (or returns the cached result for) the class named `name`.
@@ -799,7 +791,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
-        self.origins.insert(class_symbol, resource_origin);
+        self.session.origins.insert(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         // `enter_class` derives visibility from `ClassAccessFlags` alone,
@@ -984,7 +976,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // rejected as `CircularInheritance`, exactly as before.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
-        self.origins.insert(class_symbol, resource_origin);
+        self.session.origins.insert(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         // Patches `Symbol::owner` from the package (set by `enter_class`,
@@ -1124,7 +1116,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
         self.enter_annotations(class_symbol, &annotations);
 
-        self.metadata.insert(
+        self.session.metadata.insert(
             class_symbol,
             ClassfileMetadata {
                 binary_name: name.clone(),
@@ -2674,6 +2666,64 @@ mod tests {
         drop(loader_b);
 
         assert_eq!(symbol_name(&store, extra), "Extra");
+    }
+
+    /// `into_session` used to transfer only `resolved`/`packages`,
+    /// dropping the previous loader's `metadata`/`origins` maps along
+    /// with the loader itself -- so a `SymbolId` a second loader picked up
+    /// from the shared `resolved` map (without loading it itself) had no
+    /// `ClassLoader::metadata`/`ClassLoader::origin` for it, even though
+    /// that data really was recorded when the class was first loaded.
+    /// Fixed by moving `metadata`/`origins` into `LoadingSession` itself
+    /// (safe, unlike `ClassRepository`'s `Failed` entries, because they
+    /// are keyed by the already-resolved `SymbolId`, not a
+    /// classpath-dependent `BinaryName` -- see `LoadingSession`'s own doc
+    /// comment).
+    #[test]
+    fn a_symbols_metadata_and_origin_survive_a_loading_session_hand_off() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let mut classes_a = HashMap::new();
+        classes_a.insert(
+            BinaryName::from_internal("Foo"),
+            synthetic_class("Foo", None),
+        );
+        let mut loader_a = ClassLoader::with_definitions(
+            InMemoryClassPath(classes_a),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let foo = loader_a
+            .load_class(&BinaryName::from_internal("Foo"))
+            .expect("Foo should load from loader A's own classpath");
+        assert!(loader_a.metadata(foo).is_some());
+        assert!(loader_a.origin(foo).is_some());
+        let session = loader_a.into_session();
+
+        // Loader B's own classpath does not have `Foo` at all -- it can
+        // only ever have reached `foo`'s `SymbolId` through the shared
+        // session's `resolved` map, never its own `load_uncached`.
+        let mut loader_b = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+            session,
+        );
+        let foo_again = loader_b
+            .load_class(&BinaryName::from_internal("Foo"))
+            .expect("Foo should still resolve, via the shared session, not loader B's own empty classpath");
+        assert_eq!(foo, foo_again);
+        assert!(
+            loader_b.metadata(foo).is_some(),
+            "metadata recorded by loader A must still be visible through loader B"
+        );
+        assert!(
+            loader_b.origin(foo).is_some(),
+            "origin recorded by loader A must still be visible through loader B"
+        );
+        drop(loader_b);
     }
 
     /// `java/lang/Object` is the one `Definitions` builtin with a real,

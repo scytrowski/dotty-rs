@@ -334,18 +334,20 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
 - `ClassLoader<'store, E>` — the loader itself; borrows a
   `&'store mut SemanticStore` for the whole session, owns its own
   loader-local `ClassRepository` (covering `Loading`/`Failed`, not
-  shared — see `LoadingSession` below), a `LoadingSession`, a
-  `ClassfileMetadata` sidecar table, and a `Definitions` (the shared
-  builtin primitive/`Object`/`Any`/`Nothing` identities every
-  descriptor/signature/`.tasty`-tree lowering step targets).
+  shared — see `LoadingSession` below), a `LoadingSession`, and a
+  `Definitions` (the shared builtin primitive/`Object`/`Any`/`Nothing`
+  identities every descriptor/signature/`.tasty`-tree lowering step
+  targets).
 - `LoadingSession` — bundles a positive-only `BinaryName -> SymbolId`
-  map and `PackageRegistry` so several `ClassLoader`s loading
-  sequentially against one shared `SemanticStore`
+  map, `PackageRegistry`, and the `ClassfileMetadata`/`ClassOrigin`
+  sidecar tables (keyed by the already-resolved `SymbolId`, so sharing
+  them carries none of the negative-caching risk below) so several
+  `ClassLoader`s loading sequentially against one shared `SemanticStore`
   (`ClassLoader::with_definitions`, one per classpath root or
   incremental recompilation unit) agree on the same ordinary
-  class/package `SymbolId`s, not just the `Definitions` builtins —
-  handed from one loader to the next by value via
-  `ClassLoader::into_session`. Deliberately excludes negative
+  class/package `SymbolId`s and provenance data, not just the
+  `Definitions` builtins — handed from one loader to the next by value
+  via `ClassLoader::into_session`. Deliberately excludes negative
   (`Failed`) and in-progress (`Loading`) results: a name one loader's
   own classpath doesn't have is not evidence a differently configured
   loader sharing the session doesn't have it either.
