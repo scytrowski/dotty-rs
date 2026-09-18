@@ -811,6 +811,51 @@ mod tests {
             .collect()
     }
 
+    fn next_event_value(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed
+    }
+
+    fn for_deterministic_event_sequence(
+        mut assertion: impl FnMut(usize, &str, &mut ContextualScanner),
+    ) {
+        let sources = [
+            "",
+            "value",
+            "root:\n  child:\nback",
+            "if ready then\n  run()",
+            "value + : next",
+            "<root>{value}</root>",
+        ];
+        let mut seed = 0x5CA_77E_u64;
+
+        for case in 0..1_024 {
+            let source = sources[(next_event_value(&mut seed) as usize) % sources.len()];
+            let mut scanner = ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected case {case}: {error}"));
+
+            for _ in 0..64 {
+                match next_event_value(&mut seed) % 7 {
+                    0 => scanner.advance(),
+                    1 => {
+                        let _ = scanner.next();
+                    }
+                    2 => {
+                        let _ = scanner.lookahead((next_event_value(&mut seed) as usize) % 16);
+                    }
+                    3 => scanner.observe(ScannerEvent::Indented),
+                    4 => scanner.observe(ScannerEvent::Outdented),
+                    5 => scanner.observe(ScannerEvent::ArrowIndented),
+                    _ => scanner.observe(ScannerEvent::ColonEol { in_template: false }),
+                }
+            }
+
+            assertion(case, source, &mut scanner);
+        }
+    }
+
     fn layout_kinds(source: &str) -> Vec<TokenKind> {
         kinds(source)
             .into_iter()
@@ -875,6 +920,32 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Eof);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn deterministic_parser_event_sequences_always_reach_eof() {
+        for_deterministic_event_sequence(|case, source, scanner| {
+            while scanner.next().is_some() {}
+            assert_eq!(
+                scanner.current().kind,
+                TokenKind::Eof,
+                "event sequence {case} did not end at EOF for {source:?}"
+            );
+            assert!(scanner.next().is_none());
+        });
+    }
+
+    #[test]
+    fn deterministic_parser_event_sequences_keep_token_spans_bounded() {
+        for_deterministic_event_sequence(|case, source, scanner| {
+            for token in scanner.tokens() {
+                assert!(
+                    token.span.start() <= token.span.end()
+                        && token.span.end() <= source.len() as u32,
+                    "event sequence {case} produced an invalid span for {source:?}"
+                );
+            }
+        });
     }
 
     #[test]
