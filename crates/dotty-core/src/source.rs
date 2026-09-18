@@ -100,7 +100,9 @@ pub struct Span {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanError {
     /// `point` fell outside `range`. `point` must satisfy
-    /// `range.start() <= point <= range.end()`.
+    /// `range.start() <= point <= range.end()` — **inclusive of `end`**,
+    /// even though [`TextRange`] itself is the half-open `[start, end)`.
+    /// See [`Span::new`] for why the upper bound is not tightened to `<`.
     PointOutOfRange { point: u32, range: TextRange },
 }
 
@@ -124,8 +126,18 @@ impl Span {
     /// diagnostic offset inside it (e.g. the start of `bar` in `foo.bar`,
     /// where `range` covers the whole selection).
     ///
-    /// Fails if `point` is given but lies outside `range` — a point makes no
-    /// sense as a location "inside" a span it isn't part of.
+    /// Fails if `point` is given but does not satisfy
+    /// `range.start() <= point <= range.end()`.
+    ///
+    /// The upper bound is **inclusive of `end`**, deliberately, even though
+    /// [`TextRange`] itself is the half-open `[start, end)`: `point` is not a
+    /// byte offset "inside" the range in that sense, it is an insertion
+    /// position — "where a single `^` would be logically placed" for a
+    /// diagnostic (matching real Dotty's `Span.point`, which allows
+    /// `point == end`, e.g. for a zero-width span or a caret placed right
+    /// after the range's last byte). Rejecting `point == end` would make it
+    /// impossible to point at the end of a token, which is a legitimate,
+    /// common diagnostic position, not an out-of-range one.
     pub fn new(range: TextRange, point: Option<u32>) -> Result<Self, SpanError> {
         if let Some(point) = point
             && !(range.start()..=range.end()).contains(&point)
@@ -234,6 +246,10 @@ mod tests {
 
     #[test]
     fn span_accepts_a_point_at_the_end_boundary() {
+        // Deliberately inclusive of `end` despite `TextRange` being
+        // half-open: `point` is an insertion position (a caret placed after
+        // the range's last byte), not a byte offset "inside" the range in
+        // the `TextRange::contains` sense. See `Span::new`'s doc comment.
         let range = TextRange::new(3, 9).expect("valid range");
 
         assert!(Span::new(range, Some(9)).is_ok());
