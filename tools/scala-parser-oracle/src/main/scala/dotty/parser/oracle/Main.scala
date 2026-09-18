@@ -30,6 +30,8 @@ object Main:
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
         fields += field("name", quote(ident.name.toString))
+      case select: dotty.tools.dotc.ast.Trees.Select[?] =>
+        fields += field("name", quote(select.name.toString))
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>

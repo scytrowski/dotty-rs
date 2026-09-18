@@ -21,4 +21,4 @@ with Rust source spans must convert them to UTF-8 byte offsets first.
 
 The initial fixtures cover the expression forms currently represented by the
 Rust smoke parser: identifiers, numeric and string literals, `this`,
-parentheses, the empty tuple, and a two-element tuple.
+parentheses, the empty tuple, a two-element tuple, and simple selections.

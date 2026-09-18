@@ -69,6 +69,12 @@ fn render_tree(
                 quote(names.resolve(ident.name.text()))
             ));
         }
+        TreeKind::Select(selection) => {
+            fields.push(format!(
+                "\"name\":{}",
+                quote(names.resolve(selection.name.text()))
+            ));
+        }
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
         }
@@ -90,6 +96,7 @@ fn render_tree(
 fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
     match kind {
         TreeKind::Ident(_) => "Ident",
+        TreeKind::Select(_) => "Select",
         TreeKind::This(_) => "This",
         TreeKind::Literal(_) => "Literal",
         TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
@@ -106,6 +113,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
 fn child_ids(kind: &TreeKind<Untyped>) -> Vec<TreeId<Untyped>> {
     match kind {
         TreeKind::This(_) => Vec::new(),
+        TreeKind::Select(selection) => vec![selection.qualifier],
         TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => vec![parens.inner],
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => tuple.elements.clone(),
         _ => Vec::new(),

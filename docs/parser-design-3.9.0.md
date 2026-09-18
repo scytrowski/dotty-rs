@@ -110,6 +110,7 @@ integer, long, decimal, exponent, float, and double literals
 string literals
 true, false, null, this
 (expr), (), and (a, b, ...)
+simple selections such as `foo.bar`
 ```
 
 The smoke grammar is plumbing coverage, not a substitute for the Scala

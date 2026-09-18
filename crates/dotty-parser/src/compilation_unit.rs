@@ -1,5 +1,5 @@
 use dotty_core::ast::{
-    Block, Ident, Literal, NumberKind, NumberLiteral, Parens, This, Tuple, UntypedNode,
+    Block, Ident, Literal, NumberKind, NumberLiteral, Parens, Select, This, Tuple, UntypedNode,
 };
 use dotty_core::{
     AstArena, Constant, HardKeyword, Punctuation, SourceId, SourceText, TokenKind, TokenSource,
@@ -91,7 +91,7 @@ where
     pub(crate) fn parse_smoke_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
 
-        match self.current().kind {
+        let tree = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let Ok(name) = self.intern_current_term_name() else {
                     return self.unexpected_expression();
@@ -126,7 +126,42 @@ where
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             _ => self.unexpected_expression(),
+        };
+
+        self.parse_select_suffix(mark, tree)
+    }
+
+    fn parse_select_suffix(
+        &mut self,
+        mark: crate::Mark,
+        mut qualifier: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        while self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+            let name = match self.current().kind {
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                    match self.intern_current_term_name() {
+                        Ok(name) => name,
+                        Err(_) => return self.unexpected_expression(),
+                    }
+                }
+                _ => {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected an identifier after `.`",
+                    );
+                    return qualifier;
+                }
+            };
+            self.advance();
+            qualifier = self.alloc_from(
+                mark,
+                TreeKind::Select(Select {
+                    qualifier,
+                    name: *name.as_name(),
+                }),
+            );
         }
+        qualifier
     }
 
     fn parse_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -569,6 +604,34 @@ mod tests {
             parser.ast().get(elements[1]).kind,
             TreeKind::Ident(_)
         ));
+    }
+
+    #[test]
+    fn parses_a_simple_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo.bar",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let (name, qualifier) = match parser.ast().get(id).kind {
+            TreeKind::Select(selection) => (selection.name, selection.qualifier),
+            _ => panic!("expected selection tree"),
+        };
+        let qualifier_is_ident = matches!(parser.ast().get(qualifier).kind, TreeKind::Ident(_));
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+
+        assert_eq!(names.resolve(name.text()), "bar");
+        assert!(qualifier_is_ident);
     }
 
     #[test]
