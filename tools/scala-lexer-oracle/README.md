@@ -70,3 +70,19 @@ It covers the Scala sources of the lexer oracle itself and the local
 `tasty-baseline` tool. The checked-in fixture directory remains the focused
 compatibility matrix; the real-source corpus is a separate smoke test for
 tokenization of larger, naturally evolving Scala files.
+
+## Manual CI compatibility check
+
+The GitHub Actions workflow
+`.github/workflows/lexer-compatibility.yml` is manual-only, matching the
+expensive TASTy compatibility workflow. Run it from the Actions tab and choose
+one of these corpora:
+
+- `fixtures` runs the focused Scala 3.9.0 compatibility matrix;
+- `source-corpus` runs the larger real-source smoke corpus;
+- `all` runs both checks.
+
+The workflow provisions JDK 25, SBT, and Rust, runs the Python normalization
+tests, and then invokes the same comparison scripts documented above. Local
+SDKMAN initialization remains supported, but CI uses the SBT executable
+provided by the workflow setup.

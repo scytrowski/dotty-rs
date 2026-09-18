@@ -30,9 +30,11 @@ for fixture in "${fixtures[@]}"; do
 
   if ! (
     cd "$script_dir"
-    set +u
-    source "${HOME}/.sdkman/bin/sdkman-init.sh"
-    set -u
+    if [[ -f "${HOME}/.sdkman/bin/sdkman-init.sh" ]]; then
+      set +u
+      source "${HOME}/.sdkman/bin/sdkman-init.sh"
+      set -u
+    fi
     sbt --error "run $fixture"
   ) >"$oracle_output" 2>&1; then
     cat "$oracle_output" >&2
@@ -41,7 +43,7 @@ for fixture in "${fixtures[@]}"; do
 
   if ! (
     cd "$repo_dir"
-    cargo run -q -p dotty-lexer --example dump -- "$fixture"
+    cargo run -q -p dotty-lexer --locked --example dump -- "$fixture"
   ) >"$rust_output"; then
     cat "$rust_output" >&2
     exit 1
