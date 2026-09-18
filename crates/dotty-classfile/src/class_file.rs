@@ -41,8 +41,24 @@ impl From<ReadError> for ClassFileHeaderError {
     }
 }
 
+/// The lowest `major_version` the JVMS has ever defined (JDK 1.0.2;
+/// `docs/classfile-format-jdk25.md` §2.1).
+pub const MIN_MAJOR_VERSION: u16 = 45;
+
+/// This project's compatibility ceiling: JDK 25, the version
+/// `docs/classfile-format-jdk25.md` is written against. A `major_version`
+/// above this is a JDK newer than this decoder has been validated
+/// against, not necessarily an invalid file.
+pub const MAX_MAJOR_VERSION: u16 = 69;
+
+/// The `minor_version` that marks a class as compiled against **preview
+/// features** of its major version (JVMS §4.1, `major_version >= 56`).
+/// Only the exact JDK that introduced those preview features can load
+/// such a class; this decoder never can, since it has no notion of
+/// "preview features enabled".
+pub const PREVIEW_MINOR_VERSION: u16 = 0xFFFF;
+
 /// The `minor_version`/`major_version` pair of a class file (JVMS §4.1).
-/// Compatibility-range checks land alongside the header decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClassFileVersion {
     pub major: u16,
@@ -65,6 +81,37 @@ impl ClassFileVersion {
         let major = reader.read_u16()?;
 
         Ok(Self { major, minor })
+    }
+
+    /// Whether this decoder can safely give this version's class file a
+    /// semantic reading, per `docs/classfile-format-jdk25.md` §2.1's
+    /// compatible-range rules:
+    ///
+    /// - `major_version` must fall within the historically valid,
+    ///   JDK-25-or-below range (`MIN_MAJOR_VERSION..=MAX_MAJOR_VERSION`);
+    /// - `minor_version` must not be [`PREVIEW_MINOR_VERSION`] (this
+    ///   decoder never has preview features enabled for any major
+    ///   version, so a preview class is always incompatible);
+    /// - for `major_version >= 56` (JDK 12+), `minor_version` must be `0`
+    ///   (the only other value the JVMS allows there is
+    ///   `PREVIEW_MINOR_VERSION`, already rejected above).
+    pub fn is_compatible(&self) -> bool {
+        if !(MIN_MAJOR_VERSION..=MAX_MAJOR_VERSION).contains(&self.major) {
+            return false;
+        }
+        if self.minor == PREVIEW_MINOR_VERSION {
+            return false;
+        }
+        if self.major >= 56 && self.minor != 0 {
+            return false;
+        }
+        true
+    }
+}
+
+impl fmt::Display for ClassFileVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}", self.major, self.minor)
     }
 }
 
@@ -486,5 +533,92 @@ mod tests {
                 remaining: 1,
             }))
         );
+    }
+
+    #[test]
+    fn a_jdk_25_version_is_compatible() {
+        assert!(
+            ClassFileVersion {
+                major: 69,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn the_oldest_historical_version_is_compatible() {
+        assert!(
+            ClassFileVersion {
+                major: 45,
+                minor: 3
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_major_version_below_the_historical_minimum_is_incompatible() {
+        assert!(
+            !ClassFileVersion {
+                major: 44,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_major_version_above_the_jdk_25_ceiling_is_incompatible() {
+        assert!(
+            !ClassFileVersion {
+                major: 70,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_preview_minor_version_is_incompatible() {
+        assert!(
+            !ClassFileVersion {
+                major: 69,
+                minor: PREVIEW_MINOR_VERSION,
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_nonzero_non_preview_minor_version_is_incompatible_from_jdk_12_onward() {
+        assert!(
+            !ClassFileVersion {
+                major: 56,
+                minor: 1
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn any_minor_version_is_compatible_before_jdk_12() {
+        assert!(
+            ClassFileVersion {
+                major: 55,
+                minor: 1234
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn version_displays_as_major_dot_minor() {
+        let version = ClassFileVersion {
+            major: 69,
+            minor: 0,
+        };
+
+        assert_eq!(version.to_string(), "69.0");
     }
 }

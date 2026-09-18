@@ -14,3 +14,6 @@ pub use dotty_classfile::classfile;
 /// types, and phase-indexed trees) for the source parser, classfile loader,
 /// TASTy unpickler, and namer/typer.
 pub use dotty_core::core;
+
+/// Classpath loading APIs, unifying TASTy and class file entries.
+pub use dotty_classloader::classloader;

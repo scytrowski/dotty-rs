@@ -1,5 +1,19 @@
 //! Lazy symbol completion, modeled from day one so the namer/classloader can
 //! defer computing a symbol's type without a completer engine existing yet.
+//!
+//! `CompletionId`'s constructor stays `pub(crate)`, unlike
+//! `ClassfileOriginId`/`TastyOriginId` (see [`super::OriginTable`]): no
+//! completer engine exists yet to resolve a `Deferred` back to a
+//! `Complete`, so handing out real `CompletionId`s today would let external
+//! code create completions that can never complete. `dotty-classloader`'s
+//! first migration onto this model uses only `Missing -> Complete`
+//! (`Symbol` enters with `SymbolInfo::Missing`, then the loader eagerly
+//! resolves it to `SymbolInfo::Complete(TypeId)` once its members/parents
+//! are known — see `docs/classloader.md`'s enter-before-complete section).
+//! `Deferred` is not removed and this module's shape does not change when a
+//! real completer engine lands; only that engine gets to mint
+//! `CompletionId`s, the same controlled-front-door pattern `OriginTable`
+//! already uses.
 
 use crate::ids::{CompletionId, TypeId};
 
