@@ -1712,6 +1712,59 @@ mod tests {
     }
 
     #[test]
+    fn opens_and_closes_an_indentation_region_after_assignment() {
+        assert_eq!(
+            kinds("val assigned =\n  value\nafter_assignment"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Val),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_and_closes_an_indentation_region_after_a_for_arrow() {
+        assert_eq!(
+            kinds("for item <-\n  items\nyield item"),
+            vec![
+                TokenKind::Keyword(HardKeyword::For),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Keyword(HardKeyword::Yield),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn opens_and_closes_an_indentation_region_after_a_standalone_operator() {
+        assert_eq!(
+            kinds("value =\n  next_value\nafter_expression"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn closes_a_then_region_without_a_separator_before_else() {
         assert_eq!(
             kinds("if condition then\n  first()\nelse\n  second()\nafter()"),
