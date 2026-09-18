@@ -12,6 +12,7 @@ members = [
     "crates/dotty-core",
     "crates/dotty-classloader",
     "crates/dotty-parser",
+    "tools/parser-smoke-dump",
 ]
 resolver = "3"
 

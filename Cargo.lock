@@ -45,6 +45,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotty-parser-smoke-dump"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "dotty-lexer",
+ "dotty-parser",
+]
+
+[[package]]
 name = "dotty-tasty"
 version = "0.1.0"
 dependencies = [

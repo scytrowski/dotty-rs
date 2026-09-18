@@ -21,7 +21,10 @@ object Main:
 
   private def render(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
     val fields = collection.mutable.ArrayBuffer.empty[String]
-    fields += field("kind", quote(tree.getClass.getSimpleName.stripSuffix("$")))
+    val normalizedKind = tree match
+      case tuple: dotty.tools.dotc.ast.untpd.Tuple if childTrees(tuple).isEmpty => "Literal"
+      case _ => tree.getClass.getSimpleName.stripSuffix("$")
+    fields += field("kind", quote(normalizedKind))
     fields += field("span", span(tree))
 
     tree match
@@ -29,6 +32,10 @@ object Main:
         fields += field("name", quote(ident.name.toString))
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
+      case number: dotty.tools.dotc.ast.untpd.Number =>
+        fields += field("literal", quote(slice(number, source)))
+      case tuple: dotty.tools.dotc.ast.untpd.Tuple if childTrees(tuple).isEmpty =>
+        fields += field("literal", quote(slice(tuple, source)))
       case _ =>
 
     val children = childTrees(tree).map(child => render(child, source)).mkString("[", ",", "]")
@@ -37,7 +44,8 @@ object Main:
 
   private def childTrees(tree: dotty.tools.dotc.ast.Trees.Tree[?]): List[dotty.tools.dotc.ast.Trees.Tree[?]] =
     def collect(value: Any): List[dotty.tools.dotc.ast.Trees.Tree[?]] = value match
-      case child: dotty.tools.dotc.ast.Trees.Tree[?] => child :: Nil
+      case child: dotty.tools.dotc.ast.Trees.Tree[?] if child.span.exists => child :: Nil
+      case _: dotty.tools.dotc.ast.Trees.Tree[?] => Nil
       case values: Iterable[?] => values.toList.flatMap(collect)
       case _ => Nil
 

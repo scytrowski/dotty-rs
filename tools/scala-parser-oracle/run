@@ -11,9 +11,13 @@ if [[ -f "${HOME}/.sdkman/bin/sdkman-init.sh" ]]; then
 fi
 
 temporary_source=''
+sbt_output=''
 cleanup() {
   if [[ -n "${temporary_source}" ]]; then
     rm -f -- "${temporary_source}"
+  fi
+  if [[ -n "${sbt_output}" ]]; then
+    rm -f -- "${sbt_output}"
   fi
 }
 trap cleanup EXIT
@@ -40,4 +44,16 @@ if ! command -v sbt >/dev/null 2>&1; then
 fi
 
 cd "${script_dir}"
-sbt --error "run ${source_path}"
+sbt_output=$(mktemp "${TMPDIR:-/tmp}/scala-parser-oracle.XXXXXX.log")
+if ! sbt --error "run ${source_path}" >"${sbt_output}" 2>&1; then
+  cat "${sbt_output}" >&2
+  exit 1
+fi
+
+json=$(grep '^{' "${sbt_output}" | tail -n 1 || true)
+if [[ -z "${json}" ]]; then
+  cat "${sbt_output}" >&2
+  echo "scala-parser-oracle did not produce JSON" >&2
+  exit 1
+fi
+printf '%s\n' "${json}"
