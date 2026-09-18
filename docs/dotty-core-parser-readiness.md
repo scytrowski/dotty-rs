@@ -44,6 +44,7 @@ Parens, Tuple,
 ForYield, ForDo, GenFrom, GenAlias,
 PatDef, ExtensionMethods, InterpolatedString,
 ContextBounds, NumberLiteral, Throw,
+ParsedTry,
 Derived
 ```
 
@@ -81,7 +82,7 @@ untyped template metadata, not to an out-of-band tree convention.
 | `Number` / `NumberKind` | `UntypedNode::Number(NumberLiteral)` | REPRESENT | Exact spelling is retained through `NameId`. The parser contract must document whether numeric kind comes from the token stream or must be added to `NumberLiteral`; it must not rely on semantic numeric conversion. |
 | `Throw` | `UntypedNode::Throw` | REPRESENT | The parser emits a distinct throw expression. |
 | `ErrorNode` (local recovery placeholder) | None | REPRESENT | Required for parser recovery. It remains untyped-only, carries only a small kind enum, and keeps diagnostics outside the AST. |
-| `ParsedTry` | None; only shared `Try` exists | REPRESENT | Required to preserve a catch handler that is either an expression or case clause before conversion to `Vec<CaseDef>`. |
+| `ParsedTry` | `UntypedNode::ParsedTry` | REPRESENT | Preserves a catch handler that is either an expression or case clause before conversion to `Vec<CaseDef>`. |
 | `DerivingTemplate` | `Template` plus `UntypedNode::Derived` | REPRESENT | Use phase-indexed `UntypedTemplateMetadata` containing `derives`; do not copy Dotty's subclass or keep an unattached `Derived` node. |
 | `UseRef` | None | REPRESENT | Store `reference` and `initially` in untyped template metadata. The `initially` bit is parser information and must not be dropped. |
 | `ImportSelector` | Phase-generic `ImportSelector<P>` | REPRESENT | The local representation intentionally uses `TreeId<P>` to avoid cross-arena references. It preserves parser data even though Dotty keeps selectors untyped-only. |
@@ -100,14 +101,12 @@ untyped template metadata, not to an out-of-band tree convention.
 
 ## Findings requiring follow-up
 
-The audit produces four concrete follow-up items before the parser starts:
+The audit produces the following concrete follow-up items before the parser
+starts:
 
 1. Add a phase-indexed template metadata slot. For `Untyped`, the metadata
    should retain `derives` and `uses`; for `Typed`, it should be `()`.
-2. Add an untyped `ParsedTry` representation. The existing shared `Try` is
-   the later lowered/semantic form and must remain unchanged.
-3. Add an untyped recovery node with no diagnostic text or `TypeId`.
-4. Add the smallest representations for `ContextBoundTypeTree` and
+2. Add the smallest representations for `ContextBoundTypeTree` and
    `FunctionWithMods`, or explicitly narrow the parser dialect so those forms
    are rejected. Silent loss is not an acceptable option.
 

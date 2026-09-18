@@ -163,6 +163,18 @@ pub struct Throw {
     pub expr: TreeId<Untyped>,
 }
 
+/// `try expr` with the parser's catch handler still intact.
+///
+/// The handler may be a single catch expression or a case clause. Converting
+/// it to the shared `Try` node's `Vec<CaseDef>` belongs to a later lowering
+/// step, not to source parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParsedTry {
+    pub expr: TreeId<Untyped>,
+    pub handler: Option<TreeId<Untyped>>,
+    pub finalizer: Option<TreeId<Untyped>>,
+}
+
 /// Surface-syntax-only constructs. This set mirrors Dotty's actual
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +210,8 @@ pub enum UntypedNode {
     Number(NumberLiteral),
 
     Throw(Throw),
+
+    ParsedTry(ParsedTry),
 
     /// A `derives` clause on a class/trait/enum `Template`. Real Dotty drops
     /// this after typing (`Template.derived` is always empty except in the
@@ -238,6 +252,55 @@ mod tests {
                 kind: ErrorNodeKind::UnexpectedToken,
             })
         );
+    }
+
+    #[test]
+    fn parsed_try_preserves_absent_handler_and_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: None,
+            finalizer: None,
+        };
+
+        assert_eq!(parsed_try.expr, tree_id(1));
+        assert_eq!(parsed_try.handler, None);
+        assert_eq!(parsed_try.finalizer, None);
+    }
+
+    #[test]
+    fn parsed_try_preserves_a_handler_without_a_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: Some(tree_id(2)),
+            finalizer: None,
+        };
+
+        assert_eq!(parsed_try.handler, Some(tree_id(2)));
+        assert_eq!(parsed_try.finalizer, None);
+    }
+
+    #[test]
+    fn parsed_try_preserves_a_finalizer_without_a_handler() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: None,
+            finalizer: Some(tree_id(3)),
+        };
+
+        assert_eq!(parsed_try.handler, None);
+        assert_eq!(parsed_try.finalizer, Some(tree_id(3)));
+    }
+
+    #[test]
+    fn parsed_try_preserves_both_handler_and_finalizer() {
+        let parsed_try = ParsedTry {
+            expr: tree_id(1),
+            handler: Some(tree_id(2)),
+            finalizer: Some(tree_id(3)),
+        };
+
+        assert_eq!(parsed_try.handler, Some(tree_id(2)));
+        assert_eq!(parsed_try.finalizer, Some(tree_id(3)));
     }
 
     #[test]

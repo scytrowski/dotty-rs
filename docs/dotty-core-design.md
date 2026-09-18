@@ -752,6 +752,8 @@ pub enum UntypedNode {
 
     Throw(Throw),
 
+    ParsedTry(ParsedTry),
+
     /// A `derives` clause on a class/trait/enum `Template`. See the
     /// `Template` audit above: real Dotty drops this after typing, so it
     /// belongs here, not on the shared `Template<P>` node.
@@ -760,9 +762,8 @@ pub enum UntypedNode {
 ```
 
 This is the foundation subset of Dotty's actual `untpd`-only node types. It
-does not yet claim complete parser coverage: `ParsedTry`,
-`ContextBoundTypeTree`, `FunctionWithMods`, and `UseRef` are among the
-parser-facing gaps recorded in
+does not yet claim complete parser coverage: `ContextBoundTypeTree`,
+`FunctionWithMods`, and `UseRef` are among the parser-facing gaps recorded in
 [`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md).
 
 ### `ast/typed.rs`
