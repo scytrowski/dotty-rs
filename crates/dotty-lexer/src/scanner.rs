@@ -308,7 +308,6 @@ fn build_tokens(
 
     fuse_case_declarations(source, &mut tokens)?;
     classify_end_markers(source, &mut tokens);
-    insert_end_marker_separators(source, &mut tokens)?;
 
     Ok(tokens)
 }
@@ -472,6 +471,8 @@ fn can_end_statement(kind: Option<TokenKind>) -> bool {
                         | HardKeyword::True
                         | HardKeyword::False
                         | HardKeyword::Type
+                        | HardKeyword::Return
+                        | HardKeyword::Given
                         | HardKeyword::End
                 )
                 | TokenKind::EndMarker
@@ -501,7 +502,11 @@ fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
     matches!(
         kind,
         RawTokenKind::Keyword(
-            HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally | HardKeyword::Yield
+            HardKeyword::Then
+                | HardKeyword::Else
+                | HardKeyword::Catch
+                | HardKeyword::Finally
+                | HardKeyword::Yield
         )
     )
 }
@@ -563,10 +568,6 @@ fn next_real_token(tokens: &[Token], index: usize) -> Option<&Token> {
     tokens[index + 1..]
         .iter()
         .find(|token| !is_layout_token(token.kind))
-}
-
-fn next_real_token_index(tokens: &[Token], index: usize) -> Option<usize> {
-    (index + 1..tokens.len()).find(|&candidate| !is_layout_token(tokens[candidate].kind))
 }
 
 fn fuse_case_declarations(source: &str, tokens: &mut Vec<Token>) -> Result<(), TextRangeError> {
@@ -634,83 +635,6 @@ fn classify_end_markers(source: &str, tokens: &mut [Token]) {
             TokenKind::Identifier
         };
     }
-}
-
-fn insert_end_marker_separators(
-    source: &str,
-    tokens: &mut Vec<Token>,
-) -> Result<(), TextRangeError> {
-    let mut index = 0;
-    while index < tokens.len() {
-        if tokens[index].kind != TokenKind::EndMarker {
-            index += 1;
-            continue;
-        }
-
-        let Some(target_index) = next_real_token_index(tokens, index) else {
-            index += 1;
-            continue;
-        };
-        if !end_marker_can_end_statement(tokens[target_index].kind) {
-            index += 1;
-            continue;
-        }
-        let Some(following_index) = next_real_token_index(tokens, target_index) else {
-            index += 1;
-            continue;
-        };
-        let following = &tokens[following_index];
-        if following.kind == TokenKind::Eof
-            || !can_start_statement_token(following.kind)
-            || !has_source_line_break(
-                source,
-                tokens[target_index].span.end(),
-                following.span.start(),
-            )
-        {
-            index += 1;
-            continue;
-        }
-
-        let target_end = tokens[target_index].span.end();
-        let separator_kind =
-            if count_line_breaks(&source[target_end as usize..following.span.start() as usize]) > 1
-            {
-                TokenKind::Newlines
-            } else {
-                TokenKind::Newline
-            };
-        tokens.insert(
-            following_index,
-            Token::new(
-                separator_kind,
-                TextRange::new(target_end, following.span.start())?,
-            ),
-        );
-        index = following_index + 1;
-    }
-    Ok(())
-}
-
-fn can_start_statement_token(kind: TokenKind) -> bool {
-    !matches!(
-        kind,
-        TokenKind::Error
-            | TokenKind::Eof
-            | TokenKind::Operator
-            | TokenKind::Punctuation(
-                Punctuation::Comma
-                    | Punctuation::Semicolon
-                    | Punctuation::Dot
-                    | Punctuation::RightParen
-                    | Punctuation::RightBracket
-                    | Punctuation::RightBrace
-            )
-    )
-}
-
-fn end_marker_can_end_statement(kind: TokenKind) -> bool {
-    matches!(kind, TokenKind::Keyword(HardKeyword::Given))
 }
 
 fn next_real_token_after<'tokens>(
@@ -1411,6 +1335,45 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Type),
                 TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_return() {
+        assert_eq!(
+            kinds("return\nnext"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Return),
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_standalone_given() {
+        assert_eq!(
+            kinds("given\nnext"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Given),
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn suppresses_a_separator_before_then_after_a_blank_line() {
+        assert_eq!(
+            kinds("value\n\nthen\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]

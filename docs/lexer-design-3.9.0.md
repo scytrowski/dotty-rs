@@ -62,6 +62,8 @@ Implementation status on the current lexer branch:
   `else`, `match`, `try`, and `do`;
 - branch transitions through `else`, `catch`, `finally`, and `yield` close the active
   body region without inserting a statement separator before the clause;
+- continuation clauses such as `then` suppress inferred separators even after
+  blank lines;
 - parser-observed colon events now reclassify `COLONop`/`COLONfollow` as
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
   scanner event contract;
