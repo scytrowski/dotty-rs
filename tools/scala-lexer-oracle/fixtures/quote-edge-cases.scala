@@ -1,0 +1,10 @@
+val termQuote = '{ 1 + 2 }
+val typeQuote = '[List[Int]]
+val nestedTermQuote = '{ '{ value } }
+val legacyQualified = 'name.member
+val legacyUnicode = 'λ
+val trailingQuote = value'
+val operatorQuote = +'
+val quotedLegacy = 'name'
+val adjacentQuotes = '''value
+val spliceQuote = '{ ${value} }

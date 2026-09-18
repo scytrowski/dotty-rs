@@ -733,13 +733,16 @@ impl<'source> RawLexer<'source> {
             lookahead += 1;
         }
 
-        self.cursor.peek_nth(lookahead) != Some('\'')
+        let has_additional_identifier_start = (2..lookahead)
+            .any(|index| self.cursor.peek_nth(index).is_some_and(is_identifier_start));
+        self.cursor.peek_nth(lookahead) != Some('\'') || has_additional_identifier_start
     }
 
     fn looks_like_char_literal(&self) -> bool {
         match self.cursor.peek_nth(1) {
             Some('\\' | '\'') => true,
             Some(character) if is_identifier_start(character) => true,
+            Some('\n' | '\r') => true,
             Some(character) if character.is_whitespace() => false,
             Some(character) if is_operator_character(character) => {
                 self.cursor.peek_nth(2) == Some('\'')
@@ -2119,6 +2122,23 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_a_legacy_quoted_identifier_with_a_trailing_quote() {
+        let (items, diagnostics) = scan("'name'");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::QuoteId, 0, 5),
+                token(RawTokenKind::Error, 5, 6),
+                token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
+        assert!(diagnostics[0].message().contains("unterminated character"));
+    }
+
+    #[test]
     fn recognizes_a_bare_quote_after_an_identifier() {
         let (items, diagnostics) = scan("x' = 1");
 
@@ -2135,6 +2155,66 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_an_unclosed_character_literal_after_an_identifier_at_line_end() {
+        let source = "value'\nnext";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 5),
+                token(RawTokenKind::Error, 5, 6),
+                trivia(TriviaKind::Newline, 6, 7),
+                token(RawTokenKind::Identifier, 7, 11),
+                token(RawTokenKind::Eof, 11, 11),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
+        assert!(diagnostics[0].message().contains("unterminated character"));
+    }
+
+    #[test]
+    fn recovers_an_unclosed_character_literal_after_an_operator_at_line_end() {
+        let source = "+'\nnext";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Operator, 0, 1),
+                token(RawTokenKind::Error, 1, 2),
+                trivia(TriviaKind::Newline, 2, 3),
+                token(RawTokenKind::Identifier, 3, 7),
+                token(RawTokenKind::Eof, 7, 7),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 2).unwrap());
+        assert!(diagnostics[0].message().contains("unterminated character"));
+    }
+
+    #[test]
+    fn recovers_a_trailing_quote_after_a_legacy_identifier_at_line_end() {
+        let source = "'name'\nnext";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::QuoteId, 0, 5),
+                token(RawTokenKind::Error, 5, 6),
+                trivia(TriviaKind::Newline, 6, 7),
+                token(RawTokenKind::Identifier, 7, 11),
+                token(RawTokenKind::Eof, 11, 11),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
+        assert!(diagnostics[0].message().contains("unterminated character"));
     }
 
     #[test]
@@ -2895,7 +2975,7 @@ mod tests {
 
     #[test]
     fn diagnoses_empty_invalid_and_unterminated_character_literals() {
-        let (items, diagnostics) = scan("'' 'ab' '\\q' '");
+        let (items, diagnostics) = scan("'' '\\q' '");
         let error_count = items
             .iter()
             .filter(|item| {
@@ -2909,8 +2989,8 @@ mod tests {
             })
             .count();
 
-        assert_eq!(error_count, 4);
-        assert_eq!(diagnostics.len(), 4);
+        assert_eq!(error_count, 3);
+        assert_eq!(diagnostics.len(), 3);
     }
 
     #[test]

@@ -83,9 +83,10 @@ Implementation status on the current lexer branch:
   transitions preserve the scanner's exact `INDENT`/`OUTDENT`/`NEWLINE` order;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
-  `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
-  plus `{` token sequence; a bare apostrophe that is not a character literal
-  is emitted as `Quote`;
+  `QuoteId`, including adjacent quote-id forms and the Scala recovery boundary
+  for trailing apostrophes; splice syntax remains the `$` plus `{` token
+  sequence; a bare apostrophe that is not a character literal is emitted as
+  `Quote`;
 - escape handling accepts repeated and uppercase Unicode prefixes, preserves
   recoverable string tokens for incomplete escapes, and reports malformed
   escapes without losing the remainder of the source;
@@ -525,7 +526,8 @@ closures remain to be refined.
 ### Increment 9 — Quotes, legacy syntax, and XML
 
 The current implementation covers term/type quote markers, legacy quoted
-identifiers, and their interaction with character literals. It also recognizes
+identifiers, and their interaction with character literals, including
+trailing-apostrophe recovery at line boundaries. It also recognizes
 the Scala `XMLSTART` entry point, preserves XML's greedy tag operators, tracks
 opening and closing tag names, validates quoted and expression-valued
 attributes, isolates expression contents from attribute-list validation, and
