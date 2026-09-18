@@ -12,10 +12,6 @@
 //! (variance belongs to type-parameter completion), and the accessor roles
 //! `FIELDACCESSOR`, `CASEACCESSOR`, `PARAMSETTER`, `PARAMALIAS`,
 //! `HASDEFAULT`, `STABLE`. Annotations are not read here.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the enter pass once it exists")
-)]
 
 use dotty_core::names::Namespace;
 use dotty_core::symbols::{SymbolFlags, SymbolKind, Visibility};

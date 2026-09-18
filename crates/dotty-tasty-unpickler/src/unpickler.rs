@@ -2,11 +2,11 @@
 
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
-use dotty_tasty::tasty::{PACKAGE_TAG, RawNode, TastyFile};
+use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
+use crate::enter::AstView;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
-use crate::names::qualified_segments;
 use crate::packages::PackageRegistry;
 
 /// Interprets one TASTy file into a `SemanticStore`.
@@ -21,11 +21,11 @@ use crate::packages::PackageRegistry;
 /// unpickler enters one file: two files entered into one store each get their
 /// own symbols for a package they share.
 pub struct TastyUnpickler<'file, 'bytes, 'store> {
-    file: &'file TastyFile<'bytes>,
-    store: &'store mut SemanticStore,
-    origin: SymbolOrigin,
-    index: TastySemanticIndex,
-    packages: PackageRegistry,
+    pub(crate) file: &'file TastyFile<'bytes>,
+    pub(crate) store: &'store mut SemanticStore,
+    pub(crate) origin: SymbolOrigin,
+    pub(crate) index: TastySemanticIndex,
+    pub(crate) packages: PackageRegistry,
 }
 
 impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
@@ -62,32 +62,14 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// Malformed or unsupported input is a typed error; symbols entered
     /// before the failure stay in the store.
     pub fn enter_symbols(&mut self) -> Result<&TastySemanticIndex, UnpickleError> {
+        let ast = AstView::new(self.file)?;
         let roots = self.file.asts()?;
         for node in roots.iter() {
             if node.tag == PACKAGE_TAG {
-                self.enter_package(node)?;
+                let at = u32::try_from(node.offset).unwrap_or(u32::MAX);
+                self.enter_package(&ast, at)?;
             }
         }
         Ok(&self.index)
     }
-
-    fn enter_package(&mut self, node: &RawNode<'_>) -> Result<(), UnpickleError> {
-        let address = address_of(node);
-        let package = node.decode_package()?;
-        let path_name = package
-            .path_name()
-            .ok_or(UnpickleError::UnsupportedPackagePath { address })?;
-        let path = qualified_segments(self.file.names(), path_name)?;
-
-        let symbol = self
-            .packages
-            .enter(self.store, &mut self.index, self.origin, &path)?;
-        self.index.insert_symbol(address, symbol)
-    }
-}
-
-/// The AST address of a node. Addresses index a section that TASTy bounds to
-/// `u32`, so a larger offset can only mean a corrupt node.
-fn address_of(node: &RawNode<'_>) -> u32 {
-    u32::try_from(node.offset).unwrap_or(u32::MAX)
 }

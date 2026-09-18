@@ -33,6 +33,11 @@ pub enum UnpickleError {
     /// A `PACKAGE` node whose path is not a direct package reference
     /// (`TERMREFpkg`), which is the only form this unpickler reads.
     UnsupportedPackagePath { address: u32 },
+    /// No definition node exists at an address the tree walk expected one.
+    MissingDefinition { address: u32 },
+    /// The parameter nodes the AST index lists under a node do not match the
+    /// parameters its structural decoding produced.
+    ParameterMismatch { address: u32 },
 }
 
 impl fmt::Display for UnpickleError {
@@ -58,6 +63,13 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "package at address {address} has an unsupported path form"
             ),
+            Self::MissingDefinition { address } => {
+                write!(formatter, "no definition node at address {address}")
+            }
+            Self::ParameterMismatch { address } => write!(
+                formatter,
+                "parameters under the node at address {address} disagree with its decoded form"
+            ),
             Self::DuplicateScope { symbol } => write!(
                 formatter,
                 "a declaration scope was already entered for symbol {}",
@@ -77,7 +89,9 @@ impl std::error::Error for UnpickleError {
             | Self::InvalidNameReference { .. }
             | Self::UnsupportedName { .. }
             | Self::UnsupportedQualifiedModifier { .. }
-            | Self::UnsupportedPackagePath { .. } => None,
+            | Self::UnsupportedPackagePath { .. }
+            | Self::MissingDefinition { .. }
+            | Self::ParameterMismatch { .. } => None,
         }
     }
 }

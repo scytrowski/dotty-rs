@@ -128,6 +128,30 @@ parent's scope. The outermost package has no owner. Any other path form is
 `UnpickleError::UnsupportedPackagePath`. Package symbols are per unpickler;
 see issue #12 for sharing them between units.
 
+### Entering definitions
+
+The walk follows the AST address index, because only the index reports
+absolute addresses. Owners are known top-down, so a symbol is allocated after
+its owner. Each `TYPEDEF`, `VALDEF`, `DEFDEF`, `TYPEPARAM` and `PARAM` gets
+exactly one symbol, so the constructor's own copies of the class parameters
+are distinct symbols owned by `<init>`: the constructor's `x: A` refers to
+the constructor's `A` (`TYPEREFdirect` to its address), not to the class's.
+
+Only packages and classes own a declaration scope. A definition is declared
+in its owner's scope when it is a member of it: class members, the class's
+own type parameters, and constructor parameters that are members (`Field`).
+Method parameters, and a `private[this]` constructor parameter, are owned but
+not declared in any scope.
+
+The index's payload for a `TYPEPARAM`/`PARAM` node omits the parameter's
+name, so parameter names and modifiers come from the parent's structural
+decoding (`TemplateStructure`, `DefDefBody`) and are paired with the index's
+child addresses in wire order; a disagreement is
+`UnpickleError::ParameterMismatch`.
+
+Not entered: definitions inside method bodies, parameters of type-lambda
+aliases, and companion links.
+
 ## 5. Errors
 
 Malformed or unsupported TASTy input is reported as a typed `UnpickleError`.

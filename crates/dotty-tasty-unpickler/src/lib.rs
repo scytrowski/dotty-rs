@@ -10,8 +10,9 @@
 //! Only the building blocks exist so far: the error model, the address-keyed
 //! `TastySemanticIndex`, wire-name reading, and the pure mappings from
 //! definition syntax to symbol facts, and the first pass of `TastyUnpickler`,
-//! which so far enters package symbols only.
+//! which enters packages, classes, members and parameters.
 
+mod enter;
 mod error;
 mod index;
 mod mapping;
