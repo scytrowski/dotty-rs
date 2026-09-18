@@ -21,6 +21,15 @@ pub enum UnpickleError {
     /// A second declaration scope was entered for a symbol that already owns
     /// one.
     DuplicateScope { symbol: SymbolId },
+    /// A name reference does not resolve to a name-table entry, or resolves
+    /// through an unreasonably deep (possibly cyclic) chain of entries.
+    InvalidNameReference { reference: u32 },
+    /// A name-table entry with a tag this unpickler does not interpret.
+    UnsupportedName { reference: u32 },
+    /// A `private[X]` or `protected[X]` modifier. `dotty-core`'s `Visibility`
+    /// has no qualified-access variant yet, so it cannot be represented
+    /// faithfully.
+    UnsupportedQualifiedModifier { tag: u8 },
 }
 
 impl fmt::Display for UnpickleError {
@@ -31,6 +40,16 @@ impl fmt::Display for UnpickleError {
             Self::DuplicateDefinition { address } => write!(
                 formatter,
                 "a symbol was already entered for the definition at address {address}"
+            ),
+            Self::InvalidNameReference { reference } => {
+                write!(formatter, "invalid name reference {reference}")
+            }
+            Self::UnsupportedName { reference } => {
+                write!(formatter, "unsupported name entry at reference {reference}")
+            }
+            Self::UnsupportedQualifiedModifier { tag } => write!(
+                formatter,
+                "qualified access modifier (tag {tag}) has no visibility representation"
             ),
             Self::DuplicateScope { symbol } => write!(
                 formatter,
@@ -46,7 +65,11 @@ impl std::error::Error for UnpickleError {
         match self {
             Self::Tasty(error) => Some(error),
             Self::Ast(error) => Some(error),
-            Self::DuplicateDefinition { .. } | Self::DuplicateScope { .. } => None,
+            Self::DuplicateDefinition { .. }
+            | Self::DuplicateScope { .. }
+            | Self::InvalidNameReference { .. }
+            | Self::UnsupportedName { .. }
+            | Self::UnsupportedQualifiedModifier { .. } => None,
         }
     }
 }
