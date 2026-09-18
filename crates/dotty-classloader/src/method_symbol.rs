@@ -1,26 +1,25 @@
 use crate::annotation::SemanticAnnotation;
-use crate::semantic_type::SemanticMethodDescriptor;
 use dotty_classfile::access_flags::MethodAccessFlags;
 use dotty_classfile::descriptor::MethodDescriptor;
 use dotty_classfile::signature::MethodSignature;
 
-/// A loaded class's method: its name, access flags, descriptor,
-/// optional generic signature, and semantic (class-reference-resolved)
-/// descriptor (JVMS §4.6).
+/// A loaded class's method: its name, access flags, descriptor, and
+/// optional generic signature (JVMS §4.6).
 ///
 /// JVMS represents constructors and static initializers as ordinary
-/// methods (named `<init>` and `<clinit>` respectively), so this type
-/// covers "constructors" per `docs/classloader.md` §9 with no special
-/// casing.
+/// methods (named `<init>` and `<clinit>` respectively). `<init>` becomes
+/// a real `dotty-core` `Symbol` (`SymbolKind::Constructor`) in the owning
+/// class's declarations scope, findable by this same `name`; `<clinit>`
+/// does not (see `ClassLoader::enter_method`'s doc comment) and is only
+/// ever reachable through this sidecar type.
 ///
-/// `descriptor` is exactly what `dotty-classfile` already parses from
-/// the method's descriptor (JVMS §4.3.3) — a parameter or return type's
+/// `descriptor` is exactly what `dotty-classfile` already parses from the
+/// method's descriptor (JVMS §4.3.3) — a parameter or return type's
 /// `Object`/`Array` entry keeps its class name as an internal-form
-/// string, not a resolved [`crate::ClassRef`]. `semantic_descriptor` is
-/// the resolved counterpart, built by `ClassLoader`
-/// (`docs/classloader.md` §9, Milestone 6); kept alongside `descriptor`
-/// rather than replacing it, the same "attach without replacing"
-/// approach used for `signature` and for `FieldSymbol::semantic_type`.
+/// string. The resolved semantic descriptor is *not* duplicated here: for
+/// every method except `<clinit>`, it is a real `Type::Method` on that
+/// same real `Symbol`. This type stays purely JVM-facing sidecar
+/// metadata — see `docs/classloader.md`'s JVM metadata sidecar section.
 ///
 /// `signature` is `None` unless the method carries a `Signature`
 /// attribute (JVMS §4.7.9.1) — the common case for a non-generic method.
@@ -33,18 +32,15 @@ pub struct MethodSymbol {
     flags: MethodAccessFlags,
     descriptor: MethodDescriptor,
     signature: Option<MethodSignature>,
-    semantic_descriptor: SemanticMethodDescriptor,
     annotations: Vec<SemanticAnnotation>,
 }
 
 impl MethodSymbol {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         flags: MethodAccessFlags,
         descriptor: MethodDescriptor,
         signature: Option<MethodSignature>,
-        semantic_descriptor: SemanticMethodDescriptor,
         annotations: Vec<SemanticAnnotation>,
     ) -> Self {
         Self {
@@ -52,7 +48,6 @@ impl MethodSymbol {
             flags,
             descriptor,
             signature,
-            semantic_descriptor,
             annotations,
         }
     }
@@ -71,10 +66,6 @@ impl MethodSymbol {
 
     pub fn signature(&self) -> Option<&MethodSignature> {
         self.signature.as_ref()
-    }
-
-    pub fn semantic_descriptor(&self) -> &SemanticMethodDescriptor {
-        &self.semantic_descriptor
     }
 
     pub fn annotations(&self) -> &[SemanticAnnotation] {
@@ -97,10 +88,6 @@ mod tests {
             MethodAccessFlags(0x0001),
             descriptor.clone(),
             None,
-            SemanticMethodDescriptor {
-                parameters: vec![],
-                return_type: None,
-            },
             Vec::new(),
         );
 
@@ -108,8 +95,7 @@ mod tests {
         assert_eq!(symbol.flags(), MethodAccessFlags(0x0001));
         assert_eq!(symbol.descriptor(), &descriptor);
         assert_eq!(symbol.signature(), None);
-        assert!(symbol.semantic_descriptor().parameters.is_empty());
-        assert!(symbol.semantic_descriptor().return_type.is_none());
+        assert!(symbol.annotations().is_empty());
     }
 
     #[test]
@@ -133,56 +119,9 @@ mod tests {
                 return_type: Some(FieldType::Object("java/lang/Comparable".to_owned())),
             },
             Some(signature.clone()),
-            SemanticMethodDescriptor {
-                parameters: vec![],
-                return_type: Some(crate::semantic_type::SemanticFieldType::Object(
-                    crate::symbol::ClassRef::Unresolved(
-                        crate::binary_name::BinaryName::from_internal("java/lang/Comparable"),
-                    ),
-                )),
-            },
             Vec::new(),
         );
 
         assert_eq!(symbol.signature(), Some(&signature));
-    }
-
-    #[test]
-    fn exposes_its_semantic_descriptor() {
-        use crate::binary_name::BinaryName;
-        use crate::semantic_type::SemanticFieldType;
-        use crate::symbol::ClassRef;
-
-        let symbol = MethodSymbol::new(
-            "exchange".to_owned(),
-            MethodAccessFlags(0x0001),
-            MethodDescriptor {
-                parameters: vec![dotty_classfile::descriptor::FieldType::Object(
-                    "Pong".to_owned(),
-                )],
-                return_type: Some(dotty_classfile::descriptor::FieldType::Object(
-                    "Pong".to_owned(),
-                )),
-            },
-            None,
-            SemanticMethodDescriptor {
-                parameters: vec![SemanticFieldType::Object(ClassRef::Unresolved(
-                    BinaryName::from_internal("Pong"),
-                ))],
-                return_type: Some(SemanticFieldType::Object(ClassRef::Unresolved(
-                    BinaryName::from_internal("Pong"),
-                ))),
-            },
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            symbol.semantic_descriptor().parameters.as_slice(),
-            [SemanticFieldType::Object(ClassRef::Unresolved(name))] if name.as_internal() == "Pong"
-        ));
-        assert!(matches!(
-            &symbol.semantic_descriptor().return_type,
-            Some(SemanticFieldType::Object(ClassRef::Unresolved(name))) if name.as_internal() == "Pong"
-        ));
     }
 }

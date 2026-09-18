@@ -8,10 +8,9 @@ use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
 use crate::packages::PackageRegistry;
 use crate::record_component::RecordComponentSymbol;
 use crate::repository::{ClassEntry, ClassRepository};
-use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
-use dotty_classfile::access_flags::{ClassAccessFlags, FieldAccessFlags};
+use dotty_classfile::access_flags::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{
@@ -21,8 +20,9 @@ use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
 use dotty_core::{
-    ClassInfo, Definitions, Name, Namespace, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Type, TypeId, Visibility,
+    ClassInfo, Definitions, MethodKind, MethodParam, MethodType, Name, Namespace, Scope, ScopeId,
+    SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
+    SymbolOrigin, TermName, Type, TypeId, Visibility,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -443,7 +443,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let descriptor = method
                 .descriptor(&class_file.constant_pool)
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
-            let semantic_descriptor = self.resolve_semantic_method_descriptor(name, &descriptor)?;
             let signature = self.resolve_optional_signature(
                 name,
                 &method.attributes,
@@ -452,12 +451,36 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )?;
             let annotations =
                 self.resolve_annotations(name, &method.attributes, &class_file.constant_pool)?;
+
+            // `<clinit>` is a JVM static-initializer entry point, not a
+            // source-level member -- see `enter_method`'s doc comment.
+            if method_name != "<clinit>" {
+                let parameter_names = self.resolve_method_parameter_names(
+                    name,
+                    &method.attributes,
+                    &class_file.constant_pool,
+                )?;
+                let resolved_type = self.lower_method_descriptor(
+                    name,
+                    &descriptor,
+                    &parameter_names,
+                    method.access_flags.is_varargs(),
+                )?;
+                self.enter_method(
+                    class_symbol,
+                    declarations,
+                    &method_name,
+                    method.access_flags,
+                    resolved_type,
+                    origin,
+                );
+            }
+
             methods.push(MethodSymbol::new(
                 method_name,
                 method.access_flags,
                 descriptor,
                 signature,
-                semantic_descriptor,
                 annotations,
             ));
         }
@@ -807,59 +830,163 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })
     }
 
-    /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2), resolving
-    /// every `Object`/array-of-`Object` leaf into a [`SemanticFieldType::Object`]
-    /// via [`Self::resolve_member_class`]. Base types map straight
-    /// across; `Array` recurses into its component type.
-    fn resolve_semantic_field_type(
-        &mut self,
-        owner: &BinaryName,
-        field_type: &FieldType,
-    ) -> Result<SemanticFieldType, ClassLoadError> {
-        match field_type {
-            FieldType::Byte => Ok(SemanticFieldType::Byte),
-            FieldType::Char => Ok(SemanticFieldType::Char),
-            FieldType::Double => Ok(SemanticFieldType::Double),
-            FieldType::Float => Ok(SemanticFieldType::Float),
-            FieldType::Int => Ok(SemanticFieldType::Int),
-            FieldType::Long => Ok(SemanticFieldType::Long),
-            FieldType::Short => Ok(SemanticFieldType::Short),
-            FieldType::Boolean => Ok(SemanticFieldType::Boolean),
-            FieldType::Object(class_name) => {
-                let dependency = BinaryName::from_internal(class_name);
-                let symbol = self.resolve_member_class(owner, &dependency)?;
-                Ok(SemanticFieldType::Object(ClassRef::Resolved(symbol)))
-            }
-            FieldType::Array(component) => {
-                let resolved = self.resolve_semantic_field_type(owner, component)?;
-                Ok(SemanticFieldType::Array(Box::new(resolved)))
-            }
-        }
-    }
-
-    /// Walks an already-parsed [`MethodDescriptor`] (JVMS §4.3.3) the
-    /// same way [`Self::resolve_semantic_field_type`] walks a field's
-    /// type, applied to every parameter and the return type.
-    fn resolve_semantic_method_descriptor(
+    /// Walks an already-parsed [`MethodDescriptor`] (JVMS §4.3.3) into a
+    /// `Type::Method`'s `TypeId`, the same way [`Self::lower_field_type`]
+    /// walks a field's type: each parameter lowers via
+    /// [`Self::lower_field_type`], and a missing `return_type` (`void`)
+    /// lowers to [`Definitions::unit`]. `parameter_names[i]` (from a
+    /// `MethodParameters` attribute when present, see
+    /// [`Self::resolve_method_parameter_names`]) names parameter `i`; a
+    /// missing entry gets a stable synthetic `p{i}` name instead — a
+    /// method's semantic shape does not depend on debug/source metadata
+    /// existing. `varargs` marks the *last* parameter's
+    /// `MethodParam::varargs` (JVMS guarantees `ACC_VARARGS` only ever
+    /// applies to the last parameter), so `f(String... xs)` stays
+    /// distinguishable from `f(String[] xs)`.
+    fn lower_method_descriptor(
         &mut self,
         owner: &BinaryName,
         descriptor: &MethodDescriptor,
-    ) -> Result<SemanticMethodDescriptor, ClassLoadError> {
-        let mut parameters = Vec::with_capacity(descriptor.parameters.len());
-        for parameter in &descriptor.parameters {
-            parameters.push(self.resolve_semantic_field_type(owner, parameter)?);
+        parameter_names: &[Option<String>],
+        varargs: bool,
+    ) -> Result<TypeId, ClassLoadError> {
+        let last_index = descriptor.parameters.len().checked_sub(1);
+        let mut params = Vec::with_capacity(descriptor.parameters.len());
+        for (index, parameter) in descriptor.parameters.iter().enumerate() {
+            let ty = self.lower_field_type(owner, parameter)?;
+            let synthetic_name = format!("p{index}");
+            let param_name = parameter_names
+                .get(index)
+                .and_then(|name| name.as_deref())
+                .unwrap_or(&synthetic_name);
+            let text = self.store.names.intern(param_name);
+            params.push(MethodParam {
+                name: TermName::new(text),
+                ty,
+                erased: false,
+                varargs: varargs && Some(index) == last_index,
+            });
         }
 
-        let return_type = descriptor
-            .return_type
-            .as_ref()
-            .map(|field_type| self.resolve_semantic_field_type(owner, field_type))
-            .transpose()?;
+        let result = match &descriptor.return_type {
+            Some(field_type) => self.lower_field_type(owner, field_type)?,
+            None => self.definitions.unit,
+        };
 
-        Ok(SemanticMethodDescriptor {
-            parameters,
-            return_type,
-        })
+        Ok(self.store.types.alloc(Type::Method(MethodType {
+            params,
+            result,
+            kind: MethodKind::Plain,
+        })))
+    }
+
+    /// Looks for a `MethodParameters` attribute (JVMS §4.7.24) among
+    /// `attributes`. Each entry is `None` if its `name_index` is `0` (JVMS:
+    /// "no name") or the attribute is absent entirely — an empty
+    /// `Vec` when the attribute is missing, matching every other
+    /// `resolve_optional_*` helper's "not present" shape. Callers fall
+    /// back to a synthetic name for any index this returns `None` for or
+    /// does not cover.
+    fn resolve_method_parameter_names(
+        &self,
+        owner: &BinaryName,
+        attributes: &[Attribute<'_>],
+        constant_pool: &ConstantPool,
+    ) -> Result<Vec<Option<String>>, ClassLoadError> {
+        let entries = attributes.iter().find_map(|attribute| match attribute {
+            Attribute::MethodParameters(entries) => Some(entries),
+            _ => None,
+        });
+        let Some(entries) = entries else {
+            return Ok(Vec::new());
+        };
+
+        entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .name_index
+                    .map(|index| self.resolve_member_name(owner, constant_pool, index))
+                    .transpose()
+            })
+            .collect()
+    }
+
+    /// Allocates a method/constructor's `Symbol` and enters it into the
+    /// class's declarations scope by name — like a field, a method needs
+    /// no enter-before-complete staging, since its `Type::Method` is fully
+    /// known the moment its descriptor (and any class types it
+    /// references) resolves. `<clinit>` is deliberately never passed here
+    /// (see the call site): it is a JVM static-initializer entry point,
+    /// not a source-level member a Scala program could ever refer to by
+    /// name, so it stays metadata-only rather than getting a `Symbol`.
+    /// `<init>` becomes `SymbolKind::Constructor`; every other name
+    /// becomes `SymbolKind::Method`.
+    fn enter_method(
+        &mut self,
+        class_symbol: SymbolId,
+        declarations: ScopeId,
+        method_name: &str,
+        flags: MethodAccessFlags,
+        resolved_type: TypeId,
+        origin: SymbolOrigin,
+    ) {
+        let visibility = if flags.is_private() {
+            Visibility::Private
+        } else if flags.is_protected() {
+            Visibility::Protected
+        } else if flags.is_public() {
+            Visibility::Public
+        } else {
+            let owner = self
+                .store
+                .symbols
+                .get(class_symbol)
+                .owner
+                .expect("a loaded class always has a package owner");
+            Visibility::Package(owner)
+        };
+
+        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        if flags.is_static() {
+            symbol_flags = symbol_flags | SymbolFlags::STATIC;
+        }
+        if flags.is_final() {
+            symbol_flags = symbol_flags | SymbolFlags::FINAL;
+        }
+        if flags.is_abstract() {
+            symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
+        }
+        if flags.is_synthetic() {
+            symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
+        }
+
+        let kind = if method_name == "<init>" {
+            SymbolKind::Constructor
+        } else {
+            SymbolKind::Method
+        };
+
+        let text = self.store.names.intern(method_name);
+        let symbol_name = Name::new(text, Namespace::Term);
+
+        let method_symbol = self.store.symbols.alloc(Symbol {
+            name: symbol_name,
+            owner: Some(class_symbol),
+            kind,
+            flags: symbol_flags,
+            visibility,
+            info: SymbolInfo::Complete(resolved_type),
+            origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+
+        self.store
+            .scopes
+            .get_mut(declarations)
+            .enter(symbol_name, method_symbol);
     }
 
     /// Looks for a `Record` attribute (JVMS §4.7.30) — present only on
@@ -1175,24 +1302,24 @@ mod tests {
         *symbol
     }
 
-    /// The resolved `TypeId` of the field named `field_name`, looked up
-    /// through `class_symbol`'s declarations scope — the sole canonical
-    /// source for a class's members.
-    fn field_type_id(
+    /// The resolved `TypeId` of the field or method named `member_name`,
+    /// looked up through `class_symbol`'s declarations scope — the sole
+    /// canonical source for a class's members.
+    fn member_type_id(
         store: &mut SemanticStore,
         class_symbol: SymbolId,
-        field_name: &str,
+        member_name: &str,
     ) -> TypeId {
         let declarations = class_info(store, class_symbol).declarations;
-        let text = store.names.intern(field_name);
+        let text = store.names.intern(member_name);
         let name = Name::new(text, Namespace::Term);
-        let field_symbol = store
+        let member_symbol = store
             .scopes
             .get(declarations)
             .lookup(&name)
-            .unwrap_or_else(|| panic!("field {field_name} should be entered in the class scope"));
-        let SymbolInfo::Complete(type_id) = store.symbols.get(field_symbol).info else {
-            panic!("expected the field to have complete info");
+            .unwrap_or_else(|| panic!("{member_name} should be entered in the class scope"));
+        let SymbolInfo::Complete(type_id) = store.symbols.get(member_symbol).info else {
+            panic!("expected the member to have complete info");
         };
         type_id
     }
@@ -1461,11 +1588,11 @@ mod tests {
             );
         }
 
-        let answer_type = field_type_id(&mut store, symbol, "ANSWER");
+        let answer_type = member_type_id(&mut store, symbol, "ANSWER");
         let int_symbol = parent_symbol(&store, answer_type);
         assert_eq!(symbol_name(&store, int_symbol), "Int");
 
-        let greeting_type = field_type_id(&mut store, symbol, "GREETING");
+        let greeting_type = member_type_id(&mut store, symbol, "GREETING");
         let string_symbol = parent_symbol(&store, greeting_type);
         assert_eq!(symbol_name(&store, string_symbol), "String");
     }
@@ -1520,6 +1647,141 @@ mod tests {
         );
         assert!(method("computeAnswer").flags().is_private());
         assert!(method("computeAnswer").flags().is_static());
+    }
+
+    /// The same 3 methods as [`loads_a_real_fixtures_methods`], now
+    /// checked through the canonical path: real `dotty-core` `Symbol`s
+    /// entered into `PoolSample`'s declarations scope. `<init>` becomes a
+    /// `Constructor`; `run`/`computeAnswer` become plain `Method`s, with
+    /// `computeAnswer`'s `private static ()I` shape fully round-tripping
+    /// through `Type::Method`.
+    #[test]
+    fn enters_real_fixtures_methods_into_the_class_declarations_scope() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load");
+        drop(loader);
+
+        let declarations = class_info(&store, symbol).declarations;
+        let lookup = |store: &mut SemanticStore, method_name: &str| {
+            let text = store.names.intern(method_name);
+            let name = Name::new(text, Namespace::Term);
+            store
+                .scopes
+                .get(declarations)
+                .lookup(&name)
+                .unwrap_or_else(|| panic!("{method_name} should be entered in the class scope"))
+        };
+
+        let init_id = lookup(&mut store, "<init>");
+        assert_eq!(store.symbols.get(init_id).kind, SymbolKind::Constructor);
+
+        let run_id = lookup(&mut store, "run");
+        let run = store.symbols.get(run_id);
+        assert_eq!(run.kind, SymbolKind::Method);
+        assert_eq!(run.visibility, Visibility::Public);
+
+        let compute_answer_id = lookup(&mut store, "computeAnswer");
+        let compute_answer = store.symbols.get(compute_answer_id);
+        assert_eq!(compute_answer.kind, SymbolKind::Method);
+        assert_eq!(compute_answer.visibility, Visibility::Private);
+        assert!(compute_answer.flags.contains(SymbolFlags::STATIC));
+
+        let compute_answer_type = member_type_id(&mut store, symbol, "computeAnswer");
+        let Type::Method(descriptor) = store.types.get(compute_answer_type) else {
+            panic!("expected computeAnswer to be a Type::Method");
+        };
+        assert!(descriptor.params.is_empty());
+        let int_symbol = parent_symbol(&store, descriptor.result);
+        assert_eq!(symbol_name(&store, int_symbol), "Int");
+    }
+
+    /// A hand-built, minimal, synthetic class file with two methods:
+    /// `<clinit>()V` (a static initializer) and `normal()V`. `javac`
+    /// always emits `<clinit>` alongside real static field initializers,
+    /// but building it by hand keeps this test independent of exactly
+    /// which fixture happens to need one.
+    fn synthetic_class_with_a_static_initializer() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&[0x00, 0x06]); // constant_pool_count = 6
+        bytes.push(1); // #1 Utf8 "C"
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"C");
+        bytes.push(7); // #2 Class -> #1
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(1); // #3 Utf8 "<clinit>"
+        bytes.extend_from_slice(&8u16.to_be_bytes());
+        bytes.extend_from_slice(b"<clinit>");
+        bytes.push(1); // #4 Utf8 "()V"
+        bytes.extend_from_slice(&3u16.to_be_bytes());
+        bytes.extend_from_slice(b"()V");
+        bytes.push(1); // #5 Utf8 "normal"
+        bytes.extend_from_slice(&6u16.to_be_bytes());
+        bytes.extend_from_slice(b"normal");
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // fields_count = 0
+        bytes.extend_from_slice(&[0x00, 0x02]); // methods_count = 2
+        bytes.extend_from_slice(&[0x00, 0x08]); // <clinit> access_flags = ACC_STATIC
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // name_index = #3
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // descriptor_index = #4
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // normal access_flags = ACC_PUBLIC
+        bytes.extend_from_slice(&5u16.to_be_bytes()); // name_index = #5
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // descriptor_index = #4
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    #[test]
+    fn clinit_is_not_entered_into_the_class_declarations_scope() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_a_static_initializer(),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .expect("C should load");
+
+        let metadata = loader
+            .metadata(symbol)
+            .expect("C should have classfile metadata");
+        assert_eq!(
+            metadata.methods.len(),
+            2,
+            "<clinit> and normal should both be in the sidecar"
+        );
+        drop(loader);
+
+        let declarations = class_info(&store, symbol).declarations;
+        let clinit_text = store.names.intern("<clinit>");
+        let clinit_name = Name::new(clinit_text, Namespace::Term);
+        assert_eq!(
+            store.scopes.get(declarations).lookup(&clinit_name),
+            None,
+            "<clinit> should not be entered as a Symbol"
+        );
+
+        let normal_text = store.names.intern("normal");
+        let normal_name = Name::new(normal_text, Namespace::Term);
+        let normal_symbol = store
+            .scopes
+            .get(declarations)
+            .lookup(&normal_name)
+            .expect("normal should be entered as a Symbol");
+        assert_eq!(store.symbols.get(normal_symbol).kind, SymbolKind::Method);
     }
 
     /// Reads a fixture owned by this crate (as opposed to `fixture_bytes`,
@@ -2408,11 +2670,11 @@ mod tests {
             .expect("Ping should load despite the mutual field reference");
         drop(loader);
 
-        let ping_other_type = field_type_id(&mut store, ping, "other");
+        let ping_other_type = member_type_id(&mut store, ping, "other");
         let pong = parent_symbol(&store, ping_other_type);
         assert_eq!(symbol_name(&store, pong), "Pong");
 
-        let pong_other_type = field_type_id(&mut store, pong, "other");
+        let pong_other_type = member_type_id(&mut store, pong, "other");
         let ping_again = parent_symbol(&store, pong_other_type);
         assert_eq!(symbol_name(&store, ping_again), "Ping");
     }
@@ -2448,7 +2710,7 @@ mod tests {
             .expect("Ping should load");
         drop(loader);
 
-        let others_type = field_type_id(&mut store, ping, "others");
+        let others_type = member_type_id(&mut store, ping, "others");
         let Type::JavaArray { element } = store.types.get(others_type) else {
             panic!("expected Ping.others to be a JavaArray type");
         };
@@ -2482,25 +2744,20 @@ mod tests {
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load despite the mutual method reference");
-
-        let metadata = loader
-            .metadata(ping)
-            .expect("Ping should have classfile metadata");
-        let exchange = metadata
-            .methods
-            .iter()
-            .find(|method| method.name() == "exchange")
-            .expect("Ping.exchange should exist");
-
-        let parameter_symbol = match exchange.semantic_descriptor().parameters.as_slice() {
-            [SemanticFieldType::Object(ClassRef::Resolved(symbol))] => *symbol,
-            unexpected => panic!("expected a single resolved Object parameter, got {unexpected:?}"),
-        };
-        let return_symbol = match &exchange.semantic_descriptor().return_type {
-            Some(SemanticFieldType::Object(ClassRef::Resolved(symbol))) => *symbol,
-            unexpected => panic!("expected a resolved Object return type, got {unexpected:?}"),
-        };
         drop(loader);
+
+        let exchange_type = member_type_id(&mut store, ping, "exchange");
+        let Type::Method(method) = store.types.get(exchange_type) else {
+            panic!("expected Ping.exchange to be a Type::Method");
+        };
+        let &[parameter] = method.params.as_slice() else {
+            panic!(
+                "expected exactly one parameter, got {}",
+                method.params.len()
+            );
+        };
+        let parameter_symbol = parent_symbol(&store, parameter.ty);
+        let return_symbol = parent_symbol(&store, method.result);
 
         assert_eq!(symbol_name(&store, parameter_symbol), "Pong");
         assert_eq!(symbol_name(&store, return_symbol), "Pong");
