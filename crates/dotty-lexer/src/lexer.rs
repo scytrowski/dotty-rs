@@ -97,6 +97,7 @@ impl<'source> RawLexer<'source> {
     }
 
     /// Emits the next raw token or trivia item.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<RawItem>, RawLexerError> {
         if let Some(item) = self.pending.take() {
             return Ok(Some(item));
@@ -813,16 +814,16 @@ impl<'source> RawLexer<'source> {
 
             self.scan_based_digits(start, base)?;
 
-            if base == 10 && self.cursor.peek() == Some('.') {
-                if self
+            if base == 10
+                && self.cursor.peek() == Some('.')
+                && self
                     .cursor
                     .peek_nth(1)
                     .is_some_and(|character| character.is_ascii_digit())
-                {
-                    let _ = self.cursor.bump();
-                    kind = RawTokenKind::DecimalLiteral;
-                    self.scan_decimal_digits(start, "fractional part")?;
-                }
+            {
+                let _ = self.cursor.bump();
+                kind = RawTokenKind::DecimalLiteral;
+                self.scan_decimal_digits(start, "fractional part")?;
             }
 
             if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
@@ -4606,7 +4607,7 @@ mod tests {
     #[test]
     fn raw_lexer_covers_seeded_mixed_inputs_without_gaps() {
         for_seeded_mixed_source(|case, source| {
-            let mut lexer = RawLexer::new(&source).expect("generated UTF-8 source is valid");
+            let mut lexer = RawLexer::new(source).expect("generated UTF-8 source is valid");
             let mut offset = 0;
             let mut reached_eof = false;
             let mut previous_item_debug = String::from("<start>");

@@ -8,8 +8,9 @@ struct XmlExpression {
     attribute: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum XmlContent {
+    #[default]
     Text,
     Comment,
     Cdata,
@@ -27,12 +28,6 @@ enum XmlAttributeState {
     ExpectEquals,
     ExpectValue,
     InExpression,
-}
-
-impl Default for XmlContent {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 /// State shared by the raw and contextual XML handling stages.

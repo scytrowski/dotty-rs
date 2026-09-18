@@ -25,10 +25,7 @@ impl ContextualScanner {
     pub fn new(source: &str) -> Result<Self, RawLexerError> {
         let mut raw_lexer = RawLexer::new(source)?;
         let mut items = Vec::new();
-        loop {
-            let Some(item) = raw_lexer.next()? else {
-                break;
-            };
+        while let Some(item) = raw_lexer.next()? {
             let eof = matches!(
                 item,
                 RawItem::Token(RawToken {
@@ -64,6 +61,7 @@ impl ContextualScanner {
     }
 
     /// Returns the next token and advances the scanner.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&Token> {
         let token = self.tokens.get(self.position);
         if token.is_some() {
@@ -211,10 +209,8 @@ impl TokenSource for ContextualScanner {
                 }
             }
             ScannerEvent::ArrowIndented => {
-                if self.current_is_arrow() {
-                    if self.insert_indent_after_current() {
-                        self.feedback_regions += 1;
-                    }
+                if self.current_is_arrow() && self.insert_indent_after_current() {
+                    self.feedback_regions += 1;
                 }
             }
         }
@@ -273,12 +269,14 @@ fn build_tokens(
                         closed_same_indent_case = adjust_indentation(
                             &mut tokens,
                             &mut indentation_stack,
-                            &indentation,
-                            previous_kind,
-                            previous_opens_indentation,
-                            raw.kind,
-                            leading_infix,
-                            raw.span.start(),
+                            IndentationTransition {
+                                indentation: &indentation,
+                                previous_kind,
+                                previous_opens_indentation,
+                                current_kind: raw.kind,
+                                leading_infix,
+                                offset: raw.span.start(),
+                            },
                         )?;
                     }
 
@@ -462,16 +460,28 @@ impl LayoutRegion {
     }
 }
 
-fn adjust_indentation(
-    tokens: &mut Vec<Token>,
-    stack: &mut Vec<LayoutRegion>,
-    indentation: &IndentWidth,
+struct IndentationTransition<'a> {
+    indentation: &'a IndentWidth,
     previous_kind: Option<TokenKind>,
     previous_opens_indentation: bool,
     current_kind: RawTokenKind,
     leading_infix: bool,
     offset: u32,
+}
+
+fn adjust_indentation(
+    tokens: &mut Vec<Token>,
+    stack: &mut Vec<LayoutRegion>,
+    transition: IndentationTransition<'_>,
 ) -> Result<bool, TextRangeError> {
+    let IndentationTransition {
+        indentation,
+        previous_kind,
+        previous_opens_indentation,
+        current_kind,
+        leading_infix,
+        offset,
+    } = transition;
     let mut closed_same_indent_case = false;
     let current = stack
         .last()
