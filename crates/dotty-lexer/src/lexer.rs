@@ -1681,6 +1681,73 @@ mod tests {
         ),
     );
 
+    macro_rules! literal_tests {
+        ($(($name:ident, $spelling:literal, $literal:expr)),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let (items, diagnostics) = scan($spelling);
+
+                    assert_eq!(
+                        items,
+                        vec![
+                            token(
+                                $literal,
+                                0,
+                                $spelling.len() as u32,
+                            ),
+                            token(
+                                RawTokenKind::Eof,
+                                $spelling.len() as u32,
+                                $spelling.len() as u32,
+                            ),
+                        ]
+                    );
+                    assert!(diagnostics.is_empty());
+                }
+            )+
+        };
+    }
+
+    literal_tests!(
+        (
+            classifies_a_character_literal,
+            "'a'",
+            RawTokenKind::CharLiteral
+        ),
+        (
+            classifies_an_integer_literal,
+            "42",
+            RawTokenKind::IntegerLiteral
+        ),
+        (
+            classifies_a_decimal_literal,
+            "1.0",
+            RawTokenKind::DecimalLiteral
+        ),
+        (
+            classifies_an_exponent_literal,
+            "1e2",
+            RawTokenKind::ExponentLiteral
+        ),
+        (classifies_a_long_literal, "42L", RawTokenKind::LongLiteral),
+        (
+            classifies_a_float_literal,
+            "1.0F",
+            RawTokenKind::FloatLiteral
+        ),
+        (
+            classifies_a_double_literal,
+            "1.0D",
+            RawTokenKind::DoubleLiteral
+        ),
+        (
+            classifies_a_string_literal,
+            "\"text\"",
+            RawTokenKind::StringLiteral
+        ),
+    );
+
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
         RawItem::Trivia(Trivia {
             kind,
