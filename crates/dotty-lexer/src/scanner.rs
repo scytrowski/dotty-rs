@@ -144,6 +144,28 @@ impl ContextualScanner {
         );
         true
     }
+
+    fn current_is_arrow(&self) -> bool {
+        let current = self.current();
+        current.kind == TokenKind::Operator
+            && self
+                .source
+                .get(current.span.start() as usize..current.span.end() as usize)
+                .is_some_and(|spelling| matches!(spelling, "=>" | "?=>"))
+    }
+
+    fn is_at_line_end(&self, index: usize) -> bool {
+        let Some(current) = self.tokens.get(index) else {
+            return false;
+        };
+        match next_real_token(&self.tokens, index) {
+            None => true,
+            Some(next) if next.kind == TokenKind::Eof => true,
+            Some(next) => {
+                has_source_line_break(&self.source, current.span.end(), next.span.start())
+            }
+        }
+    }
 }
 
 impl TokenSource for ContextualScanner {
@@ -167,11 +189,14 @@ impl TokenSource for ContextualScanner {
 
     fn observe(&mut self, event: ScannerEvent) {
         match event {
-            ScannerEvent::ColonEol { .. } => {
+            ScannerEvent::ColonEol { in_template } => {
                 let index = self.current_index();
-                if self.tokens[index].kind == TokenKind::ColonFollow
-                    || self.tokens[index].kind == TokenKind::ColonOp
-                {
+                let enabled = match self.tokens[index].kind {
+                    TokenKind::ColonFollow => true,
+                    TokenKind::ColonOp => in_template,
+                    _ => false,
+                };
+                if enabled && self.is_at_line_end(index) {
                     self.tokens[index].kind = TokenKind::ColonEol;
                 }
             }
@@ -186,7 +211,7 @@ impl TokenSource for ContextualScanner {
                 }
             }
             ScannerEvent::ArrowIndented => {
-                if self.current().kind == TokenKind::Operator {
+                if self.current_is_arrow() {
                     if self.insert_indent_after_current() {
                         self.feedback_regions += 1;
                     }
@@ -1766,6 +1791,28 @@ mod tests {
 
         assert_eq!(scanner.current().kind, TokenKind::ColonOp);
         scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        assert_eq!(scanner.current().kind, TokenKind::ColonOp);
+    }
+
+    #[test]
+    fn colon_eol_feedback_does_not_reclassify_a_same_line_colon() {
+        let mut scanner = ContextualScanner::new("object Foo: Int").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::ColonFollow);
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        assert_eq!(scanner.current().kind, TokenKind::ColonFollow);
+    }
+
+    #[test]
+    fn colon_eol_feedback_reclassifies_an_operator_colon_in_a_template() {
+        let mut scanner = ContextualScanner::new("value + :\n  next").expect("source scans");
+        scanner.advance();
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::ColonOp);
+        scanner.observe(ScannerEvent::ColonEol { in_template: true });
         assert_eq!(scanner.current().kind, TokenKind::ColonEol);
     }
 
@@ -1901,6 +1948,30 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn arrow_indented_feedback_ignores_a_non_arrow_operator() {
+        let mut scanner = ContextualScanner::new("value +\n  next").expect("source scans");
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::Operator);
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        assert_eq!(
+            scanner
+                .tokens()
+                .iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
