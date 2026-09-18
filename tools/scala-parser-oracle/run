@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ -f "${HOME}/.sdkman/bin/sdkman-init.sh" ]]; then
+  # shellcheck disable=SC1091
+  set +u
+  source "${HOME}/.sdkman/bin/sdkman-init.sh"
+  set -u
+fi
+
+temporary_source=''
+cleanup() {
+  if [[ -n "${temporary_source}" ]]; then
+    rm -f -- "${temporary_source}"
+  fi
+}
+trap cleanup EXIT
+
+if [[ "$#" -gt 1 ]]; then
+  echo "usage: $0 [source-file]" >&2
+  exit 2
+fi
+
+if [[ "$#" -eq 1 ]]; then
+  source_path=$1
+  if [[ "${source_path}" != /* ]]; then
+    source_path="$(cd "$(dirname "${source_path}")" && pwd)/$(basename "${source_path}")"
+  fi
+else
+  temporary_source=$(mktemp "${TMPDIR:-/tmp}/scala-parser-oracle.XXXXXX.scala")
+  cat >"${temporary_source}"
+  source_path=${temporary_source}
+fi
+
+if ! command -v sbt >/dev/null 2>&1; then
+  echo "scala-parser-oracle requires sbt 2.0.9 and Scala 3.9.0" >&2
+  exit 127
+fi
+
+cd "${script_dir}"
+sbt --error "run ${source_path}"
