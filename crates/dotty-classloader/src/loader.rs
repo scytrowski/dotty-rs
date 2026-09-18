@@ -772,6 +772,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
+        // Patches `Symbol::owner` from the package (set by `enter_class`,
+        // and always correct for `Visibility::Package` -- see
+        // `resolve_semantic_owner`'s doc comment) to the real enclosing
+        // class, for a nested/local/anonymous class. Done this early, via
+        // `resolve_member_class`'s mutual-reference tolerance, so an outer
+        // class that is itself still `Loading` (e.g. its own member type
+        // references this inner class back) resolves to the in-progress
+        // shell instead of recursing.
+        if let Some(semantic_owner) = self.resolve_semantic_owner(name, &class_file)? {
+            self.store.symbols.get_mut(class_symbol).owner = Some(semantic_owner);
+        }
+
         // Parsed and entered before super_class/interfaces/fields/methods so
         // that a supertype's own generic arguments and every member's
         // signature can resolve a reference to one of this class's type
@@ -1091,6 +1103,74 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .transpose()?;
 
         Ok(Some(EnclosingMethodRef { class, method }))
+    }
+
+    /// Resolves `name`'s real semantic owner — the enclosing class, for a
+    /// nested/local/anonymous class — distinct from `Visibility::Package`,
+    /// which stays the actual package symbol regardless of nesting depth
+    /// (a package-private nested class is still visible package-wide, not
+    /// only within its enclosing class). Returns `None` for a top-level
+    /// class, whose owner stays the package `enter_class` already set.
+    ///
+    /// JVMS §4.7.6 requires a nested class's own class file to carry a
+    /// *self*-referencing `InnerClasses` entry (`inner_class` == `name`):
+    /// for a member class this entry also carries `outer_class`; for a
+    /// local/anonymous class it does not (confirmed via `javap -p -v`
+    /// against the real `nested_sample/NestedSample$Inner.class` and
+    /// `NestedSample$1LocalRunnable.class` fixtures — see
+    /// `resolves_the_inner_classes_of_a_real_nest_host`'s doc comment).
+    /// A local/anonymous class instead falls back to its `EnclosingMethod`
+    /// attribute's own `class` reference.
+    ///
+    /// The owner this returns is always the enclosing *class*, never the
+    /// specific enclosing *method* real `dotc` would use for a local class
+    /// — matching a JVM `EnclosingMethod`'s raw `(name, descriptor)` pair
+    /// back to one of that method's own overloads' `SymbolId` would need
+    /// structural descriptor-vs-`Type` matching this loader does nowhere
+    /// else. The enclosing class is a stable, reasonable approximation;
+    /// the raw `(name, descriptor)` pair itself is still available via
+    /// `ClassfileMetadata::enclosing_method` for anyone who needs it.
+    ///
+    /// Resolved through [`Self::resolve_member_class`], not
+    /// [`Self::resolve_dependency`]: an outer class referencing this
+    /// class back (e.g. a member field typed as its own inner class) is a
+    /// legitimate mutual reference, not a supertype cycle.
+    fn resolve_semantic_owner(
+        &mut self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<SymbolId>, ClassLoadError> {
+        let self_entry = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => entries.iter().find(|entry| {
+                    self.resolve_name(name, class_file, entry.inner_class_info_index)
+                        .is_ok_and(|inner_class| inner_class == *name)
+                }),
+                _ => None,
+            });
+
+        let outer_class_name = match self_entry.and_then(|entry| entry.outer_class_info_index) {
+            Some(index) => Some(self.resolve_name(name, class_file, index)?),
+            None => {
+                let enclosing_method =
+                    class_file
+                        .attributes
+                        .iter()
+                        .find_map(|attribute| match attribute {
+                            Attribute::EnclosingMethod { class_index, .. } => Some(*class_index),
+                            _ => None,
+                        });
+                enclosing_method
+                    .map(|index| self.resolve_name(name, class_file, index))
+                    .transpose()?
+            }
+        };
+
+        outer_class_name
+            .map(|outer_class| self.resolve_member_class(name, &outer_class))
+            .transpose()
     }
 
     /// Resolves a `Utf8` constant-pool reference (a field or method's
@@ -4014,6 +4094,101 @@ mod tests {
                 "(Ljava/lang/String;)Ljava/lang/Runnable;".to_owned()
             ))
         );
+    }
+
+    /// A top-level class's `Symbol::owner` stays its package — this real
+    /// `javac` fixture has no `InnerClasses`/`EnclosingMethod` attribute
+    /// naming itself, so `resolve_semantic_owner` finds nothing to patch.
+    #[test]
+    fn a_top_level_classs_owner_is_still_its_package() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+
+        let owner = store
+            .symbols
+            .get(symbol)
+            .owner
+            .expect("a loaded top-level class always has a package owner");
+        assert_eq!(store.symbols.get(owner).kind, SymbolKind::Package);
+    }
+
+    /// `NestedSample$Inner`'s own `InnerClasses` self-entry carries an
+    /// `outer_class` (confirmed via `javap -p -v`, see
+    /// `resolves_the_inner_classes_of_a_real_nest_host`'s doc comment), so
+    /// its `Symbol::owner` becomes `NestedSample`'s own `SymbolId` — not
+    /// the `""` (unnamed) package `BinaryName::package_path` would derive
+    /// from its JVM `$`-joined binary name alone.
+    #[test]
+    fn a_member_classs_owner_is_its_real_enclosing_class_not_its_package() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let outer = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+        let inner = loader
+            .load_class(&BinaryName::from_internal("NestedSample$Inner"))
+            .expect("NestedSample$Inner should load");
+
+        assert_eq!(store.symbols.get(inner).owner, Some(outer));
+    }
+
+    /// `NestedSample$1LocalRunnable`'s own `InnerClasses` self-entry has
+    /// no `outer_class` (it's local, not a member class), so
+    /// `resolve_semantic_owner` falls back to its `EnclosingMethod`
+    /// attribute's `class` reference — still `NestedSample`, not the
+    /// specific `makeLocalRunnable` method (a deliberate simplification,
+    /// see `resolve_semantic_owner`'s doc comment).
+    #[test]
+    fn a_local_classs_owner_is_its_enclosing_class_via_enclosing_method() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let outer = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+        let local = loader
+            .load_class(&BinaryName::from_internal("NestedSample$1LocalRunnable"))
+            .expect("NestedSample$1LocalRunnable should load");
+
+        assert_eq!(store.symbols.get(local).owner, Some(outer));
+    }
+
+    /// `Symbol::owner` becomes the enclosing class, but
+    /// `Visibility::Package` must not follow it: a package-private nested
+    /// class is visible everywhere in its *package*, not only from within
+    /// its enclosing class. `NestedSample$1LocalRunnable` is package-
+    /// private (confirmed via `javap -p`: no `public` modifier) while its
+    /// new semantic owner `NestedSample` is `public` — so this also
+    /// guards against a regression that conflates the two, which
+    /// `assert_eq!(visibility, owner's visibility)` would not catch here
+    /// since the two happen to differ.
+    #[test]
+    fn a_nested_classs_package_visibility_still_names_the_real_package_not_the_enclosing_class() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let outer = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+        let local = loader
+            .load_class(&BinaryName::from_internal("NestedSample$1LocalRunnable"))
+            .expect("NestedSample$1LocalRunnable should load");
+
+        let local_symbol = store.symbols.get(local);
+        assert_eq!(local_symbol.owner, Some(outer));
+
+        let Visibility::Package(package) = local_symbol.visibility else {
+            panic!(
+                "expected NestedSample$1LocalRunnable to be package-private, got {:?}",
+                local_symbol.visibility
+            );
+        };
+        assert_ne!(
+            package, outer,
+            "the package-private boundary must be the real package, not the enclosing class"
+        );
+        assert_eq!(store.symbols.get(package).kind, SymbolKind::Package);
     }
 
     /// `sealed_record_sample/Shape$Circle.class` (real `javac` output) is
