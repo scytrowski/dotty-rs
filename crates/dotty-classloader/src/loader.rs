@@ -23,9 +23,9 @@ use dotty_classfile::signature::{
     SignatureError, TypeArgument, TypeSignature,
 };
 use dotty_core::{
-    ClassInfo, Definitions, MethodKind, MethodParam, MethodType, Name, Namespace, Scope, ScopeId,
-    SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
-    SymbolOrigin, TermName, Type, TypeId, Visibility,
+    ClassInfo, Definitions, MethodKind, MethodParam, MethodType, Name, Namespace, PolyType, Scope,
+    ScopeId, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
+    SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Variance, Visibility,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -63,6 +63,30 @@ pub struct ClassLoader<'store, E> {
 /// nesting section). Used only to resolve which class a signature names;
 /// the class's *own* binary name (as loaded) is never reconstructed from
 /// this — see `resolve_inner_classes`/`InnerClasses` for that.
+/// Resolves a `TypeVariable` (JVMS §4.7.9.1) while lowering a signature.
+///
+/// A method-level type parameter of its own (`method_type_params`, `name ->`
+/// its already-allocated `Type::ParamRef` into the enclosing `Type::Poly`)
+/// shadows the declaring class's own type parameters (`declarations`, real
+/// `SymbolKind::TypeParameter` symbols looked up via ordinary
+/// `Scope::lookup` — see [`ClassLoader::enter_class_type_parameters`]).
+/// `method_type_params` is `None` while lowering a class's own type
+/// parameter bounds, or a field/non-generic-method signature, where there
+/// is no method-level binder in scope at all.
+struct TypeVarEnv<'a> {
+    declarations: ScopeId,
+    method_type_params: Option<&'a HashMap<String, TypeId>>,
+}
+
+impl TypeVarEnv<'_> {
+    fn class_only(declarations: ScopeId) -> Self {
+        Self {
+            declarations,
+            method_type_params: None,
+        }
+    }
+}
+
 fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryName {
     let mut simple_name = signature.simple_name.clone();
     for suffix in &signature.suffix {
@@ -365,7 +389,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         )?;
         let resolved_type = match &signature {
             Some(FieldSignature(reference)) => {
-                self.lower_reference_type_signature(owner, declarations, reference)?
+                let env = TypeVarEnv::class_only(declarations);
+                self.lower_reference_type_signature(owner, &env, reference)?
             }
             None => self.lower_field_type(owner, field_type)?,
         };
@@ -424,16 +449,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             entered.push((symbol, parameter));
         }
 
+        let env = TypeVarEnv::class_only(declarations);
         for (symbol, parameter) in entered {
             let high = match &parameter.class_bound {
-                Some(bound) => self.lower_reference_type_signature(owner, declarations, bound)?,
+                Some(bound) => self.lower_reference_type_signature(owner, &env, bound)?,
                 None => self.type_ref(self.definitions.object_class),
             };
             let high = parameter.interface_bounds.iter().try_fold(
                 high,
                 |left, interface_bound| -> Result<TypeId, ClassLoadError> {
                     let right =
-                        self.lower_reference_type_signature(owner, declarations, interface_bound)?;
+                        self.lower_reference_type_signature(owner, &env, interface_bound)?;
                     Ok(self.store.types.alloc(Type::And { left, right }))
                 },
             )?;
@@ -447,16 +473,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         Ok(())
     }
 
-    /// Resolves a `TypeVariable`'s name (JVMS §4.7.9.1) to the `TypeId` of
-    /// the `SymbolKind::TypeParameter` symbol it denotes, via ordinary
-    /// `Scope::lookup` on `declarations` — see
-    /// [`Self::enter_class_type_parameters`]. `None` when no such symbol was
-    /// entered (an unresolvable/out-of-scope type variable; the caller turns
-    /// this into [`ClassLoadError::UnresolvedTypeVariable`]).
-    fn resolve_type_variable(&mut self, declarations: ScopeId, name: &str) -> Option<TypeId> {
+    /// Resolves a `TypeVariable`'s name (JVMS §4.7.9.1) to the `TypeId` it
+    /// denotes — see [`TypeVarEnv`]'s doc comment for the shadowing order.
+    /// `None` when neither finds it (an unresolvable/out-of-scope type
+    /// variable; the caller turns this into
+    /// [`ClassLoadError::UnresolvedTypeVariable`]).
+    fn resolve_type_variable(&mut self, env: &TypeVarEnv, name: &str) -> Option<TypeId> {
+        if let Some(&param_ref) = env.method_type_params.and_then(|params| params.get(name)) {
+            return Some(param_ref);
+        }
         let text = self.store.names.intern(name);
         let lookup_name = Name::new(text, Namespace::Type);
-        let symbol = self.store.scopes.get(declarations).lookup(&lookup_name)?;
+        let symbol = self
+            .store
+            .scopes
+            .get(env.declarations)
+            .lookup(&lookup_name)?;
         Some(self.type_ref(symbol))
     }
 
@@ -469,13 +501,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn lower_type_signature(
         &mut self,
         owner: &BinaryName,
-        declarations: ScopeId,
+        env: &TypeVarEnv,
         signature: &TypeSignature,
     ) -> Result<TypeId, ClassLoadError> {
         match signature {
             TypeSignature::Base(field_type) => self.lower_field_type(owner, field_type),
             TypeSignature::Reference(reference) => {
-                self.lower_reference_type_signature(owner, declarations, reference)
+                self.lower_reference_type_signature(owner, env, reference)
             }
         }
     }
@@ -489,19 +521,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn lower_reference_type_signature(
         &mut self,
         owner: &BinaryName,
-        declarations: ScopeId,
+        env: &TypeVarEnv,
         signature: &ReferenceTypeSignature,
     ) -> Result<TypeId, ClassLoadError> {
         match signature {
             ReferenceTypeSignature::TypeVariable(name) => self
-                .resolve_type_variable(declarations, name)
+                .resolve_type_variable(env, name)
                 .ok_or_else(|| ClassLoadError::UnresolvedTypeVariable(owner.clone(), name.clone())),
             ReferenceTypeSignature::Array(component) => {
-                let element = self.lower_type_signature(owner, declarations, component)?;
+                let element = self.lower_type_signature(owner, env, component)?;
                 Ok(self.store.types.alloc(Type::JavaArray { element }))
             }
             ReferenceTypeSignature::Class(class_signature) => {
-                self.lower_class_type_signature(owner, declarations, class_signature)
+                self.lower_class_type_signature(owner, env, class_signature)
             }
         }
     }
@@ -522,7 +554,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn lower_class_type_signature(
         &mut self,
         owner: &BinaryName,
-        declarations: ScopeId,
+        env: &TypeVarEnv,
         signature: &ClassTypeSignature,
     ) -> Result<TypeId, ClassLoadError> {
         let dependency = class_type_signature_binary_name(signature);
@@ -539,7 +571,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let mut args = Vec::with_capacity(type_arguments.len());
         for argument in type_arguments {
-            args.push(self.lower_type_argument(owner, declarations, argument)?);
+            args.push(self.lower_type_argument(owner, env, argument)?);
         }
         Ok(self.store.types.alloc(Type::Applied { tycon, args }))
     }
@@ -554,21 +586,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn lower_type_argument(
         &mut self,
         owner: &BinaryName,
-        declarations: ScopeId,
+        env: &TypeVarEnv,
         argument: &TypeArgument,
     ) -> Result<TypeId, ClassLoadError> {
         match argument {
             TypeArgument::Exact(reference) => {
-                self.lower_reference_type_signature(owner, declarations, reference)
+                self.lower_reference_type_signature(owner, env, reference)
             }
             TypeArgument::Extends(reference) => {
-                let high = self.lower_reference_type_signature(owner, declarations, reference)?;
+                let high = self.lower_reference_type_signature(owner, env, reference)?;
                 let low = self.type_ref(self.definitions.nothing_class);
                 let bounds = self.store.types.alloc(Type::Bounds { low, high });
                 Ok(self.store.types.alloc(Type::Wildcard { bounds }))
             }
             TypeArgument::Super(reference) => {
-                let low = self.lower_reference_type_signature(owner, declarations, reference)?;
+                let low = self.lower_reference_type_signature(owner, env, reference)?;
                 let high = self.type_ref(self.definitions.any_class);
                 let bounds = self.store.types.alloc(Type::Bounds { low, high });
                 Ok(self.store.types.alloc(Type::Wildcard { bounds }))
@@ -1100,9 +1132,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ///
     /// `signature` (a method's optional `Signature` attribute) is preferred
     /// over the erased descriptor per-parameter/result — e.g. a bare `T`
-    /// return type instead of its erased bound — but only when it declares
-    /// no method-level type parameters of its own (a generic method needs
-    /// `Type::Poly`/`ParamRef` binder machinery not built yet) *and* its
+    /// return type instead of its erased bound — but only when its
     /// parameter count matches the descriptor's exactly. A mismatch is not
     /// malformed input: JVMS §4.7.9.1 allows a `MethodSignature` to omit
     /// leading synthetic/mandated parameters (e.g. an inner class
@@ -1111,6 +1141,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// those are — so a mismatched signature is simply not used, falling
     /// back to the descriptor entirely, rather than risk misaligning names/
     /// types across the two lists.
+    ///
+    /// A method that declares type parameters of its own delegates to
+    /// [`Self::lower_generic_method_descriptor`] instead, wrapping the
+    /// result in `Type::Poly` — JVMS requires such a method to carry a
+    /// `Signature` attribute, so an aligned one is always available there.
     fn lower_method_descriptor(
         &mut self,
         owner: &BinaryName,
@@ -1120,18 +1155,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         parameter_names: &[Option<String>],
         varargs: bool,
     ) -> Result<TypeId, ClassLoadError> {
-        let signature = signature.filter(|signature| {
-            signature.type_parameters.is_empty()
-                && signature.parameters.len() == descriptor.parameters.len()
-        });
+        let aligned =
+            signature.filter(|signature| signature.parameters.len() == descriptor.parameters.len());
+        if let Some(signature) = aligned.filter(|signature| !signature.type_parameters.is_empty()) {
+            return self.lower_generic_method_descriptor(
+                owner,
+                declarations,
+                signature,
+                parameter_names,
+                varargs,
+            );
+        }
+        let signature = aligned.filter(|signature| signature.type_parameters.is_empty());
 
         let last_index = descriptor.parameters.len().checked_sub(1);
+        let env = TypeVarEnv::class_only(declarations);
         let mut params = Vec::with_capacity(descriptor.parameters.len());
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
             let ty = match signature.map(|signature| &signature.parameters[index]) {
-                Some(signature_type) => {
-                    self.lower_type_signature(owner, declarations, signature_type)?
-                }
+                Some(signature_type) => self.lower_type_signature(owner, &env, signature_type)?,
                 None => self.lower_field_type(owner, parameter)?,
             };
             let synthetic_name = format!("p{index}");
@@ -1149,9 +1191,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
 
         let result = match signature.and_then(|signature| signature.result.as_ref()) {
-            Some(signature_type) => {
-                self.lower_type_signature(owner, declarations, signature_type)?
-            }
+            Some(signature_type) => self.lower_type_signature(owner, &env, signature_type)?,
             None => match &descriptor.return_type {
                 Some(field_type) => self.lower_field_type(owner, field_type)?,
                 None => self.definitions.unit,
@@ -1163,6 +1203,106 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             result,
             kind: MethodKind::Plain,
         })))
+    }
+
+    /// Lowers a method that declares generic type parameters of its own
+    /// (`signature.type_parameters` non-empty, already confirmed aligned
+    /// with the descriptor by [`Self::lower_method_descriptor`]) into
+    /// `Type::Poly(PolyType { params, result: <a Type::Method TypeId> })`.
+    ///
+    /// Built via the same two-phase `TypeArena::reserve`/`fill` construction
+    /// `docs/dotty-core-design.md` §8 describes for any binder whose own
+    /// bounds may reference it (F-bounded polymorphism, e.g.
+    /// `<T extends Comparable<T>> T max(T a, T b)`): the `Poly`'s `TypeId`
+    /// is reserved first, each type parameter's `Type::ParamRef` is
+    /// allocated against that reserved id, and only then are the type
+    /// parameters' bounds and the method's own parameters/result lowered —
+    /// with a `TypeVarEnv` whose `method_type_params` resolves a
+    /// `TypeVariable` naming one of *this* method's own type parameters to
+    /// its `ParamRef`, shadowing (per JVM scoping) an enclosing class type
+    /// parameter of the same name.
+    fn lower_generic_method_descriptor(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        signature: &MethodSignature,
+        parameter_names: &[Option<String>],
+        varargs: bool,
+    ) -> Result<TypeId, ClassLoadError> {
+        let poly_binder = self.store.types.reserve();
+        let poly_id = poly_binder.id();
+
+        let mut method_type_params = HashMap::with_capacity(signature.type_parameters.len());
+        for (index, parameter) in signature.type_parameters.iter().enumerate() {
+            let param_ref = self.store.types.alloc(Type::ParamRef {
+                binder: poly_id,
+                index: index as u32,
+            });
+            method_type_params.insert(parameter.name.clone(), param_ref);
+        }
+        let env = TypeVarEnv {
+            declarations,
+            method_type_params: Some(&method_type_params),
+        };
+
+        let mut type_params = Vec::with_capacity(signature.type_parameters.len());
+        for parameter in &signature.type_parameters {
+            let high = match &parameter.class_bound {
+                Some(bound) => self.lower_reference_type_signature(owner, &env, bound)?,
+                None => self.type_ref(self.definitions.object_class),
+            };
+            let high = parameter.interface_bounds.iter().try_fold(
+                high,
+                |left, interface_bound| -> Result<TypeId, ClassLoadError> {
+                    let right =
+                        self.lower_reference_type_signature(owner, &env, interface_bound)?;
+                    Ok(self.store.types.alloc(Type::And { left, right }))
+                },
+            )?;
+            let text = self.store.names.intern(&parameter.name);
+            type_params.push(TypeParam {
+                name: TypeName::new(text),
+                bounds: high,
+                variance: Variance::Invariant,
+            });
+        }
+
+        let last_index = signature.parameters.len().checked_sub(1);
+        let mut params = Vec::with_capacity(signature.parameters.len());
+        for (index, parameter_signature) in signature.parameters.iter().enumerate() {
+            let ty = self.lower_type_signature(owner, &env, parameter_signature)?;
+            let synthetic_name = format!("p{index}");
+            let param_name = parameter_names
+                .get(index)
+                .and_then(|name| name.as_deref())
+                .unwrap_or(&synthetic_name);
+            let text = self.store.names.intern(param_name);
+            params.push(MethodParam {
+                name: TermName::new(text),
+                ty,
+                erased: false,
+                varargs: varargs && Some(index) == last_index,
+            });
+        }
+
+        let result = match &signature.result {
+            Some(signature_type) => self.lower_type_signature(owner, &env, signature_type)?,
+            None => self.definitions.unit,
+        };
+
+        let method_type = self.store.types.alloc(Type::Method(MethodType {
+            params,
+            result,
+            kind: MethodKind::Plain,
+        }));
+
+        Ok(self.store.types.fill(
+            poly_binder,
+            Type::Poly(PolyType {
+                params: type_params,
+                result: method_type,
+            }),
+        ))
     }
 
     /// Looks for a `MethodParameters` attribute (JVMS §4.7.24) among
@@ -3369,6 +3509,86 @@ mod tests {
             synthetic_class("java/lang/Comparable", None),
         );
         classes
+    }
+
+    /// `NestedSample.max`'s real declaration is
+    /// `public static <T extends Comparable<T>> T max(T a, T b) throws
+    /// IllegalStateException` — a generic static method whose erased
+    /// descriptor is `(Ljava/lang/Comparable;Ljava/lang/Comparable;)
+    /// Ljava/lang/Comparable;` and whose real `Signature` attribute is
+    /// `<T::Ljava/lang/Comparable<TT;>;>(TT;TT;)TT;` (confirmed via
+    /// `javap -p -v`) — so it lowers to a real `Type::Poly` wrapping a
+    /// `Type::Method` whose params/result reference `T` via `ParamRef`,
+    /// not the erased `Comparable` the descriptor alone would give.
+    #[test]
+    fn lowers_a_real_fixtures_generic_static_method_into_a_poly_wrapped_method() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("NestedSample"))
+            .expect("NestedSample should load");
+        drop(loader);
+
+        let max_type = member_type_id(&mut store, class_symbol, "max");
+        let Type::Poly(poly) = store.types.get(max_type) else {
+            panic!("expected max's type to be a Type::Poly");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let type_param = poly.params[0];
+        assert_eq!(store.names.resolve(type_param.name.as_name().text()), "T");
+        let method_result = poly.result;
+
+        // T's bound is the implicit Object intersected with its one
+        // interface bound, Comparable[T] -- same shape as a class-level
+        // F-bounded type parameter (`class_bound: None` means Object).
+        let Type::And { left, right } = store.types.get(type_param.bounds) else {
+            panic!("expected T's bound to be an intersection with the implicit Object bound");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *left)), "Object");
+        let Type::Applied { tycon, args } = store.types.get(*right) else {
+            panic!("expected T's interface bound to be an Applied Comparable[T]");
+        };
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, *tycon)),
+            "Comparable"
+        );
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            store.types.get(args[0]),
+            &Type::ParamRef {
+                binder: max_type,
+                index: 0
+            }
+        );
+
+        let Type::Method(method) = store.types.get(method_result) else {
+            panic!("expected max's Poly result to be a Type::Method");
+        };
+        assert_eq!(method.params.len(), 2);
+        assert_eq!(
+            store.names.resolve(method.params[0].name.as_name().text()),
+            "a"
+        );
+        assert_eq!(
+            store.names.resolve(method.params[1].name.as_name().text()),
+            "b"
+        );
+        for param in &method.params {
+            assert_eq!(
+                store.types.get(param.ty),
+                &Type::ParamRef {
+                    binder: max_type,
+                    index: 0
+                }
+            );
+        }
+        assert_eq!(
+            store.types.get(method.result),
+            &Type::ParamRef {
+                binder: max_type,
+                index: 0
+            }
+        );
     }
 
     /// Confirms `NestMembers` (JVMS §4.7.29) names both of
