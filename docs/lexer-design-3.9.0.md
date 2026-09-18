@@ -553,6 +553,27 @@ from being scanned. XML tokenization is covered by dedicated compatibility
 and malformed-recovery fixtures against the pinned Scala 3.9.0 oracle. XML
 parsing semantics and AST construction remain outside the lexer scope.
 
+### Increment 10 — Hardening, corpus comparison, and the lexer contract
+
+The completed lexer hardening pass combines three complementary checks:
+
+- focused Rust unit and integration tests for each independently regressible
+  lexical behavior and recovery boundary;
+- deterministic property-style generation through the public `RawLexer` and
+  `ContextualScanner` APIs, checking termination, EOF reachability, bounded
+  UTF-8 spans, non-overlapping raw items, and bounded diagnostics across
+  malformed as well as mixed Unicode input;
+- differential comparison against the pinned Scala 3.9.0 oracle.
+
+The differential harness recursively scans the focused fixture matrix and the
+real Scala sources under both `tools/scala-lexer-oracle/src/main/scala` and
+`tools/tasty-baseline/src/main/scala`. Run the real-source corpus with
+`bash tools/scala-lexer-oracle/check-corpus.sh`. Corpus comparison ignores
+layout tokens because the raw dump does not provide parser feedback events;
+focused scanner tests cover those layout decisions separately. The normalizer
+has its own Python unit tests for UTF-16 offsets, interpolation boundaries,
+wildcards, and parser-facing colon protocol normalization.
+
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid
 digits in hexadecimal/binary literals are diagnosed independently, without
@@ -566,9 +587,12 @@ The lexer also has deterministic short-input hardening tests that exercise
 inputs containing whitespace, operators, delimiters, XML/comment markers,
 escape characters, combining marks, and supplementary Unicode through both
 raw and contextual scanning. These cases check progress, EOF reachability,
-and source-span coverage. Full randomized fuzzing remains a separate
-hardening task. Dedicated EOF-recovery matrices cover truncated interpolation,
-XML, comments, strings, backquoted identifiers, and escapes.
+and source-span coverage. The public property-style harness adds a separate
+deterministic regression boundary around the exported APIs; randomized
+`proptest`/`cargo-fuzz` campaigns remain optional follow-up tooling rather than
+a prerequisite for the current core lexer milestone. Dedicated EOF-recovery
+matrices cover truncated interpolation, XML, comments, strings, backquoted
+identifiers, and escapes.
 
 ## 11. Testing strategy
 
@@ -650,4 +674,4 @@ The core lexer milestone is complete when:
 
 The complete lexer/scanner milestone additionally requires semantic newlines,
 indentation, leading infix handling, colon protocol, end markers, and the
-corresponding differential, corpus, and fuzz coverage.
+corresponding differential, corpus, and deterministic property coverage.

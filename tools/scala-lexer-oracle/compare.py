@@ -9,17 +9,29 @@ import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: compare.py <source> <oracle-output> <rust-output>", file=sys.stderr)
+    ignore_layout = False
+    arguments = sys.argv[1:]
+    if arguments and arguments[0] == "--ignore-layout":
+        ignore_layout = True
+        arguments = arguments[1:]
+    if len(arguments) != 3:
+        print(
+            "usage: compare.py [--ignore-layout] <source> <oracle-output> <rust-output>",
+            file=sys.stderr,
+        )
         return 2
 
-    source_path = pathlib.Path(sys.argv[1])
+    source_path = pathlib.Path(arguments[0])
     with source_path.open(encoding="utf-8", newline="") as source_file:
         source = source_file.read()
     oracle = normalize_oracle(
-        pathlib.Path(sys.argv[2]).read_text().splitlines(), source
+        pathlib.Path(arguments[1]).read_text().splitlines(), source
     )
-    rust = normalize_rust(pathlib.Path(sys.argv[3]).read_text().splitlines())
+    rust = normalize_rust(pathlib.Path(arguments[2]).read_text().splitlines())
+
+    if ignore_layout:
+        oracle = [row for row in oracle if row[0] not in LAYOUT_KINDS]
+        rust = [row for row in rust if row[0] not in LAYOUT_KINDS]
 
     oracle_kinds = [kind for kind, _ in oracle]
     rust_kinds = [kind for kind, _ in rust]
@@ -56,6 +68,7 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
         spelling = source.encode("utf-8")[start:end].decode("utf-8", errors="replace")
         in_interpolation = any(
             range_start <= start < range_end
+            and not is_in_interpolation_expression(source, range_start, start)
             for range_start, range_end in interpolation_ranges
         )
         rows.append((oracle_kind(token, name, spelling, in_interpolation), start))
@@ -67,6 +80,10 @@ def normalize_oracle(lines: list[str], source: str) -> list[tuple[str, int]]:
 def oracle_kind(token: str, name: str, spelling: str, in_interpolation: bool) -> str:
     if token == "erroneous token":
         return "error"
+    if token == "_":
+        # Scala exposes wildcard underscore as a dedicated raw token; the
+        # current shared token surface represents it as an identifier.
+        return "identifier"
     if token == "$XMLSTART$<":
         return token
     if token == "string literal" and in_interpolation:
@@ -92,10 +109,12 @@ def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     pattern = re.compile(r'(?<![\w$])(?:[A-Za-z_][A-Za-z0-9_]*)("""|")')
     for match in pattern.finditer(source):
+        if is_inside_string_literal(source, match.start()):
+            continue
         quote = match.group(1)
         content_start = match.end()
-        closing = source.find(quote, content_start)
-        if closing < 0:
+        closing = find_interpolation_end(source, content_start, quote)
+        if closing is None:
             continue
         content = source[content_start:closing]
         if "\n" in content or "\r" in content:
@@ -106,6 +125,91 @@ def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
         end = len(source[: closing + len(quote)].encode("utf-8"))
         ranges.append((start, end))
     return ranges
+
+
+def find_interpolation_end(source: str, content_start: int, quote: str) -> int | None:
+    index = content_start
+    brace_depth = 0
+    while index < len(source):
+        if brace_depth:
+            if source.startswith('"""', index):
+                end = source.find('"""', index + 3)
+                if end < 0:
+                    return None
+                index = end + 3
+                continue
+            if source[index] == '"':
+                end = index + 1
+                while end < len(source):
+                    if source[end] == "\\":
+                        end += 2
+                    elif source[end] == '"':
+                        break
+                    else:
+                        end += 1
+                index = end + 1
+                continue
+            if source[index] == "{":
+                brace_depth += 1
+            elif source[index] == "}":
+                brace_depth -= 1
+            index += 1
+            continue
+
+        if source.startswith(quote, index):
+            return index
+        if source.startswith("${", index):
+            brace_depth = 1
+            index += 2
+        elif source[index] == "\\":
+            index += 2
+        else:
+            index += 1
+    return None
+
+
+def is_inside_string_literal(source: str, offset: int) -> bool:
+    """Reject interpolator-looking text that is itself inside a string."""
+    index = 0
+    in_string: str | None = None
+    while index < offset:
+        if in_string is None:
+            if source.startswith('"""', index):
+                in_string = '"""'
+                index += 3
+                continue
+            if source[index] == '"':
+                in_string = '"'
+            index += 1
+            continue
+
+        if source.startswith(in_string, index):
+            index += len(in_string)
+            in_string = None
+        elif source[index] == "\\" and in_string == '"':
+            index += 2
+        else:
+            index += 1
+    return in_string is not None
+
+
+def is_in_interpolation_expression(source: str, range_start: int, offset: int) -> bool:
+    quote = source.find('"', range_start, offset)
+    if quote < 0:
+        return False
+    content_start = quote + (3 if source.startswith('"""', quote) else 1)
+    depth = 0
+    index = content_start
+    while index < offset:
+        if source[index] == "\\":
+            index += 2
+            continue
+        if source[index] == "{" and index > 0 and source[index - 1] == "$":
+            depth += 1
+        elif source[index] == "}" and depth:
+            depth -= 1
+        index += 1
+    return depth > 0
 
 
 def has_invalid_simple_splice(content: str) -> bool:
@@ -154,6 +258,10 @@ def normalize_rust(lines: list[str]) -> list[tuple[str, int]]:
         if len(fields) != 3 or fields[0] == "kind":
             continue
         kind, start, _ = fields
+        if kind == "':'":
+            # The parser-facing scanner exposes colon protocol variants, while
+            # the Scala oracle reports the underlying operator token.
+            kind = "operator"
         rows.append((kind, int(start)))
     if not rows:
         raise ValueError("Rust output did not contain token rows")

@@ -39,14 +39,34 @@ bash tools/scala-lexer-oracle/compare.sh
 ```
 
 The harness runs the pinned sbt oracle, runs the Rust scanner dump example, and
-compares normalized token kinds plus source-token start offsets. Scala UTF-16
+compares normalized token kinds plus source-token start offsets. Colon protocol
+variants are normalized to the underlying operator token because the parser
+feedback event is not part of this raw differential harness. Scala UTF-16
 offsets are converted to Rust UTF-8 byte offsets. Layout tokens are compared
 by kind; their exact end offsets differ between the Scala scanner and the
 parser-facing Rust stream. A mismatch reports the first token and a source
 excerpt around it.
 
-To compare another fixture directory:
+To compare another fixture or corpus directory (recursively):
 
 ```text
 bash tools/scala-lexer-oracle/compare.sh path/to/fixtures
 ```
+
+For a real-source corpus where parser feedback is not available, use
+`--ignore-layout` to compare only source tokens:
+
+```text
+bash tools/scala-lexer-oracle/compare.sh --ignore-layout path/to/corpus
+```
+
+The repository's real-source corpus can be checked with:
+
+```text
+bash tools/scala-lexer-oracle/check-corpus.sh
+```
+
+It covers the Scala sources of the lexer oracle itself and the local
+`tasty-baseline` tool. The checked-in fixture directory remains the focused
+compatibility matrix; the real-source corpus is a separate smoke test for
+tokenization of larger, naturally evolving Scala files.
