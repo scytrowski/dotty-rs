@@ -1563,6 +1563,75 @@ mod tests {
         (classifies_end_as_a_hard_keyword, "end", HardKeyword::End),
     );
 
+    macro_rules! punctuation_tests {
+        ($(($name:ident, $spelling:literal, $punctuation:expr)),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    let (items, diagnostics) = scan($spelling);
+
+                    assert_eq!(
+                        items,
+                        vec![
+                            token(
+                                RawTokenKind::Punctuation($punctuation),
+                                0,
+                                $spelling.len() as u32,
+                            ),
+                            token(
+                                RawTokenKind::Eof,
+                                $spelling.len() as u32,
+                                $spelling.len() as u32,
+                            ),
+                        ]
+                    );
+                    assert!(diagnostics.is_empty());
+                }
+            )+
+        };
+    }
+
+    punctuation_tests!(
+        (classifies_comma_as_punctuation, ",", Punctuation::Comma),
+        (
+            classifies_semicolon_as_punctuation,
+            ";",
+            Punctuation::Semicolon
+        ),
+        (classifies_dot_as_punctuation, ".", Punctuation::Dot),
+        (classifies_colon_as_punctuation, ":", Punctuation::Colon),
+        (
+            classifies_left_paren_as_punctuation,
+            "(",
+            Punctuation::LeftParen
+        ),
+        (
+            classifies_right_paren_as_punctuation,
+            ")",
+            Punctuation::RightParen
+        ),
+        (
+            classifies_left_bracket_as_punctuation,
+            "[",
+            Punctuation::LeftBracket
+        ),
+        (
+            classifies_right_bracket_as_punctuation,
+            "]",
+            Punctuation::RightBracket
+        ),
+        (
+            classifies_left_brace_as_punctuation,
+            "{",
+            Punctuation::LeftBrace
+        ),
+        (
+            classifies_right_brace_as_punctuation,
+            "}",
+            Punctuation::RightBrace
+        ),
+    );
+
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
         RawItem::Trivia(Trivia {
             kind,
