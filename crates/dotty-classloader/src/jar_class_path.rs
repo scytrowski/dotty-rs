@@ -12,11 +12,15 @@ const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
 const MIN_VERSIONED_DIRECTORY: u16 = 9;
 
 /// A [`ClassPathEntry`] backed by a single JAR file, mapping
-/// `BinaryName` to the entry named `<internal name>.class` - or, for a
-/// multi-release JAR (the JAR File Specification's "Multi-release JAR
-/// files" section), to the highest `META-INF/versions/N/<internal
-/// name>.class` entry with `N` at or below `release_version`, falling
-/// back to the unversioned entry when no such `N` exists.
+/// `BinaryName` to the entry named `<internal name>.tasty`, preferred,
+/// or `<internal name>.class` as a fallback (`docs/classloader.md` §9:
+/// `.tasty` is preferred over `.class` when both exist for the same
+/// name — the same rule [`crate::class_path::DirectoryClassPath`]
+/// applies) - or, for a multi-release JAR (the JAR File Specification's
+/// "Multi-release JAR files" section), to the highest
+/// `META-INF/versions/N/<internal name>.{tasty,class}` entry with `N`
+/// at or below `release_version`, falling back to the unversioned entry
+/// when no such `N` exists.
 ///
 /// `release_version` is the target feature-release version to select
 /// `META-INF/versions/` entries for - analogous to a running JVM's own
@@ -73,6 +77,19 @@ impl JarClassPath {
             .rev()
             .map(move |version| format!("META-INF/versions/{version}/{entry_name}"))
     }
+
+    /// Reads `entry_name`, preferring the highest multi-release override
+    /// (see [`Self::versioned_entry_names`]) and falling back to the
+    /// unversioned entry.
+    fn read_versioned_entry(&self, entry_name: &str) -> Result<Option<Vec<u8>>, ClassPathError> {
+        for versioned_entry_name in self.versioned_entry_names(entry_name) {
+            if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
+                return Ok(Some(bytes));
+            }
+        }
+
+        Ok(self.archive.read_entry(entry_name)?)
+    }
 }
 
 impl ClassPathEntry for JarClassPath {
@@ -81,19 +98,17 @@ impl ClassPathEntry for JarClassPath {
             return Err(ClassPathError::invalid_binary_name(name.clone()));
         }
 
-        let entry_name = format!("{}.class", name.as_internal());
-
-        for versioned_entry_name in self.versioned_entry_names(&entry_name) {
-            if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
-                return Ok(Some(ClassResource::new(
-                    bytes,
-                    ClassFormat::Class,
-                    ClassOrigin::Jar(self.path.clone()),
-                )));
-            }
+        let tasty_entry_name = format!("{}.tasty", name.as_internal());
+        if let Some(bytes) = self.read_versioned_entry(&tasty_entry_name)? {
+            return Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Tasty,
+                ClassOrigin::Jar(self.path.clone()),
+            )));
         }
 
-        match self.archive.read_entry(&entry_name)? {
+        let class_entry_name = format!("{}.class", name.as_internal());
+        match self.read_versioned_entry(&class_entry_name)? {
             Some(bytes) => Ok(Some(ClassResource::new(
                 bytes,
                 ClassFormat::Class,
@@ -110,6 +125,74 @@ mod tests {
 
     fn fixture_path(relative_path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+    }
+
+    /// A minimal, single-entry, STORED-only ZIP archive holding `entries`
+    /// (name, contents) — just enough for [`JarClassPath`] threading
+    /// tests, not a general-purpose ZIP writer (see `zip_archive.rs`'s own
+    /// tests for archive-format coverage).
+    fn minimal_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut central_directory = Vec::new();
+
+        for (name, data) in entries {
+            let crc = crate::crc32::checksum(data);
+            let local_header_offset = bytes.len() as u32;
+
+            bytes.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local file header signature
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // version needed to extract
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // general purpose bit flag
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file time
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file date
+            bytes.extend_from_slice(&crc.to_le_bytes());
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
+            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(data);
+
+            central_directory.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // central directory header signature
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // version made by
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // version needed to extract
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // general purpose bit flag
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // last mod file time
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // last mod file date
+            central_directory.extend_from_slice(&crc.to_le_bytes());
+            central_directory.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central_directory.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central_directory.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // file comment length
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+            central_directory.extend_from_slice(&0u16.to_le_bytes()); // internal file attributes
+            central_directory.extend_from_slice(&0u32.to_le_bytes()); // external file attributes
+            central_directory.extend_from_slice(&local_header_offset.to_le_bytes());
+            central_directory.extend_from_slice(name.as_bytes());
+        }
+
+        let central_directory_offset = bytes.len() as u32;
+        let central_directory_size = central_directory.len() as u32;
+        bytes.extend(central_directory);
+
+        bytes.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // end of central directory signature
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // disk with central directory
+        bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // entries on this disk
+        bytes.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // total entries
+        bytes.extend_from_slice(&central_directory_size.to_le_bytes());
+        bytes.extend_from_slice(&central_directory_offset.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        bytes
+    }
+
+    fn write_temp_jar(unique_name: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("dotty_classloader_jar_{unique_name}.jar"));
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
     #[test]
@@ -146,6 +229,44 @@ mod tests {
             .expect_err("a path-traversal name must be rejected, not resolved");
 
         assert!(error.to_string().contains("not safe to use as a path"));
+    }
+
+    #[test]
+    fn finds_a_tasty_only_entry_in_the_jar() {
+        let jar_bytes = minimal_stored_zip(&[("TastySample.tasty", b"not a real tasty file")]);
+        let jar_path = write_temp_jar("tasty_only", &jar_bytes);
+
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+        let resource = class_path
+            .find_class(&BinaryName::from_internal("TastySample"))
+            .unwrap()
+            .expect("entry should be found");
+
+        assert_eq!(resource.format(), ClassFormat::Tasty);
+        assert_eq!(resource.bytes(), b"not a real tasty file");
+        assert!(matches!(resource.origin(), ClassOrigin::Jar(_)));
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn prefers_the_tasty_entry_over_a_co_present_class_entry() {
+        let jar_bytes = minimal_stored_zip(&[
+            ("Both.tasty", b"tasty bytes"),
+            ("Both.class", b"class bytes"),
+        ]);
+        let jar_path = write_temp_jar("tasty_preferred", &jar_bytes);
+
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+        let resource = class_path
+            .find_class(&BinaryName::from_internal("Both"))
+            .unwrap()
+            .expect("entry should be found");
+
+        assert_eq!(resource.format(), ClassFormat::Tasty);
+        assert_eq!(resource.bytes(), b"tasty bytes");
+
+        std::fs::remove_file(&jar_path).unwrap();
     }
 
     #[test]
