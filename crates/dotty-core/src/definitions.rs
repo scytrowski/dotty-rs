@@ -29,6 +29,14 @@ use crate::types::Type;
 /// happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Definitions {
+    /// The one `Type::NoPrefix` every builtin `Type::TypeRef` here uses,
+    /// and that every other session-wide `Type::TypeRef`/`Type::ClassInfo`
+    /// prefix should reuse too — see this type's own doc comment: two
+    /// `TypeRef`s naming the same symbol must also agree on `prefix`'s
+    /// identity to be the same `TypeId`, and `NoPrefix` has no further
+    /// structure to compare, so allocating more than one per session only
+    /// creates spurious `TypeId` distinctions.
+    pub no_prefix: TypeId,
     pub byte: TypeId,
     pub char: TypeId,
     pub double: TypeId,
@@ -76,6 +84,7 @@ impl Definitions {
         let nothing_class = Self::builtin_symbol(store, "Nothing");
 
         Self {
+            no_prefix,
             byte,
             char,
             double,

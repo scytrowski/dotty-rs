@@ -52,9 +52,11 @@ pub struct ClassLoader<'store, E> {
     packages: PackageRegistry,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
-    /// [`Definitions::bootstrap`].
+    /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
+    /// loader's `Type::NoPrefix` too (see [`Self::with_definitions`]):
+    /// there is no separate loader-owned copy, so every `ClassLoader`
+    /// sharing one `Definitions` also agrees on prefix identity.
     definitions: Definitions,
-    no_prefix: TypeId,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -130,7 +132,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         store: &'store mut SemanticStore,
         definitions: Definitions,
     ) -> Self {
-        let no_prefix = store.types.alloc(Type::NoPrefix);
         Self {
             class_path,
             store,
@@ -138,7 +139,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             metadata: HashMap::new(),
             packages: PackageRegistry::new(),
             definitions,
-            no_prefix,
         }
     }
 
@@ -283,18 +283,43 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
         }
 
-        let class_symbol = self.store.symbols.alloc(Symbol {
-            name: symbol_name,
-            owner: Some(owner),
-            kind,
-            flags: symbol_flags,
-            visibility,
-            info: SymbolInfo::Missing,
-            origin,
-            annotations: Vec::new(),
-            position: None,
-            links: SymbolLinks::default(),
-        });
+        // `java/lang/Object` is the one real, classpath-loadable JVM class
+        // among `Definitions`'s builtins (`Any`/`Nothing` are Scala
+        // compiler fictions with no `.class`/`.tasty` of their own) --
+        // reusing `definitions.object_class`'s `SymbolId` here, instead of
+        // allocating a fresh one, means a `Type::TypeRef` built from
+        // `Definitions` (e.g. an implicit JVM superclass) and one built
+        // from actually loading `java/lang/Object` off the classpath name
+        // the exact same symbol, not two permanently distinct ones.
+        let class_symbol = if name.as_internal() == "java/lang/Object" {
+            let symbol = self.definitions.object_class;
+            *self.store.symbols.get_mut(symbol) = Symbol {
+                name: symbol_name,
+                owner: Some(owner),
+                kind,
+                flags: symbol_flags,
+                visibility,
+                info: SymbolInfo::Missing,
+                origin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            };
+            symbol
+        } else {
+            self.store.symbols.alloc(Symbol {
+                name: symbol_name,
+                owner: Some(owner),
+                kind,
+                flags: symbol_flags,
+                visibility,
+                info: SymbolInfo::Missing,
+                origin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            })
+        };
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
         (class_symbol, declarations)
@@ -320,7 +345,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
 
         let class_info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
-            prefix: self.no_prefix,
+            prefix: self.definitions.no_prefix,
             class: class_symbol,
             parents,
             declarations,
@@ -333,7 +358,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
         self.store.types.alloc(Type::TypeRef {
-            prefix: self.no_prefix,
+            prefix: self.definitions.no_prefix,
             symbol,
         })
     }
@@ -2403,6 +2428,83 @@ mod tests {
         drop(loader_b);
 
         assert_eq!(object_a, object_b);
+    }
+
+    /// `with_definitions` shares `Object`/`Any`/`Nothing`/primitive
+    /// identity, but each `ClassLoader` used to allocate its own
+    /// `Type::NoPrefix` regardless -- so a `Type::ClassInfo`/`Type::TypeRef`
+    /// built by one loader still had a different `prefix` `TypeId` than
+    /// one built by another loader sharing the same `Definitions`, even
+    /// though both `prefix`es resolve to the exact same `Type::NoPrefix`
+    /// value. Fixed by making `definitions.no_prefix` the one shared
+    /// `TypeId` every loader reads instead of allocating its own.
+    #[test]
+    fn class_loaders_sharing_one_bootstrapped_definitions_agree_on_no_prefix_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let mut classes_a = HashMap::new();
+        classes_a.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        let mut loader_a =
+            ClassLoader::with_definitions(InMemoryClassPath(classes_a), &mut store, definitions);
+        let object_a = loader_a
+            .load_class(&BinaryName::from_internal("java/lang/Object"))
+            .expect("java/lang/Object should load");
+        drop(loader_a);
+        let prefix_a = class_info(&store, object_a).prefix;
+
+        let mut classes_b = HashMap::new();
+        classes_b.insert(
+            BinaryName::from_internal("A"),
+            synthetic_class("A", Some("java/lang/Object")),
+        );
+        classes_b.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        let mut loader_b =
+            ClassLoader::with_definitions(InMemoryClassPath(classes_b), &mut store, definitions);
+        let a = loader_b
+            .load_class(&BinaryName::from_internal("A"))
+            .expect("A should load");
+        drop(loader_b);
+        let prefix_b = class_info(&store, a).prefix;
+
+        assert_eq!(prefix_a, prefix_b);
+        assert_eq!(prefix_a, definitions.no_prefix);
+    }
+
+    /// `java/lang/Object` is the one `Definitions` builtin with a real,
+    /// classpath-loadable backing class file -- loading it must resolve to
+    /// the exact same `SymbolId` as `Definitions::object_class`, not a
+    /// second, disconnected identity, or a `Type::TypeRef` built by
+    /// `Definitions` (e.g. an implicit JVM superclass) and one built by
+    /// actually loading `java/lang/Object` would name two different
+    /// symbols despite both meaning the same class.
+    #[test]
+    fn loading_java_lang_object_reuses_the_definitions_object_class_identity() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let object_class = loader.definitions().object_class;
+
+        let loaded_object = loader
+            .load_class(&BinaryName::from_internal("java/lang/Object"))
+            .expect("java/lang/Object should load");
+        drop(loader);
+
+        assert_eq!(loaded_object, object_class);
+        assert_eq!(symbol_name(&store, loaded_object), "Object");
+        let info = class_info(&store, loaded_object);
+        assert!(info.parents.is_empty());
     }
 
     #[test]
