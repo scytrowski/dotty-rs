@@ -808,6 +808,13 @@ mod tests {
             .collect()
     }
 
+    fn layout_kinds(source: &str) -> Vec<TokenKind> {
+        kinds(source)
+            .into_iter()
+            .filter(|kind| is_layout_token(*kind))
+            .collect()
+    }
+
     fn assert_newline_after_xml_literal(source: &str) {
         let tokens = kinds(source);
         let newline = tokens
@@ -1623,6 +1630,27 @@ mod tests {
     }
 
     #[test]
+    fn closes_nested_if_regions_before_each_else_clause() {
+        assert_eq!(
+            layout_kinds(
+                "if outer then\n  if inner then\n    inner\n  else\n    alternative\n  after_inner\nelse\n  fallback\nafter_if"
+            ),
+            vec![
+                TokenKind::Indent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+            ]
+        );
+    }
+
+    #[test]
     fn closes_try_regions_without_separators_before_catch_and_finally() {
         assert_eq!(
             kinds(
@@ -1655,6 +1683,26 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_nested_try_and_case_regions_before_finally() {
+        assert_eq!(
+            layout_kinds(
+                "try\n  risky()\ncatch\n  case error =>\n    recover()\nfinally\n  cleanup()\nafter_try"
+            ),
+            vec![
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Indent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Outdent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
             ]
         );
     }
@@ -1704,6 +1752,23 @@ mod tests {
     }
 
     #[test]
+    fn closes_nested_given_and_then_regions_before_the_following_statement() {
+        assert_eq!(
+            layout_kinds(
+                "given Service with\n  if ready then\n    service_value\n  service_after\nafter_given"
+            ),
+            vec![
+                TokenKind::Indent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+            ]
+        );
+    }
+
+    #[test]
     fn opens_and_closes_a_while_do_region() {
         assert_eq!(
             kinds("while condition do\n  work()\nafter_while()"),
@@ -1721,6 +1786,23 @@ mod tests {
                 TokenKind::Punctuation(Punctuation::LeftParen),
                 TokenKind::Punctuation(Punctuation::RightParen),
                 TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_nested_while_and_if_regions_before_the_following_statement() {
+        assert_eq!(
+            layout_kinds(
+                "while condition do\n  if nested then\n    work()\n  after_work\nafter_while"
+            ),
+            vec![
+                TokenKind::Indent,
+                TokenKind::Indent,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Outdent,
+                TokenKind::Newline,
             ]
         );
     }

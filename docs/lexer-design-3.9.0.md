@@ -74,6 +74,8 @@ Implementation status on the current lexer branch:
   recognition are now part of scanner post-processing, including
   `new`/`this`/`given`/`val` targets;
 - dedented closing delimiters close implicit regions after `)`, `]`, or `}`;
+- nested `if`/`else`, `try`/`catch`/`finally`, `while`/`do`, and `given`/`with`
+  transitions preserve the scanner's exact `INDENT`/`OUTDENT`/`NEWLINE` order;
 - incomparable space/tab indentation prefixes produce recoverable diagnostics;
 - quote markers and legacy quoted identifiers are emitted as `Quote` and
   `QuoteId`, including adjacent quote-id forms; splice syntax remains the `$`
