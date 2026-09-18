@@ -503,6 +503,7 @@ fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
         kind,
         RawTokenKind::Keyword(
             HardKeyword::Then
+                | HardKeyword::With
                 | HardKeyword::Else
                 | HardKeyword::Catch
                 | HardKeyword::Finally
@@ -1374,6 +1375,19 @@ mod tests {
             vec![
                 TokenKind::Identifier,
                 TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn suppresses_a_separator_before_with_after_a_blank_line() {
+        assert_eq!(
+            kinds("value\n\nwith\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::With),
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
