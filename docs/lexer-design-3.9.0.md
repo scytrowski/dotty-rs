@@ -72,8 +72,9 @@ Implementation status on the current lexer branch:
   `COLONeol` and can request `INDENT`/`OUTDENT` insertion through the shared
   scanner event contract; repeated indentation events are idempotent;
 - leading-infix continuation is recognized for line-start symbolic and
-  backquoted operators, while an operator after a blank line starts a new
-  logical statement;
+  backquoted operators, while a trailing ordinary operator ends the current
+  logical statement at a line break; layout operators such as `=>`, `=`, and
+  `<-` remain body triggers;
 - same-line `CASECLASS`/`CASEOBJECT` fusion and basic line-start end-marker
   recognition are now part of scanner post-processing, including
   `new`/`this`/`given`/`val` targets, comment boundaries, and explicit braces;

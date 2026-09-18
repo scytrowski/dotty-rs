@@ -237,6 +237,8 @@ fn build_tokens(
                     let blank_line_before_operator =
                         blank_line && raw.kind == RawTokenKind::Operator;
                     if can_end_statement(previous_kind)
+                        && !(previous_kind == Some(TokenKind::Operator)
+                            && previous_opens_indentation)
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
                         && (can_start_statement(raw.kind) || blank_line_before_operator)
@@ -461,6 +463,7 @@ fn can_end_statement(kind: Option<TokenKind>) -> bool {
                 | TokenKind::DoubleLiteral
                 | TokenKind::StringLiteral
                 | TokenKind::StringPart
+                | TokenKind::Operator
                 | TokenKind::Punctuation(
                     Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
                 )
@@ -1609,6 +1612,34 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_a_trailing_operator() {
+        assert_eq!(
+            kinds("left +\n  right"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inserts_a_newline_after_a_trailing_operator_before_a_line_comment() {
+        assert_eq!(
+            kinds("left + // comment\n  right"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Newline,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
