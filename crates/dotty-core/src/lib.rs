@@ -19,6 +19,25 @@ pub mod store;
 pub mod symbols;
 pub mod types;
 
+/// Shared semantic foundation: identity, names, source positions, the type
+/// and symbol/scope model, and phase-indexed syntax/typed trees.
+pub mod core {
+    pub use super::ast;
+    pub use super::ast::*;
+    pub use super::ids;
+    pub use super::ids::*;
+    pub use super::names;
+    pub use super::names::*;
+    pub use super::source;
+    pub use super::source::*;
+    pub use super::store;
+    pub use super::store::*;
+    pub use super::symbols;
+    pub use super::symbols::*;
+    pub use super::types;
+    pub use super::types::*;
+}
+
 pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
 pub use ids::{
     AnnotationId, ClassfileOriginId, CompletionId, NameId, ScopeId, SourceId, SymbolId,

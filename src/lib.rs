@@ -9,3 +9,7 @@ pub use dotty_tasty::tasty;
 
 /// JVM class file decoding and encoding APIs.
 pub use dotty_classfile::classfile;
+
+/// Shared semantic foundation (symbols, types, phase-indexed trees) for the
+/// source parser, classfile loader, TASTy unpickler, and namer/typer.
+pub use dotty_core::core;
