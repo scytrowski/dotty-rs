@@ -349,9 +349,7 @@ impl<'source> RawLexer<'source> {
                 || (!state.multiline && self.cursor.peek() == Some('"'))
             {
                 if state.multiline {
-                    let _ = self.cursor.bump();
-                    let _ = self.cursor.bump();
-                    let _ = self.cursor.bump();
+                    self.consume_multiline_terminator();
                 } else {
                     let _ = self.cursor.bump();
                 }
@@ -436,9 +434,7 @@ impl<'source> RawLexer<'source> {
                 || (!multiline && self.cursor.peek() == Some('"'))
             {
                 if multiline {
-                    let _ = self.cursor.bump();
-                    let _ = self.cursor.bump();
-                    let _ = self.cursor.bump();
+                    self.consume_multiline_terminator();
                 } else {
                     let _ = self.cursor.bump();
                 }
@@ -1045,9 +1041,7 @@ impl<'source> RawLexer<'source> {
                 && self.cursor.peek_nth(1) == Some('"')
                 && self.cursor.peek_nth(2) == Some('"')
             {
-                let _ = self.cursor.bump();
-                let _ = self.cursor.bump();
-                let _ = self.cursor.bump();
+                self.consume_multiline_terminator();
                 return Ok(RawToken {
                     kind: RawTokenKind::StringLiteral,
                     span: self.span(start)?,
@@ -1060,6 +1054,12 @@ impl<'source> RawLexer<'source> {
                     span: self.span(start)?,
                 });
             }
+        }
+    }
+
+    fn consume_multiline_terminator(&mut self) {
+        while self.cursor.peek() == Some('"') {
+            let _ = self.cursor.bump();
         }
     }
 
@@ -2820,6 +2820,54 @@ mod tests {
                 token(RawTokenKind::StringLiteral, 0, 8),
                 token(RawTokenKind::Eof, 8, 8),
             ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_quotes_before_a_multiline_string_terminator() {
+        let source = "\"\"\"text\"\"\"\"";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::StringLiteral, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_quotes_before_an_interpolated_string_terminator() {
+        let source = "s\"\"\"text $value\"\"\"\"";
+        let (items, diagnostics) = scan(source);
+        let kinds: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            items.last(),
+            Some(&token(
+                RawTokenKind::Eof,
+                source.len() as u32,
+                source.len() as u32
+            ))
         );
         assert!(diagnostics.is_empty());
     }

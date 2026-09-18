@@ -55,7 +55,9 @@ Implementation status on the current lexer branch:
 
 - `RawLexer` emits a lossless stream for trivia, identifiers, operators,
   keywords, punctuation, numeric and character literals, ordinary and
-  multiline strings, and basic string interpolation;
+  multiline strings, and basic string interpolation; multiline terminators
+  consume a complete trailing quote run, including quotes immediately before
+  the final `"""`;
 - `ContextualScanner` maps raw categories to the shared `dotty-token` kinds;
 - the scanner currently infers `NEWLINE`/`NEWLINES` separators and maintains
   prefix-based indentation regions for non-colon triggers such as `then`,

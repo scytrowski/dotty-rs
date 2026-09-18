@@ -1,0 +1,6 @@
+val empty = """"""
+val text = """text"""
+val leadingQuote = """"text"""
+val trailingQuote = """text""""
+val interpolated = s"""text $value"""
+val interpolatedQuotes = s"""text """"""
