@@ -169,6 +169,16 @@ path dependency back to `crates/dotty-core/Cargo.toml`, replace the local
 `TextRange`/`TextRangeError` in `source.rs` with a re-export of
 `dotty_source::TextRange`, and delete this note.
 
+PR #3 review raised this as a blocker; the resolution (kept as documented
+above rather than taking the dependency early) was a deliberate choice —
+`feature/lexer` was still 70+ commits ahead of `main` and under active
+development by another agent at review time, so adding a path dependency on
+it now would reintroduce the exact branch-coupling problem this design
+avoided. `source.rs`'s module documentation now pins the local
+`TextRange`'s public shape against `dotty_source::TextRange`'s real
+definition (verified on `feature/lexer`) with a dedicated test, and spells
+out the swap as three concrete steps.
+
 ## 3. Crate layout
 
 ```text

@@ -6,7 +6,7 @@
 //! one [`Annotation`]/[`AnnotationArena`] here.
 
 use crate::ast::Typed;
-use crate::ids::{AnnotationId, TreeId, TypeId};
+use crate::ids::{AnnotationId, TreeId, TypeId, checked_index};
 
 /// One semantic annotation, e.g. `@deprecated` on a symbol or `@unchecked`
 /// on a type.
@@ -37,7 +37,7 @@ impl AnnotationArena {
     }
 
     pub fn alloc(&mut self, annotation: Annotation) -> AnnotationId {
-        let id = AnnotationId::new(self.annotations.len() as u32);
+        let id = AnnotationId::new(checked_index(self.annotations.len()));
         self.annotations.push(annotation);
         id
     }

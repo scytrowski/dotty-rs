@@ -8,14 +8,34 @@
 //! sentinel `SourceId` (see `docs/dotty-core-design.md`, "source positions
 //! need an explicit no-source/synthetic state").
 //!
-//! [`TextRange`] here is a **temporary stand-in** for `dotty_source::TextRange`.
+//! [`TextRange`] here is a **temporary stand-in** for `dotty_source::TextRange`,
+//! not a permanent parallel implementation.
+//!
 //! `dotty-core` was branched from `main` while the `dotty-source` crate still
-//! lives only on the not-yet-merged `feature/lexer` branch, so it cannot be a
-//! path dependency yet without coupling `dotty-core` to another team's
-//! in-flight branch. Once `feature/lexer` merges into `main`, replace this
-//! module's `TextRange`/`TextRangeError` with a re-export of
-//! `dotty_source::TextRange` and drop the local definition — see
-//! `docs/dotty-core-design.md`, "§2 deviations."
+//! lives only on the not-yet-merged `feature/lexer` branch (still 70+ commits
+//! ahead of `main`, still under active development by another agent as of
+//! this writing), so it cannot be a path dependency yet without coupling
+//! `dotty-core` to another team's in-flight branch.
+//!
+//! `new`/`start`/`end` here match `dotty_source::TextRange`'s signatures
+//! field-for-field and byte-for-byte (verified against
+//! `feature/lexer`'s `crates/dotty-source/src/span.rs`; pinned by
+//! `local_text_range_matches_dotty_sources_public_constructor_shape` below),
+//! so every call site in this crate keeps compiling unchanged after the swap.
+//! The real type additionally has `len`, `is_empty`, `contains`,
+//! `intersects`, and `cover`; this stand-in deliberately does not replicate
+//! them because nothing in `dotty-core` needs them yet — if a caller needs
+//! one before the swap happens, add it here too so the two stay in lockstep.
+//!
+//! **Required once `feature/lexer` merges into `main`:**
+//! 1. Add `dotty-source = { path = "../dotty-source" }` to
+//!    `crates/dotty-core/Cargo.toml`.
+//! 2. Delete `TextRange`/`TextRangeError` from this module and replace them
+//!    with `pub use dotty_source::{TextRange, TextRangeError};`.
+//! 3. Delete the shape-pinning test below (it becomes redundant — the real
+//!    type is now used directly).
+//!
+//! See also `docs/dotty-core-design.md`, "§2 deviations."
 
 use core::fmt;
 
@@ -76,17 +96,49 @@ pub struct Span {
     point: Option<u32>,
 }
 
+/// Failure while constructing a [`Span`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanError {
+    /// `point` fell outside `range`. `point` must satisfy
+    /// `range.start() <= point <= range.end()`.
+    PointOutOfRange { point: u32, range: TextRange },
+}
+
+impl fmt::Display for SpanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PointOutOfRange { point, range } => write!(
+                formatter,
+                "diagnostic point {point} lies outside range [{}, {}]",
+                range.start(),
+                range.end()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpanError {}
+
 impl Span {
     /// Creates a span covering `range`, with `point` identifying the primary
     /// diagnostic offset inside it (e.g. the start of `bar` in `foo.bar`,
     /// where `range` covers the whole selection).
-    pub const fn new(range: TextRange, point: Option<u32>) -> Self {
-        Self { range, point }
+    ///
+    /// Fails if `point` is given but lies outside `range` — a point makes no
+    /// sense as a location "inside" a span it isn't part of.
+    pub fn new(range: TextRange, point: Option<u32>) -> Result<Self, SpanError> {
+        if let Some(point) = point
+            && !(range.start()..=range.end()).contains(&point)
+        {
+            return Err(SpanError::PointOutOfRange { point, range });
+        }
+
+        Ok(Self { range, point })
     }
 
     /// Creates a span with no distinguished diagnostic point.
     pub const fn without_point(range: TextRange) -> Self {
-        Self::new(range, None)
+        Self { range, point: None }
     }
 
     pub const fn range(self) -> TextRange {
@@ -123,6 +175,22 @@ impl SourceSpan {
 mod tests {
     use super::*;
 
+    /// Pins this module's `TextRange::new`/`start`/`end` to the exact
+    /// signatures `dotty_source::TextRange` exposes, so this file's module
+    /// documentation stays true and the eventual swap (see above) is a pure
+    /// deletion, not a call-site rewrite. Delete this test as part of that
+    /// swap — see step 3 in the module documentation.
+    #[test]
+    fn local_text_range_matches_dotty_sources_public_constructor_shape() {
+        fn assert_shape(_: fn(u32, u32) -> Result<TextRange, TextRangeError>) {}
+        assert_shape(TextRange::new);
+
+        let range = TextRange::new(5, 12).expect("valid range");
+        let start: u32 = range.start();
+        let end: u32 = range.end();
+        assert_eq!((start, end), (5, 12));
+    }
+
     #[test]
     fn text_range_exposes_its_start_and_end() {
         let range = TextRange::new(3, 9).expect("valid range");
@@ -151,10 +219,54 @@ mod tests {
     #[test]
     fn span_keeps_its_diagnostic_point_distinct_from_the_range() {
         let range = TextRange::new(0, 7).expect("valid range");
-        let span = Span::new(range, Some(4));
+        let span = Span::new(range, Some(4)).expect("point inside range");
 
         assert_eq!(span.range(), range);
         assert_eq!(span.point(), Some(4));
+    }
+
+    #[test]
+    fn span_accepts_a_point_at_the_start_boundary() {
+        let range = TextRange::new(3, 9).expect("valid range");
+
+        assert!(Span::new(range, Some(3)).is_ok());
+    }
+
+    #[test]
+    fn span_accepts_a_point_at_the_end_boundary() {
+        let range = TextRange::new(3, 9).expect("valid range");
+
+        assert!(Span::new(range, Some(9)).is_ok());
+    }
+
+    #[test]
+    fn span_rejects_a_point_before_the_range_start() {
+        let range = TextRange::new(10, 20).expect("valid range");
+
+        assert_eq!(
+            Span::new(range, Some(9)),
+            Err(SpanError::PointOutOfRange { point: 9, range })
+        );
+    }
+
+    #[test]
+    fn span_rejects_a_point_after_the_range_end() {
+        let range = TextRange::new(10, 20).expect("valid range");
+
+        assert_eq!(
+            Span::new(range, Some(21)),
+            Err(SpanError::PointOutOfRange { point: 21, range })
+        );
+    }
+
+    #[test]
+    fn span_rejects_a_point_outside_the_range_even_when_zero() {
+        let range = TextRange::new(10, 20).expect("valid range");
+
+        assert_eq!(
+            Span::new(range, Some(0)),
+            Err(SpanError::PointOutOfRange { point: 0, range })
+        );
     }
 
     #[test]

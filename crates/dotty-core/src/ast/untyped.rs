@@ -118,12 +118,18 @@ pub struct InterpolatedString {
     pub parts: Vec<TreeId<Untyped>>,
 }
 
-/// `def f[A: Show](...)`'s `: Show` context bound, before desugaring into an
-/// implicit parameter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `def f[A: Show](...)`'s `: Show` context bound(s), before desugaring into
+/// implicit parameters.
+///
+/// `context_bounds` is a `Vec`, not a single `TreeId`: Scala 3.9 allows more
+/// than one bound on the same type parameter, either as `[A: Ord: Show]` or
+/// the newer `[A: {Ord, Show}]` syntax — see
+/// <https://docs.scala-lang.org/scala3/reference/contextual/context-bounds.html>.
+/// Mirrors real Dotty's `untpd.ContextBounds(bounds: TypeBoundsTree, cxBounds: List[Tree])`.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextBounds {
     pub bounds: TreeId<Untyped>,
-    pub context_bounds: TreeId<Untyped>,
+    pub context_bounds: Vec<TreeId<Untyped>>,
 }
 
 /// A raw numeric literal, before the exact numeric type and overflow
@@ -342,16 +348,31 @@ mod tests {
     fn context_bounds_carries_its_bound_trees() {
         let node = UntypedNode::ContextBounds(ContextBounds {
             bounds: tree_id(1),
-            context_bounds: tree_id(2),
+            context_bounds: vec![tree_id(2)],
         });
 
         assert_eq!(
             node,
             UntypedNode::ContextBounds(ContextBounds {
                 bounds: tree_id(1),
-                context_bounds: tree_id(2),
+                context_bounds: vec![tree_id(2)],
             })
         );
+    }
+
+    /// `def f[A: Ord: Show]` / `def f[A: {Ord, Show}]` — more than one
+    /// context bound on the same type parameter.
+    #[test]
+    fn context_bounds_preserves_multiple_bounds_in_order() {
+        let node = UntypedNode::ContextBounds(ContextBounds {
+            bounds: tree_id(1),
+            context_bounds: vec![tree_id(2), tree_id(3)],
+        });
+
+        let UntypedNode::ContextBounds(context_bounds) = &node else {
+            panic!("expected a ContextBounds node");
+        };
+        assert_eq!(context_bounds.context_bounds, vec![tree_id(2), tree_id(3)]);
     }
 
     #[test]

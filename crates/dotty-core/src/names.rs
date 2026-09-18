@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::ids::NameId;
+use crate::ids::{NameId, checked_index};
 
 /// The two namespaces Scala names live in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -99,7 +99,7 @@ impl NameInterner {
             return id;
         }
 
-        let id = NameId::new(self.strings.len() as u32);
+        let id = NameId::new(checked_index(self.strings.len()));
         let boxed: Box<str> = Box::from(text);
         self.strings.push(boxed.clone());
         self.lookup.insert(boxed, id);

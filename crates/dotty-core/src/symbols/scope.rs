@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::ids::{ScopeId, SymbolId};
+use crate::ids::{ScopeId, SymbolId, checked_index};
 use crate::names::Name;
 
 /// A name-lookup table for one owner (a class body, a block, ...).
@@ -68,7 +68,7 @@ impl ScopeArena {
     }
 
     pub fn alloc(&mut self, scope: Scope) -> ScopeId {
-        let id = ScopeId::new(self.scopes.len() as u32);
+        let id = ScopeId::new(checked_index(self.scopes.len()));
         self.scopes.push(scope);
         id
     }

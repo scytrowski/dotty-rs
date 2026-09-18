@@ -44,7 +44,7 @@ pub use ids::{
     TastyOriginId, TreeId, TypeId,
 };
 pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
-pub use source::{SourceSpan, Span};
+pub use source::{SourceSpan, Span, SpanError};
 pub use store::SemanticStore;
 pub use symbols::{
     Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,

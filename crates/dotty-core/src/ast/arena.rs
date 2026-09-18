@@ -2,7 +2,7 @@
 
 use crate::ast::phase::AstPhase;
 use crate::ast::tree::Tree;
-use crate::ids::TreeId;
+use crate::ids::{TreeId, checked_index};
 
 /// Owns every [`Tree`] for one phase (`Untyped` or `Typed`) of one
 /// compilation session.
@@ -26,7 +26,7 @@ impl<P: AstPhase> AstArena<P> {
     }
 
     pub fn alloc(&mut self, tree: Tree<P>) -> TreeId<P> {
-        let id = TreeId::new(self.nodes.len() as u32);
+        let id = TreeId::new(checked_index(self.nodes.len()));
         self.nodes.push(tree);
         id
     }

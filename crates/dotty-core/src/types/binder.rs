@@ -18,18 +18,31 @@ use crate::ids::TypeId;
 
 /// A [`TypeId`] reserved by [`TypeArena::reserve`](super::TypeArena::reserve),
 /// not yet guaranteed to hold its final value.
+///
+/// Carries the reserving arena's identity (`arena_id`) so
+/// [`TypeArena::fill`](super::TypeArena::fill) can reject a reservation
+/// filled in a different arena than the one that issued it — passing it to
+/// the wrong arena would otherwise silently overwrite an unrelated slot and
+/// invalidate any `ParamRef`/`RecThis` relationship built against it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ReservedTypeId(TypeId);
+pub struct ReservedTypeId {
+    id: TypeId,
+    arena_id: u64,
+}
 
 impl ReservedTypeId {
-    pub(crate) const fn from_type_id(id: TypeId) -> Self {
-        Self(id)
+    pub(crate) const fn reserved_in(id: TypeId, arena_id: u64) -> Self {
+        Self { id, arena_id }
+    }
+
+    pub(crate) const fn arena_id(self) -> u64 {
+        self.arena_id
     }
 
     /// The `TypeId` this reservation will resolve to once filled. Usable
     /// immediately as a binder identity in `ParamRef`/`RecThis`, before the
     /// reservation is filled — see the module documentation.
     pub const fn id(self) -> TypeId {
-        self.0
+        self.id
     }
 }

@@ -8,6 +8,18 @@
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+/// Converts an arena's current length into the raw index for its next
+/// allocation.
+///
+/// Panics rather than silently wrapping if the arena has grown past
+/// `u32::MAX` entries: a wrapped index would collide with an
+/// already-allocated, unrelated entry and hand out a duplicate ID, which is
+/// the same class of internal-invariant violation as an out-of-range `get`
+/// (see `docs/dotty-core-design.md` §12's error-handling policy).
+pub(crate) fn checked_index(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or_else(|_| panic!("arena exceeded u32::MAX entries ({len})"))
+}
+
 macro_rules! opaque_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -209,5 +221,17 @@ mod tests {
 
         assert_eq!(a.index(), 3);
         assert_eq!(b.index(), 3);
+    }
+
+    #[test]
+    fn checked_index_passes_through_a_representable_length() {
+        assert_eq!(checked_index(42), 42);
+        assert_eq!(checked_index(u32::MAX as usize), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "arena exceeded u32::MAX entries")]
+    fn checked_index_panics_instead_of_wrapping_a_length_that_overflows_u32() {
+        checked_index(u32::MAX as usize + 1);
     }
 }

@@ -1,8 +1,17 @@
 //! Allocates and looks up [`Type`] values.
 
-use crate::ids::TypeId;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::ids::{TypeId, checked_index};
 use crate::types::binder::ReservedTypeId;
 use crate::types::ty::Type;
+
+/// Hands out a fresh, process-wide-unique id for each `TypeArena`, so a
+/// [`ReservedTypeId`] can be checked against the arena it was reserved from.
+fn next_arena_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Owns every [`Type`] value for one compilation session.
 ///
@@ -10,7 +19,7 @@ use crate::types::ty::Type;
 /// `TypeLambda` values are only truly interchangeable if their binders are
 /// alpha-equivalent, which plain structural equality does not establish —
 /// see `docs/dotty-core-design.md` §8.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypeArena {
     types: Vec<Type>,
     /// Parallel to `types`: false for a slot created by `reserve` that has
@@ -18,6 +27,19 @@ pub struct TypeArena {
     /// reservation that outlived the construction sequence that made it),
     /// not recoverable input — see §12's error-handling policy.
     filled: Vec<bool>,
+    /// This arena's identity, checked by [`TypeArena::fill`] against the
+    /// [`ReservedTypeId`] it is given.
+    arena_id: u64,
+}
+
+impl Default for TypeArena {
+    fn default() -> Self {
+        Self {
+            types: Vec::new(),
+            filled: Vec::new(),
+            arena_id: next_arena_id(),
+        }
+    }
 }
 
 impl TypeArena {
@@ -26,7 +48,7 @@ impl TypeArena {
     }
 
     pub fn alloc(&mut self, ty: Type) -> TypeId {
-        let id = TypeId::new(self.types.len() as u32);
+        let id = TypeId::new(checked_index(self.types.len()));
         self.types.push(ty);
         self.filled.push(true);
         id
@@ -57,15 +79,30 @@ impl TypeArena {
     /// its `TypeId` immediately so it can be used as a binder identity before
     /// the real value is known.
     pub fn reserve(&mut self) -> ReservedTypeId {
-        let id = TypeId::new(self.types.len() as u32);
+        let id = TypeId::new(checked_index(self.types.len()));
         self.types.push(Type::NoType);
         self.filled.push(false);
-        ReservedTypeId::from_type_id(id)
+        ReservedTypeId::reserved_in(id, self.arena_id)
     }
 
     /// Overwrites a reserved slot with its real value.
+    ///
+    /// Panics if `id` was reserved by a different `TypeArena`, or if it was
+    /// already filled — either would otherwise silently overwrite a slot
+    /// that a different reservation legitimately owns, invalidating any
+    /// `ParamRef`/`RecThis` relationship already built against it (see
+    /// `docs/dotty-core-design.md` §8, `[BLOCKER 1]`).
     pub fn fill(&mut self, id: ReservedTypeId, ty: Type) -> TypeId {
+        assert_eq!(
+            id.arena_id(),
+            self.arena_id,
+            "ReservedTypeId was reserved from a different TypeArena"
+        );
         let index = id.id().index() as usize;
+        assert!(
+            !self.filled[index],
+            "TypeId {index} was already filled — a ReservedTypeId can only be filled once"
+        );
         self.types[index] = ty;
         self.filled[index] = true;
         id.id()
@@ -112,6 +149,26 @@ mod tests {
         let reserved = arena.reserve();
 
         arena.get(reserved.id());
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved from a different TypeArena")]
+    fn fill_rejects_a_reservation_from_a_different_arena() {
+        let mut arena_a = TypeArena::new();
+        let mut arena_b = TypeArena::new();
+        let reserved_in_a = arena_a.reserve();
+
+        arena_b.fill(reserved_in_a, Type::NoPrefix);
+    }
+
+    #[test]
+    #[should_panic(expected = "already filled")]
+    fn fill_rejects_filling_the_same_reservation_twice() {
+        let mut arena = TypeArena::new();
+        let reserved = arena.reserve();
+
+        arena.fill(reserved, Type::NoPrefix);
+        arena.fill(reserved, Type::NoType);
     }
 
     #[test]

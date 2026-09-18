@@ -1,6 +1,6 @@
 //! Allocates and looks up [`Symbol`] values.
 
-use crate::ids::SymbolId;
+use crate::ids::{SymbolId, checked_index};
 use crate::symbols::completion::SymbolInfo;
 use crate::symbols::symbol::Symbol;
 
@@ -16,7 +16,7 @@ impl SymbolTable {
     }
 
     pub fn alloc(&mut self, symbol: Symbol) -> SymbolId {
-        let id = SymbolId::new(self.symbols.len() as u32);
+        let id = SymbolId::new(checked_index(self.symbols.len()));
         self.symbols.push(symbol);
         id
     }
