@@ -23,7 +23,7 @@ for fixture in "${fixtures[@]}"; do
 
   "${script_dir}/run" "${fixture}" >"${scala_output}"
   cargo run -q -p dotty-parser-smoke-dump --locked -- "${fixture}" >"${rust_output}"
-  python3 "${script_dir}/compare.py" "${scala_output}" "${rust_output}"
+  python3 "${script_dir}/compare.py" "${fixture}" "${scala_output}" "${rust_output}"
 
   rm -f "${scala_output}" "${rust_output}"
   trap - EXIT

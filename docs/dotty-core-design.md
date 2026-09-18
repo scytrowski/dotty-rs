@@ -24,10 +24,10 @@ marked `[MAJOR 1, extended]`.
 
 ## 1. Scope and goal
 
-Today the workspace has a shared frontend foundation (`dotty-core`) with a
-lexer pipeline (`dotty-lexer`) and two independent binary codecs
-(`dotty-tasty`, `dotty-classfile`). There is no parser, no symbol table, no
-type representation, and no typed AST.
+Today the workspace has a shared frontend foundation (`dotty-core`), a lexer
+pipeline (`dotty-lexer`), the initial source parser infrastructure
+(`dotty-parser`), and two independent binary codecs (`dotty-tasty`,
+`dotty-classfile`). There is still no namer, typer, or typed AST pipeline.
 
 `[MINOR 3]` The four future consumers do not all need the same slice of the
 model, and the introduction should not imply they do:
@@ -92,13 +92,17 @@ Current workspace members and their dependency edges:
 ```text
 dotty-core     (shared source, diagnostics, token, and semantic contracts)
 dotty-lexer    -> dotty-core
+dotty-parser   -> dotty-core
 dotty-classfile (no deps; raw ClassFile/ConstantPool/etc. type skeleton only)
 dotty-tasty    (no deps; raw + structured wire-format codec)
 dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
 ```
 
-`dotty-parser`, `dotty-typer`, and `dotty-compiler` do not exist yet. Only
-lexing/tokenizing is implemented; nothing today builds an AST.
+`dotty-parser` now exists as an infrastructure crate with a deliberately small
+Scala 3.9.0 smoke grammar. Full grammar coverage, namer, typer, and compiler
+orchestration remain future work; the parser boundary and `AstArena<Untyped>`
+ownership are no longer speculative. See
+[`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md) for its current scope.
 
 `[MAJOR 6]` The prior draft left it open whether classfile/TASTy semantic
 adapters live inside the future `dotty-typer` crate or in a dedicated module.
@@ -210,7 +214,8 @@ crates/
 │
 ├── dotty-tasty/       (unchanged; semantic adapter is future work, not here)
 ├── dotty-classfile/   (unchanged; semantic adapter is future work, not here)
-└── dotty-lexer/
+├── dotty-lexer/
+└── dotty-parser/      (SourceText + TokenSource -> AstArena<Untyped>)
 ```
 
 Changes from the first draft's layout:
@@ -231,8 +236,9 @@ query API (`AstArena`, `TypeArena`, `SymbolTable`) still gets its own file.
 
 `dotty-core` is a workspace member and the root `dotty` facade exposes its
 shared contracts as `dotty::core`, alongside `dotty::tasty` and
-`dotty::classfile`. This keeps the public entry point stable for the future
-parser and semantic adapters without making them depend on the root facade.
+`dotty::classfile`. `dotty-parser` consumes those contracts directly and does
+not depend on the root facade. This keeps the public entry point stable for
+future parser and semantic adapters.
 
 ## 4. `ids.rs` — opaque identities
 
@@ -406,7 +412,9 @@ The parser-facing coverage audit is maintained separately in
 document is authoritative for the distinction between parser-owned syntax,
 lowered forms, and explicitly feature-gated Scala 3.9 constructs. The AST
 model in this section is the current foundation baseline, not a claim that
-every Dotty `untpd` helper has already been mirrored.
+every Dotty `untpd` helper has already been mirrored. The implemented parser
+infrastructure and its smoke grammar are documented in
+[`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md).
 
 ### `ast/phase.rs`
 
@@ -1350,9 +1358,11 @@ touches code that already exists.
   semantic loader (raw `ClassFile` → `Symbol`/`ClassInfo`/`Scope`) is new
   code in the same dedicated adapter layer, added later once `dotty-
   classfile` actually has a decoder to adapt.
-- **The future parser** produces `AstArena<Untyped>` directly — no
-  intermediate representation. Per `[MINOR 3]`, it needs a `NameInterner`
-  and the `Span`/`SourceSpan` types, but nothing else from `SemanticStore`.
+- **`dotty-parser`** produces `AstArena<Untyped>` directly — no intermediate
+  representation. Per `[MINOR 3]`, it needs a `NameInterner` and the
+  `Span`/`SourceSpan` types, but nothing else from `SemanticStore`. Its current
+  grammar is intentionally limited; later parser increments expand it without
+  changing this semantic boundary.
 - **The future typer** is the first component to touch every part of
   `dotty-core` at once: it reads `AstArena<Untyped>`, populates `symbols`/
   `types`/`scopes`/`annotations` on a `SemanticStore`, and produces
@@ -1533,8 +1543,9 @@ conversion, TASTy → `dotty-core` conversion, inline-call provenance on
 Once the foundation lands, the following can proceed in parallel, each
 depending only on `dotty-core`:
 
-- Scala source parser producing `AstArena<Untyped>` (extends today's
-  `dotty-lexer` output and the shared `dotty-core::token` contracts).
+- Further Scala source grammar increments in `dotty-parser`, producing
+  `AstArena<Untyped>` from today's `dotty-lexer` output and the shared
+  `dotty-core::token` contracts.
 - Classfile semantic adapter (`dotty-classfile` decoder + loader producing
   `Symbol`/`Type`/`ClassInfo`), in the dedicated adapter layer from §2.
 - TASTy semantic adapter (`dotty-tasty` structured trees →
