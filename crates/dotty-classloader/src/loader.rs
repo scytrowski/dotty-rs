@@ -163,10 +163,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
         match self.repository.get(name).cloned() {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
-            Some(ClassEntry::Failed(error)) => return Err(error),
-            Some(ClassEntry::Loading(_)) => {
+            Some(ClassEntry::Failed(_, error)) => return Err(error),
+            Some(ClassEntry::Loading(symbol)) => {
                 let error = ClassLoadError::CircularInheritance(name.clone());
-                self.repository.mark_failed(name.clone(), error.clone());
+                // Same reasoning as the `DependencyFailure` branch below:
+                // this class's `Symbol` was already allocated by
+                // `enter_class` and may already be reachable through a
+                // legitimate mutual member-type reference, so it must not
+                // be left looking like a merely-not-yet-completed
+                // `SymbolInfo::Missing` once the repository says `Failed`.
+                self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
+                self.repository
+                    .mark_failed(name.clone(), Some(symbol), error.clone());
                 return Err(error);
             }
             None => {}
@@ -194,10 +202,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 // failure is recorded -- makes that already-observable
                 // half-built `Symbol` self-describing instead of silently
                 // looking like a real, merely-not-yet-completed one.
-                if let Some(ClassEntry::Loading(symbol)) = self.repository.get(name) {
-                    self.store.symbols.get_mut(*symbol).info = SymbolInfo::Error;
+                // Only `None` (no `enter_class` reached yet, e.g. a
+                // `NotFound`/`InvalidClassFile` failure) or `Loading` (set
+                // by `enter_class` at the very start of this name's own
+                // `load_uncached` call, above) are reachable here -- `name`
+                // had no repository entry when `load_class` started.
+                let still_loading_symbol = self.repository.get(name).and_then(ClassEntry::symbol);
+                if let Some(symbol) = still_loading_symbol {
+                    self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
                 }
-                self.repository.mark_failed(name.clone(), error.clone());
+                self.repository
+                    .mark_failed(name.clone(), still_loading_symbol, error.clone());
                 Err(error)
             }
         }
@@ -4083,6 +4098,47 @@ mod tests {
         }
 
         assert!(contains_circular_inheritance(&error));
+    }
+
+    /// The circular-inheritance branch and the `DependencyFailure` branch
+    /// in `ClassLoader::load_class` are two separate places that mark a
+    /// failed load's already-allocated `Symbol` `SymbolInfo::Error` — this
+    /// checks both sides of the cycle got it, not just the one the outer
+    /// `load_class` call directly sees. `A`'s `Symbol` is marked by the
+    /// `Loading` branch when the recursive `load_class("A")` call (from
+    /// resolving `B`'s superclass) finds `A` already `Loading`; `B`'s is
+    /// then marked by the `DependencyFailure` branch once that error
+    /// propagates back out through `B`'s own still-`Loading` entry.
+    #[test]
+    fn circular_inheritance_marks_both_symbols_as_error() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("A"),
+            synthetic_class("A", Some("B")),
+        );
+        classes.insert(
+            BinaryName::from_internal("B"),
+            synthetic_class("B", Some("A")),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        loader
+            .load_class(&BinaryName::from_internal("A"))
+            .unwrap_err();
+
+        let a_symbol = match loader.repository.get(&BinaryName::from_internal("A")) {
+            Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
+            other => panic!("expected A to be Failed with a Symbol, got {other:?}"),
+        };
+        let b_symbol = match loader.repository.get(&BinaryName::from_internal("B")) {
+            Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
+            other => panic!("expected B to be Failed with a Symbol, got {other:?}"),
+        };
+        drop(loader);
+
+        assert_eq!(store.symbols.get(a_symbol).info, SymbolInfo::Error);
+        assert_eq!(store.symbols.get(b_symbol).info, SymbolInfo::Error);
     }
 
     /// Confirms the "reuse an in-progress shell" technique
