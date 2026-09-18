@@ -1220,7 +1220,26 @@ fn classify_keyword(text: &str) -> Option<HardKeyword> {
 
 #[cfg(test)]
 mod tests {
+    use dotty_token::TokenKind;
+
     use super::*;
+
+    fn visit_short_ascii_inputs(
+        alphabet: &[char],
+        current: &mut String,
+        remaining: usize,
+        visit: &mut impl FnMut(&str),
+    ) {
+        visit(current);
+        if remaining == 0 {
+            return;
+        }
+        for character in alphabet {
+            current.push(*character);
+            visit_short_ascii_inputs(alphabet, current, remaining - 1, visit);
+            current.pop();
+        }
+    }
 
     fn scan(source: &str) -> (Vec<RawItem>, Vec<Diagnostic>) {
         let mut lexer = RawLexer::new(source).expect("valid source");
@@ -3081,5 +3100,50 @@ mod tests {
             )
         }));
         assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn raw_and_contextual_lexers_terminate_on_short_ascii_inputs() {
+        let alphabet = [
+            ' ', '\t', '\n', '\r', 'a', '1', '\'', '"', '$', '{', '}', '/', '*',
+        ];
+        let mut input = String::new();
+        let mut visited = 0;
+
+        visit_short_ascii_inputs(&alphabet, &mut input, 3, &mut |source| {
+            visited += 1;
+
+            let (items, _) = scan(source);
+            let mut offset = 0;
+            for item in items {
+                let span = match item {
+                    RawItem::Token(token) => token.span,
+                    RawItem::Trivia(trivia) => trivia.span,
+                };
+                assert_eq!(span.start(), offset, "raw span gap for {source:?}");
+                offset = span.end();
+            }
+            assert_eq!(offset, source.len() as u32, "raw span gap for {source:?}");
+
+            let scanner = crate::ContextualScanner::new(source)
+                .unwrap_or_else(|error| panic!("scanner rejected {source:?}: {error}"));
+            assert_eq!(
+                scanner.tokens().last().map(|token| token.kind),
+                Some(TokenKind::Eof),
+                "scanner did not reach EOF for {source:?}"
+            );
+            for token in scanner.tokens() {
+                assert!(
+                    token.span.end() <= source.len() as u32,
+                    "scanner span exceeds source for {source:?}"
+                );
+            }
+        });
+
+        let alphabet_size = alphabet.len();
+        assert_eq!(
+            visited,
+            1 + alphabet_size + alphabet_size.pow(2) + alphabet_size.pow(3)
+        );
     }
 }

@@ -533,6 +533,11 @@ reporting a typed diagnostic. Missing digits after a base prefix and invalid
 digits in hexadecimal/binary literals are diagnosed independently, without
 emitting duplicate errors for the same malformed literal.
 
+The lexer also has a deterministic short-input hardening test that exercises
+2,380 ASCII inputs through both raw and contextual scanning, checking progress,
+EOF reachability, and source-span coverage. Full randomized fuzzing remains a
+separate hardening task.
+
 ## 11. Testing strategy
 
 ### Focused unit tests
