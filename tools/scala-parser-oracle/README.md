@@ -23,3 +23,4 @@ The initial fixtures cover the expression forms currently represented by the
 Rust smoke parser: identifiers, numeric and string literals, `this`,
 parentheses, the empty tuple, a two-element tuple, simple selections, and
 simple applications, including empty and multiple argument lists.
+Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.

@@ -212,20 +212,55 @@ where
     }
 
     fn parse_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
-        let kind = match self.current().kind {
-            TokenKind::IntegerLiteral | TokenKind::LongLiteral => {
-                NumberKind::Whole(integer_radix(self.current_text().ok()))
+        let token_kind = self.current().kind;
+        let spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+
+        let kind = match token_kind {
+            TokenKind::LongLiteral => {
+                let Some(value) = parse_long_literal(spelling) else {
+                    return self.unexpected_expression();
+                };
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::Literal(Literal {
+                        value: Constant::Long(value),
+                    }),
+                );
             }
+            TokenKind::FloatLiteral => {
+                let Some(value) = parse_float_literal(spelling) else {
+                    return self.unexpected_expression();
+                };
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::Literal(Literal {
+                        value: Constant::Float(value),
+                    }),
+                );
+            }
+            TokenKind::DoubleLiteral => {
+                let Some(value) = parse_double_literal(spelling) else {
+                    return self.unexpected_expression();
+                };
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::Literal(Literal {
+                        value: Constant::Double(value),
+                    }),
+                );
+            }
+            TokenKind::IntegerLiteral => NumberKind::Whole(integer_radix(Some(spelling))),
             TokenKind::DecimalLiteral => NumberKind::Decimal,
-            TokenKind::ExponentLiteral | TokenKind::FloatLiteral | TokenKind::DoubleLiteral => {
-                NumberKind::Floating
-            }
+            TokenKind::ExponentLiteral => NumberKind::Floating,
             _ => return self.unexpected_expression(),
         };
-        let Ok(text) = self.current_text() else {
-            return self.unexpected_expression();
-        };
-        let text = self.names.intern(text);
+        let text = self.names.intern(spelling);
         self.advance();
         self.alloc_from(
             mark,
@@ -343,6 +378,34 @@ fn integer_radix(text: Option<&str>) -> u32 {
         Some(text) if text.starts_with("0b") || text.starts_with("0B") => 2,
         _ => 10,
     }
+}
+
+fn parse_long_literal(spelling: &str) -> Option<i64> {
+    let digits = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
+    let radix = integer_radix(Some(&digits));
+    let digits = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+        .or_else(|| digits.strip_prefix("0b"))
+        .or_else(|| digits.strip_prefix("0B"))
+        .unwrap_or(&digits);
+    i64::from_str_radix(digits, radix).ok()
+}
+
+fn parse_float_literal(spelling: &str) -> Option<f32> {
+    spelling
+        .strip_suffix(['f', 'F'])?
+        .replace('_', "")
+        .parse()
+        .ok()
+}
+
+fn parse_double_literal(spelling: &str) -> Option<f64> {
+    spelling
+        .strip_suffix(['d', 'D'])?
+        .replace('_', "")
+        .parse()
+        .ok()
 }
 
 const fn is_unsupported_start(kind: TokenKind) -> bool {
@@ -509,6 +572,94 @@ mod tests {
             panic!("expected raw number tree");
         };
         assert_eq!(number.kind, NumberKind::Whole(2));
+    }
+
+    #[test]
+    fn decodes_a_decimal_long_literal_as_a_long_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1L",
+            vec![
+                token(TokenKind::LongLiteral, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(1)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_hexadecimal_long_literal_as_a_long_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xffL",
+            vec![
+                token(TokenKind::LongLiteral, 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(255)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_float_suffix_as_a_float_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5f",
+            vec![
+                token(TokenKind::FloatLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Float(value)
+            }) if value == 1.5
+        ));
+    }
+
+    #[test]
+    fn decodes_a_double_suffix_as_a_double_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5d",
+            vec![
+                token(TokenKind::DoubleLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Double(value)
+            }) if value == 1.5
+        ));
     }
 
     #[test]
