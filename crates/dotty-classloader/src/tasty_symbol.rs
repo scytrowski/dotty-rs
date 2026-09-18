@@ -595,6 +595,35 @@ fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Optio
     }
 }
 
+/// What [`resolve_reference_name`] learned about a tree.
+///
+/// A plain `Option<BinaryName>` cannot distinguish "this isn't a reference
+/// shape I understand at all, try your own heuristic" from "this
+/// unambiguously *is* a real, post-typecheck reference, but I can't name
+/// its prefix" — and [`resolve_parent_name`] must treat those two cases
+/// completely differently: the first still falls back to its
+/// flatten-and-guess heuristic (the only thing that has ever handled
+/// pre-typecheck `IDENT`/`SELECT` chains), but the second must not — a
+/// same-package guess for a reference we *know* is not same-package
+/// (its prefix is real, just unreadable to this decoder) is not a
+/// best-effort fallback, it is actively misleading, so it becomes an
+/// explicit, reported [`TastyDecodeError::UnresolvedSupertype`] instead
+/// (see `docs/classloader.md`'s Milestone 9 follow-up notes and
+/// https://github.com/scytrowski/dotty-rs/issues/7).
+enum ReferenceResolution {
+    Resolved(BinaryName),
+    /// Definitely a real, post-typecheck reference (a `TERMREF`/`TYPEREF`/
+    /// `TERMREFsymbol`/`TYPEREFsymbol` node), but this decoder cannot name
+    /// its prefix — real scope/import resolution is needed, which this
+    /// best-effort decoder does not have (see [`resolve_reference_prefix`]'s
+    /// doc comment for exactly which prefix shapes it does understand).
+    Unresolved,
+    /// Not a reference shape this function recognizes at all — the caller
+    /// should fall back to its own heuristic exactly as if this function
+    /// did not exist.
+    NotAReference,
+}
+
 /// Resolves a real, post-typecheck `TYPEREF`/`TERMREF` node — or one
 /// nested inside the elaborated `IDENTTPT` pretty-print form a `.tasty`
 /// `extends` clause's own reference tree wraps it in — into a fully
@@ -602,39 +631,44 @@ fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Optio
 /// prefix/name-table semantics instead of [`resolve_parent_name`]'s
 /// flatten-and-guess fallback.
 ///
-/// Returns `None` — never a bare, unqualified name — when the simple
-/// name resolves but the prefix does not: [`resolve_parent_name`]'s own
-/// fallback already produces a same-package guess for a genuinely bare
-/// reference, and a partially-resolved name pretending to be complete
-/// would be strictly worse than that guess, not better.
-///
-/// `TERMREFsymbol`/`TYPEREFsymbol` deliberately do not appear in the
-/// matched tags below: unlike `TERMREF`/`TYPEREF`, their `reference`
-/// field is an AST address naming the defining symbol directly, not a
+/// Returns [`ReferenceResolution::Unresolved`] — never a bare,
+/// unqualified name — when the simple name resolves but the prefix does
+/// not, and for `TERMREFsymbol`/`TYPEREFsymbol` (whose `reference` field
+/// is an AST address naming the defining symbol directly, not a
 /// `NameRef` — resolving one needs the same real symbol resolution
 /// [`resolve_reference_prefix`]'s own doc comment says this decoder does
-/// not have.
-fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<BinaryName> {
-    match tree.decode_structured().ok()? {
+/// not have): in every one of these cases the tree unambiguously *is* a
+/// real reference, so [`resolve_parent_name`]'s same-package guess would
+/// be a wrong answer being presented as a real one, not a best-effort
+/// fallback — see [`ReferenceResolution`]'s own doc comment.
+fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> ReferenceResolution {
+    let Ok(structured) = tree.decode_structured() else {
+        return ReferenceResolution::NotAReference;
+    };
+    match structured {
         StructuredTree::Reference(ReferenceNode {
             tag: TERMREF_TAG | TYPEREF_TAG,
             reference,
             qualifier,
         }) => {
-            let simple_name = resolve_qualified_name(file, reference)?;
-            let package = resolve_reference_prefix(file, &qualifier)?;
-            Some(BinaryName::from_internal(format!(
-                "{package}/{simple_name}"
-            )))
+            let Some(simple_name) = resolve_qualified_name(file, reference) else {
+                return ReferenceResolution::Unresolved;
+            };
+            match resolve_reference_prefix(file, &qualifier) {
+                Some(package) => ReferenceResolution::Resolved(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                ))),
+                None => ReferenceResolution::Unresolved,
+            }
         }
         StructuredTree::Reference(ReferenceNode {
             tag: TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG,
             ..
-        }) => None,
+        }) => ReferenceResolution::Unresolved,
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name(file, &type_tree)
         }
-        _ => None,
+        _ => ReferenceResolution::NotAReference,
     }
 }
 
@@ -694,8 +728,15 @@ fn resolve_parent_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
-    if let Some(resolved) = resolve_reference_name(file, parent) {
-        return Some(resolved);
+    match resolve_reference_name(file, parent) {
+        ReferenceResolution::Resolved(resolved) => return Some(resolved),
+        // A real reference this decoder cannot fully qualify (an
+        // implicit-import reference such as `scala.package$.Iterator`,
+        // see `ReferenceResolution`'s own doc comment) must not fall
+        // through to the heuristic below and come back out as a
+        // misleading same-package guess.
+        ReferenceResolution::Unresolved => return None,
+        ReferenceResolution::NotAReference => {}
     }
 
     let mut names: Vec<String> = parent
@@ -888,60 +929,52 @@ mod tests {
     /// `scala3-library/scala/io/Source.tasty`'s real `Source` mixes in
     /// `Iterable[Char]` — a generic mixin encoded as an `AppliedTpt`
     /// node, not the plain `IdentTpt`/`SelectTpt` the other tests here
-    /// exercise. Without [`resolve_applied_type_name`], this parent's
-    /// `name_refs()` is empty (see its doc comment) and decoding fails
-    /// with `UnresolvedSupertype`.
+    /// exercise. `resolve_applied_type_name` correctly extracts and
+    /// recurses into its `tycon`: `Closeable`'s own reference (a plain,
+    /// non-generic mixin) carries a real `TERMREFpkg` prefix and
+    /// resolves fully, proving that machinery works. `Iterator`'s tycon
+    /// does not — it is `scala.package$.Iterator`, a reference through
+    /// Scala's compiler-synthesized `package object scala` (a type-alias
+    /// member, not a direct package-qualified class reference), which
+    /// resolving needs real scope/import resolution this best-effort
+    /// decoder does not have (tracked in
+    /// https://github.com/scytrowski/dotty-rs/issues/7). Per
+    /// `ReferenceResolution`'s own doc comment, that unresolvable-but-
+    /// unambiguously-real reference now fails the whole decode with
+    /// `UnresolvedSupertype` rather than silently falling back to a
+    /// same-package guess (a misleading `BinaryName` naming *some* class,
+    /// just not the right one).
     #[test]
-    fn decodes_a_class_with_a_generic_mixin_encoded_as_an_applied_type() {
-        let decoded = decode(
+    fn decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference() {
+        let error = decode(
             &fixture_bytes("scala3-library/scala/io/Source.tasty"),
             &BinaryName::from_internal("Source"),
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(decoded.flags.is_abstract());
-        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
-        // `Closeable`'s own reference carries a real `TERMREFpkg` prefix
-        // (`java.io`), so `resolve_reference_name` resolves it fully.
-        // `Iterator`'s generic mixin's tycon reference does not (an
-        // implicit-import reference this decoder still cannot see
-        // through — [`resolve_parent_name`]'s own doc comment), so it
-        // still falls back to a bare name, exactly as documented.
-        assert_eq!(
-            decoded.interfaces,
-            vec![
-                BinaryName::from_internal("Iterator"),
-                BinaryName::from_internal("java/io/Closeable"),
-            ]
-        );
+        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
     }
 
     /// `scala3-library/scala/math/BigInt.tasty`'s real `BigInt` mixes in
     /// `Ordered[BigInt]` alongside two plain (non-generic) mixins —
-    /// covering an `AppliedType` mixin that isn't the only, or the
-    /// first, non-superclass parent.
+    /// covering an `AppliedType` mixin (not `AppliedTpt`) that isn't the
+    /// only, or the first, non-superclass parent. `ScalaNumericConversions`
+    /// and `Ordered` both carry real `TERMREFpkg` prefixes and resolve
+    /// fully (same machinery proven by the `AppliedTpt` case above), but
+    /// the synthetic `Serializable` mixin is the same kind of
+    /// unresolvable implicit-import reference as `Iterator` there, so —
+    /// per the same `ReferenceResolution`/`UnresolvedSupertype` reasoning
+    /// — the whole decode now fails rather than silently guessing a bare
+    /// `Serializable`.
     #[test]
-    fn decodes_a_final_class_with_a_generic_mixin_among_plain_ones() {
-        let decoded = decode(
+    fn decoding_fails_when_one_of_several_mixins_is_an_unresolvable_implicit_import_reference() {
+        let error = decode(
             &fixture_bytes("scala3-library/scala/math/BigInt.tasty"),
             &BinaryName::from_internal("BigInt"),
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert!(decoded.flags.is_final());
-        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
-        // `ScalaNumericConversions` and `Ordered`'s own references carry
-        // real `TERMREFpkg` prefixes and resolve fully; the synthetic
-        // `Serializable` mixin does not (same known limitation as
-        // `Iterator` above), so it still falls back to a bare name.
-        assert_eq!(
-            decoded.interfaces,
-            vec![
-                BinaryName::from_internal("scala/math/ScalaNumericConversions"),
-                BinaryName::from_internal("Serializable"),
-                BinaryName::from_internal("scala/math/Ordered"),
-            ]
-        );
+        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
     }
 
     /// `scala3-library/scala/math/Ordering.tasty`'s private nested

@@ -2129,6 +2129,7 @@ mod tests {
     use crate::class_path::{
         ClassFormat, ClassOrigin, ClassPathError, ClassResource, CompositeClassPath,
     };
+    use crate::tasty_symbol::TastyDecodeError;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -4298,23 +4299,31 @@ mod tests {
         assert!(message.contains("could not reduce the declared type tree to a name"));
     }
 
-    /// `scala3-library/scala/math/Ordering.tasty`'s real private nested
-    /// `Reverse` (already used by
     /// `tasty_symbol::decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class`
-    /// to prove `tasty_symbol::decode` preserves its real
-    /// `PRIVATE_TAG` — this proves the loader actually *uses* that:
-    /// without `load_uncached_tasty`'s visibility patch,
-    /// `enter_class` can only default a non-public `.tasty` class to
-    /// `Visibility::Package`, which would make `Reverse` look no more
-    /// restricted than ordinary Java package-private, silently widening
-    /// its real, more restrictive Scala `private` access boundary.
-    /// `Reverse extends Ordering[T]`, so loading it for real also loads
-    /// `Ordering` itself (a large trait with its own further
-    /// dependencies) — every stub below is a minimal `.class` dependency
-    /// this pulls in transitively, found by loading with progressively
-    /// fewer gaps until nothing was left unresolved.
+    /// already proves, at the decode level, that `tasty_symbol::decode`
+    /// preserves `scala3-library/scala/math/Ordering.tasty`'s real
+    /// private nested `Reverse`'s `PRIVATE_TAG` — this used to prove the
+    /// *loader* actually uses that too, by loading `Reverse` for real
+    /// (which also loads `Ordering` itself, `Reverse`'s declared
+    /// interface). `Ordering` itself mixes in a synthetic `Serializable`
+    /// — the same unresolvable implicit-import reference as `BigInt`'s
+    /// own `Serializable`
+    /// (`tasty_symbol::decoding_fails_when_one_of_several_mixins_is_an_unresolvable_implicit_import_reference`)
+    /// — so loading `Ordering` (and therefore `Reverse`) through a real
+    /// `ClassLoader` now fails with `UnresolvedSupertype` instead of
+    /// silently widening or narrowing any visibility, per the same
+    /// explicit-unresolved-over-misleading-guess reasoning. Asserts that
+    /// failure explicitly; this crate has no other real `.tasty` fixture
+    /// with a non-public top-level class and no unresolvable implicit-
+    /// import mixin anywhere in its dependency chain, so the loader-level
+    /// (as opposed to `tasty_symbol::decode`-level, still covered by the
+    /// `tasty_symbol` test named above) proof that
+    /// `load_uncached_tasty`'s visibility patch is actually wired up is
+    /// lost along with this fixture's usability, until either a suitable
+    /// fixture is found or real scope/import resolution (issue #7)
+    /// closes the underlying gap.
     #[test]
-    fn a_private_tasty_classs_visibility_is_not_widened_to_package() {
+    fn loading_a_private_tasty_class_fails_when_its_own_interface_has_an_unresolved_mixin() {
         let mut tasty = HashMap::new();
         tasty.insert(
             BinaryName::from_internal("Reverse"),
@@ -4347,26 +4356,31 @@ mod tests {
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
-        let reverse = loader
+        let error = loader
             .load_class(&BinaryName::from_internal("Reverse"))
-            .expect("Reverse should load from its real .tasty fixture");
+            .expect_err("Reverse should fail to load, via Ordering's own unresolved mixin");
         drop(loader);
 
-        assert_eq!(store.symbols.get(reverse).visibility, Visibility::Private);
+        assert!(matches!(error, ClassLoadError::DependencyFailure { .. }));
     }
 
     /// End-to-end regression for `resolve_reference_name`
     /// (`tasty_symbol.rs`): loads the real `scala/io/Source.tasty`
-    /// fixture through a full `ClassLoader`, with its real dependencies
-    /// on the classpath, and confirms `Closeable` resolves to the real
-    /// `java/io/Closeable` `Symbol` — not a same-package guess, and not
-    /// left as `Type::Error` — while `Iterator`'s own generic-mixin
-    /// reference (an implicit-import reference this decoder still can't
-    /// see through) stays a bare, unqualified dependency, exactly as
-    /// `tasty_symbol::tests::decodes_a_class_with_a_generic_mixin_encoded_as_an_applied_type`
-    /// documents at the decode-only level.
+    /// fixture through a full `ClassLoader`. `Closeable`'s own reference
+    /// carries a real `TERMREFpkg` prefix and would resolve to the real
+    /// `java/io/Closeable` classpath `Symbol` (that same real-classpath-
+    /// resolution proof, via `Dog`/`Animal`'s own real `TERMREFpkg`
+    /// mixin, still stands end-to-end in `tasty_loading.rs`'s
+    /// `loads_dog_with_animal_resolved_through_tasty_as_a_real_interface`
+    /// — `Dog.tasty` has no implicit-import mixin) — but `Source` also
+    /// mixes in `Iterator`, an unresolvable implicit-import reference
+    /// (`tasty_symbol::tests::decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference`
+    /// documents this at the decode-only level), so loading `Source`
+    /// itself now fails outright rather than silently entering a
+    /// same-package-guessed `Iterator` dependency, per the same
+    /// explicit-unresolved-over-misleading-guess reasoning.
     #[test]
-    fn loads_source_tasty_and_resolves_its_real_qualified_mixin() {
+    fn loading_source_tasty_fails_on_its_unresolvable_iterator_mixin() {
         let mut tasty = HashMap::new();
         tasty.insert(
             BinaryName::from_internal("Source"),
@@ -4385,29 +4399,15 @@ mod tests {
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
-        let source = loader
+        let error = loader
             .load_class(&BinaryName::from_internal("Source"))
-            .expect("Source should load from its real .tasty fixture");
+            .expect_err("Source should fail to load, via its own unresolved Iterator mixin");
         drop(loader);
 
-        let info = class_info(&store, source);
-        let parent_names: Vec<&str> = info
-            .parents
-            .iter()
-            .map(|parent| symbol_name(&store, parent_symbol(&store, *parent)))
-            .collect();
-        assert_eq!(parent_names, vec!["Object", "Iterator", "Closeable"]);
-
-        // `Closeable`'s owner chain is `java -> io`, not the root/
-        // unnamed package `Source` itself lives in -- proving it
-        // resolved to the real classpath `java/io/Closeable`, not a
-        // same-package guess (which `Source`'s own bare, unqualified
-        // request would otherwise produce).
-        let closeable = parent_symbol(&store, info.parents[2]);
-        let io_package = store.symbols.get(closeable).owner.unwrap();
-        assert_eq!(symbol_name(&store, io_package), "io");
-        let java_package = store.symbols.get(io_package).owner.unwrap();
-        assert_eq!(symbol_name(&store, java_package), "java");
+        assert!(matches!(
+            error,
+            ClassLoadError::InvalidTastyFile(_, TastyDecodeError::UnresolvedSupertype)
+        ));
     }
 
     #[test]
