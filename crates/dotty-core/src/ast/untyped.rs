@@ -6,6 +6,20 @@ use crate::ast::phase::Untyped;
 use crate::ids::{NameId, TreeId};
 use crate::names::{Name, TermName};
 
+/// One parser-level entry in a template's `uses` clause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UseRef {
+    pub reference: TreeId<Untyped>,
+    pub initially: bool,
+}
+
+/// Syntax-only metadata attached to an untyped template.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct UntypedTemplateMetadata {
+    pub derives: Vec<TreeId<Untyped>>,
+    pub uses: Vec<UseRef>,
+}
+
 /// The parser-level reason an expression, type, or pattern could not be
 /// constructed. Diagnostics remain outside the AST; this enum only lets
 /// recovery produce a structurally valid untyped tree.
@@ -212,13 +226,6 @@ pub enum UntypedNode {
     Throw(Throw),
 
     ParsedTry(ParsedTry),
-
-    /// A `derives` clause on a class/trait/enum `Template`. Real Dotty drops
-    /// this after typing (`Template.derived` is always empty except in the
-    /// untyped-only `DerivingTemplate` subclass), so it belongs here rather
-    /// than on the shared `Template<P>` node — see
-    /// `docs/dotty-core-design.md` §7.
-    Derived(Vec<TreeId<Untyped>>),
 }
 
 #[cfg(test)]
@@ -485,12 +492,5 @@ mod tests {
         let throw = UntypedNode::Throw(Throw { expr: tree_id(1) });
 
         assert_ne!(number, throw);
-    }
-
-    #[test]
-    fn derived_carries_the_derives_clause_trees() {
-        let node = UntypedNode::Derived(vec![tree_id(1), tree_id(2)]);
-
-        assert_eq!(node, UntypedNode::Derived(vec![tree_id(1), tree_id(2)]));
     }
 }

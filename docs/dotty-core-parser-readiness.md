@@ -45,17 +45,17 @@ ForYield, ForDo, GenFrom, GenAlias,
 PatDef, ExtensionMethods, InterpolatedString,
 ContextBounds, NumberLiteral, Throw,
 ParsedTry,
-Derived
+ErrorNode
 ```
 
 The current shared model already contains the phase-generic forms needed by
 both parser and typer, including `Try`, `Template`, type trees, definitions,
 imports/exports, quotes/splices, patterns, and `ApplyKind::Using`.
 
-The current `Template` still stores only `parents`, `self_val`, and `body`;
-`derives` is currently represented as a separate `UntypedNode::Derived`.
-The audit below records the intended correction: derives and uses belong to
-untyped template metadata, not to an out-of-band tree convention.
+`Template<Untyped>` now stores parser-only `derives` and ordered `uses`
+metadata through `UntypedTemplateMetadata`; `Template<Typed>` carries `()`.
+Each `UseRef` preserves its `initially` bit, so the parser does not need an
+out-of-band tree convention or a lossy lowering step.
 
 ## Audit of parser-facing untyped constructs
 
@@ -77,14 +77,14 @@ untyped template metadata, not to an out-of-band tree convention.
 | `PatDef` | `UntypedNode::PatDef` | REPRESENT | Pattern definitions retain modifiers, patterns, type ascription, and RHS. |
 | `ExtMethods` | `UntypedNode::ExtensionMethods` | REPRESENT | The local name differs, but the parser-facing information is present. |
 | `InterpolatedString` | `UntypedNode::InterpolatedString` | REPRESENT | Interpolator name and interpolation parts remain available to later lowering. |
-| `ContextBounds` | `UntypedNode::ContextBounds` | REPRESENT | Multiple bounds and their order are preserved. The current shape is incomplete for Scala 3.9 context-bound aliases; see the gap list below. |
+| `ContextBounds` | `UntypedNode::ContextBounds` | REPRESENT | Multiple bounds and their order are preserved. Individual Scala 3.9 aliases are represented by `ContextBoundTypeTree` entries. |
 | `ContextBoundTypeTree` | None | REPRESENT | Scala 3.9 syntax can carry an `as` name on an individual context bound. That name cannot be reconstructed from the current `ContextBounds` fields and requires a small untyped node or equivalent payload. |
 | `Number` / `NumberKind` | `UntypedNode::Number(NumberLiteral)` | REPRESENT | Exact spelling is retained through `NameId`. The parser contract must document whether numeric kind comes from the token stream or must be added to `NumberLiteral`; it must not rely on semantic numeric conversion. |
 | `Throw` | `UntypedNode::Throw` | REPRESENT | The parser emits a distinct throw expression. |
-| `ErrorNode` (local recovery placeholder) | None | REPRESENT | Required for parser recovery. It remains untyped-only, carries only a small kind enum, and keeps diagnostics outside the AST. |
+| `ErrorNode` (local recovery placeholder) | `UntypedNode::Error` | REPRESENT | Required for parser recovery. It remains untyped-only, carries only a small kind enum, and keeps diagnostics outside the AST. |
 | `ParsedTry` | `UntypedNode::ParsedTry` | REPRESENT | Preserves a catch handler that is either an expression or case clause before conversion to `Vec<CaseDef>`. |
-| `DerivingTemplate` | `Template` plus `UntypedNode::Derived` | REPRESENT | Use phase-indexed `UntypedTemplateMetadata` containing `derives`; do not copy Dotty's subclass or keep an unattached `Derived` node. |
-| `UseRef` | None | REPRESENT | Store `reference` and `initially` in untyped template metadata. The `initially` bit is parser information and must not be dropped. |
+| `DerivingTemplate` | `Template<Untyped>::metadata.derives` | REPRESENT | Phase-indexed `UntypedTemplateMetadata` retains derives without copying Dotty's subclass or keeping an unattached node. |
+| `UseRef` | `Template<Untyped>::metadata.uses` | REPRESENT | `reference` and `initially` are retained in wire/source order. |
 | `ImportSelector` | Phase-generic `ImportSelector<P>` | REPRESENT | The local representation intentionally uses `TreeId<P>` to avoid cross-arena references. It preserves parser data even though Dotty keeps selectors untyped-only. |
 | `SymbolLit` | None | REJECT / FEATURE-GATE | Default Scala 3.9 policy should diagnose legacy symbol literals. If the deprecated compatibility dialect is supported, add a distinct untyped node or define an explicit, tested lowering; do not conflate it with a string literal. |
 | `MacroTree` | None | REJECT / FEATURE-GATE | Keep macro syntax outside the first parser contract until its accepted dialect and downstream semantics are defined. Do not silently turn it into an ordinary expression. |
@@ -104,11 +104,11 @@ untyped template metadata, not to an out-of-band tree convention.
 The audit produces the following concrete follow-up items before the parser
 starts:
 
-1. Add a phase-indexed template metadata slot. For `Untyped`, the metadata
-   should retain `derives` and `uses`; for `Typed`, it should be `()`.
-2. Add the smallest representations for `ContextBoundTypeTree` and
-   `FunctionWithMods`, or explicitly narrow the parser dialect so those forms
-   are rejected. Silent loss is not an acceptable option.
+1. Add the smallest representation for `ContextBoundTypeTree`, or explicitly
+   narrow the parser dialect so context-bound aliases are rejected. Silent
+   loss is not an acceptable option.
+2. Add the smallest representation for `FunctionWithMods`, or explicitly
+   narrow the parser dialect so modified/erased function types are rejected.
 
 The following are policy decisions, not immediate AST additions:
 

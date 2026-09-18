@@ -23,5 +23,5 @@ pub use typed::{TypedAst, TypedAstBuilder, TypedTree, TypedTreeId};
 pub use untyped::{
     ContextBounds, ErrorNode, ErrorNodeKind, ExtensionMethods, ForDo, ForYield, Function, GenAlias,
     GenFrom, InfixOp, InterpolatedString, ModuleDef, NumberLiteral, Parens, ParsedTry, PatDef,
-    PolyFunction, PostfixOp, PrefixOp, Throw, Tuple, UntypedNode,
+    PolyFunction, PostfixOp, PrefixOp, Throw, Tuple, UntypedNode, UntypedTemplateMetadata, UseRef,
 };

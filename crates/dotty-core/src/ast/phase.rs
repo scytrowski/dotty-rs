@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::fmt::Debug;
 
 use crate::ast::modifiers::Modifiers;
-use crate::ast::untyped::UntypedNode;
+use crate::ast::untyped::{UntypedNode, UntypedTemplateMetadata};
 use crate::ids::TypeId;
 
 mod sealed {
@@ -23,6 +23,8 @@ mod sealed {
 /// - `DefMetadata` is the source-level [`Modifiers`] before typing, `()`
 ///   after — a typed definition node cannot carry syntactic modifiers (see
 ///   `docs/dotty-core-design.md` §7, `[MAJOR 2]`).
+/// - `TemplateMetadata` is parser-only template syntax before typing and `()`
+///   after — a typed template cannot retain `derives` or `uses` metadata.
 ///
 /// The associated types carry `Clone + Debug + PartialEq` bounds (and
 /// `DefMetadata` additionally `Eq`) so that every generic node payload
@@ -34,6 +36,7 @@ pub trait AstPhase: sealed::Sealed {
     type TypeInfo: Clone + Debug + PartialEq;
     type ExtraNode: Clone + Debug + PartialEq;
     type DefMetadata: Clone + Debug + PartialEq + Eq;
+    type TemplateMetadata: Clone + Debug + PartialEq + Eq;
 }
 
 /// Marker for a syntax tree produced by parsing, before typing.
@@ -54,10 +57,12 @@ impl AstPhase for Untyped {
     type TypeInfo = ();
     type ExtraNode = UntypedNode;
     type DefMetadata = Modifiers;
+    type TemplateMetadata = UntypedTemplateMetadata;
 }
 
 impl AstPhase for Typed {
     type TypeInfo = TypeId;
     type ExtraNode = Infallible;
     type DefMetadata = ();
+    type TemplateMetadata = ();
 }

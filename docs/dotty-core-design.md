@@ -410,14 +410,16 @@ every Dotty `untpd` helper has already been mirrored.
 
 ### `ast/phase.rs`
 
-`[MAJOR 2]` extends this trait with a second associated type, `DefMetadata`,
-to resolve where source-level modifiers live (see "Definitions" below):
+`[MAJOR 2]` extends this trait with phase-specific definition and template
+metadata, resolving where source-level modifiers and parser-only template
+clauses live (see "Definitions" below):
 
 ```rust
 pub trait AstPhase: sealed::Sealed {
     type TypeInfo;
     type ExtraNode;
     type DefMetadata;
+    type TemplateMetadata;
 }
 
 pub enum Untyped {}
@@ -427,12 +429,14 @@ impl AstPhase for Untyped {
     type TypeInfo = ();
     type ExtraNode = UntypedNode;
     type DefMetadata = Modifiers;
+    type TemplateMetadata = UntypedTemplateMetadata;
 }
 
 impl AstPhase for Typed {
     type TypeInfo = TypeId;
     type ExtraNode = std::convert::Infallible;
     type DefMetadata = ();
+    type TemplateMetadata = ();
 }
 ```
 
@@ -447,6 +451,8 @@ Invariants this must enforce:
   cannot appear on a `Typed` definition node — `DefMetadata = ()` makes it
   disappear at the type level once typing has produced `SymbolFlags` and
   resolved annotations instead.
+- `TemplateMetadata` retains untyped `derives` and ordered `uses` clauses,
+  including each `UseRef.initially` bit; it is `()` after typing.
 
 This is a case where Rust can express an invariant Dotty's own `Tree[T]`
 leaves to convention. In real Dotty (`Trees.scala`), `DefTree` stores syntax-
@@ -555,11 +561,9 @@ phase.* Concretely:
 - `Template`: real Dotty's `Template` carries a combined
   parents-followed-by-derived-classes list only pre-typing (`derived` is
   always `Nil` after typing except in the untyped-only `DerivingTemplate`
-  subclass). The current foundation therefore carries only
-  `parents: Vec<TreeId<P>>`; the parser-readiness audit recommends moving
-  `derives` and Scala 3.9 `uses` into phase-indexed untyped template metadata
-  before parser implementation. The current `UntypedNode::Derived` is a
-  temporary foundation representation, not the intended parser boundary.
+  subclass). The Rust foundation keeps `parents` separate and stores
+  untyped-only `derives` and Scala 3.9 `uses` in
+  `Template<Untyped>::metadata`; `Template<Typed>::metadata` is `()`.
 - `DefDef`/`ValDef`/`TypeDef` modifiers: resolved above via
   `AstPhase::DefMetadata` (`[MAJOR 2]`).
 
@@ -754,16 +758,12 @@ pub enum UntypedNode {
 
     ParsedTry(ParsedTry),
 
-    /// A `derives` clause on a class/trait/enum `Template`. See the
-    /// `Template` audit above: real Dotty drops this after typing, so it
-    /// belongs here, not on the shared `Template<P>` node.
-    Derived(Vec<TreeId<Untyped>>),
 }
 ```
 
 This is the foundation subset of Dotty's actual `untpd`-only node types. It
-does not yet claim complete parser coverage: `ContextBoundTypeTree`,
-`FunctionWithMods`, and `UseRef` are among the parser-facing gaps recorded in
+does not yet claim complete parser coverage: `ContextBoundTypeTree` and
+`FunctionWithMods` remain the concrete parser-facing gaps recorded in
 [`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md).
 
 ### `ast/typed.rs`
