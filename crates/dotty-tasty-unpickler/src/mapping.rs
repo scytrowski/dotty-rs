@@ -26,7 +26,7 @@ use dotty_tasty::tasty::{
 use crate::error::UnpickleError;
 
 /// `TYPEREFpkg` (`docs/tasty-format-3.9.0.md`, tag 65). `dotty-tasty` does
-/// not export a constant for this tag.
+/// not export a constant for this tag (issue #15).
 pub(crate) const TYPEREFPKG_TAG: u8 = 65;
 
 /// The name TASTy gives every constructor.
