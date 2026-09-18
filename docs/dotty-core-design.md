@@ -401,6 +401,13 @@ rather than adding a second mapping mechanism.
 
 ## 7. AST phase model
 
+The parser-facing coverage audit is maintained separately in
+[`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md). That
+document is authoritative for the distinction between parser-owned syntax,
+lowered forms, and explicitly feature-gated Scala 3.9 constructs. The AST
+model in this section is the current foundation baseline, not a claim that
+every Dotty `untpd` helper has already been mirrored.
+
 ### `ast/phase.rs`
 
 `[MAJOR 2]` extends this trait with a second associated type, `DefMetadata`,
@@ -548,10 +555,11 @@ phase.* Concretely:
 - `Template`: real Dotty's `Template` carries a combined
   parents-followed-by-derived-classes list only pre-typing (`derived` is
   always `Nil` after typing except in the untyped-only `DerivingTemplate`
-  subclass). `dotty-core`'s shared `Template<P>` therefore carries only
-  `parents: Vec<TreeId<P>>`; a `derives` clause is untyped-only surface
-  syntax and lives on `UntypedNode`, not on the shared node, consumed by the
-  namer before a `Template<Typed>` is ever built.
+  subclass). The current foundation therefore carries only
+  `parents: Vec<TreeId<P>>`; the parser-readiness audit recommends moving
+  `derives` and Scala 3.9 `uses` into phase-indexed untyped template metadata
+  before parser implementation. The current `UntypedNode::Derived` is a
+  temporary foundation representation, not the intended parser boundary.
 - `DefDef`/`ValDef`/`TypeDef` modifiers: resolved above via
   `AstPhase::DefMetadata` (`[MAJOR 2]`).
 
@@ -751,9 +759,11 @@ pub enum UntypedNode {
 }
 ```
 
-This set mirrors Dotty's actual `untpd`-only node types (`untpd.scala`:
-`ForYield`, `ForDo`, `GenFrom`, `GenAlias`, `PatDef`, `ExtMethods`, and
-others), plus `Derived` added by the `Template` audit above.
+This is the foundation subset of Dotty's actual `untpd`-only node types. It
+does not yet claim complete parser coverage: `ParsedTry`,
+`ContextBoundTypeTree`, `FunctionWithMods`, and `UseRef` are among the
+parser-facing gaps recorded in
+[`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md).
 
 ### `ast/typed.rs`
 
