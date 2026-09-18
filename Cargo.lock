@@ -20,6 +20,14 @@ name = "dotty-core"
 version = "0.1.0"
 
 [[package]]
+name = "dotty-lexer"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "unicode-ident",
+]
+
+[[package]]
 name = "dotty-tasty"
 version = "0.1.0"
 dependencies = [

@@ -5,7 +5,12 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["crates/dotty-tasty", "crates/dotty-classfile", "crates/dotty-core"]
+members = [
+    "crates/dotty-tasty",
+    "crates/dotty-classfile",
+    "crates/dotty-lexer",
+    "crates/dotty-core",
+]
 resolver = "3"
 
 [profile.test]
