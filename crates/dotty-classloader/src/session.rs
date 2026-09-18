@@ -1,11 +1,13 @@
+use crate::binary_name::BinaryName;
 use crate::packages::PackageRegistry;
-use crate::repository::ClassRepository;
+use dotty_core::SymbolId;
+use std::collections::HashMap;
 
 /// The `SymbolId`-allocating state that must be shared, by value, across
 /// every [`ClassLoader`](crate::loader::ClassLoader) loading against one
-/// [`SemanticStore`](dotty_core::SemanticStore) session — the
-/// [`ClassRepository`] cache (which class names have already been resolved
-/// to which `SymbolId`) and the [`PackageRegistry`] (which package paths
+/// [`SemanticStore`](dotty_core::SemanticStore) session — which class names
+/// have already been *successfully* resolved to which `SymbolId`
+/// ([`Self::resolved`]), and the [`PackageRegistry`] (which package paths
 /// have already been resolved to which package `SymbolId`).
 ///
 /// `Definitions` (`ClassLoader::with_definitions`) already solved this for
@@ -19,6 +21,19 @@ use crate::repository::ClassRepository;
 /// agree on `Object`'s — otherwise `TypeRef` equality and any later
 /// AST/Symbol lookup would depend on which loader happened to load a given
 /// class first.
+///
+/// Deliberately holds only *positive* results, not a full
+/// [`ClassRepository`](crate::repository::ClassRepository) (that stays a
+/// loader-local field on `ClassLoader`, covering `Loading`/`Failed` too):
+/// a name one loader's own classpath doesn't have is not evidence that a
+/// *different* loader's classpath doesn't have it either (the
+/// one-per-classpath-root pattern this exists for is exactly a case where
+/// two loaders' classpaths legitimately differ), so caching a negative
+/// result here would make a later loader wrongly skip probing its own,
+/// different classpath. A `Loading` entry is loader-call-local by
+/// construction too — it only ever matters during one loader's own
+/// still-in-progress recursive `load_class` call, never across the
+/// loader-instance boundary `into_session`/`with_definitions` crosses.
 ///
 /// A `ClassLoader` cannot simply borrow one `&mut LoadingSession` for its
 /// entire lifetime while another `ClassLoader` also needs one: both would
@@ -34,7 +49,7 @@ use crate::repository::ClassRepository;
 /// `HashMap`s and so is moved instead).
 #[derive(Debug, Default)]
 pub struct LoadingSession {
-    pub(crate) repository: ClassRepository,
+    pub(crate) resolved: HashMap<BinaryName, SymbolId>,
     pub(crate) packages: PackageRegistry,
 }
 
@@ -44,7 +59,7 @@ impl LoadingSession {
     /// `SemanticStore`.
     pub fn new() -> Self {
         Self {
-            repository: ClassRepository::new(),
+            resolved: HashMap::new(),
             packages: PackageRegistry::new(),
         }
     }

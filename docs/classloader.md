@@ -332,18 +332,23 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
   keyed by `BinaryName`, storing `SymbolId`s (not shared-ownership
   symbols — a `SymbolId` is already `Copy` and session-stable).
 - `ClassLoader<'store, E>` — the loader itself; borrows a
-  `&'store mut SemanticStore` for the whole session, owns a
-  `LoadingSession` (the `ClassRepository` and `PackageRegistry` — see
-  below), a `ClassfileMetadata` sidecar table, and a `Definitions` (the
-  shared builtin primitive/`Object`/`Any`/`Nothing` identities every
+  `&'store mut SemanticStore` for the whole session, owns its own
+  loader-local `ClassRepository` (covering `Loading`/`Failed`, not
+  shared — see `LoadingSession` below), a `LoadingSession`, a
+  `ClassfileMetadata` sidecar table, and a `Definitions` (the shared
+  builtin primitive/`Object`/`Any`/`Nothing` identities every
   descriptor/signature/`.tasty`-tree lowering step targets).
-- `LoadingSession` — bundles `ClassRepository` and `PackageRegistry` so
-  several `ClassLoader`s loading sequentially against one shared
-  `SemanticStore` (`ClassLoader::with_definitions`, one per classpath
-  root or incremental recompilation unit) agree on the same ordinary
+- `LoadingSession` — bundles a positive-only `BinaryName -> SymbolId`
+  map and `PackageRegistry` so several `ClassLoader`s loading
+  sequentially against one shared `SemanticStore`
+  (`ClassLoader::with_definitions`, one per classpath root or
+  incremental recompilation unit) agree on the same ordinary
   class/package `SymbolId`s, not just the `Definitions` builtins —
   handed from one loader to the next by value via
-  `ClassLoader::into_session`.
+  `ClassLoader::into_session`. Deliberately excludes negative
+  (`Failed`) and in-progress (`Loading`) results: a name one loader's
+  own classpath doesn't have is not evidence a differently configured
+  loader sharing the session doesn't have it either.
 - `ClassRef` — `Unresolved(BinaryName)` / `Resolved(SymbolId)`, used
   only for JVM-specific sidecar metadata (nest host/members, inner/
   enclosing-class references, an annotation's own type) — never for a
