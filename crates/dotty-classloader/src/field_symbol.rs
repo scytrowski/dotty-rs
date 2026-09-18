@@ -1,20 +1,19 @@
 use crate::annotation::SemanticAnnotation;
-use crate::semantic_type::SemanticFieldType;
 use dotty_classfile::access_flags::FieldAccessFlags;
 use dotty_classfile::descriptor::FieldType;
 use dotty_classfile::signature::FieldSignature;
 
-/// A loaded class's field: its name, access flags, declared type,
-/// optional generic signature, and semantic (class-reference-resolved)
-/// type (JVMS §4.5).
+/// A loaded class's field: its name, access flags, declared type, and
+/// optional generic signature (JVMS §4.5).
 ///
 /// `field_type` is exactly what `dotty-classfile` already parses from the
 /// field's descriptor (JVMS §4.3.2) — an `Object`/`Array` entry's class
-/// name stays an internal-form string, not a resolved [`crate::ClassRef`].
-/// `semantic_type` is the resolved counterpart, built by
-/// `ClassLoader` (`docs/classloader.md` §9, Milestone 6); kept alongside
-/// `field_type` rather than replacing it, the same "attach without
-/// replacing" approach Milestone 5 used for `signature`.
+/// name stays an internal-form string, not a resolved reference. The
+/// resolved semantic type is *not* duplicated here: it is a real
+/// `dotty-core` `Symbol` (`SymbolKind::Field`) entered into the owning
+/// class's `Type::ClassInfo::declarations` scope, findable by this same
+/// `name`. This type stays purely JVM-facing sidecar metadata — see
+/// `docs/classloader.md`'s JVM metadata sidecar section.
 ///
 /// `signature` is `None` unless the field carries a `Signature` attribute
 /// (JVMS §4.7.9.1) — the common case for a non-generic field type. It is
@@ -27,18 +26,15 @@ pub struct FieldSymbol {
     flags: FieldAccessFlags,
     field_type: FieldType,
     signature: Option<FieldSignature>,
-    semantic_type: SemanticFieldType,
     annotations: Vec<SemanticAnnotation>,
 }
 
 impl FieldSymbol {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         flags: FieldAccessFlags,
         field_type: FieldType,
         signature: Option<FieldSignature>,
-        semantic_type: SemanticFieldType,
         annotations: Vec<SemanticAnnotation>,
     ) -> Self {
         Self {
@@ -46,7 +42,6 @@ impl FieldSymbol {
             flags,
             field_type,
             signature,
-            semantic_type,
             annotations,
         }
     }
@@ -67,10 +62,6 @@ impl FieldSymbol {
         self.signature.as_ref()
     }
 
-    pub fn semantic_type(&self) -> &SemanticFieldType {
-        &self.semantic_type
-    }
-
     pub fn annotations(&self) -> &[SemanticAnnotation] {
         &self.annotations
     }
@@ -87,7 +78,6 @@ mod tests {
             FieldAccessFlags(0x0019),
             FieldType::Int,
             None,
-            SemanticFieldType::Int,
             Vec::new(),
         );
 
@@ -95,7 +85,6 @@ mod tests {
         assert_eq!(symbol.flags(), FieldAccessFlags(0x0019));
         assert_eq!(symbol.field_type(), &FieldType::Int);
         assert_eq!(symbol.signature(), None);
-        assert!(matches!(symbol.semantic_type(), SemanticFieldType::Int));
         assert!(symbol.annotations().is_empty());
     }
 
@@ -109,32 +98,9 @@ mod tests {
             FieldAccessFlags(0x0001),
             FieldType::Object("java/util/List".to_owned()),
             Some(signature.clone()),
-            SemanticFieldType::Object(crate::symbol::ClassRef::Unresolved(
-                crate::binary_name::BinaryName::from_internal("java/util/List"),
-            )),
             Vec::new(),
         );
 
         assert_eq!(symbol.signature(), Some(&signature));
-    }
-
-    #[test]
-    fn exposes_its_semantic_type() {
-        use crate::binary_name::BinaryName;
-        use crate::symbol::ClassRef;
-
-        let symbol = FieldSymbol::new(
-            "other".to_owned(),
-            FieldAccessFlags(0x0001),
-            FieldType::Object("Pong".to_owned()),
-            None,
-            SemanticFieldType::Object(ClassRef::Unresolved(BinaryName::from_internal("Pong"))),
-            Vec::new(),
-        );
-
-        assert!(matches!(
-            symbol.semantic_type(),
-            SemanticFieldType::Object(ClassRef::Unresolved(name)) if name.as_internal() == "Pong"
-        ));
     }
 }

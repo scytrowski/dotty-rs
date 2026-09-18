@@ -11,7 +11,7 @@ use crate::repository::{ClassEntry, ClassRepository};
 use crate::semantic_type::{SemanticFieldType, SemanticMethodDescriptor};
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
-use dotty_classfile::access_flags::ClassAccessFlags;
+use dotty_classfile::access_flags::{ClassAccessFlags, FieldAccessFlags};
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{
@@ -21,8 +21,8 @@ use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
 use dotty_core::{
-    ClassInfo, Name, Namespace, Scope, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolLinks, SymbolOrigin, Type, TypeId, Visibility,
+    ClassInfo, Definitions, Name, Namespace, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags,
+    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Type, TypeId, Visibility,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -46,18 +46,24 @@ pub struct ClassLoader<'store, E> {
     repository: ClassRepository,
     metadata: HashMap<SymbolId, ClassfileMetadata>,
     packages: PackageRegistry,
+    /// The canonical `TypeId`/`SymbolId` every JVM primitive and
+    /// `Object`/`Any`/`Nothing` reference lowers against — see
+    /// [`Definitions::bootstrap`].
+    definitions: Definitions,
     no_prefix: TypeId,
 }
 
 impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     pub fn new(class_path: E, store: &'store mut SemanticStore) -> Self {
         let no_prefix = store.types.alloc(Type::NoPrefix);
+        let definitions = Definitions::bootstrap(store);
         Self {
             class_path,
             store,
             repository: ClassRepository::new(),
             metadata: HashMap::new(),
             packages: PackageRegistry::new(),
+            definitions,
             no_prefix,
         }
     }
@@ -109,15 +115,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    /// Allocates a class's stable `SymbolId` immediately, before any
-    /// recursive supertype/member resolution — `dotty-core`'s
-    /// enter-before-complete rule (`docs/classloader.md` §5).
+    /// Allocates a class's stable `SymbolId`, and its declarations scope,
+    /// immediately — before any recursive supertype/member resolution.
+    /// `dotty-core`'s enter-before-complete rule (`docs/classloader.md`
+    /// §5) covers the `SymbolId`; the scope is allocated this early too so
+    /// fields/methods can be entered into it as they're decoded, rather
+    /// than collected separately and entered only once the whole class is
+    /// known.
     fn enter_class(
         &mut self,
         name: &BinaryName,
         flags: ClassAccessFlags,
         origin: SymbolOrigin,
-    ) -> SymbolId {
+    ) -> (SymbolId, ScopeId) {
         let owner = self.packages.resolve(self.store, name);
 
         let text = self.store.names.intern(name.simple_name());
@@ -149,7 +159,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
         }
 
-        self.store.symbols.alloc(Symbol {
+        let class_symbol = self.store.symbols.alloc(Symbol {
             name: symbol_name,
             owner: Some(owner),
             kind,
@@ -160,21 +170,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             annotations: Vec::new(),
             position: None,
             links: SymbolLinks::default(),
-        })
+        });
+        let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
+
+        (class_symbol, declarations)
     }
 
-    /// Allocates the (for now empty — fields/methods are not yet migrated
-    /// into it, a later migration step) declarations scope, resolves
-    /// `super_class`/`interfaces` into `Type::TypeRef`s, and completes
-    /// `class_symbol`'s `SymbolInfo`.
+    /// Resolves `super_class`/`interfaces` into `Type::TypeRef`s and
+    /// completes `class_symbol`'s `SymbolInfo`. `declarations` was already
+    /// allocated by [`Self::enter_class`] and populated (for a `.class`
+    /// symbol) by the field/method decode loop by the time this runs.
     fn complete_class(
         &mut self,
         class_symbol: SymbolId,
+        declarations: ScopeId,
         super_class: Option<SymbolId>,
         interfaces: Vec<SymbolId>,
     ) {
-        let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
-
         let mut parents = Vec::with_capacity(interfaces.len() + 1);
         if let Some(parent) = super_class {
             parents.push(self.type_ref(parent));
@@ -202,6 +214,128 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })
     }
 
+    /// Allocates a field's `Symbol` and enters it into the class's
+    /// declarations scope by name. Unlike a class, a field needs no
+    /// enter-before-complete staging: its type is fully known the moment
+    /// its descriptor (and, transitively, any class it references) is
+    /// resolved, so it is allocated already `SymbolInfo::Complete`.
+    fn enter_field(
+        &mut self,
+        class_symbol: SymbolId,
+        declarations: ScopeId,
+        field_name: &str,
+        flags: FieldAccessFlags,
+        resolved_type: TypeId,
+        origin: SymbolOrigin,
+    ) {
+        // Unlike a top-level class's access_flags, a field's *can* carry
+        // ACC_PRIVATE/ACC_PROTECTED (JVMS §4.5 Table 4.5-A), so all four
+        // Java visibilities are distinguishable here.
+        let visibility = if flags.is_private() {
+            Visibility::Private
+        } else if flags.is_protected() {
+            Visibility::Protected
+        } else if flags.is_public() {
+            Visibility::Public
+        } else {
+            let owner = self
+                .store
+                .symbols
+                .get(class_symbol)
+                .owner
+                .expect("a loaded class always has a package owner");
+            Visibility::Package(owner)
+        };
+
+        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        if flags.is_static() {
+            symbol_flags = symbol_flags | SymbolFlags::STATIC;
+        }
+        if flags.is_final() {
+            symbol_flags = symbol_flags | SymbolFlags::FINAL;
+        } else {
+            symbol_flags = symbol_flags | SymbolFlags::MUTABLE;
+        }
+        if flags.is_synthetic() {
+            symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
+        }
+
+        let text = self.store.names.intern(field_name);
+        let symbol_name = Name::new(text, Namespace::Term);
+
+        let field_symbol = self.store.symbols.alloc(Symbol {
+            name: symbol_name,
+            owner: Some(class_symbol),
+            kind: SymbolKind::Field,
+            flags: symbol_flags,
+            visibility,
+            info: SymbolInfo::Complete(resolved_type),
+            origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+
+        self.store
+            .scopes
+            .get_mut(declarations)
+            .enter(symbol_name, field_symbol);
+    }
+
+    /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2) into a semantic
+    /// `TypeId`: primitives map to their canonical [`Definitions`]
+    /// identity, `Object` resolves via [`Self::resolve_member_class`] into
+    /// a `Type::TypeRef`, and `Array` becomes a `Type::JavaArray`
+    /// recursing into its component type.
+    fn lower_field_type(
+        &mut self,
+        owner: &BinaryName,
+        field_type: &FieldType,
+    ) -> Result<TypeId, ClassLoadError> {
+        match field_type {
+            FieldType::Byte => Ok(self.definitions.byte),
+            FieldType::Char => Ok(self.definitions.char),
+            FieldType::Double => Ok(self.definitions.double),
+            FieldType::Float => Ok(self.definitions.float),
+            FieldType::Int => Ok(self.definitions.int),
+            FieldType::Long => Ok(self.definitions.long),
+            FieldType::Short => Ok(self.definitions.short),
+            FieldType::Boolean => Ok(self.definitions.boolean),
+            FieldType::Object(class_name) => {
+                let dependency = BinaryName::from_internal(class_name);
+                let symbol = self.resolve_member_class(owner, &dependency)?;
+                Ok(self.type_ref(symbol))
+            }
+            FieldType::Array(component) => {
+                let element = self.lower_field_type(owner, component)?;
+                Ok(self.store.types.alloc(Type::JavaArray { element }))
+            }
+        }
+    }
+
+    /// Resolves an already-parsed [`FieldType`]'s optional `Signature`
+    /// attribute and lowers its semantic type together, in the order both
+    /// a real field and a `Record` component need them. Shared by the
+    /// field-building loop below and [`Self::resolve_record_components`]
+    /// — the only difference between the two is that a record component
+    /// has no access flags of its own in the class file format.
+    fn lower_field_like(
+        &mut self,
+        owner: &BinaryName,
+        field_type: &FieldType,
+        attributes: &[Attribute<'_>],
+        constant_pool: &ConstantPool,
+    ) -> Result<(Option<FieldSignature>, TypeId), ClassLoadError> {
+        let resolved_type = self.lower_field_type(owner, field_type)?;
+        let signature = self.resolve_optional_signature(
+            owner,
+            attributes,
+            constant_pool,
+            FieldSignature::parse,
+        )?;
+        Ok((signature, resolved_type))
+    }
+
     /// `.tasty`-backed loading (`docs/classloader.md` §9): reconstructs
     /// only name/flags/superclass/interfaces via [`tasty_symbol::decode`]
     /// and recurses into the same [`Self::load_dependency`] used by the
@@ -218,7 +352,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
-        let class_symbol = self.enter_class(name, decoded.flags, origin);
+        let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         let super_class = self.load_dependency(name, decoded.super_class)?;
@@ -227,7 +361,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             interfaces.push(self.load_dependency(name, dependency)?);
         }
 
-        self.complete_class(class_symbol, Some(super_class), interfaces);
+        self.complete_class(class_symbol, declarations, Some(super_class), interfaces);
         Ok(class_symbol)
     }
 
@@ -255,7 +389,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // `resolve_dependency` -> `load_class`) still hits `Loading` and is
         // rejected as `CircularInheritance`, exactly as before.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
-        let class_symbol = self.enter_class(name, class_file.access_flags, origin);
+        let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         let super_class = class_file
@@ -275,7 +409,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let field_type = field
                 .field_type(&class_file.constant_pool)
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
-            let (signature, semantic_type) = self.resolve_field_like(
+            let (signature, resolved_type) = self.lower_field_like(
                 name,
                 &field_type,
                 &field.attributes,
@@ -283,12 +417,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )?;
             let annotations =
                 self.resolve_annotations(name, &field.attributes, &class_file.constant_pool)?;
+
+            self.enter_field(
+                class_symbol,
+                declarations,
+                &field_name,
+                field.access_flags,
+                resolved_type,
+                origin,
+            );
+
             fields.push(FieldSymbol::new(
                 field_name,
                 field.access_flags,
                 field_type,
                 signature,
-                semantic_type,
                 annotations,
             ));
         }
@@ -353,7 +496,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             },
         );
 
-        self.complete_class(class_symbol, super_class, interfaces);
+        self.complete_class(class_symbol, declarations, super_class, interfaces);
         Ok(class_symbol)
     }
 
@@ -719,30 +862,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })
     }
 
-    /// Resolves an already-parsed [`FieldType`]'s optional `Signature`
-    /// attribute and semantic type together, in the order both a real
-    /// field and a `Record` component need them. Shared by the
-    /// field-building loop above and [`Self::resolve_record_components`]
-    /// below — the only difference between the two is that a record
-    /// component has no access flags of its own in the class file
-    /// format.
-    fn resolve_field_like(
-        &mut self,
-        owner: &BinaryName,
-        field_type: &FieldType,
-        attributes: &[Attribute<'_>],
-        constant_pool: &ConstantPool,
-    ) -> Result<(Option<FieldSignature>, SemanticFieldType), ClassLoadError> {
-        let semantic_type = self.resolve_semantic_field_type(owner, field_type)?;
-        let signature = self.resolve_optional_signature(
-            owner,
-            attributes,
-            constant_pool,
-            FieldSignature::parse,
-        )?;
-        Ok((signature, semantic_type))
-    }
-
     /// Looks for a `Record` attribute (JVMS §4.7.30) — present only on
     /// a `record` class, listing its components. `None` means the
     /// class isn't a record at all; `Some(vec![])` means it is a record
@@ -774,7 +893,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let field_type = FieldType::parse(descriptor_text).map_err(|error| {
                 ClassLoadError::MalformedDescriptor(owner.clone(), error.into())
             })?;
-            let (signature, semantic_type) = self.resolve_field_like(
+            let (signature, resolved_type) = self.lower_field_like(
                 owner,
                 &field_type,
                 &component.attributes,
@@ -784,7 +903,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 component_name,
                 field_type,
                 signature,
-                semantic_type,
+                resolved_type,
             ));
         }
 
@@ -1056,6 +1175,28 @@ mod tests {
         *symbol
     }
 
+    /// The resolved `TypeId` of the field named `field_name`, looked up
+    /// through `class_symbol`'s declarations scope — the sole canonical
+    /// source for a class's members.
+    fn field_type_id(
+        store: &mut SemanticStore,
+        class_symbol: SymbolId,
+        field_name: &str,
+    ) -> TypeId {
+        let declarations = class_info(store, class_symbol).declarations;
+        let text = store.names.intern(field_name);
+        let name = Name::new(text, Namespace::Term);
+        let field_symbol = store
+            .scopes
+            .get(declarations)
+            .lookup(&name)
+            .unwrap_or_else(|| panic!("field {field_name} should be entered in the class scope"));
+        let SymbolInfo::Complete(type_id) = store.symbols.get(field_symbol).info else {
+            panic!("expected the field to have complete info");
+        };
+        type_id
+    }
+
     /// An in-memory classpath backed by a fixed name -> bytes map, for
     /// tests that need full control over what a class's bytes are
     /// (including synthetic, hand-built, invalid, or cyclic class files
@@ -1267,6 +1408,66 @@ mod tests {
             assert!(field(name).flags().is_static(), "{name} should be static");
             assert!(field(name).flags().is_final(), "{name} should be final");
         }
+    }
+
+    /// The same 5 `public static final` fields as
+    /// [`loads_a_real_fixtures_fields`], now checked through the
+    /// canonical path: real `dotty-core` `Symbol`s entered into
+    /// `PoolSample`'s declarations scope, not the `ClassfileMetadata`
+    /// sidecar.
+    #[test]
+    fn enters_real_fixtures_fields_into_the_class_declarations_scope() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(pool_sample_classpath()), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("PoolSample"))
+            .expect("PoolSample should load");
+        drop(loader);
+
+        let declarations = class_info(&store, symbol).declarations;
+        let mut field_symbol = |field_name: &str| {
+            let text = store.names.intern(field_name);
+            let name = Name::new(text, Namespace::Term);
+            store
+                .scopes
+                .get(declarations)
+                .lookup(&name)
+                .unwrap_or_else(|| panic!("{field_name} should be entered in the class scope"))
+        };
+
+        for field_name in ["ANSWER", "BIG_ANSWER", "HALF", "PI", "GREETING"] {
+            let field = store.symbols.get(field_symbol(field_name));
+            assert_eq!(
+                field.kind,
+                SymbolKind::Field,
+                "{field_name} should be a Field"
+            );
+            assert_eq!(
+                field.visibility,
+                Visibility::Public,
+                "{field_name} should be public"
+            );
+            assert!(
+                field.flags.contains(SymbolFlags::STATIC),
+                "{field_name} should be static"
+            );
+            assert!(
+                field.flags.contains(SymbolFlags::FINAL),
+                "{field_name} should be final"
+            );
+            assert!(
+                !field.flags.contains(SymbolFlags::MUTABLE),
+                "{field_name} is final, so should not be MUTABLE"
+            );
+        }
+
+        let answer_type = field_type_id(&mut store, symbol, "ANSWER");
+        let int_symbol = parent_symbol(&store, answer_type);
+        assert_eq!(symbol_name(&store, int_symbol), "Int");
+
+        let greeting_type = field_type_id(&mut store, symbol, "GREETING");
+        let string_symbol = parent_symbol(&store, greeting_type);
+        assert_eq!(symbol_name(&store, string_symbol), "String");
     }
 
     /// `pool_sample/PoolSample.class` declares 3 real methods (confirmed
@@ -2205,40 +2406,19 @@ mod tests {
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load despite the mutual field reference");
-
-        let ping_metadata = loader
-            .metadata(ping)
-            .expect("Ping should have classfile metadata");
-        let ping_other = ping_metadata
-            .fields
-            .iter()
-            .find(|field| field.name() == "other")
-            .expect("Ping.other should exist");
-        let pong = match ping_other.semantic_type() {
-            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
-            unexpected => panic!("expected Ping.other to resolve to a class, got {unexpected:?}"),
-        };
-
-        let pong_metadata = loader
-            .metadata(pong)
-            .expect("Pong should have classfile metadata");
-        let pong_other = pong_metadata
-            .fields
-            .iter()
-            .find(|field| field.name() == "other")
-            .expect("Pong.other should exist");
-        let ping_again = match pong_other.semantic_type() {
-            SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
-            unexpected => panic!("expected Pong.other to resolve to a class, got {unexpected:?}"),
-        };
         drop(loader);
 
+        let ping_other_type = field_type_id(&mut store, ping, "other");
+        let pong = parent_symbol(&store, ping_other_type);
         assert_eq!(symbol_name(&store, pong), "Pong");
+
+        let pong_other_type = field_type_id(&mut store, pong, "other");
+        let ping_again = parent_symbol(&store, pong_other_type);
         assert_eq!(symbol_name(&store, ping_again), "Ping");
     }
 
-    /// `resolve_semantic_field_type`'s `FieldType::Array` branch
-    /// recurses into its component type; every other test in this file
+    /// `lower_field_type`'s `FieldType::Array` branch recurses into its
+    /// component type; every other test in this file
     /// only exercises plain `Object` fields, so this specifically
     /// targets `Ping.others: Pong[]` (real `javac` output, see
     /// `tests/fixtures/ping_pong/generate.sh`) to prove an
@@ -2266,28 +2446,13 @@ mod tests {
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load");
-
-        let metadata = loader
-            .metadata(ping)
-            .expect("Ping should have classfile metadata");
-        let others = metadata
-            .fields
-            .iter()
-            .find(|field| field.name() == "others")
-            .expect("Ping.others should exist");
-
-        let pong = match others.semantic_type() {
-            SemanticFieldType::Array(component) => match component.as_ref() {
-                SemanticFieldType::Object(ClassRef::Resolved(symbol)) => *symbol,
-                unexpected => {
-                    panic!(
-                        "expected the array's component to resolve to a class, got {unexpected:?}"
-                    )
-                }
-            },
-            unexpected => panic!("expected Ping.others to be an array type, got {unexpected:?}"),
-        };
         drop(loader);
+
+        let others_type = field_type_id(&mut store, ping, "others");
+        let Type::JavaArray { element } = store.types.get(others_type) else {
+            panic!("expected Ping.others to be a JavaArray type");
+        };
+        let pong = parent_symbol(&store, *element);
 
         assert_eq!(symbol_name(&store, pong), "Pong");
     }
