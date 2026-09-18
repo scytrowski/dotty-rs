@@ -1,0 +1,8 @@
+[package]
+name = "dotty-tasty-unpickler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotty-tasty = { path = "../dotty-tasty" }
+dotty-core = { path = "../dotty-core" }

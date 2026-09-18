@@ -17,3 +17,6 @@ pub use dotty_core::core;
 
 /// Classpath loading APIs, unifying TASTy and class file entries.
 pub use dotty_classloader::classloader;
+
+/// Semantic unpickling of TASTy into the shared `dotty-core` model.
+pub use dotty_tasty_unpickler::tasty_unpickler;

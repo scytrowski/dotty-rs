@@ -72,3 +72,16 @@ fn reencodes_structured_asts_through_the_public_facade() {
     reparsed.validate_ast_reference_targets().unwrap();
     assert_eq!(reparsed.source_file(), file.source_file());
 }
+
+#[test]
+fn exposes_the_tasty_unpickler_error_under_the_dotty_namespace() {
+    use dotty::tasty::AstError;
+    use dotty::tasty_unpickler::UnpickleError;
+
+    let error = UnpickleError::from(AstError::InvalidTag { tag: 1, offset: 7 });
+
+    assert_eq!(
+        error,
+        UnpickleError::Ast(AstError::InvalidTag { tag: 1, offset: 7 })
+    );
+}

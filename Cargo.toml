@@ -11,6 +11,7 @@ members = [
     "crates/dotty-lexer",
     "crates/dotty-core",
     "crates/dotty-classloader",
+    "crates/dotty-tasty-unpickler",
 ]
 resolver = "3"
 
@@ -22,3 +23,4 @@ dotty-tasty = { path = "crates/dotty-tasty" }
 dotty-classfile = { path = "crates/dotty-classfile" }
 dotty-core = { path = "crates/dotty-core" }
 dotty-classloader = { path = "crates/dotty-classloader" }
+dotty-tasty-unpickler = { path = "crates/dotty-tasty-unpickler" }
