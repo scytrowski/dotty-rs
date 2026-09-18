@@ -250,9 +250,9 @@ allocate a `String` for every lexeme.
 - byte offset to UTF-8 column;
 - byte offset to UTF-16 column for oracle comparison and tooling.
 
-The original bytes remain unchanged. LF and CRLF are recognized as logical
-line breaks without rewriting source ranges. Exact handling of bare CR and FF
-is a compatibility case to be verified against Scala 3.9.0.
+The original bytes remain unchanged. Scala 3.9.0 recognizes LF, FF, CR, and SU
+as physical line-break characters; CRLF counts as one logical line break.
+These characters are indexed without rewriting source ranges.
 
 The cursor must support checked lookahead, raw reads for multiline strings,
 and normal reads with the source's escape and line semantics. Every operation

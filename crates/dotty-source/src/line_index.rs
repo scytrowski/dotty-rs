@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::SourceTextError;
+use crate::{SourceTextError, is_line_break_char};
 
 /// Logical line starts for a UTF-8 source buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,9 @@ impl LineIndex {
                     } else {
                         line_starts.push((offset + character.len_utf8()) as u32);
                     }
+                }
+                character if is_line_break_char(character) => {
+                    line_starts.push((offset + character.len_utf8()) as u32);
                 }
                 _ => {}
             }
@@ -143,6 +146,26 @@ mod tests {
         assert_eq!(index.line_start(1), Some(4));
         assert_eq!(index.line_start(2), Some(9));
         assert_eq!(index.line_of_offset(9), Ok(2));
+    }
+
+    #[test]
+    fn indexes_form_feed_as_a_line_break() {
+        let source = "one\u{000c}two";
+        let index = LineIndex::new(source).expect("valid source");
+
+        assert_eq!(index.line_count(), 2);
+        assert_eq!(index.line_start(1), Some(4));
+        assert_eq!(index.line_of_offset(4), Ok(1));
+    }
+
+    #[test]
+    fn indexes_substitute_as_a_line_break() {
+        let source = "one\u{001a}two";
+        let index = LineIndex::new(source).expect("valid source");
+
+        assert_eq!(index.line_count(), 2);
+        assert_eq!(index.line_start(1), Some(4));
+        assert_eq!(index.line_of_offset(4), Ok(1));
     }
 
     #[test]

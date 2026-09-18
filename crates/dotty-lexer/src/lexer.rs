@@ -1,7 +1,7 @@
 use core::fmt;
 
 use dotty_diagnostics::{Diagnostic, DiagnosticSeverity};
-use dotty_source::{SourceText, SourceTextError, TextRange, TextRangeError};
+use dotty_source::{SourceText, SourceTextError, TextRange, TextRangeError, is_line_break_char};
 
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
@@ -143,14 +143,14 @@ impl<'source> RawLexer<'source> {
                 |character| character == '\t',
             )?)));
         }
-        if character.is_whitespace() && character != '\n' && character != '\r' {
+        if character.is_whitespace() && !is_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_whitespace(
                 start,
                 TriviaKind::OtherWhitespace,
-                |character| character.is_whitespace() && character != '\n' && character != '\r',
+                |character| character.is_whitespace() && !is_line_break_char(character),
             )?)));
         }
-        if character == '\n' || character == '\r' {
+        if is_line_break_char(character) {
             return Ok(Some(RawItem::Trivia(self.scan_newline(start)?)));
         }
         if character == '/' && self.cursor.peek_nth(1) == Some('/') {
@@ -525,7 +525,7 @@ impl<'source> RawLexer<'source> {
             Some('\r') => {
                 let _ = self.cursor.eat_if('\n');
             }
-            Some('\n') => {}
+            Some('\n' | '\u{000c}' | '\u{001a}') => {}
             Some(_) | None => {
                 return Err(RawLexerError::Cursor(CursorError::InvalidOffset {
                     offset: start,
@@ -1672,12 +1672,22 @@ mod tests {
         (classifies_tabs_as_trivia, "\t", TriviaKind::Tabs),
         (
             classifies_other_whitespace_as_trivia,
-            "\u{000c}",
+            "\u{000b}",
             TriviaKind::OtherWhitespace
         ),
         (
             classifies_crlf_as_one_newline_trivia,
             "\r\n",
+            TriviaKind::Newline
+        ),
+        (
+            classifies_form_feed_as_newline_trivia,
+            "\u{000c}",
+            TriviaKind::Newline
+        ),
+        (
+            classifies_substitute_as_newline_trivia,
+            "\u{001a}",
             TriviaKind::Newline
         ),
         (
@@ -2201,14 +2211,30 @@ mod tests {
     }
 
     #[test]
-    fn preserves_form_feed_as_other_whitespace() {
+    fn preserves_form_feed_as_newline_trivia() {
         let (items, diagnostics) = scan("a\u{000c}b");
 
         assert_eq!(
             items,
             vec![
                 token(RawTokenKind::Identifier, 0, 1),
-                trivia(TriviaKind::OtherWhitespace, 1, 2),
+                trivia(TriviaKind::Newline, 1, 2),
+                token(RawTokenKind::Identifier, 2, 3),
+                token(RawTokenKind::Eof, 3, 3),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_substitute_as_newline_trivia() {
+        let (items, diagnostics) = scan("a\u{001a}b");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Identifier, 0, 1),
+                trivia(TriviaKind::Newline, 1, 2),
                 token(RawTokenKind::Identifier, 2, 3),
                 token(RawTokenKind::Eof, 3, 3),
             ]

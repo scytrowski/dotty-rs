@@ -5,5 +5,5 @@ mod source_text;
 mod span;
 
 pub use line_index::LineIndex;
-pub use source_text::{SourceText, SourceTextError};
+pub use source_text::{SourceText, SourceTextError, is_line_break_char};
 pub use span::{TextRange, TextRangeError};

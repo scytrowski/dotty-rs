@@ -1,5 +1,5 @@
 use dotty_diagnostics::Diagnostic;
-use dotty_source::{TextRange, TextRangeError};
+use dotty_source::{TextRange, TextRangeError, is_line_break_char};
 use dotty_token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
 use crate::xml::XmlState;
@@ -898,7 +898,7 @@ fn count_line_breaks(text: &str) -> usize {
                     let _ = chars.next();
                 }
             }
-            '\n' => count += 1,
+            character if is_line_break_char(character) => count += 1,
             _ => {}
         }
     }
@@ -922,7 +922,7 @@ fn line_indentation(source: &str, offset: u32) -> IndentWidth {
 fn line_start_offset(source: &str, offset: u32) -> u32 {
     let bytes = source.as_bytes();
     let mut line_start = offset as usize;
-    while line_start > 0 && !matches!(bytes[line_start - 1], b'\n' | b'\r') {
+    while line_start > 0 && !matches!(bytes[line_start - 1], b'\n' | b'\r' | 0x0c | 0x1a) {
         line_start -= 1;
     }
     line_start as u32
@@ -2782,6 +2782,68 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Newline,
                 TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn treats_form_feed_as_a_logical_line_break() {
+        assert_eq!(
+            kinds("first\u{000c}second"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn treats_substitute_as_a_logical_line_break() {
+        assert_eq!(
+            kinds("first\u{001a}second"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_form_feed_as_the_start_of_an_indented_line() {
+        assert_eq!(
+            kinds("if ready then\u{000c}  run()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_substitute_as_the_start_of_an_indented_line() {
+        assert_eq!(
+            kinds("if ready then\u{001a}  run()"),
+            vec![
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Then),
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftParen),
+                TokenKind::Punctuation(Punctuation::RightParen),
+                TokenKind::Outdent,
                 TokenKind::Eof,
             ]
         );

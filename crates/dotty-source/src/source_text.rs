@@ -2,6 +2,11 @@ use core::fmt;
 
 use crate::{LineIndex, TextRange};
 
+/// Returns whether a character is a Scala 3.9.0 physical line-break character.
+pub const fn is_line_break_char(character: char) -> bool {
+    matches!(character, '\n' | '\u{000c}' | '\r' | '\u{001a}')
+}
+
 /// A checked, borrowed view of UTF-8 source text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceText<'source> {
@@ -106,6 +111,19 @@ impl<'source> SourceText<'source> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_all_scala_line_break_characters() {
+        for character in ['\n', '\u{000c}', '\r', '\u{001a}'] {
+            assert!(is_line_break_char(character), "{character:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_line_break_whitespace() {
+        assert!(!is_line_break_char(' '));
+        assert!(!is_line_break_char('\t'));
+    }
 
     #[test]
     fn keeps_utf8_source_ranges_in_bytes() {
