@@ -1,6 +1,6 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassFormat, ClassPathEntry};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry};
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
@@ -54,6 +54,14 @@ pub struct ClassLoader<'store, E> {
     /// each loader owning its own.
     session: LoadingSession,
     metadata: HashMap<SymbolId, ClassfileMetadata>,
+    /// Where each class's bytes were read from (directory root/JAR/JMOD
+    /// path) — the [`ClassResource::origin`](crate::class_path::ClassResource::origin)
+    /// a class's [`ClassOrigin`] was found under, kept for diagnostics and
+    /// duplicate-class detection (`ClassOrigin`'s own doc comment). Entered
+    /// alongside the `Symbol` itself, so it survives even if the load later
+    /// fails (a `Symbol` left `SymbolInfo::Error` by a `DependencyFailure`
+    /// is still worth explaining "this came from here").
+    origins: HashMap<SymbolId, ClassOrigin>,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -149,6 +157,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             store,
             session,
             metadata: HashMap::new(),
+            origins: HashMap::new(),
             definitions,
         }
     }
@@ -177,6 +186,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// did not produce.
     pub fn metadata(&self, id: SymbolId) -> Option<&ClassfileMetadata> {
         self.metadata.get(&id)
+    }
+
+    /// Where a class's bytes were read from (a directory root/JAR/JMOD
+    /// path) — `None` for a `SymbolId` this loader did not produce (e.g. a
+    /// `Definitions` builtin, which has no backing classpath resource).
+    pub fn origin(&self, id: SymbolId) -> Option<&ClassOrigin> {
+        self.origins.get(&id)
     }
 
     /// Loads (or returns the cached result for) the class named `name`.
@@ -254,8 +270,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
 
         match resource.format() {
-            ClassFormat::Class => self.load_uncached_class(name, resource.bytes()),
-            ClassFormat::Tasty => self.load_uncached_tasty(name, resource.bytes()),
+            ClassFormat::Class => {
+                self.load_uncached_class(name, resource.bytes(), resource.origin().clone())
+            }
+            ClassFormat::Tasty => {
+                self.load_uncached_tasty(name, resource.bytes(), resource.origin().clone())
+            }
         }
     }
 
@@ -755,12 +775,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
         bytes: &[u8],
+        resource_origin: ClassOrigin,
     ) -> Result<SymbolId, ClassLoadError> {
         let decoded = tasty_symbol::decode(bytes, name)
             .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
+        self.origins.insert(class_symbol, resource_origin);
         self.session
             .repository
             .mark_loading(name.clone(), class_symbol);
@@ -914,6 +936,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
         bytes: &[u8],
+        resource_origin: ClassOrigin,
     ) -> Result<SymbolId, ClassLoadError> {
         let mut reader = Reader::new(bytes);
         let class_file = ClassFile::decode(&mut reader)
@@ -946,6 +969,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // rejected as `CircularInheritance`, exactly as before.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
+        self.origins.insert(class_symbol, resource_origin);
         self.session
             .repository
             .mark_loading(name.clone(), class_symbol);
@@ -2619,6 +2643,43 @@ mod tests {
         assert_eq!(symbol_name(&store, loaded_object), "Object");
         let info = class_info(&store, loaded_object);
         assert!(info.parents.is_empty());
+    }
+
+    /// `load_uncached_class`/`load_uncached_tasty` used to receive only
+    /// `resource.bytes()`, discarding `resource.origin()` -- so
+    /// `SymbolOrigin::Classfile`/`Tasty`'s opaque ID had no way back to
+    /// which directory/JAR/JMOD actually supplied a class's bytes. Fixed by
+    /// threading `ClassOrigin` through into the loader's own `origins`
+    /// table, queryable via `ClassLoader::origin`.
+    #[test]
+    fn loading_a_class_records_its_class_path_origin() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let object = loader
+            .load_class(&BinaryName::from_internal("java/lang/Object"))
+            .expect("java/lang/Object should load");
+
+        assert_eq!(
+            loader.origin(object),
+            Some(&ClassOrigin::Directory(PathBuf::from("<memory>")))
+        );
+    }
+
+    /// A `Definitions` builtin (`Object`/`Any`/`Nothing`/a primitive) has
+    /// no backing classpath resource -- `origin` must not report a
+    /// misleading one for it.
+    #[test]
+    fn a_definitions_builtin_has_no_recorded_origin() {
+        let mut store = SemanticStore::new();
+        let loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+
+        assert_eq!(loader.origin(loader.definitions().object_class), None);
     }
 
     #[test]
