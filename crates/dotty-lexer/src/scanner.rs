@@ -949,6 +949,9 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
                 Some(
                     TokenKind::Identifier
                         | TokenKind::BackquotedIdentifier
+                        | TokenKind::Keyword(
+                            HardKeyword::This | HardKeyword::Super | HardKeyword::New,
+                        )
                         | TokenKind::Punctuation(
                             Punctuation::RightParen | Punctuation::RightBracket
                         )
@@ -1323,6 +1326,45 @@ mod tests {
             kinds("value: Int"),
             vec![
                 TokenKind::Identifier,
+                TokenKind::ColonFollow,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_colon_after_this_as_colon_follow() {
+        assert_eq!(
+            kinds("this: T"),
+            vec![
+                TokenKind::Keyword(HardKeyword::This),
+                TokenKind::ColonFollow,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_colon_after_super_as_colon_follow() {
+        assert_eq!(
+            kinds("super: T"),
+            vec![
+                TokenKind::Keyword(HardKeyword::Super),
+                TokenKind::ColonFollow,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_colon_after_new_as_colon_follow() {
+        assert_eq!(
+            kinds("new: T"),
+            vec![
+                TokenKind::Keyword(HardKeyword::New),
                 TokenKind::ColonFollow,
                 TokenKind::Identifier,
                 TokenKind::Eof,
