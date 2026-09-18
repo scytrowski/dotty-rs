@@ -43,7 +43,7 @@ InfixOp, PrefixOp, PostfixOp,
 Parens, Tuple,
 ForYield, ForDo, GenFrom, GenAlias,
 PatDef, ExtensionMethods, InterpolatedString,
-ContextBounds, NumberLiteral, Throw,
+ContextBounds, ContextBoundTypeTree, NumberLiteral, Throw,
 ParsedTry,
 ErrorNode
 ```
@@ -78,7 +78,7 @@ out-of-band tree convention or a lossy lowering step.
 | `ExtMethods` | `UntypedNode::ExtensionMethods` | REPRESENT | The local name differs, but the parser-facing information is present. |
 | `InterpolatedString` | `UntypedNode::InterpolatedString` | REPRESENT | Interpolator name and interpolation parts remain available to later lowering. |
 | `ContextBounds` | `UntypedNode::ContextBounds` | REPRESENT | Multiple bounds and their order are preserved. Individual Scala 3.9 aliases are represented by `ContextBoundTypeTree` entries. |
-| `ContextBoundTypeTree` | None | REPRESENT | Scala 3.9 syntax can carry an `as` name on an individual context bound. That name cannot be reconstructed from the current `ContextBounds` fields and requires a small untyped node or equivalent payload. |
+| `ContextBoundTypeTree` | `UntypedNode::ContextBoundTypeTree` | REPRESENT | Preserves the bound tree, its type parameter, and the optional Scala 3.9 `as` term name. `ContextBounds` keeps these entries in source order. |
 | `Number` / `NumberKind` | `UntypedNode::Number(NumberLiteral)` | REPRESENT | Exact spelling is retained through `NameId`. The parser contract must document whether numeric kind comes from the token stream or must be added to `NumberLiteral`; it must not rely on semantic numeric conversion. |
 | `Throw` | `UntypedNode::Throw` | REPRESENT | The parser emits a distinct throw expression. |
 | `ErrorNode` (local recovery placeholder) | `UntypedNode::Error` | REPRESENT | Required for parser recovery. It remains untyped-only, carries only a small kind enum, and keeps diagnostics outside the AST. |
@@ -101,13 +101,10 @@ out-of-band tree convention or a lossy lowering step.
 
 ## Findings requiring follow-up
 
-The audit produces the following concrete follow-up items before the parser
+The audit produces the following concrete follow-up item before the parser
 starts:
 
-1. Add the smallest representation for `ContextBoundTypeTree`, or explicitly
-   narrow the parser dialect so context-bound aliases are rejected. Silent
-   loss is not an acceptable option.
-2. Add the smallest representation for `FunctionWithMods`, or explicitly
+1. Add the smallest representation for `FunctionWithMods`, or explicitly
    narrow the parser dialect so modified/erased function types are rejected.
 
 The following are policy decisions, not immediate AST additions:

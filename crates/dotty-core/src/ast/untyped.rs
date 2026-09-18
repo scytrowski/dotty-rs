@@ -163,6 +163,18 @@ pub struct ContextBounds {
     pub context_bounds: Vec<TreeId<Untyped>>,
 }
 
+/// One Scala 3.9 context bound, including its optional `as` alias.
+///
+/// For example, `A: Show as show` is retained as a bound tree for `Show`,
+/// `parameter = A`, and `name = Some(show)`. `ContextBounds` owns these
+/// nodes in source order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextBoundTypeTree {
+    pub bound: TreeId<Untyped>,
+    pub parameter: crate::names::TypeName,
+    pub name: Option<TermName>,
+}
+
 /// A raw numeric literal, before the exact numeric type and overflow
 /// checking are resolved. The parser does not own numeric overflow
 /// checking (see `AGENTS.md`); `text` is the literal exactly as written.
@@ -220,6 +232,7 @@ pub enum UntypedNode {
     InterpolatedString(InterpolatedString),
 
     ContextBounds(ContextBounds),
+    ContextBoundTypeTree(ContextBoundTypeTree),
 
     Number(NumberLiteral),
 
@@ -482,6 +495,33 @@ mod tests {
             panic!("expected a ContextBounds node");
         };
         assert_eq!(context_bounds.context_bounds, vec![tree_id(2), tree_id(3)]);
+    }
+
+    #[test]
+    fn context_bound_type_tree_preserves_parameter_without_an_alias() {
+        let node = UntypedNode::ContextBoundTypeTree(ContextBoundTypeTree {
+            bound: tree_id(1),
+            parameter: crate::names::TypeName::new(NameId::new(2)),
+            name: None,
+        });
+
+        let UntypedNode::ContextBoundTypeTree(bound) = node else {
+            panic!("expected a ContextBoundTypeTree node");
+        };
+        assert_eq!(bound.bound, tree_id(1));
+        assert_eq!(bound.parameter, crate::names::TypeName::new(NameId::new(2)));
+        assert_eq!(bound.name, None);
+    }
+
+    #[test]
+    fn context_bound_type_tree_preserves_an_as_alias() {
+        let node = ContextBoundTypeTree {
+            bound: tree_id(1),
+            parameter: crate::names::TypeName::new(NameId::new(2)),
+            name: Some(TermName::new(NameId::new(3))),
+        };
+
+        assert_eq!(node.name, Some(TermName::new(NameId::new(3))));
     }
 
     #[test]

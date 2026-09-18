@@ -751,6 +751,7 @@ pub enum UntypedNode {
     InterpolatedString(InterpolatedString),
 
     ContextBounds(ContextBounds),
+    ContextBoundTypeTree(ContextBoundTypeTree),
 
     Number(NumberLiteral),
 
@@ -762,8 +763,8 @@ pub enum UntypedNode {
 ```
 
 This is the foundation subset of Dotty's actual `untpd`-only node types. It
-does not yet claim complete parser coverage: `ContextBoundTypeTree` and
-`FunctionWithMods` remain the concrete parser-facing gaps recorded in
+does not yet claim complete parser coverage: `FunctionWithMods` remains the
+concrete parser-facing gap recorded in
 [`docs/dotty-core-parser-readiness.md`](dotty-core-parser-readiness.md).
 
 ### `ast/typed.rs`
