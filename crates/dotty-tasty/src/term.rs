@@ -8,56 +8,92 @@ use crate::reader::{ReadError, Reader};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+/// TASTy tag for the unit constant.
 pub const UNITCONST_TAG: u8 = 2;
+/// TASTy tag for the `false` constant.
 pub const FALSECONST_TAG: u8 = 3;
+/// TASTy tag for the `true` constant.
 pub const TRUECONST_TAG: u8 = 4;
+/// TASTy tag for the null constant.
 pub const NULLCONST_TAG: u8 = 5;
+/// TASTy tag for a byte constant.
 pub const BYTECONST_TAG: u8 = 67;
+/// TASTy tag for a short constant.
 pub const SHORTCONST_TAG: u8 = 68;
+/// TASTy tag for a character constant.
 pub const CHARCONST_TAG: u8 = 69;
+/// TASTy tag for an integer constant.
 pub const INTCONST_TAG: u8 = 70;
+/// TASTy tag for a long constant.
 pub const LONGCONST_TAG: u8 = 71;
+/// TASTy tag for a float constant.
 pub const FLOATCONST_TAG: u8 = 72;
+/// TASTy tag for a double constant.
 pub const DOUBLECONST_TAG: u8 = 73;
+/// TASTy tag for a string constant.
 pub const STRINGCONST_TAG: u8 = 74;
 
+/// Default maximum depth for recursive term decoding.
 pub const DEFAULT_MAX_TREE_DEPTH: usize = 1024;
 
+/// Meaning of an AST reference leaf tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AstRefKind {
+    /// Reference to a shared term.
     SharedTerm,
+    /// Reference to a shared type.
     SharedType,
+    /// Direct term reference.
     TermRefDirect,
+    /// Direct type reference.
     TypeRefDirect,
+    /// Recursive `this` reference.
     RecursiveThis,
+    /// Reference to a parameter-type binder.
     ParamTypeBinder,
+    /// Reference to a return target.
     ReturnTarget,
 }
 
+/// An AST reference together with its wire-level kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AstRef {
+    /// Kind of reference encoded by the tag.
     pub kind: AstRefKind,
+    /// Absolute AST address targeted by the reference.
     pub address: u32,
 }
 
+/// Metadata for one visible tree node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AstTreeNode {
+    /// TASTy tag of the node.
     pub tag: u8,
+    /// Absolute offset of the node in the enclosing AST payload.
     pub offset: usize,
 }
 
+/// Value carried by a category-one or category-two term leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermValue {
     /// A valid category-one tag with no payload, such as a modifier or a
     /// grammar marker.
     Tag,
+    /// Unit constant.
     Unit,
+    /// Boolean constant.
     Boolean(bool),
+    /// Null constant.
     Null,
+    /// AST address reference.
     AstRef(u32),
+    /// One-based name-table reference.
     NameRef(u32),
+    /// Unsigned natural number.
     Nat(u32),
+    /// Signed 32-bit integer.
     Int(i32),
+    /// Signed 64-bit integer.
     LongInt(i64),
 }
 
@@ -68,58 +104,124 @@ pub enum TermValue {
 /// Rust's floating-point types during a lossless decode/encode cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstantValue {
+    /// Unit constant.
     Unit,
+    /// Boolean constant.
     Boolean(bool),
+    /// Null constant.
     Null,
+    /// Signed byte constant.
     Byte(i8),
+    /// Signed short constant.
     Short(i16),
+    /// UTF-16 code-unit character constant.
     Char(u16),
+    /// Signed integer constant.
     Int(i32),
+    /// Signed long constant.
     Long(i64),
+    /// IEEE-754 single-precision bit pattern.
     FloatBits(u32),
+    /// IEEE-754 double-precision bit pattern.
     DoubleBits(u64),
+    /// One-based name-table reference for a string constant.
     String(NameRef),
 }
 
+/// A decoded leaf term with its original tag and offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleTerm {
+    /// TASTy leaf tag.
     pub tag: u8,
+    /// Absolute offset where the tag was read.
     pub offset: usize,
+    /// Decoded payload value.
     pub value: TermValue,
 }
 
+/// Lossless tree representation for terms and bounded AST nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawTree<'a> {
+    /// A category-one or category-two leaf.
     Leaf(SimpleTerm),
+    /// A category-three wrapper around one child tree.
     Ast {
+        /// Wrapper tag.
         tag: u8,
+        /// Absolute offset of the wrapper.
         offset: usize,
+        /// Wrapped child tree.
         child: Box<RawTree<'a>>,
     },
+    /// A category-four wrapper carrying a natural-number value.
     NatAst {
+        /// Wrapper tag.
         tag: u8,
+        /// Absolute offset of the wrapper.
         offset: usize,
+        /// Natural-number payload.
         value: u32,
+        /// Wrapped child tree.
         child: Box<RawTree<'a>>,
     },
+    /// A bounded category-five node.
     LengthNode(RawNode<'a>),
 }
 
+/// Errors returned while decoding a raw term tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermError {
+    /// A bounded binary read failed.
     Read(ReadError),
-    InvalidTag { tag: u8, offset: usize },
-    UnsupportedCategory { tag: u8, offset: usize },
-    InvalidConstant { tag: u8, value: i64, offset: usize },
-    RecursionLimit { offset: usize, limit: usize },
+    /// The tag is not valid in the current term context.
+    InvalidTag {
+        /// Invalid term tag.
+        tag: u8,
+        /// Offset at which the tag was read.
+        offset: usize,
+    },
+    /// The tag belongs to an unsupported category for a leaf.
+    UnsupportedCategory {
+        /// Unsupported tag.
+        tag: u8,
+        /// Offset at which the tag was read.
+        offset: usize,
+    },
+    /// A constant payload is outside its Scala type's range.
+    InvalidConstant {
+        /// Constant tag.
+        tag: u8,
+        /// Raw value that was outside the constant's range.
+        value: i64,
+        /// Offset at which the constant was read.
+        offset: usize,
+    },
+    /// The configured recursive decoding limit was reached.
+    RecursionLimit {
+        /// Offset at which the limit was reached.
+        offset: usize,
+        /// Configured maximum depth.
+        limit: usize,
+    },
 }
 
+/// Errors returned while encoding a raw term tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TermEncodeError {
+    /// A binary writer failed.
     Write(WriteError),
+    /// An AST reference or raw AST node failed validation.
     Ast(AstError),
-    InvalidTag { tag: u8 },
-    InvalidValue { tag: u8 },
+    /// The supplied term tag is not encodable.
+    InvalidTag {
+        /// Invalid term tag.
+        tag: u8,
+    },
+    /// The supplied value does not match the term tag.
+    InvalidValue {
+        /// Tag whose value did not match.
+        tag: u8,
+    },
 }
 
 impl fmt::Display for TermEncodeError {
@@ -212,6 +314,7 @@ impl SimpleTerm {
         })
     }
 
+    /// Decodes one category-one or category-two leaf.
     pub fn decode(reader: &mut Reader<'_>) -> Result<Self, TermError> {
         let offset = reader.position();
         let tag = reader.read_u8()?;
@@ -237,6 +340,7 @@ impl SimpleTerm {
         Ok(Self { tag, offset, value })
     }
 
+    /// Returns the name reference carried by this leaf, if any.
     pub fn name_ref(&self) -> Option<NameRef> {
         match self.value {
             TermValue::NameRef(reference) => Some(reference),
@@ -244,6 +348,7 @@ impl SimpleTerm {
         }
     }
 
+    /// Returns the AST-reference kind carried by this leaf, if any.
     pub fn ast_ref_kind(&self) -> Option<AstRefKind> {
         if !matches!(self.value, TermValue::AstRef(_)) {
             return None;
@@ -259,6 +364,7 @@ impl SimpleTerm {
         }
     }
 
+    /// Returns the decoded AST reference carried by this leaf, if any.
     pub fn ast_ref(&self) -> Option<AstRef> {
         let TermValue::AstRef(address) = &self.value else {
             return None;
@@ -337,6 +443,7 @@ impl SimpleTerm {
         Ok(Some(value))
     }
 
+    /// Encodes this leaf at the writer's current position.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         writer.write_u8(self.tag);
         match (&self.value, self.tag) {
@@ -552,6 +659,7 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Returns the AST reference if this tree is a direct reference leaf.
     pub fn ast_ref(&self) -> Option<AstRef> {
         match self {
             Self::Leaf(term) => term.ast_ref(),
@@ -559,6 +667,7 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Decodes a tree using [`DEFAULT_MAX_TREE_DEPTH`].
     pub fn decode(reader: &mut Reader<'a>) -> Result<Self, TermError> {
         Self::decode_with_max_depth(reader, DEFAULT_MAX_TREE_DEPTH)
     }
@@ -577,6 +686,7 @@ impl<'a> RawTree<'a> {
         Self::decode_with_max_depth_and_base_offset(reader, DEFAULT_MAX_TREE_DEPTH, base_offset)
     }
 
+    /// Decodes a tree with an explicit recursion limit.
     pub fn decode_with_max_depth(
         reader: &mut Reader<'a>,
         max_depth: usize,
@@ -670,6 +780,7 @@ impl<'a> RawTree<'a> {
         }
     }
 
+    /// Encodes this tree at the writer's current position.
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         match self {
             Self::Leaf(term) => term.encode(writer),

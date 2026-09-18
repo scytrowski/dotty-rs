@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "dotty-classfile",
  "dotty-classloader",
+ "dotty-core",
  "dotty-tasty",
 ]
 
@@ -22,6 +23,10 @@ dependencies = [
  "dotty-classfile",
  "dotty-tasty",
 ]
+
+[[package]]
+name = "dotty-core"
+version = "0.1.0"
 
 [[package]]
 name = "dotty-tasty"

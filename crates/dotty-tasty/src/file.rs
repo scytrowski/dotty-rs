@@ -14,6 +14,12 @@ use crate::term::{AstRef, AstTreeNode, TermEncodeError};
 use crate::writer::{WriteError, Writer};
 use std::fmt;
 
+/// A zero-copy view of a TASTy file.
+///
+/// The view borrows the original byte slice. Parsing does not copy section
+/// payloads, while structured queries allocate only the requested views. Use
+/// [`TastyFile::parse_and_validate_scala_3_9`] when the input should be
+/// checked before inspection.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TastyFile<'a> {
     header: Header,
@@ -21,6 +27,10 @@ pub struct TastyFile<'a> {
     sections: SectionTable<'a>,
 }
 
+/// Owned bytes produced by a TASTy encoder together with allocated AST addresses.
+///
+/// The address list is populated by the address-aware encoding methods and is
+/// empty for encodings that do not request address allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedTastyFile {
     bytes: Vec<u8>,
@@ -30,7 +40,9 @@ pub struct EncodedTastyFile {
 /// A visible AST node paired with its resolved source span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AstTreePosition {
+    /// Visible AST node.
     pub node: AstTreeNode,
+    /// Resolved position associated with the node.
     pub position: ResolvedPosition,
 }
 
@@ -48,48 +60,76 @@ pub struct TastyFileBuilder {
 }
 
 impl EncodedTastyFile {
+    /// Borrows the complete encoded TASTy file.
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// Returns the encoded file bytes and consumes this value.
     pub fn into_inner(self) -> Vec<u8> {
         self.bytes
     }
 
+    /// Returns addresses of top-level AST nodes in the encoded file.
     pub fn ast_addresses(&self) -> &[u32] {
         &self.ast_addresses
     }
 }
 
+/// Errors returned by file parsing, validation, and encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TastyFileError {
+    /// Header decoding or version validation failed.
     Header(HeaderError),
+    /// Name-table decoding or validation failed.
     Names(NameTableError),
+    /// Section decoding or validation failed.
     Sections(SectionError),
+    /// AST decoding or validation failed.
     Asts(AstError),
+    /// Structured term encoding failed.
     Terms(TermEncodeError),
+    /// Binary encoding failed.
     Write(WriteError),
+    /// A required standard section is absent.
     MissingSection(StandardSection),
+    /// A payload contains an invalid one-based name reference.
     InvalidNameReference {
+        /// Description of the payload containing the reference.
         context: &'static str,
+        /// Invalid name reference.
         reference: NameRef,
     },
+    /// `SOURCEFILE` points at a non-UTF-8 name entry.
     InvalidSourceFileName {
+        /// Invalid source-file name reference.
         reference: NameRef,
+        /// Actual raw name kind.
         kind: RawNameKind,
     },
+    /// More than one section has the same standard name.
     DuplicateStandardSection {
+        /// Duplicated standard section.
         section: StandardSection,
+        /// Index of the first occurrence.
         first_index: usize,
+        /// Index of the duplicate occurrence.
         duplicate_index: usize,
     },
+    /// A position or comment address lies outside the AST payload.
     InvalidAstAddress {
+        /// Description of the payload containing the address.
         context: &'static str,
+        /// Invalid address.
         address: i64,
+        /// AST payload length used for validation.
         asts_length: usize,
     },
+    /// An address is inside the AST payload but not at a visible node start.
     InvalidAstNodeAddress {
+        /// Description of the payload containing the address.
         context: &'static str,
+        /// Invalid node address.
         address: u32,
     },
 }
@@ -181,6 +221,7 @@ impl From<WriteError> for TastyFileError {
 }
 
 impl TastyFileBuilder {
+    /// Creates a builder from a header and validated name table.
     pub fn new(header: Header, names: NameTable) -> Self {
         Self {
             header,
@@ -195,18 +236,22 @@ impl TastyFileBuilder {
         self
     }
 
+    /// Appends a section to the builder.
     pub fn push_section(&mut self, section: EncodedSection) {
         self.sections.push(section);
     }
 
+    /// Borrows the file header being assembled.
     pub fn header(&self) -> &Header {
         &self.header
     }
 
+    /// Borrows the name table being assembled.
     pub fn names(&self) -> &NameTable {
         &self.names
     }
 
+    /// Borrows sections in their insertion order.
     pub fn sections(&self) -> &[EncodedSection] {
         &self.sections
     }
@@ -283,10 +328,12 @@ impl TastyFileBuilder {
         )
     }
 
+    /// Encodes the assembled file without content validation.
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
         self.build()?.encode()
     }
 
+    /// Encodes the assembled file and returns allocated AST addresses.
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
         self.build()?.encode_with_ast_addresses()
     }
@@ -359,6 +406,7 @@ impl TastyFileBuilder {
 }
 
 impl<'a> TastyFile<'a> {
+    /// Creates a file view from its already decoded components.
     pub fn from_parts(
         header: Header,
         names: NameTable,
@@ -372,6 +420,7 @@ impl<'a> TastyFile<'a> {
         })
     }
 
+    /// Parses a TASTy file without enforcing a particular version.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
         let mut reader = Reader::new(bytes);
         let header = Header::decode(&mut reader)?;
@@ -385,6 +434,7 @@ impl<'a> TastyFile<'a> {
         })
     }
 
+    /// Parses a file and requires the Scala 3.9.0 format version.
     pub fn parse_scala_3_9(bytes: &'a [u8]) -> Result<Self, TastyFileError> {
         let file = Self::parse(bytes)?;
         file.header.validate_scala_3_9()?;
@@ -535,6 +585,7 @@ impl<'a> TastyFile<'a> {
         Ok(())
     }
 
+    /// Encodes the borrowed file without additional validation.
     pub fn encode(&self) -> Result<Vec<u8>, TastyFileError> {
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
@@ -592,6 +643,7 @@ impl<'a> TastyFile<'a> {
         self.encode()
     }
 
+    /// Encodes the file while allocating addresses for top-level AST nodes.
     pub fn encode_with_ast_addresses(&self) -> Result<EncodedTastyFile, TastyFileError> {
         let mut writer = Writer::new();
         self.header.encode(&mut writer)?;
@@ -634,24 +686,29 @@ impl<'a> TastyFile<'a> {
         self.encode_with_ast_addresses()
     }
 
+    /// Borrows the decoded header.
     pub fn header(&self) -> &Header {
         &self.header
     }
 
+    /// Borrows the decoded name table.
     pub fn names(&self) -> &NameTable {
         &self.names
     }
 
+    /// Borrows sections in their original wire order.
     pub fn sections(&self) -> &SectionTable<'a> {
         &self.sections
     }
 
+    /// Returns the first section with the requested standard name.
     pub fn section(&self, kind: StandardSection) -> Option<&Section<'a>> {
         self.sections
             .iter()
             .find(|section| section.standard_kind(&self.names) == Some(kind))
     }
 
+    /// Resolves a one-based AST/name reference against the file's name table.
     pub fn name(&self, reference: NameRef) -> Option<&RawName> {
         self.names.get(reference)
     }
@@ -675,6 +732,7 @@ impl<'a> TastyFile<'a> {
         self.names.render_signed_name(reference)
     }
 
+    /// Decodes the top-level `ASTs` section as raw nodes.
     pub fn asts(&self) -> Result<RawNodes<'a>, TastyFileError> {
         let section = self
             .section(StandardSection::Asts)
@@ -685,6 +743,7 @@ impl<'a> TastyFile<'a> {
         Ok(nodes)
     }
 
+    /// Decodes the top-level ASTs into their supported structural variants.
     pub fn structured_asts(&self) -> Result<Vec<StructuredNode<'a>>, TastyFileError> {
         Ok(self
             .asts()?
@@ -732,6 +791,7 @@ impl<'a> TastyFile<'a> {
         builder.encode_validated()
     }
 
+    /// Returns the raw AST node beginning at `address`, if one exists.
     pub fn ast_at(&self, address: u32) -> Result<Option<crate::RawNode<'a>>, TastyFileError> {
         Ok(self.asts()?.address_index().get(address).cloned())
     }
@@ -989,6 +1049,7 @@ impl<'a> TastyFile<'a> {
         Ok(())
     }
 
+    /// Decodes attributes when the standard section is present.
     pub fn attributes(&self) -> Result<Option<Vec<Attribute>>, TastyFileError> {
         let attributes = self
             .section(StandardSection::Attributes)
@@ -1030,6 +1091,7 @@ impl<'a> TastyFile<'a> {
         self.resolve_source_file(reference).map(Some)
     }
 
+    /// Decodes comments when the standard section is present.
     pub fn comments(&self) -> Result<Option<Vec<Comment>>, TastyFileError> {
         let comments = self
             .section(StandardSection::Comments)
@@ -1039,6 +1101,7 @@ impl<'a> TastyFile<'a> {
         Ok(comments)
     }
 
+    /// Decodes positions when the standard section is present.
     pub fn positions(&self) -> Result<Option<PositionSection>, TastyFileError> {
         let positions = self
             .section(StandardSection::Positions)

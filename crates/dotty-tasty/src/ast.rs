@@ -1,3 +1,19 @@
+//! Raw and structurally decoded TASTy ASTs.
+//!
+//! The public node structs intentionally mirror the wire grammar: their
+//! fields retain raw tags, offsets, borrowed payloads, and ordered child
+//! collections so that decoding and re-encoding can remain lossless. The
+//! normative meaning of each field is defined by the Scala 3.9.0 format
+//! reference in `docs/tasty-format-3.9.0.md`; the higher-level API contract is
+//! documented in `docs/tasty-api.md`.
+//!
+//! This module contains a large, mechanical structural schema. Its item-level
+//! documentation lint is allowed here because duplicating the format table as
+//! prose on every raw field would make the Rust API documentation diverge from
+//! the normative reference. The semantic entry points, constructors, query
+//! methods, and error types are documented at their declarations.
+#![allow(missing_docs)]
+
 use crate::name_table::NameRef;
 use crate::reader::{ReadError, Reader};
 use crate::term::{
@@ -7,152 +23,293 @@ use crate::writer::{WriteError, Writer};
 use std::cell::{Cell, RefCell};
 use std::fmt;
 
+/// Default maximum depth for AST address indexing.
 pub const DEFAULT_MAX_AST_INDEX_DEPTH: usize = 1024;
 
+/// Scala 3.9.0 TASTy tag constant TERMREFPKG_TAG.
 pub const TERMREFPKG_TAG: u8 = 64;
+/// Scala 3.9.0 TASTy tag constant SHAREDTERM_TAG.
 pub const SHAREDTERM_TAG: u8 = 60;
+/// Scala 3.9.0 TASTy tag constant SHAREDTYPE_TAG.
 pub const SHAREDTYPE_TAG: u8 = 61;
+/// Scala 3.9.0 TASTy tag constant TERMREFDIRECT_TAG.
 pub const TERMREFDIRECT_TAG: u8 = 62;
+/// Scala 3.9.0 TASTy tag constant TYPEREFDIRECT_TAG.
 pub const TYPEREFDIRECT_TAG: u8 = 63;
+/// Scala 3.9.0 TASTy tag constant RECTHIS_TAG.
 pub const RECTHIS_TAG: u8 = 66;
+/// Scala 3.9.0 TASTy tag constant THIS_TAG.
 pub const THIS_TAG: u8 = 90;
+/// Scala 3.9.0 TASTy tag constant QUALTHIS_TAG.
 pub const QUALTHIS_TAG: u8 = 91;
+/// Scala 3.9.0 TASTy tag constant CLASSCONST_TAG.
 pub const CLASSCONST_TAG: u8 = 92;
+/// Scala 3.9.0 TASTy tag constant BYNAMETYPE_TAG.
 pub const BYNAMETYPE_TAG: u8 = 93;
+/// Scala 3.9.0 TASTy tag constant BYNAMETPT_TAG.
 pub const BYNAMETPT_TAG: u8 = 94;
+/// Scala 3.9.0 TASTy tag constant NEW_TAG.
 pub const NEW_TAG: u8 = 95;
+/// Scala 3.9.0 TASTy tag constant THROW_TAG.
 pub const THROW_TAG: u8 = 96;
+/// Scala 3.9.0 TASTy tag constant IMPLICITARG_TAG.
 pub const IMPLICITARG_TAG: u8 = 97;
+/// Scala 3.9.0 TASTy tag constant PRIVATEQUALIFIED_TAG.
 pub const PRIVATEQUALIFIED_TAG: u8 = 98;
+/// Scala 3.9.0 TASTy tag constant PROTECTEDQUALIFIED_TAG.
 pub const PROTECTEDQUALIFIED_TAG: u8 = 99;
+/// Scala 3.9.0 TASTy tag constant RECTYPE_TAG.
 pub const RECTYPE_TAG: u8 = 100;
+/// Scala 3.9.0 TASTy tag constant SINGLETONTPT_TAG.
 pub const SINGLETONTPT_TAG: u8 = 101;
+/// Scala 3.9.0 TASTy tag constant EXPLICITTPT_TAG.
 pub const EXPLICITTPT_TAG: u8 = 103;
+/// Scala 3.9.0 TASTy tag constant ELIDED_TAG.
 pub const ELIDED_TAG: u8 = 104;
+/// Scala 3.9.0 TASTy tag constant PACKAGE_TAG.
 pub const PACKAGE_TAG: u8 = 128;
+/// Scala 3.9.0 TASTy tag constant VALDEF_TAG.
 pub const VALDEF_TAG: u8 = 129;
+/// Scala 3.9.0 TASTy tag constant DEFDEF_TAG.
 pub const DEFDEF_TAG: u8 = 130;
+/// Scala 3.9.0 TASTy tag constant TYPEDEF_TAG.
 pub const TYPEDEF_TAG: u8 = 131;
+/// Scala 3.9.0 TASTy tag constant ANDTYPE_TAG.
 pub const ANDTYPE_TAG: u8 = 165;
+/// Scala 3.9.0 TASTy tag constant ORTYPE_TAG.
 pub const ORTYPE_TAG: u8 = 167;
+/// Scala 3.9.0 TASTy tag constant APPLIEDTYPE_TAG.
 pub const APPLIEDTYPE_TAG: u8 = 161;
+/// Scala 3.9.0 TASTy tag constant APPLIEDTPT_TAG.
 pub const APPLIEDTPT_TAG: u8 = 162;
+/// Scala 3.9.0 TASTy tag constant TYPEBOUNDS_TAG.
 pub const TYPEBOUNDS_TAG: u8 = 163;
+/// Scala 3.9.0 TASTy tag constant TYPEBOUNDSTPT_TAG.
 pub const TYPEBOUNDSTPT_TAG: u8 = 164;
+/// Scala 3.9.0 TASTy tag constant SUPERTYPE_TAG.
 pub const SUPERTYPE_TAG: u8 = 158;
+/// Scala 3.9.0 TASTy tag constant MATCHCASETYPE_TAG.
 pub const MATCHCASETYPE_TAG: u8 = 192;
+/// Scala 3.9.0 TASTy tag constant POLYTYPE_TAG.
 pub const POLYTYPE_TAG: u8 = 169;
+/// Scala 3.9.0 TASTy tag constant TYPELAMBDATYPE_TAG.
 pub const TYPELAMBDATYPE_TAG: u8 = 170;
+/// Scala 3.9.0 TASTy tag constant METHODTYPE_TAG.
 pub const METHODTYPE_TAG: u8 = 180;
+/// Scala 3.9.0 TASTy tag constant HOLE_TAG.
 pub const HOLE_TAG: u8 = 255;
+/// Scala 3.9.0 TASTy tag constant ANNOTATEDTYPE_TAG.
 pub const ANNOTATEDTYPE_TAG: u8 = 153;
+/// Scala 3.9.0 TASTy tag constant ANNOTATEDTPT_TAG.
 pub const ANNOTATEDTPT_TAG: u8 = 154;
+/// Scala 3.9.0 TASTy tag constant ANNOTATION_TAG.
 pub const ANNOTATION_TAG: u8 = 173;
+/// Scala 3.9.0 TASTy tag constant PARAMTYPE_TAG.
 pub const PARAMTYPE_TAG: u8 = 172;
+/// Scala 3.9.0 TASTy tag constant FLEXIBLETYPE_TAG.
 pub const FLEXIBLETYPE_TAG: u8 = 193;
+/// Scala 3.9.0 TASTy tag constant TYPEPARAM_TAG.
 pub const TYPEPARAM_TAG: u8 = 133;
+/// Scala 3.9.0 TASTy tag constant PARAM_TAG.
 pub const PARAM_TAG: u8 = 134;
+/// Scala 3.9.0 TASTy tag constant BIND_TAG.
 pub const BIND_TAG: u8 = 150;
+/// Scala 3.9.0 TASTy tag constant ALTERNATIVE_TAG.
 pub const ALTERNATIVE_TAG: u8 = 151;
+/// Scala 3.9.0 TASTy tag constant UNAPPLY_TAG.
 pub const UNAPPLY_TAG: u8 = 152;
+/// Scala 3.9.0 TASTy tag constant CASEDEF_TAG.
 pub const CASEDEF_TAG: u8 = 155;
+/// Scala 3.9.0 TASTy tag constant REFINEDTYPE_TAG.
 pub const REFINEDTYPE_TAG: u8 = 159;
+/// Scala 3.9.0 TASTy tag constant REFINEDTPT_TAG.
 pub const REFINEDTPT_TAG: u8 = 160;
+/// Scala 3.9.0 TASTy tag constant LAMBDATPT_TAG.
 pub const LAMBDATPT_TAG: u8 = 171;
+/// Scala 3.9.0 TASTy tag constant TERMREFIN_TAG.
 pub const TERMREFIN_TAG: u8 = 174;
+/// Scala 3.9.0 TASTy tag constant TYPEREFIN_TAG.
 pub const TYPEREFIN_TAG: u8 = 175;
+/// Scala 3.9.0 TASTy tag constant SELECTIN_TAG.
 pub const SELECTIN_TAG: u8 = 176;
+/// Scala 3.9.0 TASTy tag constant QUOTE_TAG.
 pub const QUOTE_TAG: u8 = 178;
+/// Scala 3.9.0 TASTy tag constant SPLICE_TAG.
 pub const SPLICE_TAG: u8 = 179;
+/// Scala 3.9.0 TASTy tag constant APPLYSIGPOLY_TAG.
 pub const APPLYSIGPOLY_TAG: u8 = 181;
+/// Scala 3.9.0 TASTy tag constant QUOTEPATTERN_TAG.
 pub const QUOTEPATTERN_TAG: u8 = 182;
+/// Scala 3.9.0 TASTy tag constant SPLICEPATTERN_TAG.
 pub const SPLICEPATTERN_TAG: u8 = 183;
+/// Scala 3.9.0 TASTy tag constant MATCHTYPE_TAG.
 pub const MATCHTYPE_TAG: u8 = 190;
+/// Scala 3.9.0 TASTy tag constant MATCHTPT_TAG.
 pub const MATCHTPT_TAG: u8 = 191;
+/// Scala 3.9.0 TASTy tag constant APPLY_TAG.
 pub const APPLY_TAG: u8 = 136;
+/// Scala 3.9.0 TASTy tag constant TYPEAPPLY_TAG.
 pub const TYPEAPPLY_TAG: u8 = 137;
+/// Scala 3.9.0 TASTy tag constant TYPED_TAG.
 pub const TYPED_TAG: u8 = 138;
+/// Scala 3.9.0 TASTy tag constant ASSIGN_TAG.
 pub const ASSIGN_TAG: u8 = 139;
+/// Scala 3.9.0 TASTy tag constant BLOCK_TAG.
 pub const BLOCK_TAG: u8 = 140;
+/// Scala 3.9.0 TASTy tag constant IF_TAG.
 pub const IF_TAG: u8 = 141;
+/// Scala 3.9.0 TASTy tag constant LAMBDA_TAG.
 pub const LAMBDA_TAG: u8 = 142;
+/// Scala 3.9.0 TASTy tag constant MATCH_TAG.
 pub const MATCH_TAG: u8 = 143;
+/// Scala 3.9.0 TASTy tag constant RETURN_TAG.
 pub const RETURN_TAG: u8 = 144;
+/// Scala 3.9.0 TASTy tag constant WHILE_TAG.
 pub const WHILE_TAG: u8 = 145;
+/// Scala 3.9.0 TASTy tag constant TRY_TAG.
 pub const TRY_TAG: u8 = 146;
+/// Scala 3.9.0 TASTy tag constant INLINED_TAG.
 pub const INLINED_TAG: u8 = 147;
+/// Scala 3.9.0 TASTy tag constant SELECTOUTER_TAG.
 pub const SELECTOUTER_TAG: u8 = 148;
+/// Scala 3.9.0 TASTy tag constant REPEATED_TAG.
 pub const REPEATED_TAG: u8 = 149;
+/// Scala 3.9.0 TASTy tag constant TEMPLATE_TAG.
 pub const TEMPLATE_TAG: u8 = 156;
+/// Scala 3.9.0 TASTy tag constant SUPER_TAG.
 pub const SUPER_TAG: u8 = 157;
+/// Scala 3.9.0 TASTy tag constant IMPORT_TAG.
 pub const IMPORT_TAG: u8 = 132;
+/// Scala 3.9.0 TASTy tag constant EXPORT_TAG.
 pub const EXPORT_TAG: u8 = 177;
+/// Scala 3.9.0 TASTy tag constant IMPORTED_TAG.
 pub const IMPORTED_TAG: u8 = 75;
+/// Scala 3.9.0 TASTy tag constant RENAMED_TAG.
 pub const RENAMED_TAG: u8 = 76;
+/// Scala 3.9.0 TASTy tag constant BOUNDED_TAG.
 pub const BOUNDED_TAG: u8 = 102;
+/// Scala 3.9.0 TASTy tag constant IDENT_TAG.
 pub const IDENT_TAG: u8 = 110;
+/// Scala 3.9.0 TASTy tag constant IDENTTPT_TAG.
 pub const IDENTTPT_TAG: u8 = 111;
+/// Scala 3.9.0 TASTy tag constant SELECT_TAG.
 pub const SELECT_TAG: u8 = 112;
+/// Scala 3.9.0 TASTy tag constant SELECTTPT_TAG.
 pub const SELECTTPT_TAG: u8 = 113;
+/// Scala 3.9.0 TASTy tag constant TERMREFSYMBOL_TAG.
 pub const TERMREFSYMBOL_TAG: u8 = 114;
+/// Scala 3.9.0 TASTy tag constant TERMREF_TAG.
 pub const TERMREF_TAG: u8 = 115;
+/// Scala 3.9.0 TASTy tag constant TYPEREFSYMBOL_TAG.
 pub const TYPEREFSYMBOL_TAG: u8 = 116;
+/// Scala 3.9.0 TASTy tag constant TYPEREF_TAG.
 pub const TYPEREF_TAG: u8 = 117;
+/// Scala 3.9.0 TASTy tag constant SELFDEF_TAG.
 pub const SELFDEF_TAG: u8 = 118;
+/// Scala 3.9.0 TASTy tag constant NAMEDARG_TAG.
 pub const NAMEDARG_TAG: u8 = 119;
+/// Scala 3.9.0 TASTy tag constant EMPTYCLAUSE_TAG.
 pub const EMPTYCLAUSE_TAG: u8 = 45;
+/// Scala 3.9.0 TASTy tag constant SPLITCLAUSE_TAG.
 pub const SPLITCLAUSE_TAG: u8 = 46;
+/// Scala 3.9.0 TASTy tag constant SUBMATCH_TAG.
 pub const SUBMATCH_TAG: u8 = 48;
+/// Scala 3.9.0 TASTy tag constant PRIVATE_TAG.
 pub const PRIVATE_TAG: u8 = 6;
+/// Scala 3.9.0 TASTy tag constant PROTECTED_TAG.
 pub const PROTECTED_TAG: u8 = 8;
+/// Scala 3.9.0 TASTy tag constant ABSTRACT_TAG.
 pub const ABSTRACT_TAG: u8 = 9;
+/// Scala 3.9.0 TASTy tag constant FINAL_TAG.
 pub const FINAL_TAG: u8 = 10;
+/// Scala 3.9.0 TASTy tag constant SEALED_TAG.
 pub const SEALED_TAG: u8 = 11;
+/// Scala 3.9.0 TASTy tag constant CASE_TAG.
 pub const CASE_TAG: u8 = 12;
+/// Scala 3.9.0 TASTy tag constant IMPLICIT_TAG.
 pub const IMPLICIT_TAG: u8 = 13;
+/// Scala 3.9.0 TASTy tag constant LAZY_TAG.
 pub const LAZY_TAG: u8 = 14;
+/// Scala 3.9.0 TASTy tag constant OVERRIDE_TAG.
 pub const OVERRIDE_TAG: u8 = 15;
+/// Scala 3.9.0 TASTy tag constant INLINEPROXY_TAG.
 pub const INLINEPROXY_TAG: u8 = 16;
+/// Scala 3.9.0 TASTy tag constant INLINE_TAG.
 pub const INLINE_TAG: u8 = 17;
+/// Scala 3.9.0 TASTy tag constant STATIC_TAG.
 pub const STATIC_TAG: u8 = 18;
+/// Scala 3.9.0 TASTy tag constant OBJECT_TAG.
 pub const OBJECT_TAG: u8 = 19;
+/// Scala 3.9.0 TASTy tag constant TRAIT_TAG.
 pub const TRAIT_TAG: u8 = 20;
+/// Scala 3.9.0 TASTy tag constant ENUM_TAG.
 pub const ENUM_TAG: u8 = 21;
+/// Scala 3.9.0 TASTy tag constant LOCAL_TAG.
 pub const LOCAL_TAG: u8 = 22;
+/// Scala 3.9.0 TASTy tag constant SYNTHETIC_TAG.
 pub const SYNTHETIC_TAG: u8 = 23;
+/// Scala 3.9.0 TASTy tag constant ARTIFACT_TAG.
 pub const ARTIFACT_TAG: u8 = 24;
+/// Scala 3.9.0 TASTy tag constant MUTABLE_TAG.
 pub const MUTABLE_TAG: u8 = 25;
+/// Scala 3.9.0 TASTy tag constant FIELDACCESSOR_TAG.
 pub const FIELDACCESSOR_TAG: u8 = 26;
+/// Scala 3.9.0 TASTy tag constant CASEACCESSOR_TAG.
 pub const CASEACCESSOR_TAG: u8 = 27;
+/// Scala 3.9.0 TASTy tag constant COVARIANT_TAG.
 pub const COVARIANT_TAG: u8 = 28;
+/// Scala 3.9.0 TASTy tag constant CONTRAVARIANT_TAG.
 pub const CONTRAVARIANT_TAG: u8 = 29;
+/// Scala 3.9.0 TASTy tag constant HASDEFAULT_TAG.
 pub const HASDEFAULT_TAG: u8 = 31;
+/// Scala 3.9.0 TASTy tag constant STABLE_TAG.
 pub const STABLE_TAG: u8 = 32;
+/// Scala 3.9.0 TASTy tag constant MACRO_TAG.
 pub const MACRO_TAG: u8 = 33;
+/// Scala 3.9.0 TASTy tag constant ERASED_TAG.
 pub const ERASED_TAG: u8 = 34;
+/// Scala 3.9.0 TASTy tag constant OPAQUE_TAG.
 pub const OPAQUE_TAG: u8 = 35;
+/// Scala 3.9.0 TASTy tag constant EXTENSION_TAG.
 pub const EXTENSION_TAG: u8 = 36;
+/// Scala 3.9.0 TASTy tag constant GIVEN_TAG.
 pub const GIVEN_TAG: u8 = 37;
+/// Scala 3.9.0 TASTy tag constant PARAMSETTER_TAG.
 pub const PARAMSETTER_TAG: u8 = 38;
+/// Scala 3.9.0 TASTy tag constant EXPORTED_TAG.
 pub const EXPORTED_TAG: u8 = 39;
+/// Scala 3.9.0 TASTy tag constant OPEN_TAG.
 pub const OPEN_TAG: u8 = 40;
+/// Scala 3.9.0 TASTy tag constant PARAMALIAS_TAG.
 pub const PARAMALIAS_TAG: u8 = 41;
+/// Scala 3.9.0 TASTy tag constant TRANSPARENT_TAG.
 pub const TRANSPARENT_TAG: u8 = 42;
+/// Scala 3.9.0 TASTy tag constant INFIX_TAG.
 pub const INFIX_TAG: u8 = 43;
+/// Scala 3.9.0 TASTy tag constant INVISIBLE_TAG.
 pub const INVISIBLE_TAG: u8 = 44;
+/// Scala 3.9.0 TASTy tag constant TRACKED_TAG.
 pub const TRACKED_TAG: u8 = 47;
+/// Scala 3.9.0 TASTy tag constant INTO_TAG.
 pub const INTO_TAG: u8 = 49;
 
+/// Broad category determined by a TASTy tag range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeCategory {
+    /// Category-one leaves and modifiers.
     Category1,
+    /// Category-two references and constants.
     Category2,
+    /// Category-three unary AST wrappers.
     Category3,
+    /// Category-four natural-number AST wrappers.
     Category4,
+    /// Category-five length-delimited AST nodes.
     Category5,
 }
 
 impl NodeCategory {
+    /// Classifies a tag by its category range.
     pub fn from_tag(tag: u8) -> Option<Self> {
         match tag {
             1..=59 => Some(Self::Category1),
@@ -195,24 +352,32 @@ impl NodeCategory {
     }
 }
 
+/// Opaque category-five AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawNode<'a> {
+    /// TASTy node tag.
     pub tag: u8,
+    /// Absolute offset of the node in its enclosing payload.
     pub offset: usize,
+    /// Bounded node payload, excluding tag and length prefix.
     pub payload: &'a [u8],
 }
 
+/// AST reference together with the top-level node that contains it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AstReference {
     /// Address of the top-level AST node that owns this reference.
     pub owner_address: u32,
+    /// Decoded reference target and reference kind.
     pub reference: AstRef,
 }
 
+/// Name reference together with the top-level node that contains it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NameReference {
     /// Address of the top-level AST node that owns this reference.
     pub owner_address: u32,
+    /// One-based name-table reference.
     pub reference: NameRef,
 }
 
@@ -223,7 +388,9 @@ pub struct NameReference {
 /// necessarily sorted by absolute address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AstTreeEdge {
+    /// Enclosing visible AST node.
     pub parent: AstTreeNode,
+    /// Direct visible child node.
     pub child: AstTreeNode,
 }
 
@@ -271,11 +438,13 @@ impl<'a> RawNode<'a> {
     }
 }
 
+/// Borrowed top-level AST nodes in wire order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawNodes<'a> {
     nodes: Vec<RawNode<'a>>,
 }
 
+/// Indexed view of all visible nodes in an AST section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AstAddressIndex<'a> {
     nodes: Vec<RawNode<'a>>,
@@ -284,61 +453,111 @@ pub struct AstAddressIndex<'a> {
     edges_by_child: Vec<AstTreeEdge>,
 }
 
+/// Owned AST payload together with its top-level node addresses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedAstNodes {
     bytes: Vec<u8>,
     addresses: Vec<u32>,
 }
 
+/// Structurally decoded category-five AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructuredNode<'a> {
+    /// Package declaration.
     Package(PackageNode<'a>),
+    /// Value definition.
     ValDef(DefinitionBody<'a>),
+    /// Method definition.
     DefDef(DefDefBody<'a>),
+    /// Type definition.
     TypeDef(DefinitionBody<'a>),
+    /// Import or export declaration.
     ImportExport(ImportExportNode<'a>),
+    /// Type or term parameter.
     Parameter(ParameterNode<'a>),
+    /// Method or function application.
     Apply(ApplyNode<'a>),
+    /// Type application.
     TypeApply(TypeApplyNode<'a>),
+    /// Typed expression.
     Typed(TypedNode<'a>),
+    /// Assignment.
     Assign(AssignNode<'a>),
+    /// Block expression.
     Block(BlockNode<'a>),
+    /// Conditional expression.
     If(IfNode<'a>),
+    /// Lambda expression.
     Lambda(LambdaNode<'a>),
+    /// Match expression.
     Match(MatchNode<'a>),
+    /// Return expression.
     Return(ReturnNode<'a>),
+    /// While loop.
     While(WhileNode<'a>),
+    /// Try expression.
     Try(TryNode<'a>),
+    /// Inlined expression.
     Inlined(InlinedNode<'a>),
+    /// Selection from an outer instance.
     SelectOuter(SelectOuterNode<'a>),
+    /// Repeated argument sequence.
     Repeated(RepeatedNode<'a>),
+    /// Pattern binding.
     Bind(BindNode<'a>),
+    /// Alternative pattern.
     Alternative(AlternativeNode<'a>),
+    /// Extractor pattern.
     Unapply(UnapplyNode<'a>),
+    /// Annotated tree.
     Annotated(AnnotatedNode<'a>),
+    /// Annotation tree.
     Annotation(AnnotationNode<'a>),
+    /// Match case definition.
     CaseDef(CaseDefNode<'a>),
+    /// Template structure.
     Template(TemplateStructure<'a>),
+    /// Super call/type.
     Super(SuperNode<'a>),
+    /// Binary type such as an intersection or union.
     BinaryType(BinaryTypeNode<'a>),
+    /// Refinement type.
     RefinedType(RefinedTypeNode<'a>),
+    /// Refinement type tree.
     RefinedTpt(RefinedTptNode<'a>),
+    /// Applied type.
     AppliedType(AppliedTypeNode<'a>),
+    /// Type bounds.
     TypeBounds(TypeBoundsNode<'a>),
+    /// Flexible type.
     FlexibleType(FlexibleTypeNode<'a>),
+    /// Type lambda.
     LambdaTpt(LambdaTptNode<'a>),
+    /// Polymorphic type.
     PolyType(PolyTypeNode<'a>),
+    /// Parameter type reference.
     ParamType(ParamTypeNode),
+    /// Method type.
     MethodType(MethodTypeNode<'a>),
+    /// Polymorphic signature application.
     ApplySigPoly(ApplySigPolyNode<'a>),
+    /// Quoted expression.
     Quote(QuoteNode<'a>),
+    /// Quoted pattern.
     QuotePattern(QuotePatternNode<'a>),
+    /// Spliced pattern.
     SplicePattern(SplicePatternNode<'a>),
+    /// Match type.
     MatchType(MatchTypeNode<'a>),
+    /// Match type tree.
     MatchTpt(MatchTptNode<'a>),
+    /// Type hole.
     Hole(HoleNode<'a>),
+    /// Category-five reference node.
     InReference(InReferenceNode<'a>),
+    /// Selection inside a refinement.
     SelectIn(SelectInNode<'a>),
+    /// Unknown category-five node preserved opaquely.
     Raw(RawNode<'a>),
 }
 
@@ -350,15 +569,25 @@ pub enum StructuredNode<'a> {
 /// whose grammar depends on an enclosing context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructuredTree<'a> {
+    /// Typed constant.
     Constant(ConstantValue),
+    /// Category-one or category-two leaf.
     Leaf(SimpleTerm),
+    /// Category-three child wrapper.
     AstChild(AstChildNode<'a>),
+    /// Class constant tree.
     ClassConstant(ClassConstNode<'a>),
+    /// Identifier tree.
     Ident(IdentNode<'a>),
+    /// Selection tree.
     Select(SelectNode<'a>),
+    /// Reference tree.
     Reference(ReferenceNode<'a>),
+    /// Self definition tree.
     SelfDef(SelfDefNode<'a>),
+    /// Named argument tree.
     NamedArg(NamedArgNode<'a>),
+    /// Length-delimited category-five tree.
     Length(StructuredNode<'a>),
 }
 
@@ -5637,6 +5866,45 @@ mod tests {
         assert!(!NodeCategory::Category1.contains_known_tag(60));
         assert!(!NodeCategory::Category5.contains_known_tag(135));
         assert!(NodeCategory::Category5.contains_known_tag(255));
+    }
+
+    #[test]
+    fn matches_the_complete_scala_3_9_tag_assignment_matrix() {
+        let assigned: Vec<u8> = [
+            2..=6,
+            8..=29,
+            31..=49,
+            60..=76,
+            90..=104,
+            110..=119,
+            128..=134,
+            136..=165,
+            167..=167,
+            169..=183,
+            190..=193,
+            255..=255,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        for tag in 0..=u8::MAX {
+            let is_assigned = assigned.contains(&tag);
+            assert_eq!(NodeCategory::is_known_tag(tag), is_assigned, "tag {tag}");
+
+            let category = match tag {
+                1..=59 => Some(NodeCategory::Category1),
+                60..=89 => Some(NodeCategory::Category2),
+                90..=109 => Some(NodeCategory::Category3),
+                110..=127 => Some(NodeCategory::Category4),
+                128..=255 => Some(NodeCategory::Category5),
+                0 => None,
+            };
+            assert_eq!(NodeCategory::from_tag(tag), category, "tag {tag}");
+            if let Some(category) = category {
+                assert_eq!(category.contains_known_tag(tag), is_assigned, "tag {tag}");
+            }
+        }
     }
 
     #[test]

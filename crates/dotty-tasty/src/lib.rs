@@ -1,10 +1,36 @@
+//! Borrowed and owned codecs for the Scala 3.9.0 TASTy format.
+//!
+//! The crate is organized into four layers:
+//!
+//! - [`header`] and [`reader`] / [`writer`] expose the binary primitives;
+//! - [`name_table`] and [`section`] decode the file-level tables;
+//! - [`term`] and [`ast`] expose raw and structured tree representations;
+//! - [`mod@file`] composes those pieces into the borrowed [`TastyFile`] and the
+//!   owned [`TastyFileBuilder`].
+//!
+//! Parsed files borrow their input bytes. Use [`TastyFile::parse`] or one of
+//! its validating variants for read-only inspection. Use [`TastyFileBuilder`]
+//! and the owned encoded section types when constructing a new file. Raw
+//! nodes and sections remain available when a semantic interpretation is not
+//! implemented. The codec targets TASTy 3.9.0 (format 28.9.0); compatibility
+//! with another format must be requested explicitly through the compatible
+//! APIs.
+
+/// Raw and structured AST nodes, tags, references, and AST indexes.
 pub mod ast;
+/// File-level parsing, validation, encoding, and AST queries.
 pub mod file;
+/// TASTy header parsing and version validation.
 pub mod header;
+/// One-based TASTy names, compound names, and name-table builders.
 pub mod name_table;
+/// Bounded zero-copy readers for TASTy binary values.
 pub mod reader;
+/// Standard and raw TASTy sections and their encoded counterparts.
 pub mod section;
+/// Raw terms, constants, and length-delimited tree nodes.
 pub mod term;
+/// Binary writers for TASTy values and bounded payloads.
 pub mod writer;
 
 /// Scala 3 TASTy encoding and structural APIs.
@@ -85,18 +111,3 @@ pub use term::{
     TRUECONST_TAG, TermEncodeError, TermError, TermValue, UNITCONST_TAG,
 };
 pub use writer::{WriteError, Writer};
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}

@@ -11,6 +11,10 @@ The real corpus consists of the local fixtures plus the pinned
 `obscure_tasty/ObscureTasty.tasty` and
 `signature_polymorphic/SignaturePolymorphic$package.tasty`.
 
+The complete numeric assignment and all reserved gaps across categories are
+also checked by `matches_the_complete_scala_3_9_tag_assignment_matrix` in the
+`dotty-tasty` unit suite.
+
 | Tag(s) | Name(s) | Coverage | Notes |
 | --- | --- | --- | --- |
 | 128–147 | `PACKAGE` … `INLINED` | Real corpus | Baseline and local fixtures |
