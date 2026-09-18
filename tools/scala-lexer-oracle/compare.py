@@ -109,17 +109,22 @@ def find_interpolation_ranges(source: str) -> list[tuple[int, int]]:
 
 
 def has_invalid_simple_splice(content: str) -> bool:
-    for index, character in enumerate(content):
+    index = 0
+    while index < len(content):
+        character = content[index]
         if character != "$":
+            index += 1
             continue
         next_character = content[index + 1] if index + 1 < len(content) else None
         if next_character in {"$", '"', "{"}:
+            index += 2
             continue
         if next_character is not None and (
             next_character == "_"
             or next_character == "$"
             or next_character.isalpha()
         ):
+            index += 2
             continue
         return True
     return False

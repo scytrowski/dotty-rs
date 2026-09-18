@@ -87,6 +87,9 @@ Implementation status on the current lexer branch:
   for trailing apostrophes; splice syntax remains the `$` plus `{` token
   sequence; a bare apostrophe that is not a character literal is emitted as
   `Quote`;
+- interpolation preserves escaped dollars as string content, supports
+  underscore and Unicode simple splices, multiline string parts, braced
+  expressions, and nested interpolators through explicit lexical modes;
 - escape handling accepts repeated and uppercase Unicode prefixes, preserves
   recoverable string tokens for incomplete escapes, and reports malformed
   escapes without losing the remainder of the source;
@@ -538,10 +541,10 @@ comment and CDATA sections and diagnoses those constructs, mismatched closing
 names, invalid attribute structure, unexpected tokens in an open attribute
 list, attributes on closing tags, and unfinished tags when they reach EOF.
 EOF recovery distinguishes a missing attribute `=`, a missing attribute value,
-and an unclosed attribute expression. Add remaining quote/splice forms,
-compatibility syntax, and broader malformed-input recovery without entangling
-XML state with normal Scala tokenization. The currently supported soft
-compatibility words are covered by a dedicated oracle fixture.
+and an unclosed attribute expression. Remaining work is compatibility syntax
+and broader malformed-input recovery without entangling XML state with normal
+Scala tokenization. The currently supported soft compatibility words are
+covered by a dedicated oracle fixture.
 
 Numeric recovery currently keeps malformed numeric text as one raw literal while
 reporting a typed diagnostic. Missing digits after a base prefix and invalid

@@ -3261,6 +3261,105 @@ mod tests {
     }
 
     #[test]
+    fn keeps_an_escaped_dollar_without_a_splice_as_string_content() {
+        let (items, diagnostics) = scan("s\"cost $$5\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_an_underscore_simple_splice_as_one_identifier() {
+        let (items, diagnostics) = scan("s\"$_value\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_a_unicode_simple_splice_as_one_identifier() {
+        let (items, diagnostics) = scan("s\"$λ\"");
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn preserves_multiline_interpolation_parts_around_simple_and_braced_splices() {
+        let source = "s\"\"\"first\n$name\n${value}\nlast\"\"\"";
+        let (items, diagnostics) = scan(source);
+        let kinds: Vec<_> = items
+            .into_iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Identifier,
+                RawTokenKind::StringPart,
+                RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn keeps_simple_splice_names_as_identifiers_even_when_they_are_keywords() {
         let (items, diagnostics) = scan("s\"$if\"");
         let kinds: Vec<_> = items
