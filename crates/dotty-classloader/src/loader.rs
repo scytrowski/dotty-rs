@@ -18,7 +18,10 @@ use dotty_classfile::constant_pool::{
 };
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
-use dotty_classfile::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
+use dotty_classfile::signature::{
+    ClassSignature, ClassTypeSignature, FieldSignature, MethodSignature, ReferenceTypeSignature,
+    SignatureError, TypeArgument, TypeSignature,
+};
 use dotty_core::{
     ClassInfo, Definitions, MethodKind, MethodParam, MethodType, Name, Namespace, Scope, ScopeId,
     SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
@@ -51,6 +54,26 @@ pub struct ClassLoader<'store, E> {
     /// [`Definitions::bootstrap`].
     definitions: Definitions,
     no_prefix: TypeId,
+}
+
+/// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
+/// package plus simple name, with any `.`-qualified inner-class suffix
+/// joined onto the simple name with `$` — the same convention a compiled
+/// inner class's own binary name already uses (`docs/classloader.md`'s
+/// nesting section). Used only to resolve which class a signature names;
+/// the class's *own* binary name (as loaded) is never reconstructed from
+/// this — see `resolve_inner_classes`/`InnerClasses` for that.
+fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryName {
+    let mut simple_name = signature.simple_name.clone();
+    for suffix in &signature.suffix {
+        simple_name.push('$');
+        simple_name.push_str(&suffix.name);
+    }
+    if signature.package.is_empty() {
+        BinaryName::from_internal(simple_name)
+    } else {
+        BinaryName::from_internal(format!("{}/{}", signature.package.join("/"), simple_name))
+    }
 }
 
 impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
@@ -314,26 +337,249 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     /// Resolves an already-parsed [`FieldType`]'s optional `Signature`
-    /// attribute and lowers its semantic type together, in the order both
-    /// a real field and a `Record` component need them. Shared by the
+    /// attribute and lowers the field's semantic type, in the order both a
+    /// real field and a `Record` component need them. Shared by the
     /// field-building loop below and [`Self::resolve_record_components`]
     /// — the only difference between the two is that a record component
     /// has no access flags of its own in the class file format.
+    ///
+    /// When a `Signature` is present, it is strictly more precise than the
+    /// erased descriptor (e.g. `List<T>` vs. erased `List`), so it is
+    /// preferred as the resolved type; `field_type` is still parsed either
+    /// way (it stays on [`crate::field_symbol::FieldSymbol`]/
+    /// [`RecordComponentSymbol`] verbatim) but is only *lowered* when there
+    /// is no signature to prefer instead.
     fn lower_field_like(
         &mut self,
         owner: &BinaryName,
+        declarations: ScopeId,
         field_type: &FieldType,
         attributes: &[Attribute<'_>],
         constant_pool: &ConstantPool,
     ) -> Result<(Option<FieldSignature>, TypeId), ClassLoadError> {
-        let resolved_type = self.lower_field_type(owner, field_type)?;
         let signature = self.resolve_optional_signature(
             owner,
             attributes,
             constant_pool,
             FieldSignature::parse,
         )?;
+        let resolved_type = match &signature {
+            Some(FieldSignature(reference)) => {
+                self.lower_reference_type_signature(owner, declarations, reference)?
+            }
+            None => self.lower_field_type(owner, field_type)?,
+        };
         Ok((signature, resolved_type))
+    }
+
+    /// Enters each of `signature`'s declared type parameters (JVMS
+    /// §4.7.9.1) as a real `SymbolKind::TypeParameter` symbol into
+    /// `declarations` — a no-op when the class has no `Signature` attribute
+    /// (the common, non-generic case) or declares none of its own. Every
+    /// symbol is entered under its own `Namespace::Type` name *before* any
+    /// bound is lowered (mirroring `enter_class`'s enter-before-complete
+    /// staging one level down), so a bound that mentions another type
+    /// parameter — an F-bounded parameter's own bound mentioning itself
+    /// (`<T extends Comparable<T>>`), or one parameter's bound mentioning a
+    /// sibling declared later (`<K extends Comparable<K>, V>`) — resolves
+    /// correctly regardless of declaration order.
+    ///
+    /// Field/method signature lowering below resolves a `TypeVariable`
+    /// reference against these same symbols via ordinary `Scope::lookup` on
+    /// `declarations` (see [`Self::resolve_type_variable`]) — ordinary name
+    /// lookup, since a type parameter and a same-named field/method never
+    /// collide (`Namespace::Type` vs. `Namespace::Term`).
+    fn enter_class_type_parameters(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        signature: Option<&ClassSignature>,
+        origin: SymbolOrigin,
+    ) -> Result<(), ClassLoadError> {
+        let Some(signature) = signature else {
+            return Ok(());
+        };
+
+        let class_symbol = self.store.scopes.get(declarations).owner;
+        let mut entered = Vec::with_capacity(signature.type_parameters.len());
+        for parameter in &signature.type_parameters {
+            let text = self.store.names.intern(&parameter.name);
+            let symbol_name = Name::new(text, Namespace::Type);
+            let symbol = self.store.symbols.alloc(Symbol {
+                name: symbol_name,
+                owner: class_symbol,
+                kind: SymbolKind::TypeParameter,
+                flags: SymbolFlags::JAVA_DEFINED,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .scopes
+                .get_mut(declarations)
+                .enter(symbol_name, symbol);
+            entered.push((symbol, parameter));
+        }
+
+        for (symbol, parameter) in entered {
+            let high = match &parameter.class_bound {
+                Some(bound) => self.lower_reference_type_signature(owner, declarations, bound)?,
+                None => self.type_ref(self.definitions.object_class),
+            };
+            let high = parameter.interface_bounds.iter().try_fold(
+                high,
+                |left, interface_bound| -> Result<TypeId, ClassLoadError> {
+                    let right =
+                        self.lower_reference_type_signature(owner, declarations, interface_bound)?;
+                    Ok(self.store.types.alloc(Type::And { left, right }))
+                },
+            )?;
+            let low = self.type_ref(self.definitions.nothing_class);
+            let bounds = self.store.types.alloc(Type::Bounds { low, high });
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(bounds));
+        }
+
+        Ok(())
+    }
+
+    /// Resolves a `TypeVariable`'s name (JVMS §4.7.9.1) to the `TypeId` of
+    /// the `SymbolKind::TypeParameter` symbol it denotes, via ordinary
+    /// `Scope::lookup` on `declarations` — see
+    /// [`Self::enter_class_type_parameters`]. `None` when no such symbol was
+    /// entered (an unresolvable/out-of-scope type variable; the caller turns
+    /// this into [`ClassLoadError::UnresolvedTypeVariable`]).
+    fn resolve_type_variable(&mut self, declarations: ScopeId, name: &str) -> Option<TypeId> {
+        let text = self.store.names.intern(name);
+        let lookup_name = Name::new(text, Namespace::Type);
+        let symbol = self.store.scopes.get(declarations).lookup(&lookup_name)?;
+        Some(self.type_ref(symbol))
+    }
+
+    /// Walks an already-parsed [`TypeSignature`] (JVMS §4.7.9.1) into a
+    /// semantic `TypeId`, the generic-signature counterpart of
+    /// [`Self::lower_field_type`]: a base type lowers exactly like its
+    /// descriptor equivalent (there is no generic form of a primitive), and
+    /// a reference type delegates to
+    /// [`Self::lower_reference_type_signature`].
+    fn lower_type_signature(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        signature: &TypeSignature,
+    ) -> Result<TypeId, ClassLoadError> {
+        match signature {
+            TypeSignature::Base(field_type) => self.lower_field_type(owner, field_type),
+            TypeSignature::Reference(reference) => {
+                self.lower_reference_type_signature(owner, declarations, reference)
+            }
+        }
+    }
+
+    /// Walks an already-parsed [`ReferenceTypeSignature`] (JVMS §4.7.9.1)
+    /// into a semantic `TypeId`: a type variable resolves via
+    /// [`Self::resolve_type_variable`], an array recurses into its
+    /// component the same way [`Self::lower_field_type`]'s `Array` arm
+    /// does, and a class type delegates to
+    /// [`Self::lower_class_type_signature`].
+    fn lower_reference_type_signature(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        signature: &ReferenceTypeSignature,
+    ) -> Result<TypeId, ClassLoadError> {
+        match signature {
+            ReferenceTypeSignature::TypeVariable(name) => self
+                .resolve_type_variable(declarations, name)
+                .ok_or_else(|| ClassLoadError::UnresolvedTypeVariable(owner.clone(), name.clone())),
+            ReferenceTypeSignature::Array(component) => {
+                let element = self.lower_type_signature(owner, declarations, component)?;
+                Ok(self.store.types.alloc(Type::JavaArray { element }))
+            }
+            ReferenceTypeSignature::Class(class_signature) => {
+                self.lower_class_type_signature(owner, declarations, class_signature)
+            }
+        }
+    }
+
+    /// Walks an already-parsed [`ClassTypeSignature`] (JVMS §4.7.9.1) into
+    /// a semantic `TypeId`: resolves the class it names the same
+    /// mutual-reference-tolerant way [`Self::lower_field_type`]'s `Object`
+    /// arm does, and — when it carries type arguments — wraps it in a
+    /// `Type::Applied`.
+    ///
+    /// A `.`-qualified inner-class suffix (`Outer<T>.Inner<U>`) only keeps
+    /// the *last* segment's own type arguments (`U`); an outer qualifier's
+    /// type arguments are dropped rather than modeled as a fully qualified
+    /// prefix chain. This mirrors the same deliberately partial scope as
+    /// `PackageRegistry` (`docs/classloader.md`) — the common `java.util`-
+    /// style generics this loader actually needs to resolve never use
+    /// qualified inner-class generic syntax.
+    fn lower_class_type_signature(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        signature: &ClassTypeSignature,
+    ) -> Result<TypeId, ClassLoadError> {
+        let dependency = class_type_signature_binary_name(signature);
+        let class_symbol = self.resolve_member_class(owner, &dependency)?;
+        let tycon = self.type_ref(class_symbol);
+
+        let type_arguments = signature
+            .suffix
+            .last()
+            .map_or(&signature.type_arguments, |last| &last.type_arguments);
+        if type_arguments.is_empty() {
+            return Ok(tycon);
+        }
+
+        let mut args = Vec::with_capacity(type_arguments.len());
+        for argument in type_arguments {
+            args.push(self.lower_type_argument(owner, declarations, argument)?);
+        }
+        Ok(self.store.types.alloc(Type::Applied { tycon, args }))
+    }
+
+    /// Walks an already-parsed [`TypeArgument`] (JVMS §4.7.9.1) into a
+    /// semantic `TypeId`: `Exact` lowers straight through (invariant, no
+    /// wrapping), while `Extends`/`Super`/the bare wildcard `*` each become
+    /// a `Type::Wildcard` around a `Type::Bounds` — `? extends Number` is
+    /// `Bounds { low: Nothing, high: Number }`, `? super Number` is
+    /// `Bounds { low: Number, high: Any }`, and bare `?`/`*` is
+    /// `Bounds { low: Nothing, high: Any }`.
+    fn lower_type_argument(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        argument: &TypeArgument,
+    ) -> Result<TypeId, ClassLoadError> {
+        match argument {
+            TypeArgument::Exact(reference) => {
+                self.lower_reference_type_signature(owner, declarations, reference)
+            }
+            TypeArgument::Extends(reference) => {
+                let high = self.lower_reference_type_signature(owner, declarations, reference)?;
+                let low = self.type_ref(self.definitions.nothing_class);
+                let bounds = self.store.types.alloc(Type::Bounds { low, high });
+                Ok(self.store.types.alloc(Type::Wildcard { bounds }))
+            }
+            TypeArgument::Super(reference) => {
+                let low = self.lower_reference_type_signature(owner, declarations, reference)?;
+                let high = self.type_ref(self.definitions.any_class);
+                let bounds = self.store.types.alloc(Type::Bounds { low, high });
+                Ok(self.store.types.alloc(Type::Wildcard { bounds }))
+            }
+            TypeArgument::Wildcard => {
+                let low = self.type_ref(self.definitions.nothing_class);
+                let high = self.type_ref(self.definitions.any_class);
+                let bounds = self.store.types.alloc(Type::Bounds { low, high });
+                Ok(self.store.types.alloc(Type::Wildcard { bounds }))
+            }
+        }
     }
 
     /// `.tasty`-backed loading (`docs/classloader.md` §9): reconstructs
@@ -392,6 +638,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
+        // Parsed and entered before super_class/interfaces/fields/methods so
+        // that a supertype's own generic arguments and every member's
+        // signature can resolve a reference to one of this class's type
+        // parameters -- see `enter_class_type_parameters`'s doc comment.
+        let signature = self.resolve_optional_signature(
+            name,
+            &class_file.attributes,
+            &class_file.constant_pool,
+            ClassSignature::parse,
+        )?;
+        self.enter_class_type_parameters(name, declarations, signature.as_ref(), origin)?;
+
         let super_class = class_file
             .super_class
             .map(|index| self.resolve_dependency(name, &class_file, index))
@@ -411,6 +669,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .map_err(|error| ClassLoadError::MalformedDescriptor(name.clone(), error))?;
             let (signature, resolved_type) = self.lower_field_like(
                 name,
+                declarations,
                 &field_type,
                 &field.attributes,
                 &class_file.constant_pool,
@@ -462,7 +721,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 )?;
                 let resolved_type = self.lower_method_descriptor(
                     name,
+                    declarations,
                     &descriptor,
+                    signature.as_ref(),
                     &parameter_names,
                     method.access_flags.is_varargs(),
                 )?;
@@ -485,19 +746,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
 
-        let signature = self.resolve_optional_signature(
-            name,
-            &class_file.attributes,
-            &class_file.constant_pool,
-            ClassSignature::parse,
-        )?;
-
         let nest_host = self.resolve_optional_nest_host(name, &class_file)?;
         let nest_members = self.resolve_nest_members(name, &class_file)?;
         let permitted_subclasses = self.resolve_permitted_subclasses(name, &class_file)?;
         let inner_classes = self.resolve_inner_classes(name, &class_file)?;
         let enclosing_method = self.resolve_enclosing_method(name, &class_file)?;
-        let record_components = self.resolve_record_components(name, &class_file)?;
+        let record_components = self.resolve_record_components(name, declarations, &class_file)?;
         let annotations =
             self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
 
@@ -843,17 +1097,43 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// `MethodParam::varargs` (JVMS guarantees `ACC_VARARGS` only ever
     /// applies to the last parameter), so `f(String... xs)` stays
     /// distinguishable from `f(String[] xs)`.
+    ///
+    /// `signature` (a method's optional `Signature` attribute) is preferred
+    /// over the erased descriptor per-parameter/result — e.g. a bare `T`
+    /// return type instead of its erased bound — but only when it declares
+    /// no method-level type parameters of its own (a generic method needs
+    /// `Type::Poly`/`ParamRef` binder machinery not built yet) *and* its
+    /// parameter count matches the descriptor's exactly. A mismatch is not
+    /// malformed input: JVMS §4.7.9.1 allows a `MethodSignature` to omit
+    /// leading synthetic/mandated parameters (e.g. an inner class
+    /// constructor's implicit outer-instance parameter) that the descriptor
+    /// still carries, and this loader does not yet track which parameters
+    /// those are — so a mismatched signature is simply not used, falling
+    /// back to the descriptor entirely, rather than risk misaligning names/
+    /// types across the two lists.
     fn lower_method_descriptor(
         &mut self,
         owner: &BinaryName,
+        declarations: ScopeId,
         descriptor: &MethodDescriptor,
+        signature: Option<&MethodSignature>,
         parameter_names: &[Option<String>],
         varargs: bool,
     ) -> Result<TypeId, ClassLoadError> {
+        let signature = signature.filter(|signature| {
+            signature.type_parameters.is_empty()
+                && signature.parameters.len() == descriptor.parameters.len()
+        });
+
         let last_index = descriptor.parameters.len().checked_sub(1);
         let mut params = Vec::with_capacity(descriptor.parameters.len());
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
-            let ty = self.lower_field_type(owner, parameter)?;
+            let ty = match signature.map(|signature| &signature.parameters[index]) {
+                Some(signature_type) => {
+                    self.lower_type_signature(owner, declarations, signature_type)?
+                }
+                None => self.lower_field_type(owner, parameter)?,
+            };
             let synthetic_name = format!("p{index}");
             let param_name = parameter_names
                 .get(index)
@@ -868,9 +1148,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
         }
 
-        let result = match &descriptor.return_type {
-            Some(field_type) => self.lower_field_type(owner, field_type)?,
-            None => self.definitions.unit,
+        let result = match signature.and_then(|signature| signature.result.as_ref()) {
+            Some(signature_type) => {
+                self.lower_type_signature(owner, declarations, signature_type)?
+            }
+            None => match &descriptor.return_type {
+                Some(field_type) => self.lower_field_type(owner, field_type)?,
+                None => self.definitions.unit,
+            },
         };
 
         Ok(self.store.types.alloc(Type::Method(MethodType {
@@ -996,6 +1281,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn resolve_record_components(
         &mut self,
         owner: &BinaryName,
+        declarations: ScopeId,
         class_file: &ClassFile<'_>,
     ) -> Result<Option<Vec<RecordComponentSymbol>>, ClassLoadError> {
         let components = class_file
@@ -1022,6 +1308,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })?;
             let (signature, resolved_type) = self.lower_field_like(
                 owner,
+                declarations,
                 &field_type,
                 &component.attributes,
                 &class_file.constant_pool,
@@ -1944,6 +2231,121 @@ mod tests {
         );
     }
 
+    /// The `SymbolId` of the `SymbolKind::TypeParameter` symbol entered
+    /// under `type_param_name` into `class_symbol`'s declarations scope by
+    /// `ClassLoader::enter_class_type_parameters`.
+    fn type_parameter_symbol(
+        store: &mut SemanticStore,
+        class_symbol: SymbolId,
+        type_param_name: &str,
+    ) -> SymbolId {
+        let declarations = class_info(store, class_symbol).declarations;
+        let text = store.names.intern(type_param_name);
+        let name = Name::new(text, Namespace::Type);
+        store
+            .scopes
+            .get(declarations)
+            .lookup(&name)
+            .unwrap_or_else(|| panic!("{type_param_name} should be entered in the class scope"))
+    }
+
+    /// `GenericSample<T extends Comparable<T>>`'s `T` becomes a real
+    /// `SymbolKind::TypeParameter` symbol in its declarations scope, whose
+    /// upper bound is `Comparable[T]` — a self (F-bounded) reference back
+    /// to the very symbol being defined, resolved correctly regardless of
+    /// entry order (`enter_class_type_parameters`'s enter-before-complete
+    /// staging).
+    #[test]
+    fn enters_a_real_fixtures_f_bounded_class_type_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("GenericSample"))
+            .expect("GenericSample should load");
+        drop(loader);
+
+        let type_param = type_parameter_symbol(&mut store, class_symbol, "T");
+        assert_eq!(
+            store.symbols.get(type_param).kind,
+            SymbolKind::TypeParameter
+        );
+
+        let SymbolInfo::Complete(bounds_id) = store.symbols.get(type_param).info else {
+            panic!("expected the type parameter to have complete info");
+        };
+        let Type::Bounds { low, high } = store.types.get(bounds_id) else {
+            panic!("expected a Bounds type");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *low)), "Nothing");
+
+        // `class_bound: None` means an implicit `Object` bound (JVMS
+        // §4.7.9.1), *in addition to* the one interface bound -- so the
+        // upper bound is the intersection `Object & Comparable[T]`, not a
+        // bare `Comparable[T]`.
+        let Type::And { left, right } = store.types.get(*high) else {
+            panic!("expected T's upper bound to be an intersection with the implicit Object bound");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *left)), "Object");
+
+        let Type::Applied { tycon, args } = store.types.get(*right) else {
+            panic!("expected T's interface bound to be an Applied Comparable[T]");
+        };
+        assert_eq!(
+            symbol_name(&store, parent_symbol(&store, *tycon)),
+            "Comparable"
+        );
+        assert_eq!(args.len(), 1);
+        assert_eq!(parent_symbol(&store, args[0]), type_param);
+    }
+
+    /// `GenericSample.items`'s declared type `List<T>` lowers to a real
+    /// `Type::Applied` referencing the class's own `T` type parameter
+    /// symbol, not the erased `List` a descriptor-only lowering would give.
+    #[test]
+    fn lowers_a_real_fixtures_generic_field_type_using_the_class_type_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("GenericSample"))
+            .expect("GenericSample should load");
+        drop(loader);
+
+        let type_param = type_parameter_symbol(&mut store, class_symbol, "T");
+        let items_type = member_type_id(&mut store, class_symbol, "items");
+        let Type::Applied { tycon, args } = store.types.get(items_type) else {
+            panic!("expected items's type to be an Applied List[T]");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *tycon)), "List");
+        assert_eq!(args.len(), 1);
+        assert_eq!(parent_symbol(&store, args[0]), type_param);
+    }
+
+    /// `GenericSample.first()`'s declared return type is a bare `T` — no
+    /// method-level type parameters of its own, just a reference to the
+    /// enclosing class's `T` — so it lowers to a real reference to that
+    /// exact symbol instead of the erased descriptor return type
+    /// (`Comparable`, `T`'s own bound).
+    #[test]
+    fn lowers_a_real_fixtures_generic_method_result_using_the_class_type_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(InMemoryClassPath(generic_sample_classpath()), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("GenericSample"))
+            .expect("GenericSample should load");
+        drop(loader);
+
+        let type_param = type_parameter_symbol(&mut store, class_symbol, "T");
+        let first_type = member_type_id(&mut store, class_symbol, "first");
+        let Type::Method(method) = store.types.get(first_type) else {
+            panic!("expected first's type to be a Type::Method");
+        };
+        assert!(method.params.is_empty());
+        assert_eq!(parent_symbol(&store, method.result), type_param);
+    }
+
     /// A hand-built, minimal, synthetic class file with one field whose
     /// descriptor is not a valid field descriptor. `javac` cannot produce
     /// this; it exists purely to exercise `MalformedDescriptor`.
@@ -2061,6 +2463,170 @@ mod tests {
         assert!(matches!(
             error,
             ClassLoadError::MalformedSignature(name, _) if name.as_internal() == "C"
+        ));
+    }
+
+    /// A hand-built, minimal, synthetic class file with one field whose
+    /// `Signature` attribute is `Ljava/util/List<+Ljava/lang/Number;>;` —
+    /// an `extends`-wildcard type argument (`List<? extends Number>`).
+    /// `javac` can produce this shape (any wildcard-typed field would do),
+    /// but building it by hand keeps this test independent of a new
+    /// fixture and lets the constant pool stay minimal.
+    fn synthetic_class_with_wildcard_field_signature() -> Vec<u8> {
+        fn push_utf8(pool: &mut Vec<u8>, next_index: &mut u16, value: &str) -> u16 {
+            let index = *next_index;
+            pool.push(1); // CONSTANT_Utf8
+            pool.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            pool.extend_from_slice(value.as_bytes());
+            *next_index += 1;
+            index
+        }
+        fn push_class(pool: &mut Vec<u8>, next_index: &mut u16, name_index: u16) -> u16 {
+            let index = *next_index;
+            pool.push(7); // CONSTANT_Class
+            pool.extend_from_slice(&name_index.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+
+        let mut pool = Vec::new();
+        let mut next_index: u16 = 1;
+        let this_name_index = push_utf8(&mut pool, &mut next_index, "C");
+        let this_class_index = push_class(&mut pool, &mut next_index, this_name_index);
+        let field_name_index = push_utf8(&mut pool, &mut next_index, "field");
+        let descriptor_index = push_utf8(&mut pool, &mut next_index, "Ljava/util/List;");
+        let signature_attr_name_index = push_utf8(&mut pool, &mut next_index, "Signature");
+        let signature_index = push_utf8(
+            &mut pool,
+            &mut next_index,
+            "Ljava/util/List<+Ljava/lang/Number;>;",
+        );
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&[0x00, 0x45]);
+        bytes.extend_from_slice(&next_index.to_be_bytes()); // constant_pool_count
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&this_class_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // fields_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // field access_flags
+        bytes.extend_from_slice(&field_name_index.to_be_bytes());
+        bytes.extend_from_slice(&descriptor_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x01]); // field attributes_count = 1
+        bytes.extend_from_slice(&signature_attr_name_index.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // attribute_length = 2
+        bytes.extend_from_slice(&signature_index.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    #[test]
+    fn field_with_an_extends_wildcard_type_argument_lowers_to_a_bounded_wildcard() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_wildcard_field_signature(),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/lang/Number"),
+            synthetic_class("java/lang/Number", None),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let class_symbol = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .expect("C should load");
+        drop(loader);
+        let field_type = member_type_id(&mut store, class_symbol, "field");
+
+        let Type::Applied { tycon, args } = store.types.get(field_type) else {
+            panic!("expected field's type to be an Applied List[_]");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *tycon)), "List");
+        assert_eq!(args.len(), 1);
+
+        let Type::Wildcard { bounds } = store.types.get(args[0]) else {
+            panic!("expected the type argument to be a Wildcard");
+        };
+        let Type::Bounds { low, high } = store.types.get(*bounds) else {
+            panic!("expected the wildcard to carry Bounds");
+        };
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *low)), "Nothing");
+        assert_eq!(symbol_name(&store, parent_symbol(&store, *high)), "Number");
+    }
+
+    /// A hand-built, minimal, synthetic class file with one field whose
+    /// `Signature` attribute references a `TypeVariable` (`TU;`) that no
+    /// class-level type parameter declares — exercises
+    /// `ClassLoadError::UnresolvedTypeVariable`.
+    fn synthetic_class_with_unresolved_type_variable_field_signature() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
+        bytes.extend_from_slice(&[0x00, 0x00]); // minor
+        bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+        bytes.extend_from_slice(&[0x00, 0x07]); // constant_pool_count = 7
+        bytes.push(1); // #1 Utf8 "C"
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(b"C");
+        bytes.push(7); // #2 Class -> #1
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(1); // #3 Utf8 "field"
+        bytes.extend_from_slice(&5u16.to_be_bytes());
+        bytes.extend_from_slice(b"field");
+        bytes.push(1); // #4 Utf8 "Ljava/lang/Object;" (valid field descriptor)
+        bytes.extend_from_slice(&18u16.to_be_bytes());
+        bytes.extend_from_slice(b"Ljava/lang/Object;");
+        bytes.push(1); // #5 Utf8 "Signature"
+        bytes.extend_from_slice(&9u16.to_be_bytes());
+        bytes.extend_from_slice(b"Signature");
+        bytes.push(1); // #6 Utf8 "TU;" (an unresolvable type variable)
+        bytes.extend_from_slice(&3u16.to_be_bytes());
+        bytes.extend_from_slice(b"TU;");
+        bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class = #2
+        bytes.extend_from_slice(&[0x00, 0x00]); // super_class = none
+        bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count = 0
+        bytes.extend_from_slice(&[0x00, 0x01]); // fields_count = 1
+        bytes.extend_from_slice(&[0x00, 0x00]); // field access_flags
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // field name_index = #3
+        bytes.extend_from_slice(&4u16.to_be_bytes()); // field descriptor_index = #4
+        bytes.extend_from_slice(&[0x00, 0x01]); // field attributes_count = 1
+        bytes.extend_from_slice(&5u16.to_be_bytes()); // attribute_name_index = #5
+        bytes.extend_from_slice(&2u32.to_be_bytes()); // attribute_length = 2
+        bytes.extend_from_slice(&6u16.to_be_bytes()); // signature_index = #6
+        bytes.extend_from_slice(&[0x00, 0x00]); // methods_count = 0
+        bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count = 0
+        bytes
+    }
+
+    #[test]
+    fn unresolved_type_variable_when_a_field_signature_references_an_unknown_type_parameter() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("C"),
+            synthetic_class_with_unresolved_type_variable_field_signature(),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let error = loader
+            .load_class(&BinaryName::from_internal("C"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::UnresolvedTypeVariable(name, variable)
+                if name.as_internal() == "C" && variable == "U"
         ));
     }
 

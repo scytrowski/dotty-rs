@@ -60,6 +60,14 @@ pub enum ClassLoadError {
         dependency: BinaryName,
         source: Rc<ClassLoadError>,
     },
+    /// A class, field, or method's `Signature` attribute referenced a
+    /// `TypeVariable` (JVMS §4.7.9.1) by a name that no enclosing
+    /// `SymbolKind::TypeParameter` symbol was entered under — either a
+    /// genuinely malformed class file, or a signature referencing an
+    /// enclosing (owner) class's own type parameter, which is not yet
+    /// resolved (only the immediately declaring class's type parameters are
+    /// in scope so far).
+    UnresolvedTypeVariable(BinaryName, String),
 }
 
 impl fmt::Display for ClassLoadError {
@@ -108,6 +116,10 @@ impl fmt::Display for ClassLoadError {
                 formatter,
                 "class {owner} failed to load because {dependency} failed: {source}"
             ),
+            Self::UnresolvedTypeVariable(owner, name) => write!(
+                formatter,
+                "signature in class file for {owner} references unresolved type variable {name}"
+            ),
         }
     }
 }
@@ -115,7 +127,10 @@ impl fmt::Display for ClassLoadError {
 impl std::error::Error for ClassLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotFound(_) | Self::NameMismatch { .. } | Self::CircularInheritance(_) => None,
+            Self::NotFound(_)
+            | Self::NameMismatch { .. }
+            | Self::CircularInheritance(_)
+            | Self::UnresolvedTypeVariable(_, _) => None,
             Self::Io(_, source) => Some(source.as_ref()),
             Self::InvalidClassFile(_, source) => Some(source),
             Self::MalformedReference(_, source) => Some(source),
@@ -223,6 +238,19 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "invalid .tasty file for Dog: no matching TypeDef found in .tasty file"
+        );
+    }
+
+    #[test]
+    fn unresolved_type_variable_displays_the_owner_and_name() {
+        let error = ClassLoadError::UnresolvedTypeVariable(
+            BinaryName::from_internal("GenericSample"),
+            "U".to_owned(),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "signature in class file for GenericSample references unresolved type variable U"
         );
     }
 
