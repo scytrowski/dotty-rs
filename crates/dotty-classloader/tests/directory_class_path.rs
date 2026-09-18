@@ -98,6 +98,42 @@ fn returns_none_for_a_missing_class_without_erroring() {
 }
 
 #[test]
+fn rejects_a_path_traversal_name_instead_of_escaping_the_root() {
+    let workspace = TemporaryDirectory::new("directory-class-path-traversal-workspace");
+    fs::write(
+        workspace.path().join("secret.class"),
+        b"outside the classpath root",
+    )
+    .unwrap();
+
+    let root = workspace.path().join("root");
+    fs::create_dir_all(&root).unwrap();
+    let class_path = DirectoryClassPath::new(root);
+
+    let error = class_path
+        .find_class(&BinaryName::from_internal("../secret"))
+        .expect_err("a path-traversal name must be rejected, not resolved");
+
+    assert!(error.to_string().contains("not safe to use as a path"));
+}
+
+#[test]
+fn rejects_an_absolute_path_name_instead_of_escaping_the_root() {
+    let secret = TemporaryDirectory::new("directory-class-path-absolute-secret");
+    fs::write(secret.path().join("secret.class"), b"outside the root").unwrap();
+    let absolute_name = secret.path().join("secret").to_string_lossy().into_owned();
+
+    let root = TemporaryDirectory::new("directory-class-path-absolute-root");
+    let class_path = DirectoryClassPath::new(root.path().clone());
+
+    let error = class_path
+        .find_class(&BinaryName::from_internal(absolute_name))
+        .expect_err("an absolute name must be rejected, not resolved");
+
+    assert!(error.to_string().contains("not safe to use as a path"));
+}
+
+#[test]
 fn resolves_a_nested_package_path_under_the_root() {
     let root = TemporaryDirectory::new("directory-class-path-nested");
     fs::create_dir_all(root.path().join("java/lang")).unwrap();

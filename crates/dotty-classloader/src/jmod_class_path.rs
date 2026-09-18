@@ -42,6 +42,10 @@ impl JmodClassPath {
 
 impl ClassPathEntry for JmodClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if !name.is_path_safe() {
+            return Err(ClassPathError::invalid_binary_name(name.clone()));
+        }
+
         let entry_name = format!("classes/{}.class", name.as_internal());
 
         match self.archive.read_entry(&entry_name)? {
@@ -77,6 +81,20 @@ mod tests {
 
         assert!(!resource.bytes().is_empty());
         assert!(matches!(resource.origin(), ClassOrigin::Jmod(_)));
+    }
+
+    #[test]
+    fn rejects_a_path_traversal_name_instead_of_probing_the_archive() {
+        let class_path = JmodClassPath::new(fixture_path(
+            "tests/fixtures/pool_sample_jmod/pool_sample.jmod",
+        ))
+        .unwrap();
+
+        let error = class_path
+            .find_class(&BinaryName::from_internal("../../etc/passwd"))
+            .expect_err("a path-traversal name must be rejected, not resolved");
+
+        assert!(error.to_string().contains("not safe to use as a path"));
     }
 
     #[test]

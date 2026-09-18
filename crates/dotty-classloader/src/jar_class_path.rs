@@ -77,6 +77,10 @@ impl JarClassPath {
 
 impl ClassPathEntry for JarClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if !name.is_path_safe() {
+            return Err(ClassPathError::invalid_binary_name(name.clone()));
+        }
+
         let entry_name = format!("{}.class", name.as_internal());
 
         for versioned_entry_name in self.versioned_entry_names(&entry_name) {
@@ -127,6 +131,21 @@ mod tests {
         .unwrap();
         assert_eq!(resource.bytes(), expected.as_slice());
         assert!(matches!(resource.origin(), ClassOrigin::Jar(_)));
+    }
+
+    #[test]
+    fn rejects_a_path_traversal_name_instead_of_probing_the_archive() {
+        let class_path = JarClassPath::new(
+            fixture_path("tests/fixtures/pool_sample_jar/pool_sample_stored.jar"),
+            21,
+        )
+        .unwrap();
+
+        let error = class_path
+            .find_class(&BinaryName::from_internal("../../etc/passwd"))
+            .expect_err("a path-traversal name must be rejected, not resolved");
+
+        assert!(error.to_string().contains("not safe to use as a path"));
     }
 
     #[test]

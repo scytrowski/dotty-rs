@@ -44,6 +44,42 @@ impl BinaryName {
     pub fn package_path(&self) -> &str {
         self.0.rsplit_once('/').map_or("", |(package, _)| package)
     }
+
+    /// Whether this name is safe to turn verbatim into a relative
+    /// filesystem or archive path.
+    ///
+    /// `from_internal`/`from_qualified` accept any string — the JVMS
+    /// §4.2.1 grammar alone doesn't guarantee this is safe, and neither
+    /// constructor's input is always compiler-driven: a class's own
+    /// superclass/interface/member-type name is read straight out of
+    /// another class file's constant pool, which is untrusted input once
+    /// the classpath itself may contain attacker-supplied bytes. Every
+    /// `ClassPathEntry` that maps a `BinaryName` onto a filesystem path or
+    /// archive entry name (`DirectoryClassPath`, `JarClassPath`,
+    /// `JmodClassPath`) must reject a name this returns `false` for,
+    /// rather than resolving it — an unchecked name could otherwise escape
+    /// a `DirectoryClassPath`'s root entirely (`../../etc/passwd`, or an
+    /// absolute path, which `Path::join` does not confine to the root at
+    /// all).
+    ///
+    /// Rejects: an empty name; a name containing a NUL byte, `\`
+    /// (Windows path-separator smuggling), or `:` (a Windows drive
+    /// letter, or an NTFS alternate-data-stream marker); and any
+    /// `/`-separated segment that is empty (a leading, trailing, or
+    /// doubled `/`), `.`, or `..` (path traversal).
+    pub fn is_path_safe(&self) -> bool {
+        if self.0.is_empty()
+            || self.0.contains('\0')
+            || self.0.contains('\\')
+            || self.0.contains(':')
+        {
+            return false;
+        }
+
+        self.0
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    }
 }
 
 impl fmt::Display for BinaryName {
@@ -125,5 +161,57 @@ mod tests {
         let name = BinaryName::from_internal("com/example/Outer$Inner");
         assert_eq!(name.simple_name(), "Outer$Inner");
         assert_eq!(name.package_path(), "com/example");
+    }
+
+    #[test]
+    fn ordinary_names_are_path_safe() {
+        assert!(BinaryName::from_internal("java/lang/Object").is_path_safe());
+        assert!(BinaryName::from_internal("PoolSample").is_path_safe());
+        assert!(BinaryName::from_internal("com/example/Outer$Inner").is_path_safe());
+    }
+
+    #[test]
+    fn an_empty_name_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("").is_path_safe());
+    }
+
+    #[test]
+    fn a_dot_dot_segment_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("../../etc/passwd").is_path_safe());
+        assert!(!BinaryName::from_internal("a/../../b").is_path_safe());
+        assert!(!BinaryName::from_internal("a/..").is_path_safe());
+    }
+
+    #[test]
+    fn a_leading_slash_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("/etc/passwd").is_path_safe());
+    }
+
+    #[test]
+    fn a_doubled_or_trailing_slash_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("java//Object").is_path_safe());
+        assert!(!BinaryName::from_internal("java/lang/").is_path_safe());
+    }
+
+    #[test]
+    fn a_bare_dot_segment_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("./Object").is_path_safe());
+        assert!(!BinaryName::from_internal(".").is_path_safe());
+    }
+
+    #[test]
+    fn a_backslash_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("..\\..\\Windows\\System32").is_path_safe());
+    }
+
+    #[test]
+    fn a_colon_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("C:/Windows/System32").is_path_safe());
+        assert!(!BinaryName::from_internal("Object:hidden").is_path_safe());
+    }
+
+    #[test]
+    fn a_nul_byte_is_not_path_safe() {
+        assert!(!BinaryName::from_internal("Object\0.class").is_path_safe());
     }
 }

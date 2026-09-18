@@ -80,12 +80,24 @@ pub struct ClassPathError {
 enum ClassPathErrorSource {
     Io(io::Error),
     Zip(crate::zip_archive::ZipError),
+    InvalidBinaryName(BinaryName),
 }
 
 impl ClassPathError {
     pub fn new(source: io::Error) -> Self {
         Self {
             source: ClassPathErrorSource::Io(source),
+        }
+    }
+
+    /// `name` is not safe to turn into a filesystem or archive path (see
+    /// [`BinaryName::is_path_safe`]) — reported by a [`ClassPathEntry`]
+    /// instead of resolving it, since `name` may come from untrusted
+    /// class-file bytes elsewhere on the classpath, not just a
+    /// compiler-driven lookup.
+    pub fn invalid_binary_name(name: BinaryName) -> Self {
+        Self {
+            source: ClassPathErrorSource::InvalidBinaryName(name),
         }
     }
 }
@@ -95,6 +107,9 @@ impl fmt::Display for ClassPathError {
         match &self.source {
             ClassPathErrorSource::Io(error) => write!(formatter, "classpath I/O error: {error}"),
             ClassPathErrorSource::Zip(error) => write!(formatter, "classpath I/O error: {error}"),
+            ClassPathErrorSource::InvalidBinaryName(name) => {
+                write!(formatter, "class name is not safe to use as a path: {name}")
+            }
         }
     }
 }
@@ -104,6 +119,7 @@ impl std::error::Error for ClassPathError {
         match &self.source {
             ClassPathErrorSource::Io(error) => Some(error),
             ClassPathErrorSource::Zip(error) => Some(error),
+            ClassPathErrorSource::InvalidBinaryName(_) => None,
         }
     }
 }
@@ -135,7 +151,11 @@ impl From<crate::zip_archive::ZipError> for ClassPathError {
 pub trait ClassPathEntry: Send + Sync {
     /// Looks up `name` on this entry. `Ok(None)` means the entry was
     /// searched successfully and does not contain `name` — that is not an
-    /// error. `Err` is reserved for actual I/O failures.
+    /// error. `Err` covers actual I/O failures, and (every filesystem/
+    /// archive-backed implementor must check this) `name` failing
+    /// [`BinaryName::is_path_safe`] — `name` can come from untrusted
+    /// class-file bytes elsewhere on the classpath, not just a
+    /// compiler-driven lookup, so it must never be resolved unchecked.
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError>;
 }
 
@@ -169,6 +189,10 @@ impl DirectoryClassPath {
 
 impl ClassPathEntry for DirectoryClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if !name.is_path_safe() {
+            return Err(ClassPathError::invalid_binary_name(name.clone()));
+        }
+
         if let Some(bytes) = self.read(&self.resource_path(name, "tasty"))? {
             return Ok(Some(ClassResource::new(
                 bytes,
@@ -231,6 +255,26 @@ mod tests {
 
         let error = ClassPathError::from(io::Error::new(io::ErrorKind::PermissionDenied, "nope"));
         assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn invalid_binary_name_displays_the_offending_name() {
+        let error =
+            ClassPathError::invalid_binary_name(BinaryName::from_internal("../../etc/passwd"));
+
+        assert_eq!(
+            error.to_string(),
+            "class name is not safe to use as a path: ../../etc/passwd"
+        );
+    }
+
+    #[test]
+    fn invalid_binary_name_has_no_further_source() {
+        use std::error::Error;
+
+        let error =
+            ClassPathError::invalid_binary_name(BinaryName::from_internal("../../etc/passwd"));
+        assert!(error.source().is_none());
     }
 
     #[test]
