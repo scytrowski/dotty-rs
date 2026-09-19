@@ -42,7 +42,7 @@ where
                 break;
             }
 
-            let before = self.current() as *const dotty_core::Token;
+            let checkpoint = self.cursor.checkpoint();
             let tree = if is_unsupported_start(self.current().kind) {
                 self.parse_unsupported_syntax()
             } else {
@@ -50,14 +50,14 @@ where
             };
             trees.push(tree);
 
-            let after = self.current() as *const dotty_core::Token;
-            if std::ptr::eq(before, after) {
+            if !self.cursor.progressed_since(checkpoint) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
                     "parser made no progress while parsing a compilation unit",
                 );
+                let recovery_checkpoint = self.cursor.checkpoint();
                 self.advance();
-                if std::ptr::eq(after, self.current() as *const dotty_core::Token) {
+                if !self.cursor.progressed_since(recovery_checkpoint) {
                     break;
                 }
             }

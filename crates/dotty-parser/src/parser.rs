@@ -206,13 +206,12 @@ where
     /// Consumes input until a synchronization token or EOF is reached.
     pub fn recover_until(&mut self, set: RecoverySet) {
         while !set.contains(self.current().kind) {
-            let before = self.current() as *const Token;
+            let checkpoint = self.cursor.checkpoint();
             self.advance();
-            let after = self.current() as *const Token;
 
             // A broken TokenSource may fail to advance. Returning here keeps
             // malformed external input from turning recovery into a hang.
-            if std::ptr::eq(before, after) {
+            if !self.cursor.progressed_since(checkpoint) {
                 return;
             }
         }
