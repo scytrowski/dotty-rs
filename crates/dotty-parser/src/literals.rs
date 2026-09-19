@@ -133,11 +133,15 @@ fn parse_long_literal(spelling: &str) -> Option<i64> {
         .or_else(|| digits.strip_prefix("0b"))
         .or_else(|| digits.strip_prefix("0B"))
         .unwrap_or(digits);
-    let value = i64::from_str_radix(digits, radix).ok()?;
+    let value = u64::from_str_radix(digits, radix).ok()?;
     if negative {
-        value.checked_neg()
+        if value == 1_u64 << 63 {
+            Some(i64::MIN)
+        } else {
+            i64::try_from(value).ok()?.checked_neg()
+        }
     } else {
-        Some(value)
+        i64::try_from(value).ok()
     }
 }
 

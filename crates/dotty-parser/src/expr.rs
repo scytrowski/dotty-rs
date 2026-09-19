@@ -1024,6 +1024,56 @@ mod tests {
     }
 
     #[test]
+    fn decodes_decimal_long_min_value() {
+        let mut names = NameInterner::new();
+        let source = "-9223372036854775808L";
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::LongLiteral, 1, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(value)
+            }) if value == i64::MIN
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_hexadecimal_long_min_value() {
+        let mut names = NameInterner::new();
+        let source = "-0x8000000000000000L";
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::LongLiteral, 1, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(value)
+            }) if value == i64::MIN
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_the_sign_in_a_negated_decimal_literal() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
