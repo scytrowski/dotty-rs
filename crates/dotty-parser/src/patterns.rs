@@ -423,7 +423,7 @@ where
             TokenKind::Newline | TokenKind::Newlines => 2,
             _ => 1,
         };
-        can_start_simple_pattern_kind(self.cursor.lookahead(offset).kind).then_some(offset)
+        can_start_simple_pattern_at(self, offset).then_some(offset)
     }
 
     fn current_is_pattern_colon(&self) -> bool {
@@ -496,15 +496,27 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
                 | TokenKind::Keyword(HardKeyword::False)
                 | TokenKind::Keyword(HardKeyword::Null)
                 | TokenKind::Keyword(HardKeyword::This)
+                | TokenKind::Keyword(HardKeyword::Super)
                 | TokenKind::Punctuation(Punctuation::LeftParen)
         )
 }
 
 fn can_start_simple_pattern<S: TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
-    can_start_simple_pattern_kind(parser.current().kind)
-        || (parser.current().kind == TokenKind::Operator
-            && parser.current_text().ok() == Some("-")
-            && is_numeric_literal(parser.cursor.lookahead(1).kind))
+    can_start_simple_pattern_at(parser, 0)
+}
+
+fn can_start_simple_pattern_at<S: TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+    offset: usize,
+) -> bool {
+    can_start_simple_pattern_kind(parser.cursor.lookahead(offset).kind)
+        || (parser.cursor.lookahead(offset).kind == TokenKind::Operator
+            && parser
+                .source
+                .slice(parser.cursor.lookahead(offset).span)
+                .ok()
+                == Some("-")
+            && is_numeric_literal(parser.cursor.lookahead(offset + 1).kind))
 }
 
 #[cfg(test)]
@@ -654,6 +666,54 @@ mod tests {
             result.ast.get(result.root).kind,
             TreeKind::Alternative(Alternative { ref alternatives })
                 if alternatives.len() == 2
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_super_as_an_alternative_pattern_start() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x | super.foo",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Super), 4, 9),
+                token(TokenKind::Punctuation(Punctuation::Dot), 9, 10),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(Alternative { ref alternatives })
+                if alternatives.len() == 2
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_negative_literal_after_an_infix_pattern_operator() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x :: -1",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 2, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::IntegerLiteral, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(result.diagnostics.is_empty());
     }
