@@ -49,7 +49,10 @@ where
             );
         }
         let then_branch = self.parse_control_body();
-        let else_branch = if self.accept(TokenKind::Keyword(dotty_core::HardKeyword::Else)) {
+        let else_branch = if let Some(separator_end) = self.accept_else_after_optional_separator() {
+            if let Some(separator_end) = separator_end {
+                self.extend_tree_end(then_branch, separator_end);
+            }
             self.parse_control_body()
         } else {
             self.synthetic_unit_at(self.last_real_token_end)
@@ -63,6 +66,42 @@ where
                 else_branch,
             }),
         )
+    }
+
+    fn accept_else_after_optional_separator(&mut self) -> Option<Option<u32>> {
+        let mut lookahead = 0;
+        let mut separator_end = None;
+        loop {
+            let token = self.cursor.lookahead(lookahead);
+            let kind = token.kind;
+            if is_else_separator(kind) {
+                if kind == TokenKind::Punctuation(Punctuation::Semicolon) {
+                    separator_end = Some(token.span.end());
+                }
+                lookahead += 1;
+                continue;
+            }
+            if kind != TokenKind::Keyword(dotty_core::HardKeyword::Else) {
+                return None;
+            }
+            break;
+        }
+
+        while is_else_separator(self.current().kind) {
+            self.advance();
+        }
+        self.advance();
+        Some(separator_end)
+    }
+
+    fn extend_tree_end(&mut self, tree: TreeId<Untyped>, end: u32) {
+        let Some(position) = self.ast.get(tree).position else {
+            return;
+        };
+        let range = position.span().range();
+        let range = TextRange::new(range.start(), end).expect("tree span endpoints are ordered");
+        self.ast.get_mut(tree).position =
+            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
     }
 
     fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -992,6 +1031,13 @@ const fn is_block_separator(kind: TokenKind) -> bool {
     )
 }
 
+const fn is_else_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline | TokenKind::Newlines | TokenKind::Punctuation(Punctuation::Semicolon)
+    )
+}
+
 const fn is_numeric_literal(kind: TokenKind) -> bool {
     matches!(
         kind,
@@ -1177,6 +1223,111 @@ mod tests {
             parser.ast().get(if_tree.cond).kind,
             TreeKind::PhaseSpecific(UntypedNode::Parens(_))
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_else_after_a_semicolon_separator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then a; else b",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Else), 13, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.then_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(10, 12).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_else_after_a_separator_in_parenthesized_if() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (c) a; else b",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Else), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.then_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(7, 9).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leaves_a_non_else_statement_separator_unconsumed() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then a\nnext",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Newline);
         assert!(parser.diagnostics().is_empty());
     }
 
