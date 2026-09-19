@@ -140,8 +140,55 @@ where
 
     fn parse_new(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
+        let type_mark = self.mark();
         let tpt = self.simple_type();
+        let tpt = if self
+            .cursor
+            .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+        {
+            self.parse_type_application(type_mark, tpt)
+        } else {
+            tpt
+        };
         self.alloc_from(mark, TreeKind::New(New { tpt }))
+    }
+
+    fn parse_type_application(
+        &mut self,
+        mark: crate::Mark,
+        function: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        self.advance();
+        let mut args = Vec::new();
+        if self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedType,
+                "expected a type argument between `[` and `]`",
+            );
+        } else {
+            loop {
+                args.push(self.simple_type());
+                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
+                    break;
+                }
+                if self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::RightBracket))
+                {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedType,
+                        "expected a type argument after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+            }
+        }
+        self.alloc_from(
+            mark,
+            TreeKind::TypeApply(dotty_core::ast::TypeApply { function, args }),
+        )
     }
 
     fn simple_expr_rest(
@@ -176,6 +223,11 @@ where
                         backquoted,
                     }),
                 );
+            } else if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+            {
+                qualifier = self.parse_type_application(mark, qualifier);
             } else if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
@@ -624,6 +676,108 @@ mod tests {
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 14).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_application_with_multiple_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo[A, B]",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::TypeApply(type_apply) = &parser.ast().get(id).kind else {
+            panic!("expected type application");
+        };
+
+        assert_eq!(type_apply.args.len(), 2);
+        assert!(type_apply
+            .args
+            .iter()
+            .all(|arg| matches!(parser.ast().get(*arg).kind, TreeKind::Ident(ident) if ident.name.is_type())));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 9).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn chains_type_application_application_and_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo[A](1).bar",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::IntegerLiteral, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Dot), 9, 10),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Select(selection) = &parser.ast().get(id).kind else {
+            panic!("expected final selection");
+        };
+        let TreeKind::Apply(application) = &parser.ast().get(selection.qualifier).kind else {
+            panic!("expected application before selection");
+        };
+        assert!(matches!(
+            parser.ast().get(application.function).kind,
+            TreeKind::TypeApply(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 13).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_type_application_on_new_before_constructor_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new Foo[Int](1)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 7, 8),
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::IntegerLiteral, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected constructor application");
+        };
+        let TreeKind::New(New { tpt }) = parser.ast().get(application.function).kind else {
+            panic!("expected new tree");
+        };
+        assert!(matches!(parser.ast().get(tpt).kind, TreeKind::TypeApply(_)));
         assert!(parser.diagnostics().is_empty());
     }
 
