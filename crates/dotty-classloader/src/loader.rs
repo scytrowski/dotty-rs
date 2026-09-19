@@ -773,6 +773,51 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
+    /// The core visibility for a `.tasty` class's declared visibility.
+    ///
+    /// A qualified modifier keeps its qualifier when it names a package that
+    /// encloses the class's own package (or is that package), which is the
+    /// only qualifier a top-level class can meaningfully have. Any other
+    /// qualifier this name-based reader cannot resolve falls back to the
+    /// plain `Private`/`Protected` rather than widening to `Public`: too
+    /// restrictive is safe, too permissive is the bug this guards against.
+    fn tasty_visibility(
+        &mut self,
+        name: &BinaryName,
+        declared: &tasty_symbol::DeclaredVisibility,
+    ) -> Visibility {
+        use tasty_symbol::{DeclaredQualifier, DeclaredVisibility};
+
+        let (qualifier, protected) = match declared {
+            DeclaredVisibility::Private => return Visibility::Private,
+            DeclaredVisibility::Protected => return Visibility::Protected,
+            DeclaredVisibility::PrivateWithin(qualifier) => (qualifier, false),
+            DeclaredVisibility::ProtectedWithin(qualifier) => (qualifier, true),
+        };
+        let fallback = if protected {
+            Visibility::Protected
+        } else {
+            Visibility::Private
+        };
+        let DeclaredQualifier::Package(path) = qualifier else {
+            return fallback;
+        };
+        let own = name.package_path();
+        let encloses = own == path
+            || own
+                .strip_prefix(path.as_str())
+                .is_some_and(|rest| rest.starts_with('/'));
+        if !encloses {
+            return fallback;
+        }
+        let package = self.session.packages.resolve_package(self.store, path);
+        if protected {
+            Visibility::ProtectedWithin(package)
+        } else {
+            Visibility::PrivateWithin(package)
+        }
+    }
+
     /// `.tasty`-backed loading (`docs/classloader.md` §9): reconstructs
     /// only name/flags/superclass/interfaces via [`tasty_symbol::decode`]
     /// and recurses into the same [`Self::load_dependency`] used by the
@@ -803,14 +848,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // now — the same "allocate first, correct once known" pattern
         // `resolve_semantic_owner`'s owner patch (`.class`'s nested-class
         // path) already uses.
-        match decoded.visibility {
-            Some(tasty_symbol::DeclaredVisibility::Private) => {
-                self.store.symbols.get_mut(class_symbol).visibility = Visibility::Private;
-            }
-            Some(tasty_symbol::DeclaredVisibility::Protected) => {
-                self.store.symbols.get_mut(class_symbol).visibility = Visibility::Protected;
-            }
-            None => {}
+        if let Some(declared) = &decoded.visibility {
+            let visibility = self.tasty_visibility(name, declared);
+            self.store.symbols.get_mut(class_symbol).visibility = visibility;
         }
 
         let super_class = self.load_dependency(name, decoded.super_class)?;

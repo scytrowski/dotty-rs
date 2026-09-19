@@ -6,11 +6,11 @@ use dotty_classfile::access_flags::{
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, AstError,
     CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
-    FINAL_TAG, IdentNode, MUTABLE_TAG, PRIVATE_TAG, PROTECTED_TAG, ParameterNode, RawName, RawTree,
-    Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG,
-    StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFSYMBOL_TAG, TastyFile,
-    TastyFileError, VALDEF_TAG,
+    FINAL_TAG, IdentNode, MUTABLE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
+    PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG,
+    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, StandardSection, StructuredNode, StructuredTree,
+    TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
+    TYPEREF_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue, VALDEF_TAG,
 };
 use std::fmt;
 
@@ -62,10 +62,29 @@ pub(crate) struct DecodedTastyClass {
 /// the same access boundary as either), so it is threaded through here
 /// instead of being collapsed the way [`decode_flags`] collapses it for
 /// `ClassAccessFlags`'s sake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeclaredVisibility {
     Private,
     Protected,
+    /// `private[qualifier]`.
+    PrivateWithin(DeclaredQualifier),
+    /// `protected[qualifier]`.
+    ProtectedWithin(DeclaredQualifier),
+}
+
+/// The qualifier of a `private[X]` / `protected[X]` modifier, as far as this
+/// name-based reader can tell it.
+///
+/// Only a package qualifier can be named without resolving symbols, so that
+/// is all it reports; the loader turns it into a package `SymbolId`. Any other
+/// shape (an enclosing class, a shared or symbol reference) is `Other`, and
+/// the loader then falls back to the plain, more restrictive
+/// `Private`/`Protected` instead of widening to `Public`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeclaredQualifier {
+    /// A package, as a `/`-joined path (`me/cytrowski`).
+    Package(String),
+    Other,
 }
 
 /// One `ValDef` reconstructed from a class's `Template.stats`.
@@ -229,7 +248,7 @@ pub(crate) fn decode(
     };
 
     let flags = decode_flags(&tail);
-    let visibility = decode_visibility(&tail);
+    let visibility = decode_visibility(&file, &tail);
 
     let RawTree::LengthNode(template_node) = &type_or_template else {
         return Err(TastyDecodeError::NoTemplateBody);
@@ -510,18 +529,37 @@ fn decode_flags(tail: &[DefinitionTail<'_>]) -> ClassAccessFlags {
 /// `PROTECTED_TAG` handling, kept as a real [`DeclaredVisibility`]
 /// instead of being collapsed into `ClassAccessFlags`'s single "not
 /// public" bit — see [`DeclaredVisibility`]'s doc comment.
-fn decode_visibility(tail: &[DefinitionTail<'_>]) -> Option<DeclaredVisibility> {
-    tail.iter().find_map(|item| {
-        let DefinitionTail::Modifier(tag) = item else {
-            return None;
-        };
-
-        match *tag {
-            PRIVATE_TAG => Some(DeclaredVisibility::Private),
-            PROTECTED_TAG => Some(DeclaredVisibility::Protected),
-            _ => None,
+fn decode_visibility(
+    file: &TastyFile<'_>,
+    tail: &[DefinitionTail<'_>],
+) -> Option<DeclaredVisibility> {
+    tail.iter().find_map(|item| match item {
+        DefinitionTail::Modifier(PRIVATE_TAG) => Some(DeclaredVisibility::Private),
+        DefinitionTail::Modifier(PROTECTED_TAG) => Some(DeclaredVisibility::Protected),
+        DefinitionTail::QualifiedModifier(modifier) => {
+            let qualifier = decode_qualifier(file, &modifier.child);
+            match modifier.tag {
+                PRIVATEQUALIFIED_TAG => Some(DeclaredVisibility::PrivateWithin(qualifier)),
+                PROTECTEDQUALIFIED_TAG => Some(DeclaredVisibility::ProtectedWithin(qualifier)),
+                _ => None,
+            }
         }
+        _ => None,
     })
+}
+
+/// `TYPEREFpkg NameRef`, which `dotty-tasty` has no constant for (issue #15).
+const TYPEREFPKG_TAG: u8 = 65;
+
+fn decode_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>) -> DeclaredQualifier {
+    match tree {
+        RawTree::Leaf(term) if term.tag == TYPEREFPKG_TAG => match term.value {
+            TermValue::NameRef(name) => resolve_qualified_name(file, name)
+                .map_or(DeclaredQualifier::Other, DeclaredQualifier::Package),
+            _ => DeclaredQualifier::Other,
+        },
+        _ => DeclaredQualifier::Other,
+    }
 }
 
 /// Resolves a name-table reference into a `/`-joined qualified string,
@@ -816,6 +854,7 @@ fn wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_tasty::tasty::{AstChildNode, SimpleTerm};
 
     fn fixture_bytes(relative_path: &str) -> Vec<u8> {
         std::fs::read(
@@ -1126,21 +1165,122 @@ mod tests {
     /// `.class`, which has no other way to represent a top-level class's
     /// visibility — see [`DeclaredVisibility`]'s doc comment), but
     /// [`decode_visibility`] must keep them apart.
+    /// Runs `check` with some real, parsed file; `decode_visibility` only
+    /// reads its name table for qualified modifiers.
+    fn with_a_file(check: impl FnOnce(&TastyFile<'_>)) {
+        let bytes = fixture_bytes("case_class/Point.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        check(&file);
+    }
+
     #[test]
     fn decode_visibility_distinguishes_private_from_protected() {
-        assert_eq!(
-            decode_visibility(&[DefinitionTail::Modifier(PRIVATE_TAG)]),
-            Some(DeclaredVisibility::Private)
-        );
-        assert_eq!(
-            decode_visibility(&[DefinitionTail::Modifier(PROTECTED_TAG)]),
-            Some(DeclaredVisibility::Protected)
-        );
+        with_a_file(|file| {
+            assert_eq!(
+                decode_visibility(file, &[DefinitionTail::Modifier(PRIVATE_TAG)]),
+                Some(DeclaredVisibility::Private)
+            );
+            assert_eq!(
+                decode_visibility(file, &[DefinitionTail::Modifier(PROTECTED_TAG)]),
+                Some(DeclaredVisibility::Protected)
+            );
+        });
     }
 
     #[test]
     fn decode_visibility_is_none_with_no_modifiers() {
-        assert_eq!(decode_visibility(&[]), None);
+        with_a_file(|file| assert_eq!(decode_visibility(file, &[]), None));
+    }
+
+    fn visibility_fixture(class: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility")
+                .join(format!("{class}.tasty")),
+        )
+        .unwrap_or_else(|error| panic!("fixture {class} should exist: {error}"))
+    }
+
+    fn declared_visibility(class: &str) -> Option<DeclaredVisibility> {
+        decode(
+            &visibility_fixture(class),
+            &BinaryName::from_internal(class),
+        )
+        .unwrap()
+        .visibility
+    }
+
+    fn package(path: &str) -> DeclaredVisibility {
+        DeclaredVisibility::PrivateWithin(DeclaredQualifier::Package(path.to_owned()))
+    }
+
+    /// Issue #16: a qualified modifier used to be skipped, which left the
+    /// class at the default `Public`.
+    #[test]
+    fn decodes_a_private_within_a_package_qualifier() {
+        assert_eq!(
+            declared_visibility("InEnclosingPackage"),
+            Some(package("me/cytrowski/tastyfixtures"))
+        );
+        assert_eq!(
+            declared_visibility("InOwnPackage"),
+            Some(package("me/cytrowski/tastyfixtures/visibility"))
+        );
+        assert_eq!(declared_visibility("InOuterPackage"), Some(package("me")));
+    }
+
+    /// The compiler writes a top-level `private` class as private to its own
+    /// package, so it is a qualified modifier too.
+    #[test]
+    fn a_top_level_private_class_is_private_within_its_package() {
+        assert_eq!(
+            declared_visibility("PlainPrivate"),
+            Some(package("me/cytrowski/tastyfixtures/visibility"))
+        );
+    }
+
+    fn qualified_tail(tag: u8, child: RawTree<'static>) -> Vec<DefinitionTail<'static>> {
+        vec![DefinitionTail::QualifiedModifier(AstChildNode {
+            tag,
+            offset: 0,
+            child,
+        })]
+    }
+
+    #[test]
+    fn decodes_a_protected_qualified_modifier() {
+        with_a_file(|file| {
+            // Name reference 0 is a plain entry of the name table.
+            let child =
+                RawTree::Leaf(SimpleTerm::new(TYPEREFPKG_TAG, TermValue::NameRef(0)).unwrap());
+            let tail = qualified_tail(PROTECTEDQUALIFIED_TAG, child);
+
+            assert!(matches!(
+                decode_visibility(file, &tail),
+                Some(DeclaredVisibility::ProtectedWithin(
+                    DeclaredQualifier::Package(_)
+                ))
+            ));
+        });
+    }
+
+    #[test]
+    fn a_qualifier_that_is_not_a_package_name_is_reported_as_other() {
+        with_a_file(|file| {
+            let child =
+                RawTree::Leaf(SimpleTerm::new(SHAREDTYPE_TAG, TermValue::AstRef(4)).unwrap());
+            let tail = qualified_tail(PRIVATEQUALIFIED_TAG, child);
+
+            assert_eq!(
+                decode_visibility(file, &tail),
+                Some(DeclaredVisibility::PrivateWithin(DeclaredQualifier::Other))
+            );
+        });
+    }
+
+    #[test]
+    fn an_open_class_has_no_declared_visibility() {
+        assert_eq!(declared_visibility("Open"), None);
     }
 
     /// `case_class/Point.tasty`'s real `case class Point(x: Int, y: Int)`

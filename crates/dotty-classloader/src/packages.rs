@@ -47,6 +47,12 @@ impl PackageRegistry {
         self.resolve_path(store, name.package_path())
     }
 
+    /// The package symbol for `path`, a `/`-joined package path (`"java/util"`),
+    /// allocating any missing segment.
+    pub(crate) fn resolve_package(&mut self, store: &mut SemanticStore, path: &str) -> SymbolId {
+        self.resolve_path(store, path)
+    }
+
     /// Resolves (allocating as needed) the package symbol for `path`, a
     /// `/`-joined package path (`"java/util"`, or `""` for the root/
     /// unnamed package). Recurses on the parent path first so a package's
