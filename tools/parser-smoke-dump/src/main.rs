@@ -3,13 +3,23 @@ use std::{env, fs, process};
 use dotty_core::ast::{AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::parse_compilation_unit;
+use dotty_parser::{parse_compilation_unit, parse_pattern_fragment};
 
 fn main() {
-    let Some(path) = env::args().nth(1) else {
-        eprintln!("usage: dotty-parser-smoke-dump <source-file>");
-        process::exit(2);
+    let args: Vec<_> = env::args().skip(1).collect();
+    let (mode, path) = match args.as_slice() {
+        [path] => ("expr", path.as_str()),
+        [flag, mode, path] if flag == "--mode" && mode == "pattern" => ("pattern", path.as_str()),
+        _ => {
+            eprintln!("usage: dotty-parser-smoke-dump [--mode pattern] <source-file>");
+            process::exit(2);
+        }
     };
+
+    if path.is_empty() {
+        eprintln!("usage: dotty-parser-smoke-dump [--mode pattern] <source-file>");
+        process::exit(2);
+    }
 
     let source = match fs::read_to_string(&path) {
         Ok(source) => source,
@@ -32,7 +42,11 @@ fn main() {
 
     let source_text = SourceText::new(&source).expect("fixture source must fit in 32-bit offsets");
     let mut names = NameInterner::new();
-    let result = parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+    let result = if mode == "pattern" {
+        parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
+    } else {
+        parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
+    };
     if !result.diagnostics.is_empty() {
         eprintln!(
             "parser reported diagnostics for {path}: {:?}",
@@ -41,14 +55,18 @@ fn main() {
         process::exit(1);
     }
 
-    let expression = match &result.ast.get(result.root).kind {
-        TreeKind::Block(block) if block.stats.is_empty() => block.expr,
-        _ => {
-            eprintln!("smoke dump requires a single expression in {path}");
-            process::exit(1);
+    let tree = if mode == "pattern" {
+        result.root
+    } else {
+        match &result.ast.get(result.root).kind {
+            TreeKind::Block(block) if block.stats.is_empty() => block.expr,
+            _ => {
+                eprintln!("expression dump requires a single expression in {path}");
+                process::exit(1);
+            }
         }
     };
-    println!("{}", render_tree(expression, &result.ast, &names, &source));
+    println!("{}", render_tree(tree, &result.ast, &names, &source));
 }
 
 fn render_tree(
@@ -87,6 +105,13 @@ fn render_tree(
                 quote(names.resolve(named.name.text()))
             ));
         }
+        TreeKind::Bind(bind) => {
+            fields.push(format!(
+                "\"name\":{}",
+                quote(names.resolve(bind.name.text()))
+            ));
+        }
+        TreeKind::Alternative(_) | TreeKind::Typed(_) => {}
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
         }
@@ -144,6 +169,9 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Select(_) => "Select",
         TreeKind::Apply(_) => "Apply",
         TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Bind(_) => "Bind",
+        TreeKind::Alternative(_) => "Alternative",
+        TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
         TreeKind::If(_) => "If",
         TreeKind::While(_) => "While",
@@ -186,6 +214,9 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::NamedArg(named) => vec![named.arg],
+        TreeKind::Bind(bind) => vec![bind.body],
+        TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
+        TreeKind::Typed(typed) => vec![typed.expr, typed.tpt],
         TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
         TreeKind::If(if_tree) => {
             let mut children = vec![if_tree.cond, if_tree.then_branch];
