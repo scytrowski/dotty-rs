@@ -26,10 +26,18 @@ pub enum UnpickleError {
     InvalidNameReference { reference: u32 },
     /// A name-table entry with a tag this unpickler does not interpret.
     UnsupportedName { reference: u32 },
-    /// A `private[X]` or `protected[X]` modifier. `dotty-core`'s `Visibility`
-    /// has no qualified-access variant yet, so it cannot be represented
-    /// faithfully.
-    UnsupportedQualifiedModifier { tag: u8 },
+    /// The qualifier of a `private[X]` / `protected[X]` modifier has a tree
+    /// shape this unpickler does not read. `tag` is the qualifier node's tag.
+    /// Package names and references to enclosing definitions are supported.
+    UnsupportedQualifier { tag: u8 },
+    /// A reference points at an address that is not the start of a visible AST
+    /// node (out of range, or inside another node's payload), or at one that
+    /// has no entered symbol. `from` is the referring definition.
+    InvalidReferenceTarget { from: u32, to: u32 },
+    /// The qualifier of a `private[Q]` / `protected[Q]` modifier at
+    /// `definition` is not a package, class, trait or object that encloses
+    /// the qualified definition (or is the definition itself).
+    InvalidQualifier { definition: u32 },
     /// A `PACKAGE` node whose path is not a direct package reference
     /// (`TERMREFpkg`), which is the only form this unpickler reads.
     UnsupportedPackagePath { address: u32 },
@@ -55,9 +63,17 @@ impl fmt::Display for UnpickleError {
             Self::UnsupportedName { reference } => {
                 write!(formatter, "unsupported name entry at reference {reference}")
             }
-            Self::UnsupportedQualifiedModifier { tag } => write!(
+            Self::UnsupportedQualifier { tag } => write!(
                 formatter,
-                "qualified access modifier (tag {tag}) has no visibility representation"
+                "access qualifier with tag {tag} is not a package or enclosing definition"
+            ),
+            Self::InvalidReferenceTarget { from, to } => write!(
+                formatter,
+                "definition at address {from} refers to address {to}, which is not a valid target"
+            ),
+            Self::InvalidQualifier { definition } => write!(
+                formatter,
+                "the access qualifier of the definition at address {definition} does not enclose it"
             ),
             Self::UnsupportedPackagePath { address } => write!(
                 formatter,
@@ -88,7 +104,9 @@ impl std::error::Error for UnpickleError {
             | Self::DuplicateScope { .. }
             | Self::InvalidNameReference { .. }
             | Self::UnsupportedName { .. }
-            | Self::UnsupportedQualifiedModifier { .. }
+            | Self::UnsupportedQualifier { .. }
+            | Self::InvalidReferenceTarget { .. }
+            | Self::InvalidQualifier { .. }
             | Self::UnsupportedPackagePath { .. }
             | Self::MissingDefinition { .. }
             | Self::ParameterMismatch { .. } => None,

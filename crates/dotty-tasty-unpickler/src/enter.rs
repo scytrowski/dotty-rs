@@ -18,17 +18,18 @@ use std::collections::HashMap;
 
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;
-use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks};
+use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
 use dotty_tasty::tasty::{
-    AstAddressIndex, AstTreeNode, DEFDEF_TAG, DefDefHeaderItem, DefinitionBody, PACKAGE_TAG,
-    PARAM_TAG, ParameterNode, RawNode, RawTree, StructuredNode, TEMPLATE_TAG, TYPEDEF_TAG,
-    TYPEPARAM_TAG, TastyFile, VALDEF_TAG,
+    AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefDefHeaderItem, DefinitionBody,
+    PACKAGE_TAG, PARAM_TAG, ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG,
+    StandardSection, StructuredNode, TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG,
+    TastyFile, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
 use crate::mapping::{
-    DeclaredModifiers, def_def_kind, namespace_of, term_param_kind, type_def_kind, type_param_kind,
-    val_def_kind,
+    DeclaredModifiers, QualifiedAccess, QualifierRef, TYPEREFPKG_TAG, def_def_kind, namespace_of,
+    term_param_kind, type_def_kind, type_param_kind, val_def_kind,
 };
 use crate::names::{qualified_segments, wire_name};
 use crate::unpickler::TastyUnpickler;
@@ -38,6 +39,8 @@ use crate::unpickler::TastyUnpickler;
 pub(crate) struct AstView<'bytes> {
     index: AstAddressIndex<'bytes>,
     children: HashMap<u32, Vec<AstTreeNode>>,
+    /// The ASTs section payload, for decoding a tree shared at an address.
+    payload: &'bytes [u8],
 }
 
 impl<'bytes> AstView<'bytes> {
@@ -50,7 +53,31 @@ impl<'bytes> AstView<'bytes> {
                 .or_default()
                 .push(edge.child);
         }
-        Ok(Self { index, children })
+        let payload = file
+            .section(StandardSection::Asts)
+            .map_or(&[][..], |section| section.payload);
+        Ok(Self {
+            index,
+            children,
+            payload,
+        })
+    }
+
+    /// Decodes the independent tree rooted at `at`. This is how a
+    /// `SHAREDtype` reference is followed: the compiler writes a repeated
+    /// subtree once and every other occurrence names its address.
+    ///
+    /// `at` comes from an untrusted reference, so it must be the start of a
+    /// visible AST node: an address inside another node's payload, or past the
+    /// end of the section, would decode as an unrelated tree. `from` is the
+    /// referring definition, for the error.
+    fn tree_at(&self, at: u32, from: u32) -> Result<RawTree<'bytes>, UnpickleError> {
+        if self.index.get_node(at).is_none() {
+            return Err(UnpickleError::InvalidReferenceTarget { from, to: at });
+        }
+        let mut reader = Reader::with_range(self.payload, at as usize, self.payload.len())
+            .map_err(AstError::from)?;
+        Ok(RawTree::decode_with_base_offset(&mut reader, 0).map_err(AstError::from)?)
     }
 
     fn node(&self, at: u32) -> Result<&RawNode<'bytes>, UnpickleError> {
@@ -63,6 +90,10 @@ impl<'bytes> AstView<'bytes> {
         self.children.get(&at).map_or(&[], Vec::as_slice)
     }
 }
+
+/// How many `SHAREDtype` links a qualifier may chain before it is treated as
+/// a cycle.
+const MAX_SHARED_DEPTH: usize = 16;
 
 /// What is known about a definition when its symbol is allocated.
 struct Declaration<'a> {
@@ -137,15 +168,18 @@ impl TastyUnpickler<'_, '_, '_> {
                     RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG
                 );
                 let kind = type_def_kind(&modifiers, has_template);
-                let symbol = self.enter_symbol(Declaration {
-                    at,
-                    tag,
-                    name_ref: name,
-                    kind,
-                    modifiers: &modifiers,
-                    owner,
-                    member: true,
-                })?;
+                let symbol = self.enter_symbol(
+                    ast,
+                    Declaration {
+                        at,
+                        tag,
+                        name_ref: name,
+                        kind,
+                        modifiers: &modifiers,
+                        owner,
+                        member: true,
+                    },
+                )?;
                 if let RawTree::LengthNode(template) = &type_or_template
                     && template.tag == TEMPLATE_TAG
                 {
@@ -156,28 +190,34 @@ impl TastyUnpickler<'_, '_, '_> {
             StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) => {
                 let modifiers = DeclaredModifiers::from_tail(&tail)?;
                 let kind = val_def_kind(&modifiers, owner_kind);
-                self.enter_symbol(Declaration {
-                    at,
-                    tag,
-                    name_ref: name,
-                    kind,
-                    modifiers: &modifiers,
-                    owner,
-                    member: true,
-                })?;
+                self.enter_symbol(
+                    ast,
+                    Declaration {
+                        at,
+                        tag,
+                        name_ref: name,
+                        kind,
+                        modifiers: &modifiers,
+                        owner,
+                        member: true,
+                    },
+                )?;
             }
             StructuredNode::DefDef(body) => {
                 let modifiers = DeclaredModifiers::from_tail(&body.tail)?;
                 let kind = def_def_kind(&wire_name(self.file.names(), body.name)?);
-                let method = self.enter_symbol(Declaration {
-                    at,
-                    tag,
-                    name_ref: body.name,
-                    kind,
-                    modifiers: &modifiers,
-                    owner,
-                    member: true,
-                })?;
+                let method = self.enter_symbol(
+                    ast,
+                    Declaration {
+                        at,
+                        tag,
+                        name_ref: body.name,
+                        kind,
+                        modifiers: &modifiers,
+                        owner,
+                        member: true,
+                    },
+                )?;
                 let parameters: Vec<&ParameterNode<'_>> = body
                     .header_items
                     .iter()
@@ -269,7 +309,7 @@ impl TastyUnpickler<'_, '_, '_> {
             if node.tag != parameter.tag() {
                 return Err(mismatch);
             }
-            self.enter_parameter(address(node.offset), parameter, owner, in_class)?;
+            self.enter_parameter(ast, address(node.offset), parameter, owner, in_class)?;
         }
         Ok(())
     }
@@ -278,6 +318,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// is a member is also declared in the class scope.
     fn enter_parameter(
         &mut self,
+        ast: &AstView<'_>,
         at: u32,
         parameter: &ParameterNode<'_>,
         owner: SymbolId,
@@ -291,22 +332,29 @@ impl TastyUnpickler<'_, '_, '_> {
             term_param_kind(&modifiers, in_class)
         };
         let is_member = in_class && matches!(kind, SymbolKind::TypeParameter | SymbolKind::Field);
-        self.enter_symbol(Declaration {
-            at,
-            tag,
-            name_ref: parameter.name(),
-            kind,
-            modifiers: &modifiers,
-            owner,
-            member: is_member,
-        })?;
+        self.enter_symbol(
+            ast,
+            Declaration {
+                at,
+                tag,
+                name_ref: parameter.name(),
+                kind,
+                modifiers: &modifiers,
+                owner,
+                member: is_member,
+            },
+        )?;
         Ok(())
     }
 
     /// Allocates the symbol for a definition, records its address, and
     /// declares it in its owner's scope when it is a member and the owner has
     /// one.
-    fn enter_symbol(&mut self, declaration: Declaration<'_>) -> Result<SymbolId, UnpickleError> {
+    fn enter_symbol(
+        &mut self,
+        ast: &AstView<'_>,
+        declaration: Declaration<'_>,
+    ) -> Result<SymbolId, UnpickleError> {
         let Declaration {
             at,
             tag,
@@ -338,11 +386,412 @@ impl TastyUnpickler<'_, '_, '_> {
         if member && let Some(scope) = self.index.scope_of(owner) {
             self.store.scopes.get_mut(scope).enter(name, symbol);
         }
+        if let Some(access) = modifiers.qualified {
+            self.apply_qualified_access(ast, at, symbol, access)?;
+        }
         Ok(symbol)
+    }
+
+    /// Sets the visibility of a `private[Q]` / `protected[Q]` definition.
+    ///
+    /// This runs after the symbol is allocated and indexed, because the
+    /// qualifier may be the definition itself, and an enclosing definition
+    /// is always entered before its members.
+    fn apply_qualified_access(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        symbol: SymbolId,
+        access: QualifiedAccess,
+    ) -> Result<(), UnpickleError> {
+        let qualifier = self.resolve_qualifier(ast, at, symbol, access.qualifier, 0)?;
+        self.store.symbols.get_mut(symbol).visibility = if access.protected {
+            Visibility::ProtectedWithin(qualifier)
+        } else {
+            Visibility::PrivateWithin(qualifier)
+        };
+        Ok(())
+    }
+
+    /// Resolves the qualifier of the definition `symbol` (at address `at`).
+    ///
+    /// The qualifier is a package (by name) or an entered definition (by
+    /// address), reached through any `SHAREDtype` links. Either way it must be
+    /// a package, class, trait or object that encloses `symbol`, or is
+    /// `symbol` itself; anything else is `InvalidQualifier`. A package is
+    /// found among the owners of `symbol`, never entered, so an untrusted name
+    /// cannot create a package symbol.
+    pub(crate) fn resolve_qualifier(
+        &self,
+        ast: &AstView<'_>,
+        at: u32,
+        symbol: SymbolId,
+        qualifier: QualifierRef,
+        depth: usize,
+    ) -> Result<SymbolId, UnpickleError> {
+        let invalid = UnpickleError::InvalidQualifier { definition: at };
+        // The definition itself, then each enclosing owner, innermost first.
+        let mut chain = vec![symbol];
+        while let Some(owner) = self
+            .store
+            .symbols
+            .get(*chain.last().unwrap_or(&symbol))
+            .owner
+        {
+            chain.push(owner);
+        }
+
+        match qualifier {
+            QualifierRef::Package(name) => {
+                let path = qualified_segments(self.file.names(), name)?;
+                chain
+                    .into_iter()
+                    .find(|candidate| {
+                        self.store.symbols.get(*candidate).kind == SymbolKind::Package
+                            && self.package_path(*candidate) == path
+                    })
+                    .ok_or(invalid)
+            }
+            QualifierRef::Symbol(definition) => {
+                let target = self.index.symbol_at(definition).ok_or(
+                    UnpickleError::InvalidReferenceTarget {
+                        from: at,
+                        to: definition,
+                    },
+                )?;
+                let eligible = matches!(
+                    self.store.symbols.get(target).kind,
+                    SymbolKind::Package
+                        | SymbolKind::Class
+                        | SymbolKind::Trait
+                        | SymbolKind::Object
+                        | SymbolKind::ModuleClass
+                );
+                if eligible && chain.contains(&target) {
+                    Ok(target)
+                } else {
+                    Err(invalid)
+                }
+            }
+            QualifierRef::Shared(target) => {
+                // A chain of shared links is at most a few deep; a longer one
+                // is a cycle.
+                if depth > MAX_SHARED_DEPTH {
+                    return Err(UnpickleError::InvalidReferenceTarget {
+                        from: at,
+                        to: target,
+                    });
+                }
+                let next = match ast.tree_at(target, at)? {
+                    RawTree::Leaf(term) => match (term.tag, term.value) {
+                        (TYPEREFPKG_TAG, TermValue::NameRef(name)) => QualifierRef::Package(name),
+                        (SHAREDTYPE_TAG, TermValue::AstRef(next)) => QualifierRef::Shared(next),
+                        (tag, _) => return Err(UnpickleError::UnsupportedQualifier { tag }),
+                    },
+                    RawTree::NatAst {
+                        tag: TYPEREFSYMBOL_TAG,
+                        value: definition,
+                        ..
+                    } => QualifierRef::Symbol(definition),
+                    RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => {
+                        return Err(UnpickleError::UnsupportedQualifier { tag });
+                    }
+                    RawTree::LengthNode(node) => {
+                        return Err(UnpickleError::UnsupportedQualifier { tag: node.tag });
+                    }
+                };
+                self.resolve_qualifier(ast, at, symbol, next, depth + 1)
+            }
+        }
+    }
+
+    /// The path of a package symbol, outermost segment first.
+    fn package_path(&self, package: SymbolId) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut current = Some(package);
+        while let Some(symbol) = current {
+            let symbol = self.store.symbols.get(symbol);
+            if symbol.kind != SymbolKind::Package {
+                break;
+            }
+            path.push(self.store.names.resolve(symbol.name.text()).to_owned());
+            current = symbol.owner;
+        }
+        path.reverse();
+        path
     }
 
     fn enter_class_scope(&mut self, class: SymbolId) -> Result<(), UnpickleError> {
         let scope = self.store.scopes.alloc(Scope::new(Some(class)));
         self.index.insert_scope(class, scope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::store::SemanticStore;
+
+    const FOO: &[u8] = include_bytes!("../tests/fixtures/semantic/Foo.tasty");
+    const OUTER: &[u8] = include_bytes!("../tests/fixtures/semantic/Outer.tasty");
+
+    // Foo.tasty (absolute addresses, pinned by `tests/semantic_fixture.rs`):
+    // 4 = class Foo, 24 = its parameter `x` (a member field), 70 = method
+    // `bar`, 27 = a type node whose payload starts at 28 (not a node start).
+    const FOO_CLASS: u32 = 4;
+    const FOO_X: u32 = 24;
+    const FOO_BAR: u32 = 70;
+    const INSIDE_A_NODE: u32 = 28;
+
+    /// Runs `check` on an unpickler that has entered the file's symbols.
+    fn with_entered<R>(
+        bytes: &[u8],
+        check: impl FnOnce(&mut TastyUnpickler<'_, '_, '_>, &AstView<'_>) -> R,
+    ) -> R {
+        let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(bytes).unwrap();
+        let mut store = SemanticStore::new();
+        let mut unpickler = TastyUnpickler::new(&file, &mut store);
+        unpickler.enter_symbols().unwrap();
+        let ast = AstView::new(&file).expect("the AST view builds");
+        check(&mut unpickler, &ast)
+    }
+
+    fn resolve(
+        unpickler: &TastyUnpickler<'_, '_, '_>,
+        ast: &AstView<'_>,
+        definition: u32,
+        qualifier: QualifierRef,
+    ) -> Result<SymbolId, UnpickleError> {
+        let symbol = unpickler.index.symbol_at(definition).expect("definition");
+        unpickler.resolve_qualifier(ast, definition, symbol, qualifier, 0)
+    }
+
+    /// The address of the definition with tag `tag` named `text` in the file.
+    fn definition_named(bytes: &[u8], tag: u8, text: &str) -> u32 {
+        let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        index
+            .iter()
+            .filter(|node| node.tag == tag)
+            .find(|node| {
+                let name = node.decode_definition().unwrap().name();
+                wire_name(file.names(), name).is_ok_and(|found| found == text)
+            })
+            .map(|node| u32::try_from(node.offset).unwrap())
+            .unwrap_or_else(|| panic!("no definition named {text}"))
+    }
+
+    // --- shared-reference targets are validated before decoding ---
+
+    #[test]
+    fn a_shared_qualifier_pointing_into_the_middle_of_a_node_is_an_invalid_target() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(
+                unpickler,
+                ast,
+                FOO_CLASS,
+                QualifierRef::Shared(INSIDE_A_NODE),
+            )
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget {
+                from: FOO_CLASS,
+                to: INSIDE_A_NODE
+            })
+        );
+    }
+
+    #[test]
+    fn a_shared_qualifier_pointing_past_the_ast_section_is_an_invalid_target() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_CLASS, QualifierRef::Shared(1_000_000))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget {
+                from: FOO_CLASS,
+                to: 1_000_000
+            })
+        );
+    }
+
+    #[test]
+    fn a_shared_qualifier_at_the_largest_address_is_an_invalid_target_not_an_overflow() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_CLASS, QualifierRef::Shared(u32::MAX))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget {
+                from: FOO_CLASS,
+                to: u32::MAX
+            })
+        );
+    }
+
+    // --- a symbol qualifier must be an enclosing class, trait, object or package ---
+
+    #[test]
+    fn a_symbol_qualifier_may_be_the_enclosing_class() {
+        let (resolved, class) = with_entered(FOO, |unpickler, ast| {
+            (
+                resolve(unpickler, ast, FOO_X, QualifierRef::Symbol(FOO_CLASS)),
+                unpickler.index.symbol_at(FOO_CLASS).unwrap(),
+            )
+        });
+
+        assert_eq!(resolved, Ok(class));
+    }
+
+    #[test]
+    fn a_symbol_qualifier_may_be_the_definition_itself() {
+        let (resolved, class) = with_entered(FOO, |unpickler, ast| {
+            (
+                resolve(unpickler, ast, FOO_CLASS, QualifierRef::Symbol(FOO_CLASS)),
+                unpickler.index.symbol_at(FOO_CLASS).unwrap(),
+            )
+        });
+
+        assert_eq!(resolved, Ok(class));
+    }
+
+    #[test]
+    fn a_symbol_qualifier_that_is_a_method_is_rejected() {
+        // `bar` is a definition with a symbol, but not a possible qualifier.
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_X, QualifierRef::Symbol(FOO_BAR))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidQualifier { definition: FOO_X })
+        );
+    }
+
+    #[test]
+    fn a_symbol_qualifier_that_is_the_definition_itself_but_not_class_like_is_rejected() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_BAR, QualifierRef::Symbol(FOO_BAR))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidQualifier {
+                definition: FOO_BAR
+            })
+        );
+    }
+
+    #[test]
+    fn a_symbol_qualifier_naming_an_address_with_no_symbol_is_an_invalid_target() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_X, QualifierRef::Symbol(INSIDE_A_NODE))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget {
+                from: FOO_X,
+                to: INSIDE_A_NODE
+            })
+        );
+    }
+
+    #[test]
+    fn a_nested_class_does_not_enclose_the_class_it_is_nested_in() {
+        // `class Outer { class Inner ... }`: `Inner` is inside `Outer`, so it
+        // cannot qualify `Outer`.
+        let (outer, inner) = (
+            definition_named(OUTER, TYPEDEF_TAG, "Outer"),
+            definition_named(OUTER, TYPEDEF_TAG, "Inner"),
+        );
+
+        let result = with_entered(OUTER, |unpickler, ast| {
+            resolve(unpickler, ast, outer, QualifierRef::Symbol(inner))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidQualifier { definition: outer })
+        );
+    }
+
+    #[test]
+    fn a_class_two_levels_out_may_qualify_a_nested_definition() {
+        // `withinOuter` is in `Inner`, which is in `Outer`.
+        let (outer, member) = (
+            definition_named(OUTER, TYPEDEF_TAG, "Outer"),
+            definition_named(OUTER, DEFDEF_TAG, "withinOuter"),
+        );
+
+        let (resolved, class) = with_entered(OUTER, |unpickler, ast| {
+            (
+                resolve(unpickler, ast, member, QualifierRef::Symbol(outer)),
+                unpickler.index.symbol_at(outer).unwrap(),
+            )
+        });
+
+        assert_eq!(resolved, Ok(class));
+    }
+
+    // --- a package qualifier must be an enclosing package, and is never entered ---
+
+    // Name-table indexes in Foo.tasty: 5 = `me.cytrowski.tastyfixtures`,
+    // 7 = `me.cytrowski.tastyfixtures.semantic`, 11 = `scala`.
+    const OUTER_PACKAGE_NAME: u32 = 5;
+    const OWN_PACKAGE_NAME: u32 = 7;
+    const SCALA_NAME: u32 = 11;
+
+    #[test]
+    fn a_package_qualifier_may_name_the_units_own_package() {
+        let (resolved, package) = with_entered(FOO, |unpickler, ast| {
+            (
+                resolve(
+                    unpickler,
+                    ast,
+                    FOO_CLASS,
+                    QualifierRef::Package(OWN_PACKAGE_NAME),
+                ),
+                unpickler.index.symbol_at(0).unwrap(),
+            )
+        });
+
+        assert_eq!(resolved, Ok(package));
+    }
+
+    #[test]
+    fn a_package_qualifier_may_name_an_outer_package() {
+        let (resolved, own) = with_entered(FOO, |unpickler, ast| {
+            (
+                resolve(
+                    unpickler,
+                    ast,
+                    FOO_CLASS,
+                    QualifierRef::Package(OUTER_PACKAGE_NAME),
+                ),
+                unpickler.index.symbol_at(0).unwrap(),
+            )
+        });
+
+        let outer = resolved.expect("an enclosing package");
+        assert_ne!(outer, own);
+    }
+
+    #[test]
+    fn a_package_that_does_not_enclose_the_definition_is_rejected() {
+        let result = with_entered(FOO, |unpickler, ast| {
+            resolve(unpickler, ast, FOO_CLASS, QualifierRef::Package(SCALA_NAME))
+        });
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::InvalidQualifier {
+                definition: FOO_CLASS
+            })
+        );
     }
 }

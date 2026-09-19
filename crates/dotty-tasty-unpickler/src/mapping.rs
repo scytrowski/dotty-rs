@@ -18,11 +18,16 @@ use dotty_core::symbols::{SymbolFlags, SymbolKind, Visibility};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, CASE_TAG, DEFDEF_TAG, DefinitionTail, ERASED_TAG, EXTENSION_TAG, FINAL_TAG,
     GIVEN_TAG, IMPLICIT_TAG, INLINE_TAG, LAZY_TAG, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, OPAQUE_TAG,
-    OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PRIVATE_TAG, PROTECTED_TAG, SEALED_TAG, STATIC_TAG,
-    SYNTHETIC_TAG, TRAIT_TAG, TRANSPARENT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+    OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PRIVATE_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG,
+    RawTree, SEALED_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, TRAIT_TAG, TRANSPARENT_TAG,
+    TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
+
+/// `TYPEREFpkg` (`docs/tasty-format-3.9.0.md`, tag 65). `dotty-tasty` does
+/// not export a constant for this tag (issue #15).
+pub(crate) const TYPEREFPKG_TAG: u8 = 65;
 
 /// The name TASTy gives every constructor.
 const CONSTRUCTOR_NAME: &str = "<init>";
@@ -42,6 +47,30 @@ pub(crate) struct DeclaredModifiers {
     pub is_trait: bool,
     /// `LOCAL`: the object-private marker, as in `private[this]`.
     pub is_local: bool,
+    /// A `private[Q]` / `protected[Q]` modifier. `visibility` stays `Public`
+    /// in that case: the qualifier can only be resolved to a symbol once the
+    /// definition's own symbol exists, so the enter pass sets the final
+    /// visibility then.
+    pub qualified: Option<QualifiedAccess>,
+}
+
+/// A qualified access modifier whose qualifier is not resolved yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QualifiedAccess {
+    /// `protected[Q]` rather than `private[Q]`.
+    pub protected: bool,
+    pub qualifier: QualifierRef,
+}
+
+/// The qualifier `Q` of `private[Q]`, as far as the modifier itself says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QualifierRef {
+    /// `TYPEREFpkg`: a package named directly (zero-based name reference).
+    Package(u32),
+    /// `SHAREDtype`: a tree shared elsewhere in the AST, by address.
+    Shared(u32),
+    /// `TYPEREFsymbol`: an enclosing definition, by the address of its node.
+    Symbol(u32),
 }
 
 impl DeclaredModifiers {
@@ -52,12 +81,15 @@ impl DeclaredModifiers {
         is_object: false,
         is_trait: false,
         is_local: false,
+        qualified: None,
     };
 
     /// Reads the modifiers out of a definition's tail.
     ///
-    /// A qualified access modifier (`private[X]`, `protected[X]`) is an
-    /// error rather than being widened or narrowed to a plain visibility.
+    /// A qualified access modifier is recorded in `qualified`, never widened
+    /// or narrowed to a plain visibility. A qualifier whose tree shape is not
+    /// a package name or a shared reference is
+    /// `UnpickleError::UnsupportedQualifier`.
     pub fn from_tail(tail: &[DefinitionTail<'_>]) -> Result<Self, UnpickleError> {
         let mut modifiers = Self::NONE;
         let mut private = false;
@@ -78,7 +110,10 @@ impl DeclaredModifiers {
                     }
                 },
                 DefinitionTail::QualifiedModifier(modifier) => {
-                    return Err(UnpickleError::UnsupportedQualifiedModifier { tag: modifier.tag });
+                    modifiers.qualified = Some(QualifiedAccess {
+                        protected: modifier.tag == PROTECTEDQUALIFIED_TAG,
+                        qualifier: qualifier_ref(&modifier.child)?,
+                    });
                 }
                 DefinitionTail::Annotation(_) => {}
             }
@@ -99,6 +134,26 @@ impl DeclaredModifiers {
     /// `private[this]`: private and object-private at once.
     pub fn is_private_this(&self) -> bool {
         self.visibility == Visibility::Private && self.is_local
+    }
+}
+
+/// Reads the qualifier tree of a qualified access modifier.
+fn qualifier_ref(tree: &RawTree<'_>) -> Result<QualifierRef, UnpickleError> {
+    match tree {
+        RawTree::Leaf(term) => match (term.tag, &term.value) {
+            (TYPEREFPKG_TAG, TermValue::NameRef(name)) => Ok(QualifierRef::Package(*name)),
+            (SHAREDTYPE_TAG, TermValue::AstRef(address)) => Ok(QualifierRef::Shared(*address)),
+            (tag, _) => Err(UnpickleError::UnsupportedQualifier { tag }),
+        },
+        RawTree::NatAst {
+            tag: TYPEREFSYMBOL_TAG,
+            value,
+            ..
+        } => Ok(QualifierRef::Symbol(*value)),
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => {
+            Err(UnpickleError::UnsupportedQualifier { tag: *tag })
+        }
+        RawTree::LengthNode(node) => Err(UnpickleError::UnsupportedQualifier { tag: node.tag }),
     }
 }
 
@@ -213,7 +268,7 @@ fn is_class_like(kind: SymbolKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_tasty::tasty::{AstChildNode, PRIVATEQUALIFIED_TAG, PROTECTEDQUALIFIED_TAG, RawTree};
+    use dotty_tasty::tasty::{AstChildNode, PRIVATEQUALIFIED_TAG, SimpleTerm, TERMREFPKG_TAG};
 
     fn tail(tags: &[u8]) -> Vec<DefinitionTail<'static>> {
         tags.iter().copied().map(DefinitionTail::Modifier).collect()
@@ -290,47 +345,115 @@ mod tests {
         assert!(!modifiers(&[PRIVATE_TAG]).is_private_this());
     }
 
-    #[test]
-    fn a_qualified_private_modifier_is_an_error() {
-        let qualified = DefinitionTail::QualifiedModifier(AstChildNode {
-            tag: PRIVATEQUALIFIED_TAG,
-            child: RawTree::Leaf(
-                dotty_tasty::tasty::SimpleTerm::new(
-                    dotty_tasty::tasty::TERMREFPKG_TAG,
-                    dotty_tasty::tasty::TermValue::NameRef(1),
-                )
-                .unwrap(),
-            ),
+    fn qualified(tag: u8, leaf_tag: u8, value: TermValue) -> DefinitionTail<'static> {
+        DefinitionTail::QualifiedModifier(AstChildNode {
+            tag,
+            child: RawTree::Leaf(SimpleTerm::new(leaf_tag, value).unwrap()),
             offset: 0,
-        });
+        })
+    }
+
+    #[test]
+    fn private_with_a_package_qualifier_is_recorded_unresolved() {
+        let tail = [qualified(
+            PRIVATEQUALIFIED_TAG,
+            TYPEREFPKG_TAG,
+            TermValue::NameRef(7),
+        )];
+
+        let modifiers = DeclaredModifiers::from_tail(&tail).unwrap();
 
         assert_eq!(
-            DeclaredModifiers::from_tail(&[qualified]),
-            Err(UnpickleError::UnsupportedQualifiedModifier {
-                tag: PRIVATEQUALIFIED_TAG
+            modifiers.qualified,
+            Some(QualifiedAccess {
+                protected: false,
+                qualifier: QualifierRef::Package(7)
+            })
+        );
+        assert_eq!(modifiers.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn protected_with_a_shared_qualifier_is_recorded_unresolved() {
+        let tail = [qualified(
+            PROTECTEDQUALIFIED_TAG,
+            SHAREDTYPE_TAG,
+            TermValue::AstRef(21),
+        )];
+
+        let modifiers = DeclaredModifiers::from_tail(&tail).unwrap();
+
+        assert_eq!(
+            modifiers.qualified,
+            Some(QualifiedAccess {
+                protected: true,
+                qualifier: QualifierRef::Shared(21)
             })
         );
     }
 
     #[test]
-    fn a_qualified_protected_modifier_is_an_error() {
-        let qualified = DefinitionTail::QualifiedModifier(AstChildNode {
-            tag: PROTECTEDQUALIFIED_TAG,
-            child: RawTree::Leaf(
-                dotty_tasty::tasty::SimpleTerm::new(
-                    dotty_tasty::tasty::TERMREFPKG_TAG,
-                    dotty_tasty::tasty::TermValue::NameRef(1),
-                )
-                .unwrap(),
-            ),
+    fn a_direct_symbol_reference_qualifier_names_the_definition_address() {
+        let tail = [DefinitionTail::QualifiedModifier(AstChildNode {
+            tag: PRIVATEQUALIFIED_TAG,
+            child: RawTree::NatAst {
+                tag: TYPEREFSYMBOL_TAG,
+                offset: 0,
+                value: 4,
+                child: Box::new(RawTree::Leaf(
+                    SimpleTerm::new(TERMREFPKG_TAG, TermValue::NameRef(1)).unwrap(),
+                )),
+            },
             offset: 0,
-        });
+        })];
 
         assert_eq!(
-            DeclaredModifiers::from_tail(&[qualified]),
-            Err(UnpickleError::UnsupportedQualifiedModifier {
-                tag: PROTECTEDQUALIFIED_TAG
+            DeclaredModifiers::from_tail(&tail).unwrap().qualified,
+            Some(QualifiedAccess {
+                protected: false,
+                qualifier: QualifierRef::Symbol(4)
             })
+        );
+    }
+
+    #[test]
+    fn no_qualified_modifier_records_no_qualifier() {
+        assert_eq!(modifiers(&[PRIVATE_TAG]).qualified, None);
+    }
+
+    #[test]
+    fn a_qualifier_of_another_leaf_shape_is_unsupported() {
+        let tail = [qualified(
+            PRIVATEQUALIFIED_TAG,
+            TERMREFPKG_TAG,
+            TermValue::NameRef(1),
+        )];
+
+        assert_eq!(
+            DeclaredModifiers::from_tail(&tail),
+            Err(UnpickleError::UnsupportedQualifier {
+                tag: TERMREFPKG_TAG
+            })
+        );
+    }
+
+    #[test]
+    fn a_qualifier_that_is_a_wrapped_tree_is_unsupported() {
+        let tail = [DefinitionTail::QualifiedModifier(AstChildNode {
+            tag: PRIVATEQUALIFIED_TAG,
+            child: RawTree::Ast {
+                tag: 90,
+                offset: 0,
+                child: Box::new(RawTree::Leaf(
+                    SimpleTerm::new(TYPEREFPKG_TAG, TermValue::NameRef(1)).unwrap(),
+                )),
+            },
+            offset: 0,
+        })];
+
+        assert_eq!(
+            DeclaredModifiers::from_tail(&tail),
+            Err(UnpickleError::UnsupportedQualifier { tag: 90 })
         );
     }
 
