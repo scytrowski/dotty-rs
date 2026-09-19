@@ -2,16 +2,16 @@
 
 use std::rc::Rc;
 
-use dotty_core::Definitions;
 use dotty_core::ids::TypeId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
+use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
 use crate::ast_view::AstView;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
-use crate::packages::{ScopeJournal, TastyPackages};
+use crate::packages::ScopeJournal;
 
 /// Interprets one TASTy file into a `SemanticStore`.
 ///
@@ -23,7 +23,7 @@ use crate::packages::{ScopeJournal, TastyPackages};
 ///
 /// The store is borrowed mutably for the unpickler's lifetime, and one
 /// unpickler enters one file. To enter several files into one store, carry the
-/// [`TastyPackages`] registry from one unpickler to the next
+/// [`Packages`] registry from one unpickler to the next
 /// ([`with_packages`](Self::with_packages), [`into_parts`](Self::into_parts)):
 /// they then share one symbol and one scope for each package they have in
 /// common. Without it each file gets its own symbols for a shared package.
@@ -34,7 +34,7 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) definitions: Definitions,
     pub(crate) origin: SymbolOrigin,
     pub(crate) index: TastySemanticIndex,
-    pub(crate) packages: TastyPackages,
+    pub(crate) packages: Packages,
     /// Declarations made into scopes during the current `enter_symbols`.
     pub(crate) scope_journal: ScopeJournal,
     /// The file's AST view, built on first use and shared by both passes.
@@ -54,7 +54,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         store: &'store mut SemanticStore,
         definitions: Definitions,
     ) -> Self {
-        Self::with_packages(file, store, definitions, TastyPackages::new())
+        Self::with_packages(file, store, definitions, Packages::new())
     }
 
     /// Like [`new`](Self::new), but reuses the package symbols and scopes
@@ -64,7 +64,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         file: &'file TastyFile<'bytes>,
         store: &'store mut SemanticStore,
         definitions: Definitions,
-        packages: TastyPackages,
+        packages: Packages,
     ) -> Self {
         let origin = SymbolOrigin::Tasty(store.origins.register_tasty());
         Self {
@@ -96,7 +96,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
 
     /// Consumes the unpickler, keeping the index for later passes and the
     /// package registry to hand to the unpickler of the next unit.
-    pub fn into_parts(self) -> (TastySemanticIndex, TastyPackages) {
+    pub fn into_parts(self) -> (TastySemanticIndex, Packages) {
         (self.index, self.packages)
     }
 
@@ -123,9 +123,9 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             for &(scope, symbol) in &self.scope_journal {
                 self.store.scopes.get_mut(scope).remove(symbol);
             }
+            self.packages.roll_back_to(self.store, packages);
             self.store.rollback_to(checkpoint);
             self.index = index;
-            self.packages.roll_back_to(packages);
             self.scope_journal.clear();
             return Err(error);
         }

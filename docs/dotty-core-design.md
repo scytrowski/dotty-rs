@@ -1303,6 +1303,23 @@ directly, for the same reason `[BLOCKER 2]` removed `Symbol.declarations`: it
 would create a second, potentially-stale source of truth alongside the
 tree's own `ty`.
 
+### 9.1 Package identities (`packages.rs`)
+
+`Packages` is the session's package registry, one per `SemanticStore`, shared
+by every adapter (source frontend, TASTy unpickler, classfile loader) so the
+same path is the same `SymbolId` whichever saw it first. Contract:
+
+- one `SymbolKind::Package` symbol per path. Dotty's package term plus
+  package module class are deliberately collapsed, so `TYPEREFpkg` and
+  `TERMREFpkg` share one identity and `Type::ThisType` may name a package;
+- named in `Namespace::Term`, after its own segment, `SymbolInfo::Missing`;
+- an explicit root (empty path): empty name, no owner, own scope, also the
+  unnamed package; every named package's owner chain ends there and each
+  package is declared in its owner's scope;
+- a shared package keeps the origin of the adapter that entered it first;
+- transactional: `mark` / `roll_back_to` forget newer packages and
+  undeclare them from surviving owners.
+
 ## 10. `store/semantic_store.rs`
 
 `[MAJOR 5]` `SemanticContext` is renamed to `SemanticStore`. The prior name

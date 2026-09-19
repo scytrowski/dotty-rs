@@ -16,6 +16,7 @@ pub mod definitions;
 pub mod diagnostics;
 pub mod ids;
 pub mod names;
+pub mod packages;
 pub mod source;
 pub mod store;
 pub mod symbols;
@@ -36,6 +37,8 @@ pub mod core {
     pub use super::ids::*;
     pub use super::names;
     pub use super::names::*;
+    pub use super::packages;
+    pub use super::packages::*;
     pub use super::source;
     pub use super::source::*;
     pub use super::store;
@@ -56,6 +59,7 @@ pub use ids::{
     TastyOriginId, TreeId, TypeId,
 };
 pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
+pub use packages::{EnteredPackage, Packages};
 pub use source::{
     LineIndex, SourceSpan, SourceText, SourceTextError, Span, SpanError, TextRange, TextRangeError,
     is_line_break_char,

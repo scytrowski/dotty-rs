@@ -92,13 +92,18 @@ impl TastyUnpickler<'_, '_, '_> {
         let path_name = package_path_name(ast, &package.path, at)?;
         let path = qualified_segments(self.file.names(), path_name)?;
 
-        let symbol = self.packages.enter(
-            self.store,
-            &mut self.index,
-            &mut self.scope_journal,
-            self.origin,
-            &path,
-        )?;
+        // An empty path names no package.
+        if path.is_empty() {
+            return Err(UnpickleError::InvalidNameReference { reference: 0 });
+        }
+        let chain = self.packages.enter(self.store, self.origin, &path);
+        for package in &chain {
+            self.index.share_scope(package.symbol, package.scope);
+        }
+        let symbol = chain
+            .last()
+            .map(|package| package.symbol)
+            .unwrap_or_else(|| unreachable!("non-empty path"));
         self.index.insert_symbol(at, symbol)?;
 
         for child in ast.children(at) {
@@ -438,7 +443,8 @@ impl TastyUnpickler<'_, '_, '_> {
         let mut current = Some(package);
         while let Some(symbol) = current {
             let symbol = self.store.symbols.get(symbol);
-            if symbol.kind != SymbolKind::Package {
+            // The root package, which has no owner, contributes no segment.
+            if symbol.kind != SymbolKind::Package || symbol.owner.is_none() {
                 break;
             }
             path.push(self.store.names.resolve(symbol.name.text()).to_owned());

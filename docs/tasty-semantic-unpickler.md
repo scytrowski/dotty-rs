@@ -176,7 +176,8 @@ registered origin id are not undone; both are harmless.
 structurally. A package is keyed by its path, so repeated `PACKAGE` nodes
 share one symbol, and the `PACKAGE` node address maps to the innermost
 package. Each package owns a declaration scope and is entered into its
-parent's scope. The outermost package has no owner. A path that is neither a
+parent's scope. The outermost package is owned by the session's explicit root
+package (empty name, no owner). A path that is neither a
 `TERMREFpkg` nor a `SHAREDtype` link to one (below) is
 `UnpickleError::UnsupportedPackagePath`.
 
@@ -190,7 +191,7 @@ treated as a cycle, and a target that is not a `TERMREFpkg` is
 only a direct `TERMREFpkg`, because resolving a link needs the whole ASTs
 payload, which the node does not have.
 
-Package symbols are shared between units through a `TastyPackages` registry
+Package symbols are shared between units through a `dotty_core::Packages` registry
 (path to symbol and scope) that the caller carries from one unpickler to the
 next: `TastyUnpickler::with_packages` takes it and `into_parts` returns it
 with the unit's index. A second unit in the same package reuses the symbol,
@@ -204,10 +205,17 @@ The caller owns the session and passes the store's `Definitions` (bootstrapped
 once) to `new`/`with_packages`. The unpickler never bootstraps, and every
 reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,
 `TERMREFpkg`) reuses `definitions.no_prefix`, so the same reference is the same
-`TypeId` whichever adapter decoded it. Placement is a caller-side decision on purpose: the classloader
-(Milestone 6) owns the store and the order units are loaded in, and its own
-`.class` package registry (issue #5, no scopes yet) has to be reconciled with
-this one there, not here.
+`TypeId` whichever adapter decoded it.
+
+The package model is a session contract of `dotty-core` (`docs/dotty-core-design.md`
+§9.1), not the unpickler's: one term-named `Package` symbol per path with an
+explicit root, shared with the classloader, whose `PackageRegistry` now enters
+packages through the same `dotty_core::Packages`. Dotty's package term and
+module class are collapsed on purpose, so `TYPEREFpkg` and `TERMREFpkg` are one
+identity and `THIS` may name a package. `LoadingSession::with_packages` /
+`into_packages` carry the registry between the two adapters; the convergence
+tests live in `dotty-classloader`. Which adapter runs first, and who owns the
+registry between them, stays a caller decision until Milestone 6.
 
 The semantic index differs from the sketch of the project document in two
 deliberate ways. Scopes are keyed by the owning `SymbolId`, not by address,
@@ -283,7 +291,7 @@ Forms decoded:
   and the argument of `THIS` a class, trait or module class; otherwise it is
   `InvalidReferenceKind { from, to }`.
 - `TYPEREFpkg` / `TERMREFpkg` name a package by path. They resolve only to a
-  package already in the `TastyPackages` registry, and never create one, since
+  package already in the `dotty_core::Packages` registry, and never create one, since
   the name is untrusted; any other package is `UnresolvedPackage`. Resolving
   packages outside the entered units belongs to the resolver.
 - `THIS` is decoded only because it is the prefix of most real references. Its

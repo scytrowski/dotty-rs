@@ -1,15 +1,13 @@
 //! Package symbols and scopes shared between TASTy units entered into one
 //! store (issue #12), over real Scala 3.9.0 compiler output.
 
-use dotty_core::Definitions;
 use dotty_core::ids::SymbolId;
 use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolKind;
+use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::{
-    TastyPackages, TastySemanticIndex, TastyUnpickler, UnpickleError,
-};
+use dotty_tasty_unpickler::tasty_unpickler::{TastySemanticIndex, TastyUnpickler, UnpickleError};
 
 const FOO: &[u8] = include_bytes!("fixtures/semantic/Foo.tasty");
 const OVERLOADS: &[u8] = include_bytes!("fixtures/semantic/Overloads.tasty");
@@ -25,8 +23,8 @@ fn enter_shared(
     bytes: &[u8],
     store: &mut SemanticStore,
     definitions: Definitions,
-    packages: TastyPackages,
-) -> (TastySemanticIndex, TastyPackages) {
+    packages: Packages,
+) -> (TastySemanticIndex, Packages) {
     let file = TastyFile::parse_scala_3_9(bytes).unwrap();
     let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
     unpickler.enter_symbols().unwrap();
@@ -42,7 +40,7 @@ fn two_units_share_one_symbol_for_their_common_package() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
 
-    let (foo, packages) = enter_shared(FOO, &mut store, definitions, TastyPackages::new());
+    let (foo, packages) = enter_shared(FOO, &mut store, definitions, Packages::new());
     let (overloads, packages) = enter_shared(OVERLOADS, &mut store, definitions, packages);
 
     let package = foo.symbol_at(PACKAGE_ADDRESS).unwrap();
@@ -58,7 +56,7 @@ fn both_units_see_the_one_package_scope_holding_both_units_members() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
 
-    let (foo, packages) = enter_shared(FOO, &mut store, definitions, TastyPackages::new());
+    let (foo, packages) = enter_shared(FOO, &mut store, definitions, Packages::new());
     let (overloads, _) = enter_shared(OVERLOADS, &mut store, definitions, packages);
 
     let package = foo.symbol_at(PACKAGE_ADDRESS).unwrap();
@@ -77,7 +75,7 @@ fn every_enclosing_package_is_shared_too() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
 
-    let (foo, packages) = enter_shared(FOO, &mut store, definitions, TastyPackages::new());
+    let (foo, packages) = enter_shared(FOO, &mut store, definitions, Packages::new());
     let (overloads, _) = enter_shared(OVERLOADS, &mut store, definitions, packages);
 
     let chain = |index: &TastySemanticIndex| {
@@ -97,8 +95,8 @@ fn units_entered_without_a_shared_registry_get_their_own_package() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
 
-    let (foo, _) = enter_shared(FOO, &mut store, definitions, TastyPackages::new());
-    let (overloads, _) = enter_shared(OVERLOADS, &mut store, definitions, TastyPackages::new());
+    let (foo, _) = enter_shared(FOO, &mut store, definitions, Packages::new());
+    let (overloads, _) = enter_shared(OVERLOADS, &mut store, definitions, Packages::new());
 
     assert_ne!(
         foo.symbol_at(PACKAGE_ADDRESS),
@@ -118,8 +116,7 @@ fn late_failing_foo() -> Vec<u8> {
 fn a_failed_unit_leaves_a_shared_package_as_the_earlier_unit_left_it() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
-    let (overloads, packages) =
-        enter_shared(OVERLOADS, &mut store, definitions, TastyPackages::new());
+    let (overloads, packages) = enter_shared(OVERLOADS, &mut store, definitions, Packages::new());
     let package = overloads.symbol_at(PACKAGE_ADDRESS).unwrap();
     let scope = overloads.scope_of(package).unwrap();
     let foo_name = type_name(&mut store, "Foo");

@@ -1,95 +1,68 @@
 use crate::binary_name::BinaryName;
-use dotty_core::{
-    Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
-    SymbolLinks, SymbolOrigin, Visibility,
-};
-use std::collections::HashMap;
+use dotty_core::{Packages, SemanticStore, SymbolId, SymbolOrigin};
 
-/// A hierarchical package registry: one stable [`SymbolId`] per package
-/// *segment* (`java/util` is `<root> -> java -> util`, three symbols, not
-/// one), reused across repeated loads.
+/// The classloader's view of the session's package registry.
 ///
-/// Each package symbol's `owner` is its immediately enclosing package —
-/// `java/util`'s owner is `java`'s symbol, whose own owner is the root/
-/// unnamed-package symbol (`owner: None`) — the same owner-chain shape
-/// `docs/classloader.md`'s architecture expects everywhere else. A
-/// package symbol's own `name` is just its segment (`"util"`, not
-/// `"java/util"`); the full path is only ever reconstructed by walking
-/// `owner`, mirroring how `dotty-core`'s `Symbol` already expects class
-/// members to be found (`Symbol` doc comment: "owner answers who
-/// semantically holds this symbol"). A class with no `/` in its binary
-/// name (the unnamed package) is owned directly by the root symbol, which
-/// doubles as the unnamed package itself — every class has *some* owning
-/// package, even the default one.
-///
-/// Package symbols carry no `SymbolInfo::Complete` (`info` stays
-/// `SymbolInfo::Missing`): unlike a class, a package has no `Type` this
-/// crate's model gives a shape to (no `dotty_core::Type` variant models
-/// "this is a package's own type"), and no code here needs one — the
-/// owner chain alone is enough for `Visibility::Package` and for a
-/// class's `Symbol::owner` to be real and stable.
+/// Package identities are not the classloader's own: they live in
+/// [`dotty_core::Packages`] and follow its contract (one term-named
+/// `SymbolKind::Package` symbol per path, an explicit root that is also the
+/// unnamed package, each package declared in its owner's scope), so a package
+/// entered here and the same path entered by the TASTy unpickler are one
+/// `SymbolId`. A class with no `/` in its binary name is owned directly by
+/// the root.
 #[derive(Debug, Default)]
 pub(crate) struct PackageRegistry {
-    packages: HashMap<String, SymbolId>,
+    packages: Packages,
 }
 
 impl PackageRegistry {
     pub(crate) fn new() -> Self {
-        Self {
-            packages: HashMap::new(),
-        }
+        Self::default()
+    }
+
+    /// Adopts the session-wide registry another adapter has been filling.
+    pub(crate) fn from_packages(packages: Packages) -> Self {
+        Self { packages }
+    }
+
+    /// Hands the session-wide registry back, to give to the next adapter.
+    pub(crate) fn into_packages(self) -> Packages {
+        self.packages
     }
 
     /// Returns `name`'s containing package's `SymbolId` — the deepest
-    /// segment, e.g. `util`'s symbol for `java/util/List` — allocating any
+    /// segment, e.g. `util`'s symbol for `java/util/List` — entering any
     /// not-yet-seen segment along the way, from the root down.
     pub(crate) fn resolve(&mut self, store: &mut SemanticStore, name: &BinaryName) -> SymbolId {
         self.resolve_path(store, name.package_path())
     }
 
     /// The package symbol for `path`, a `/`-joined package path (`"java/util"`),
-    /// allocating any missing segment.
+    /// entering any missing segment.
     pub(crate) fn resolve_package(&mut self, store: &mut SemanticStore, path: &str) -> SymbolId {
         self.resolve_path(store, path)
     }
 
-    /// Resolves (allocating as needed) the package symbol for `path`, a
-    /// `/`-joined package path (`"java/util"`, or `""` for the root/
-    /// unnamed package). Recurses on the parent path first so a package's
-    /// `owner` is always already allocated before the package itself is.
+    /// `path` is a `/`-joined package path, or `""` for the root/unnamed
+    /// package.
     fn resolve_path(&mut self, store: &mut SemanticStore, path: &str) -> SymbolId {
-        if let Some(&id) = self.packages.get(path) {
-            return id;
-        }
-
-        let (owner, segment) = match path.rsplit_once('/') {
-            Some((parent, segment)) => (Some(self.resolve_path(store, parent)), segment),
-            None if path.is_empty() => (None, ""),
-            None => (Some(self.resolve_path(store, "")), path),
+        let segments: Vec<&str> = if path.is_empty() {
+            Vec::new()
+        } else {
+            path.split('/').collect()
         };
-
-        let text = store.names.intern(segment);
-        let package_name = Name::new(text, Namespace::Type);
-        let id = store.symbols.alloc(Symbol {
-            name: package_name,
-            owner,
-            kind: SymbolKind::Package,
-            flags: SymbolFlags::EMPTY,
-            visibility: Visibility::Public,
-            info: SymbolInfo::Missing,
-            origin: SymbolOrigin::Synthetic,
-            annotations: Vec::new(),
-            position: None,
-            links: SymbolLinks::default(),
-        });
-        self.packages.insert(path.to_owned(), id);
-        id
+        self.packages
+            .enter(store, SymbolOrigin::Synthetic, &segments)
+            .last()
+            .map(|package| package.symbol)
+            .expect("entering a path yields at least the root")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::{Namespace, SymbolKind};
 
     #[test]
     fn the_same_package_resolves_to_the_same_symbol_id_on_repeated_loads() {
@@ -185,5 +158,86 @@ mod tests {
             store.symbols.get(lang).owner,
             "java/util and java/lang share the same java owner"
         );
+    }
+
+    /// The other half of the shared contract: the same path entered by the
+    /// TASTy unpickler and by this registry is one symbol, whichever adapter
+    /// entered it first.
+    mod convergence_with_the_tasty_unpickler {
+        use super::*;
+        use dotty_core::Definitions;
+        use dotty_tasty::tasty::TastyFile;
+        use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
+
+        const DISTINCT: &[u8] =
+            include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Distinct.tasty");
+        const PATH: [&str; 4] = ["me", "cytrowski", "tastyfixtures", "semantic"];
+        const SLASHED: &str = "me/cytrowski/tastyfixtures/semantic";
+
+        fn tasty_packages(store: &mut SemanticStore) -> Packages {
+            let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
+            let definitions = Definitions::bootstrap(store);
+            let mut unpickler = TastyUnpickler::new(&file, store, definitions);
+            unpickler.enter_symbols().unwrap();
+            unpickler.into_parts().1
+        }
+
+        #[test]
+        fn a_package_the_unpickler_entered_is_the_one_this_registry_resolves() {
+            let mut store = SemanticStore::new();
+            let tasty = tasty_packages(&mut store);
+            let expected = tasty.symbol(&PATH).unwrap();
+            let entered = tasty.len();
+
+            let mut classfile = PackageRegistry::from_packages(tasty);
+            let resolved = classfile.resolve_package(&mut store, SLASHED);
+
+            assert_eq!(resolved, expected);
+            assert_eq!(classfile.into_packages().len(), entered);
+        }
+
+        #[test]
+        fn a_package_the_classloader_entered_is_the_one_the_unpickler_reuses() {
+            let mut store = SemanticStore::new();
+            let mut classfile = PackageRegistry::new();
+            let expected = classfile.resolve_package(&mut store, SLASHED);
+            let packages = classfile.into_packages();
+
+            let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut unpickler =
+                TastyUnpickler::with_packages(&file, &mut store, definitions, packages);
+            let index = unpickler.enter_symbols().unwrap();
+            let unit_package = index.symbol_at(0).unwrap();
+            let packages = unpickler.into_parts().1;
+
+            assert_eq!(unit_package, expected);
+            assert_eq!(packages.symbol(&PATH), Some(expected));
+            assert_eq!(packages.len(), 4);
+        }
+
+        #[test]
+        fn both_adapters_agree_on_the_root_the_namespace_and_the_owner_chain() {
+            let mut store = SemanticStore::new();
+            let tasty = tasty_packages(&mut store);
+            let tasty_leaf = tasty.symbol(&PATH).unwrap();
+            let mut classfile = PackageRegistry::new();
+            let mut other = SemanticStore::new();
+            let class_leaf = classfile.resolve_package(&mut other, SLASHED);
+
+            for (store, leaf) in [(&store, tasty_leaf), (&other, class_leaf)] {
+                let mut chain = Vec::new();
+                let mut current = Some(leaf);
+                while let Some(symbol) = current {
+                    let symbol = store.symbols.get(symbol);
+                    assert_eq!(symbol.kind, SymbolKind::Package);
+                    assert_eq!(symbol.name.namespace(), Namespace::Term);
+                    chain.push(store.names.resolve(symbol.name.text()).to_owned());
+                    current = symbol.owner;
+                }
+                chain.reverse();
+                assert_eq!(chain, ["", "me", "cytrowski", "tastyfixtures", "semantic"]);
+            }
+        }
     }
 }

@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dotty_core::Definitions;
 use dotty_core::store::SemanticStore;
+use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::{TastyPackages, TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
 /// Every node tag that is a type reference, or a `THIS` prefix.
 const REFERENCE_TAGS: [u8; 10] = [61, 62, 63, 64, 65, 90, 114, 115, 116, 117];
@@ -62,9 +62,9 @@ fn run(
     bytes: &[u8],
     store: &mut SemanticStore,
     definitions: Definitions,
-    packages: TastyPackages,
+    packages: Packages,
     tally: &mut Tally,
-) -> TastyPackages {
+) -> Packages {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
     let addresses: Vec<u32> = {
         let index = file.ast_address_index().unwrap();
@@ -163,7 +163,7 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
             &bytes,
             &mut store,
             definitions,
-            TastyPackages::new(),
+            Packages::new(),
             &mut tally,
         );
     }
@@ -182,7 +182,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         // would have.
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
-        let mut packages = TastyPackages::new();
+        let mut packages = Packages::new();
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {
             let bytes = fs::read(&path).unwrap();

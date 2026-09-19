@@ -219,13 +219,19 @@ symbols; a `.tasty`-backed symbol has no entry (§4.4).
 
 ### 4.2 Packages and ownership
 
-`PackageRegistry` builds one stable `SymbolId` per package *segment*
+Package identities are session identities, not the classloader's own:
+`PackageRegistry` is a thin view over `dotty_core::Packages`, the registry
+every adapter shares (see `docs/dotty-core-design.md` §9.1). One
+term-named `SymbolKind::Package` symbol exists per package *segment*
 (`java/util` is `<root> -> java -> util`, three symbols), reused across
-repeated loads. Each package symbol's `owner` is its immediately
-enclosing package, and its own `name` is just its segment — the full
-path is only ever reconstructed by walking `owner`, the same
-`Symbol::owner` shape everything else in this crate uses. The unnamed
-package doubles as the root (`owner: None`).
+repeated loads and across adapters: a path the TASTy unpickler entered is the
+same `SymbolId` here. Each package symbol's `owner` is its immediately
+enclosing package, its own `name` is just its segment, and it is declared in
+its owner's scope; the full path is only ever reconstructed by walking
+`owner`. The unnamed package is the explicit root (empty name,
+`owner: None`), which owns every top-level package and every top-level class
+with no package. `LoadingSession::with_packages` / `into_packages` hand the
+shared registry to and from the next adapter.
 
 ### 4.3 Nesting
 
