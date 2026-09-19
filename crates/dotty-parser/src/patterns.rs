@@ -151,7 +151,7 @@ where
             let spelling = self.names.resolve(operator.text()).to_owned();
             let precedence = crate::precedence(&spelling);
             let left_associative = !crate::is_right_associative(&spelling);
-            if !can_start_simple_pattern_kind(self.cursor.lookahead(1).kind) {
+            if self.pattern_operand_offset().is_none() {
                 break;
             }
 
@@ -403,10 +403,18 @@ where
         if matches!(spelling, "|" | "@" | "=") {
             return None;
         }
-        if !can_start_simple_pattern_kind(self.cursor.lookahead(1).kind) {
+        if self.pattern_operand_offset().is_none() {
             return None;
         }
         Some(*self.intern_current_term_name().ok()?.as_name())
+    }
+
+    fn pattern_operand_offset(&mut self) -> Option<usize> {
+        let offset = match self.cursor.lookahead(1).kind {
+            TokenKind::Newline | TokenKind::Newlines => 2,
+            _ => 1,
+        };
+        can_start_simple_pattern_kind(self.cursor.lookahead(offset).kind).then_some(offset)
     }
 
     fn current_is_pattern_colon(&self) -> bool {
@@ -625,6 +633,29 @@ mod tests {
             result.ast.get(result.root).kind,
             TreeKind::Alternative(Alternative { ref alternatives })
                 if alternatives.len() == 2
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_newline_after_an_infix_pattern_operator() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "head ::\ntail",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::ColonOp, 5, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(result.diagnostics.is_empty());
     }
