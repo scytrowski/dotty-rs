@@ -74,7 +74,15 @@ where
 
         let (stats, expr) = match trees.pop() {
             Some(expr) => (trees, expr),
-            None => (Vec::new(), self.error_expr(self.current_span())),
+            None => {
+                let expr = self.alloc(
+                    TreeKind::Literal(Literal {
+                        value: Constant::Unit,
+                    }),
+                    Some(self.current_span()),
+                );
+                (Vec::new(), expr)
+            }
         };
         let root = self.alloc(
             TreeKind::Block(Block { stats, expr }),
@@ -1306,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_compilation_unit_still_has_a_block_root_and_error_expression() {
+    fn empty_compilation_unit_uses_a_synthetic_unit_expression() {
         let mut names = NameInterner::new();
         let parser = parser_for("", vec![token(TokenKind::Eof, 0, 0)], &mut names);
 
@@ -1319,8 +1327,42 @@ mod tests {
         assert!(stats.is_empty());
         assert!(matches!(
             result.ast.get(expr).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+            TreeKind::Literal(Literal {
+                value: Constant::Unit
+            })
         ));
+        assert_eq!(
+            result.ast.get(expr).position.unwrap().span().range(),
+            TextRange::new(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn whitespace_only_compilation_unit_uses_a_synthetic_unit_expression() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "\n",
+            vec![token(TokenKind::Newline, 0, 1), token(TokenKind::Eof, 1, 1)],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert!(stats.is_empty());
+        assert!(matches!(
+            result.ast.get(expr).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Unit
+            })
+        ));
+        assert_eq!(
+            result.ast.get(expr).position.unwrap().span().range(),
+            TextRange::new(1, 1).unwrap()
+        );
     }
 
     #[test]
