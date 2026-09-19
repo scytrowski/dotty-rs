@@ -48,9 +48,9 @@ where
                 "expected `then` after if condition",
             );
         }
-        let then_branch = self.expr();
+        let then_branch = self.parse_control_body();
         let else_branch = if self.accept(TokenKind::Keyword(dotty_core::HardKeyword::Else)) {
-            self.expr()
+            self.parse_control_body()
         } else {
             self.synthetic_unit_at(self.last_real_token_end)
         };
@@ -78,9 +78,29 @@ where
                 "expected `do` after while condition",
             );
         }
-        let body = self.expr();
+        let body = self.parse_control_body();
 
         self.alloc_from(mark, TreeKind::While(While { cond, body }))
+    }
+
+    fn parse_control_body(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Indent {
+            return self.parse_indented_block();
+        }
+        self.expr()
+    }
+
+    fn parse_indented_block(&mut self) -> TreeId<Untyped> {
+        self.advance();
+        let mark = self.mark();
+        let (stats, expr) = self.parse_expression_block_body(TokenKind::Outdent);
+        if !self.accept(TokenKind::Outdent) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected an outdent to close an indented block",
+            );
+        }
+        self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
     }
 
     fn parse_control_condition(&mut self, terminator: dotty_core::HardKeyword) -> TreeId<Untyped> {
@@ -1282,6 +1302,82 @@ mod tests {
 
         assert!(matches!(
             parser.ast().get(while_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_indented_if_branch_as_a_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then\n  yes\nelse\n  no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Outdent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Else), 16, 20),
+                token(TokenKind::Indent, 23, 23),
+                token(TokenKind::Identifier, 23, 25),
+                token(TokenKind::Outdent, 25, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::Block(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Block(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_multiple_expressions_in_an_indented_while_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do\n  step\n  next",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Indent, 13, 13),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 20, 24),
+                token(TokenKind::Outdent, 24, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+        let TreeKind::Block(ref block) = parser.ast().get(while_tree.body).kind else {
+            panic!("expected an indented block body");
+        };
+
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
             TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().is_empty());
