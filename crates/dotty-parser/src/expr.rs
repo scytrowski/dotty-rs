@@ -989,6 +989,126 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_an_incomplete_new_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::New(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_incomplete_type_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo[",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::TypeApply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_type_application_without_a_closing_bracket() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo[A",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::TypeApply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_block_without_a_closing_brace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ x",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Block(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_application_without_a_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Apply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_super_without_a_type_qualifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super[",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Super(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_simple_application_with_an_argument() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
