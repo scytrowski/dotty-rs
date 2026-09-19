@@ -219,7 +219,17 @@ packages through the same `dotty_core::Packages`. Dotty's package term and
 module class are collapsed on purpose, so `TYPEREFpkg` and `TERMREFpkg` are one
 identity and `THIS` may name a package. `LoadingSession::with_packages` /
 `into_packages` carry the registry between the two adapters; the convergence
-tests live in `dotty-classloader`. Which adapter runs first, and who owns the
+tests live in `dotty-classloader`.
+
+**Default package.** A unit with no `package` clause is written as a `PACKAGE`
+over `TERMREFpkg <empty>` (real Scala 3.9.0 output:
+`tests/fixtures/semantic/DefaultPackage.scala`, and `scala/package.tasty`). The
+unpickler normalises the wire spelling (`names.rs`, `package_segments`): a
+leading `<empty>` or `<root>` segment is dropped and a bare empty name is the
+root, so the unit's package is the session root, not a package named
+`<empty>`. Its top-level classes are owned by and declared in the root, where
+the classloader also puts a class with no `/`; a name-based reference to a
+default-package class of another unit resolves in the root's scope. Which adapter runs first, and who owns the
 registry between them, stays a caller decision until Milestone 6.
 
 The semantic index differs from the sketch of the project document in two

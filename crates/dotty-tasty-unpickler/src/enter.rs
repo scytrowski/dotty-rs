@@ -29,7 +29,7 @@ use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
     type_def_kind, type_param_kind, val_def_kind,
 };
-use crate::names::{qualified_segments, wire_name};
+use crate::names::{package_segments, wire_name};
 use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
 
@@ -90,12 +90,8 @@ impl TastyUnpickler<'_, '_, '_> {
     ) -> Result<(), UnpickleError> {
         let package = ast.node(at)?.decode_package()?;
         let path_name = package_path_name(ast, &package.path, at)?;
-        let path = qualified_segments(self.file.names(), path_name)?;
-
-        // An empty path names no package.
-        if path.is_empty() {
-            return Err(UnpickleError::InvalidNameReference { reference: 0 });
-        }
+        // A unit in the default package has the empty path: the session root.
+        let path = package_segments(self.file.names(), path_name)?;
         let chain = self.packages.enter(self.store, self.origin, &path);
         for package in &chain {
             self.index.share_scope(package.symbol, package.scope);
@@ -375,7 +371,7 @@ impl TastyUnpickler<'_, '_, '_> {
 
         match qualifier {
             QualifierRef::Package(name) => {
-                let path = qualified_segments(self.file.names(), name)?;
+                let path = package_segments(self.file.names(), name)?;
                 chain
                     .into_iter()
                     .find(|candidate| {

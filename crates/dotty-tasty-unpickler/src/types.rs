@@ -40,7 +40,7 @@ use dotty_tasty::tasty::{
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
 use crate::lookup::{LocalLookup, lookup_member};
-use crate::names::{is_signed, qualified_segments, wire_name};
+use crate::names::{is_signed, package_segments, wire_name};
 use crate::unpickler::TastyUnpickler;
 
 /// The tag and absolute address of a tree's root node.
@@ -279,7 +279,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// resolver, and is an error if it does not know it: a package is never
     /// created here, because a reference name is untrusted.
     fn referenced_package(&mut self, at: u32, name: u32) -> Result<SymbolId, UnpickleError> {
-        let path = qualified_segments(self.file.names(), name)?;
+        let path = package_segments(self.file.names(), name)?;
         let segments: Vec<&str> = path.iter().map(String::as_str).collect();
         if let Some(symbol) = self.packages.symbol(&segments) {
             return Ok(symbol);

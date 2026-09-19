@@ -1314,7 +1314,10 @@ same path is the same `SymbolId` whichever saw it first. Contract:
   `TERMREFpkg` share one identity and `Type::ThisType` may name a package;
 - named in `Namespace::Term`, after its own segment, `SymbolInfo::Missing`;
 - an explicit root (empty path): empty name, no owner, own scope, also the
-  unnamed package; every named package's owner chain ends there and each
+  unnamed package. Dotty has two packages here: `<root>` and, below it, the
+  default package `<empty>` that a unit with no `package` clause lives in. The
+  core collapses them into this one root, as it collapses package term and
+  module class; adapters normalise: `<empty>` and `<root>` are the empty path; every named package's owner chain ends there and each
   package is declared in its owner's scope;
 - a shared package keeps the origin of the adapter that entered it first;
 - transactional: `mark` / `roll_back_to` forget newer packages and

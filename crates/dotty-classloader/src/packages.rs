@@ -216,6 +216,29 @@ mod tests {
             assert_eq!(packages.len(), 4);
         }
 
+        /// A unit with no `package` clause is written against `<empty>`; the
+        /// classloader maps a class with no `/` to the root. They are one symbol.
+        #[test]
+        fn a_default_package_unit_and_a_class_with_no_slash_share_the_root() {
+            const WIDGET: &[u8] =
+                include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Widget.tasty");
+            let mut store = SemanticStore::new();
+            let file = TastyFile::parse_scala_3_9(WIDGET).unwrap();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+            let index = unpickler.enter_symbols().unwrap();
+            let unit_package = index.symbol_at(0).unwrap();
+            let tasty = unpickler.into_parts().1;
+
+            let mut classfile = PackageRegistry::from_packages(tasty);
+            let owner_of_widget =
+                classfile.resolve(&mut store, &BinaryName::from_internal("Widget"));
+
+            assert_eq!(owner_of_widget, unit_package);
+            assert_eq!(store.symbols.get(unit_package).owner, None);
+            assert_eq!(classfile.into_packages().len(), 0);
+        }
+
         #[test]
         fn both_adapters_agree_on_the_root_the_namespace_and_the_owner_chain() {
             let mut store = SemanticStore::new();

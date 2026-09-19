@@ -53,6 +53,34 @@ pub(crate) fn qualified_segments(
     Ok(segments)
 }
 
+/// The segments of a package path, outermost first, in the session's package
+/// model (`dotty_core::Packages`), where the root package is the empty path.
+///
+/// Dotty spells the root package `<root>` and the default (empty) package
+/// `<empty>`, the latter being what a unit with no `package` clause is written
+/// against. The core has one root that is also the unnamed package, so a
+/// leading `<root>` or `<empty>` segment is dropped, and a bare empty name is
+/// the root too: `<empty>` and `""` are `[]`, `<root>.scala` is `["scala"]`.
+pub(crate) fn package_segments(
+    names: &NameTable,
+    reference: u32,
+) -> Result<Vec<String>, UnpickleError> {
+    let mut segments = qualified_segments(names, reference)?;
+    if segments
+        .first()
+        .is_some_and(|first| first == ROOT_PACKAGE || first == EMPTY_PACKAGE)
+    {
+        segments.remove(0);
+    }
+    if segments == [""] {
+        segments.clear();
+    }
+    Ok(segments)
+}
+
+const ROOT_PACKAGE: &str = "<root>";
+const EMPTY_PACKAGE: &str = "<empty>";
+
 fn collect_segments(
     names: &NameTable,
     root: u32,
@@ -422,5 +450,26 @@ mod tests {
             "me.cytrowski.tastyfixtures.semantic"
         );
         assert_eq!(wire_name(file.names(), class.name()).unwrap(), "Foo");
+    }
+
+    #[test]
+    fn the_default_and_root_packages_are_the_empty_path() {
+        let names = table(vec![
+            utf8("<empty>"),
+            utf8("<root>"),
+            utf8("scala"),
+            RawName::Qualified {
+                prefix: 2,
+                selector: 3,
+            },
+            utf8(""),
+        ]);
+
+        assert_eq!(package_segments(&names, 1).unwrap(), Vec::<String>::new());
+        assert_eq!(package_segments(&names, 2).unwrap(), Vec::<String>::new());
+        assert_eq!(package_segments(&names, 4).unwrap(), ["scala"]);
+        assert_eq!(package_segments(&names, 5).unwrap(), Vec::<String>::new());
+        // Only a leading segment is special.
+        assert_eq!(package_segments(&names, 3).unwrap(), ["scala"]);
     }
 }

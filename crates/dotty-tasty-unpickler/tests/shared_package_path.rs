@@ -1,7 +1,7 @@
 //! A `PACKAGE` whose path is a `SHAREDtype` link (issue #29), over the real
 //! `scala3-library/scala/package.tasty`.
 //!
-//! The unit has two `PACKAGE` nodes: `@0` over `<empty>`, and a nested one at
+//! The unit has two `PACKAGE` nodes: `@0` over `<empty>` (the root package), and a nested one at
 //! `@21` whose path is not written out but linked to the `TERMREFpkg("scala")`
 //! leaf at address 9, which sits inside an earlier import.
 
@@ -64,7 +64,11 @@ fn the_unit_with_a_shared_package_path_enters() {
     let nested = index.symbol_at(NESTED_PACKAGE).unwrap();
     assert_eq!(store.symbols.get(nested).kind, SymbolKind::Package);
     assert_eq!(name_of(&store, nested), "scala");
-    assert_eq!(name_of(&store, outer), "<empty>");
+    // `<empty>` is the default package, which the session models as its root:
+    // the `scala` package inside it is owned by the root.
+    assert_eq!(name_of(&store, outer), "");
+    assert_eq!(store.symbols.get(outer).owner, None);
+    assert_eq!(store.symbols.get(nested).owner, Some(outer));
 }
 
 #[test]
