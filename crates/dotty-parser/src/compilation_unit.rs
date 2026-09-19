@@ -43,7 +43,7 @@ where
             let tree = if is_unsupported_start(self.current().kind) {
                 self.parse_unsupported_syntax()
             } else {
-                self.parse_smoke_expr()
+                self.simple_expr()
             };
             trees.push(tree);
 

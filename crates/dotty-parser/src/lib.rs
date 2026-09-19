@@ -4,9 +4,9 @@
 //! deliberately does not depend on the concrete lexer implementation, so
 //! parser tests can use an in-memory [`dotty_core::TokenSource`].
 //!
-//! The handwritten recursive-descent parser is introduced incrementally.
-//! Until its public entry point is added, this crate only establishes the
-//! workspace and dependency boundary.
+//! The handwritten recursive-descent parser is implemented incrementally.
+//! Its public compilation-unit entry point exists, while grammar coverage is
+//! intentionally incomplete.
 
 mod compilation_unit;
 mod context;
@@ -19,6 +19,7 @@ mod names;
 mod parser;
 mod recovery;
 mod spans;
+mod types;
 
 pub use compilation_unit::{ParseResult, parse_compilation_unit};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};

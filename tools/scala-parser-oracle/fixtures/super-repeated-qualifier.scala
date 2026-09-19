@@ -1,0 +1,1 @@
+Outer.super[Outer].foo
