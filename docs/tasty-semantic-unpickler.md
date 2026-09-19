@@ -8,7 +8,8 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 2b, semantic name resolution (canonical session identities, the
   package contract, the resolver boundary, name-based `TYPEREF`/`TERMREF`):
   implemented (§4, "Name-based references").
-- Milestone 2c, compound non-binder types: next.
+- Milestone 2c1, compositional non-binder types: in progress. Milestone 2c2
+  (the remaining core-model gaps: bounds, flexible types, constants) follows.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -52,7 +53,9 @@ function. It follows an enter-before-complete model:
 | 1. Enter | symbols, owners, declaration scopes; `SymbolInfo::Missing` | 1 |
 | 2a. Type identity | address-keyed `TypeId`s; references, `THIS`, `SHAREDtype` | 2a |
 | 2b. Name resolution | name-based `TYPEREF`/`TERMREF` through the prefix scope and the `SymbolResolver` port | 2b |
-| 2c. Compound types | `Applied`, bounds, `And`/`Or`, ..., then binders with `TypeArena::reserve`/`fill` | 2c–4 |
+| 2c1. Compound types | `Applied`, `And`, `Or`, `SuperType`, `ByName` | 2c1 |
+| 2c2. Core-model gaps | bounds and alias bounds, `Flexible`, constants | 2c2 |
+| 2d. Binders and advanced types | `TypeLambda`, `Method`, `Poly`, refinements, ..., with `TypeArena::reserve`/`fill` | 3–4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
@@ -424,8 +427,10 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      package contract, the `SymbolResolver` port, name-based
      `TYPEREF`/`TERMREF`) — complete. The resolver *interface* moves earlier
      than classloader *integration*, which stays in Milestone 6;
-   - 2c: compound non-binder types (`SuperType`, constants, `Applied`, bounds,
-     `And`/`Or`, `ByName`) — next.
+   - 2c1: compositional non-binder types (`Applied`, `And`, `Or`,
+     `SuperType`, `ByName`) — in progress;
+   - 2c2: the core-model gaps the 2c1 measurement exposes (bounds and alias
+     bounds, `Flexible`, constants) — next.
 3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
@@ -467,7 +472,7 @@ Deliberately not supported yet:
 - companion links (`SymbolLinks::companion`);
 - `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`;
-- signed term references, object prefixes, cross-unit class members and
+- signed term references, cross-unit class members and
   inherited members (§4, "Name-based references");
 - packages and members outside the entered state with no resolver that knows
   them — `UnresolvedPackage`, `UnresolvedMember`;
@@ -540,7 +545,7 @@ Unsupported tags now, most common first (library / compiler):
 | 167 | `ORtype` | 406 | 1,048 |
 | 193 | `FLEXIBLEtype` | 140 | 575 |
 
-These order Milestone 2c.
+These ordered Milestone 2c1 (Milestone 2c2 is designed from the 2c1 measurement).
 
 ## 9. Review of Milestone 1
 

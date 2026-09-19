@@ -1,4 +1,4 @@
-//! Pass 2a: the identity of semantic types, and reference types.
+//! Semantic types: identity, references, name resolution, and compound types.
 //!
 //! One type node address owns at most one `TypeId`. Decoding is lazy and
 //! cache-first: [`type_at`](TastyUnpickler::type_at) returns the id already
@@ -6,26 +6,39 @@
 //! records the address. It is address identity, not structural interning:
 //! equal trees at different addresses get different ids.
 //!
-//! The forms decoded here are the ones whose target is named by address (or by
-//! a package path already entered), so no reference is resolved by name:
+//! ## Reference forms
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
 //! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { no_prefix, symbol }`    |
-//! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { NoPrefix, symbol }`     |
+//! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { no_prefix, symbol }`    |
 //! | `TYPEREFsymbol`       | `ASTRef Type` (prefix)    | `TypeRef { prefix, symbol }`       |
 //! | `TERMREFsymbol`       | `ASTRef Type` (prefix)    | `TermRef { prefix, symbol }`       |
-//! | `TYPEREFpkg`          | `NameRef`                 | `TypeRef { NoPrefix, package }`    |
-//! | `TERMREFpkg`          | `NameRef`                 | `TermRef { NoPrefix, package }`    |
+//! | `TYPEREFpkg`          | `NameRef`                 | `TypeRef { no_prefix, package }`   |
+//! | `TERMREFpkg`          | `NameRef`                 | `TermRef { no_prefix, package }`   |
+//! | `TYPEREF`             | `NameRef Type` (prefix)   | `TypeRef { prefix, member }`       |
+//! | `TERMREF`             | `NameRef Type` (prefix)   | `TermRef { prefix, member }`       |
 //! | `THIS`                | `Type` (a class type ref) | `ThisType { class }`               |
 //! | `SHAREDtype`          | `ASTRef`                  | the `TypeId` of the named node     |
 //!
-//! `THIS` is decoded only because it is the prefix of most real references.
+//! ## Name resolution
 //!
-//! Everything else is `UnsupportedType`, including the name-based
-//! `TYPEREF`/`TERMREF` (they look a member up by name in a prefix, which needs
-//! the future resolver) and `TYPEREFin`/`TERMREFin`. Unsupported input is
-//! never lowered to `NoType`, `NoPrefix` or `Error`.
+//! `TYPEREF` and `TERMREF` name a member of their prefix rather than a
+//! definition. The member is looked up in the prefix's own declaration scope
+//! (an entered class, an object through its module class, a package), and
+//! otherwise asked of the session's
+//! [`SymbolResolver`](dotty_core::resolution::SymbolResolver). Nothing is
+//! searched by text across owners, and a signed term reference or several
+//! overloads is an explicit error, not a guess.
+//!
+//! ## Compound types
+//!
+//! (Filled in as each form is decoded.)
+//!
+//! Every other form is `UnsupportedType`: `TYPEBOUNDS`, `ANNOTATEDtype`,
+//! `TYPELAMBDAtype`, `FLEXIBLEtype`, constants, method/poly/param types,
+//! refinements, recursive and match types, and `TYPEREFin`/`TERMREFin`.
+//! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
