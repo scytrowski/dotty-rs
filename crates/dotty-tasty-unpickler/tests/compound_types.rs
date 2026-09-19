@@ -449,3 +449,24 @@ fn unsupported_neighbours_stay_explicit() {
         );
     }
 }
+
+#[test]
+fn a_failure_inside_a_nested_compound_forgets_the_compounds_already_built() {
+    // `A | (B | C)`: the inner union at 945 and its first operand are built
+    // before its second operand (950) fails. Neither union may stay recorded.
+    let patched = retagged(COMPOUND, 950, 61, 66);
+    let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let before = unpickler.index().type_count();
+    assert!(matches!(
+        unpickler.unpickle_type(OR_DEEP),
+        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+    ));
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(OR_DEEP), None);
+    assert_eq!(unpickler.index().type_at(OR_DEEP_RIGHT), None);
+    // The intact sibling node still decodes.
+    assert!(unpickler.unpickle_type(OR).is_ok());
+}
