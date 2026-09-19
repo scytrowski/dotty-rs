@@ -637,10 +637,12 @@ where
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
             {
                 if !can_apply {
-                    self.report(
-                        crate::ParseDiagnosticKind::UnexpectedToken,
-                        "a block expression cannot be applied as a function",
-                    );
+                    let message = if matches!(self.ast.get(qualifier).kind, TreeKind::Block(_)) {
+                        "a block expression cannot be applied as a function"
+                    } else {
+                        "a constructor application cannot be applied again"
+                    };
+                    self.report(crate::ParseDiagnosticKind::UnexpectedToken, message);
                     break;
                 }
                 let is_constructor_application =
@@ -2121,7 +2123,11 @@ mod tests {
             parser.current().kind,
             TokenKind::Punctuation(Punctuation::LeftParen)
         );
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "a constructor application cannot be applied again"
+        );
     }
 
     #[test]
