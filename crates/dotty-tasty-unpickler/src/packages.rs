@@ -1,14 +1,16 @@
-//! Package symbols for one TASTy unit.
+//! Package symbols, shared between TASTy units.
 //!
 //! A package is not a single definition node: `package a.b` is one `PACKAGE`
-//! node, but it also implies the symbol for `a`, and several nodes may name
-//! the same package. Packages are therefore keyed by their path, not by
-//! address. The registry is per unpickler; sharing package symbols between
-//! units is not handled yet (see the project document).
+//! node, but it also implies the symbol for `a`, and several nodes, in one
+//! unit or in many, may name the same package. Packages are therefore keyed
+//! by their path, not by address, and live in a [`TastyPackages`] registry
+//! that outlives one unpickler: entering a second unit into the same store
+//! with the same registry reuses the package symbols and scopes of the first
+//! instead of duplicating `scala.collection` once per file.
 
 use std::collections::HashMap;
 
-use dotty_core::ids::SymbolId;
+use dotty_core::ids::{ScopeId, SymbolId};
 use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
@@ -18,31 +20,104 @@ use dotty_core::symbols::{
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 
-/// Package symbols entered so far, by path.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct PackageRegistry {
-    by_path: HashMap<Vec<String>, SymbolId>,
+/// Every declaration made into a scope, in order, so that a failed unit can
+/// take its declarations back out of scopes that existed before it.
+pub(crate) type ScopeJournal = Vec<(ScopeId, SymbolId)>;
+
+/// Declares `symbol` under `name` in `scope`, journaling the entry.
+pub(crate) fn enter_in_scope(
+    store: &mut SemanticStore,
+    journal: &mut ScopeJournal,
+    scope: ScopeId,
+    name: Name,
+    symbol: SymbolId,
+) {
+    store.scopes.get_mut(scope).enter(name, symbol);
+    journal.push((scope, symbol));
 }
 
-impl PackageRegistry {
+/// A package entered into the store.
+#[derive(Debug, Clone, Copy)]
+struct EnteredPackage {
+    symbol: SymbolId,
+    scope: ScopeId,
+}
+
+/// The package symbols entered into one `SemanticStore`, by path.
+///
+/// Pass the registry from one unpickler to the next
+/// ([`TastyUnpickler::with_packages`](crate::tasty_unpickler::TastyUnpickler::with_packages),
+/// [`into_parts`](crate::tasty_unpickler::TastyUnpickler::into_parts))
+/// to share packages between units. A registry describes the store it was
+/// filled from: using it with another store would hand out ids that mean
+/// something else there.
+///
+/// A shared package keeps the origin of the unit that first entered it.
+#[derive(Debug, Default)]
+pub struct TastyPackages {
+    by_path: HashMap<Vec<String>, EnteredPackage>,
+    /// Paths in the order they were entered, so a rollback can forget the
+    /// newest ones.
+    order: Vec<Vec<String>>,
+}
+
+impl TastyPackages {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The symbol of the package named by `path`, if it has been entered.
+    pub fn symbol(&self, path: &[&str]) -> Option<SymbolId> {
+        let key: Vec<String> = path.iter().map(|segment| (*segment).to_owned()).collect();
+        self.by_path.get(&key).map(|package| package.symbol)
+    }
+
+    /// How many packages have been entered.
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// A position to [`roll_back_to`](Self::roll_back_to).
+    pub(crate) fn mark(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Forgets every package entered after `mark`. Their symbols and scopes
+    /// are freed by the store's own rollback.
+    pub(crate) fn roll_back_to(&mut self, mark: usize) {
+        while self.order.len() > mark {
+            if let Some(path) = self.order.pop() {
+                self.by_path.remove(&path);
+            }
+        }
+    }
+
     /// Returns the package symbol for `path`, entering it and every missing
     /// enclosing package first.
     ///
     /// Each new package owns a declaration scope, and is entered into its
     /// parent's scope so it can be found by name from there. The outermost
     /// package has no owner: `Definitions` has no root package to hang it on.
-    pub fn enter(
+    /// Every package on the path, new or shared, has its scope recorded in
+    /// `index`, so the unit can find it with `scope_of`.
+    pub(crate) fn enter(
         &mut self,
         store: &mut SemanticStore,
         index: &mut TastySemanticIndex,
+        journal: &mut ScopeJournal,
         origin: SymbolOrigin,
         path: &[String],
     ) -> Result<SymbolId, UnpickleError> {
-        let mut owner: Option<SymbolId> = None;
+        let mut owner: Option<EnteredPackage> = None;
 
         for depth in 1..=path.len() {
             let prefix = &path[..depth];
             if let Some(&existing) = self.by_path.get(prefix) {
+                index.share_scope(existing.symbol, existing.scope);
                 owner = Some(existing);
                 continue;
             }
@@ -50,7 +125,7 @@ impl PackageRegistry {
             let name = Name::new(store.names.intern(&path[depth - 1]), Namespace::Term);
             let symbol = store.symbols.alloc(Symbol {
                 name,
-                owner,
+                owner: owner.map(|owner| owner.symbol),
                 kind: SymbolKind::Package,
                 flags: SymbolFlags::EMPTY,
                 visibility: Visibility::Public,
@@ -62,16 +137,20 @@ impl PackageRegistry {
             });
             let scope = store.scopes.alloc(Scope::new(Some(symbol)));
             index.insert_scope(symbol, scope)?;
-            if let Some(owner_scope) = owner.and_then(|owner| index.scope_of(owner)) {
-                store.scopes.get_mut(owner_scope).enter(name, symbol);
+            if let Some(owner) = owner {
+                enter_in_scope(store, journal, owner.scope, name, symbol);
             }
 
-            self.by_path.insert(prefix.to_vec(), symbol);
-            owner = Some(symbol);
+            let entered = EnteredPackage { symbol, scope };
+            self.by_path.insert(prefix.to_vec(), entered);
+            self.order.push(prefix.to_vec());
+            owner = Some(entered);
         }
 
         // An empty path names no package.
-        owner.ok_or(UnpickleError::InvalidNameReference { reference: 0 })
+        owner
+            .map(|package| package.symbol)
+            .ok_or(UnpickleError::InvalidNameReference { reference: 0 })
     }
 }
 
@@ -89,7 +168,8 @@ mod tests {
     struct Fixture {
         store: SemanticStore,
         index: TastySemanticIndex,
-        registry: PackageRegistry,
+        registry: TastyPackages,
+        journal: ScopeJournal,
         origin: SymbolOrigin,
     }
 
@@ -100,7 +180,8 @@ mod tests {
             Self {
                 store,
                 index: TastySemanticIndex::new(),
-                registry: PackageRegistry::default(),
+                registry: TastyPackages::new(),
+                journal: ScopeJournal::new(),
                 origin,
             }
         }
@@ -110,6 +191,7 @@ mod tests {
                 .enter(
                     &mut self.store,
                     &mut self.index,
+                    &mut self.journal,
                     self.origin,
                     &path(segments),
                 )
@@ -231,10 +313,13 @@ mod tests {
     fn an_empty_path_names_no_package() {
         let mut fixture = Fixture::new();
 
-        let result =
-            fixture
-                .registry
-                .enter(&mut fixture.store, &mut fixture.index, fixture.origin, &[]);
+        let result = fixture.registry.enter(
+            &mut fixture.store,
+            &mut fixture.index,
+            &mut fixture.journal,
+            fixture.origin,
+            &[],
+        );
 
         assert_eq!(
             result,

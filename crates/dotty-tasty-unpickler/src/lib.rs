@@ -24,5 +24,6 @@ mod unpickler;
 pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
     pub use crate::index::TastySemanticIndex;
+    pub use crate::packages::TastyPackages;
     pub use crate::unpickler::TastyUnpickler;
 }

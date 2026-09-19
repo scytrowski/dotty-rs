@@ -31,6 +31,7 @@ use crate::mapping::{
     term_param_kind, type_def_kind, type_param_kind, val_def_kind,
 };
 use crate::names::{qualified_segments, wire_name};
+use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
 
 /// The file's AST as the enter pass walks it: nodes by absolute address, and
@@ -125,9 +126,13 @@ impl TastyUnpickler<'_, '_, '_> {
             .ok_or(UnpickleError::UnsupportedPackagePath { address: at })?;
         let path = qualified_segments(self.file.names(), path_name)?;
 
-        let symbol = self
-            .packages
-            .enter(self.store, &mut self.index, self.origin, &path)?;
+        let symbol = self.packages.enter(
+            self.store,
+            &mut self.index,
+            &mut self.scope_journal,
+            self.origin,
+            &path,
+        )?;
         self.index.insert_symbol(at, symbol)?;
 
         for child in ast.children(at) {
@@ -340,7 +345,7 @@ impl TastyUnpickler<'_, '_, '_> {
         self.index.insert_symbol(at, symbol)?;
 
         if member && let Some(scope) = self.index.scope_of(owner) {
-            self.store.scopes.get_mut(scope).enter(name, symbol);
+            enter_in_scope(self.store, &mut self.scope_journal, scope, name, symbol);
         }
         if let Some(access) = modifiers.qualified {
             self.apply_qualified_access(ast, at, symbol, access)?;

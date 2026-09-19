@@ -146,11 +146,12 @@ the symbols, scopes, types and annotations it allocated are freed
 (`SemanticStore::checkpoint` / `rollback_to`, which truncate the append-only
 arenas), and the index and package registry are restored, so a failed unit
 leaves no orphan symbols or packages for later units to find. This is sound
-because one unpickler owns its package symbols and scopes: nothing it changes
-existed before the call. Interned names and the registered origin id are not
-undone; both are harmless. Once package symbols are shared between units (issue
-#12) the rollback must also undo entries made into pre-existing scopes, so
-that change has to extend this mechanism rather than bypass it.
+because everything the call allocated is freed by truncation. Package symbols
+and scopes can be shared with earlier units (see below), so the scopes that
+survive the truncation also lose what the call declared in them: every
+declaration into a scope is journaled and taken back out on failure, and the
+package registry forgets the packages the call entered. Interned names and the
+registered origin id are not undone; both are harmless.
 
 ### Packages
 
@@ -160,8 +161,28 @@ structurally. A package is keyed by its path, so repeated `PACKAGE` nodes
 share one symbol, and the `PACKAGE` node address maps to the innermost
 package. Each package owns a declaration scope and is entered into its
 parent's scope. The outermost package has no owner. Any other path form is
-`UnpickleError::UnsupportedPackagePath`. Package symbols are per unpickler;
-see issue #12 for sharing them between units.
+`UnpickleError::UnsupportedPackagePath`.
+
+Package symbols are shared between units through a `TastyPackages` registry
+(path to symbol and scope) that the caller carries from one unpickler to the
+next: `TastyUnpickler::with_packages` takes it and `into_parts` returns it
+with the unit's index. A second unit in the same package reuses the symbol,
+the owner chain and the scope, records the shared scope in its own index, and
+declares its members into it. The registry belongs to one `SemanticStore`, and
+a shared package keeps the origin of the unit that first entered it.
+`TastyUnpickler::new` starts from an empty registry, so a lone unit behaves as
+before. Placement is a caller-side decision on purpose: the classloader
+(Milestone 6) owns the store and the order units are loaded in, and its own
+`.class` package registry (issue #5, no scopes yet) has to be reconciled with
+this one there, not here.
+
+The semantic index differs from the sketch of the project document in two
+deliberate ways. Scopes are keyed by the owning `SymbolId`, not by address,
+because a package spans several `PACKAGE` nodes and several units, so no
+single address identifies its scope, and a class scope has to be reachable
+from the class symbol for `ClassInfo.declarations` anyway. The `types` and
+`trees` maps are added by the milestones that populate them (2 and 7), so no
+field is dead.
 
 ### Entering definitions
 
@@ -242,7 +263,7 @@ Deliberately not supported yet:
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
 - companion links (`SymbolLinks::companion`);
-- sharing package symbols between TASTy units, issue #12.
+- reconciling the package registry with the classloader's own (Milestone 6, issue #5).
 
 Known issues in neighbouring crates that this work found: #9 (`render_name`
 one-based), #10 (qualified visibility, fixed by `Visibility::PrivateWithin` /
