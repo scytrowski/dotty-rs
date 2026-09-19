@@ -1,4 +1,4 @@
-use dotty_core::ast::{Apply, ApplyKind, Ident, Parens, Select, This, Tuple, UntypedNode};
+use dotty_core::ast::{Apply, ApplyKind, Ident, Parens, Select, Super, This, Tuple, UntypedNode};
 use dotty_core::{Constant, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
@@ -16,6 +16,15 @@ where
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        if matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+            && self.cursor.lookahead(2).kind == TokenKind::Keyword(dotty_core::HardKeyword::Super)
+        {
+            return self.parse_qualified_super(mark);
+        }
+
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
@@ -51,9 +60,80 @@ where
                 self.advance();
                 self.alloc_from(mark, TreeKind::This(This { qual: None }))
             }
+            TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             _ => self.unexpected_expression(),
         }
+    }
+
+    fn parse_qualified_super(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let qualifier_mark = self.mark();
+        let Ok(name) = self.intern_current_term_name() else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.expect(TokenKind::Punctuation(Punctuation::Dot));
+
+        let qualifier = self.alloc_from(
+            qualifier_mark,
+            TreeKind::This(This {
+                qual: Some(*name.as_name()),
+            }),
+        );
+        if !self.accept(TokenKind::Keyword(dotty_core::HardKeyword::Super)) {
+            return self.unexpected_expression();
+        }
+        self.parse_super_tail(mark, qualifier)
+    }
+
+    fn parse_super(
+        &mut self,
+        mark: crate::Mark,
+        qualifier: Option<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        let qualifier = qualifier.unwrap_or_else(|| {
+            let position = self.current_span();
+            self.advance();
+            self.alloc(TreeKind::This(This { qual: None }), Some(position))
+        });
+        self.parse_super_tail(mark, qualifier)
+    }
+
+    fn parse_super_tail(
+        &mut self,
+        mark: crate::Mark,
+        qualifier: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        let mix = if self.accept(TokenKind::Punctuation(Punctuation::LeftBracket)) {
+            let mix = match self.current().kind {
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                    let Ok(name) = self.intern_current_type_name() else {
+                        return self.unexpected_expression();
+                    };
+                    self.advance();
+                    Some(*name.as_name())
+                }
+                _ => {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedType,
+                        "expected a super type qualifier",
+                    );
+                    None
+                }
+            };
+            self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
+            mix
+        } else {
+            None
+        };
+
+        self.alloc_from(
+            mark,
+            TreeKind::Super(Super {
+                qual: qualifier,
+                mix,
+            }),
+        )
     }
 
     fn simple_expr_rest(
@@ -190,7 +270,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Literal, Parens, This, Tuple, UntypedNode};
+    use dotty_core::ast::{Literal, Parens, Super, This, Tuple, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
     #[test]
@@ -391,6 +471,85 @@ mod tests {
 
         assert!(selection.backquoted);
         assert_eq!(names.resolve(selection.name.text()), "bar");
+    }
+
+    #[test]
+    fn parses_super_selection_with_a_source_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super.foo",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+            panic!("expected super selection tree");
+        };
+        let TreeKind::Super(Super { qual, mix }) = parser.ast().get(selection.qualifier).kind
+        else {
+            panic!("expected super qualifier");
+        };
+
+        assert!(mix.is_none());
+        assert!(matches!(
+            parser.ast().get(qual).kind,
+            TreeKind::This(This { qual: None })
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 9).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        let selected_name = selection.name;
+        drop(parser);
+        assert_eq!(names.resolve(selected_name.text()), "foo");
+    }
+
+    #[test]
+    fn parses_qualified_super_with_a_mixin_qualifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Outer.super[Base].foo",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Super), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 11, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Punctuation(Punctuation::Dot), 17, 18),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+            panic!("expected qualified super selection tree");
+        };
+        let TreeKind::Super(Super { qual, mix }) = parser.ast().get(selection.qualifier).kind
+        else {
+            panic!("expected qualified super tree");
+        };
+        let TreeKind::This(This { qual: Some(outer) }) = parser.ast().get(qual).kind else {
+            panic!("expected qualified this tree");
+        };
+
+        assert!(parser.diagnostics().is_empty());
+        let outer_name = outer;
+        let mix_name = mix.unwrap();
+        let selected_name = selection.name;
+        drop(parser);
+        assert_eq!(names.resolve(outer_name.text()), "Outer");
+        assert_eq!(names.resolve(mix_name.text()), "Base");
+        assert_eq!(names.resolve(selected_name.text()), "foo");
     }
 
     #[test]
