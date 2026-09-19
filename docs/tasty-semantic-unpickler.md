@@ -160,8 +160,19 @@ registered origin id are not undone; both are harmless.
 structurally. A package is keyed by its path, so repeated `PACKAGE` nodes
 share one symbol, and the `PACKAGE` node address maps to the innermost
 package. Each package owns a declaration scope and is entered into its
-parent's scope. The outermost package has no owner. Any other path form is
+parent's scope. The outermost package has no owner. A path that is neither a
+`TERMREFpkg` nor a `SHAREDtype` link to one (below) is
 `UnpickleError::UnsupportedPackagePath`.
+
+A nested package whose path was already written elsewhere in the file (for
+example inside an import) has a `SHAREDtype` link for its path instead. The
+link is followed through the same validated, depth-bounded lookup as a shared
+qualifier: an address that is not the start of a node is
+`InvalidReferenceTarget`, a chain of more than `MAX_SHARED_DEPTH` links is
+treated as a cycle, and a target that is not a `TERMREFpkg` is
+`UnsupportedPackagePath`. `PackageNode::path_name()` itself still recognises
+only a direct `TERMREFpkg`, because resolving a link needs the whole ASTs
+payload, which the node does not have.
 
 Package symbols are shared between units through a `TastyPackages` registry
 (path to symbol and scope) that the caller carries from one unpickler to the
@@ -246,16 +257,16 @@ addresses map to exactly one `SymbolId`; a second entry for an address is
 Measured on real compiler output: all 37 small `dotty-tasty` fixtures enter
 without error. On the manifest-backed corpora (`scala3-library` and
 `scala3-compiler`, 2089 units, TASTy 28.8 — parsed leniently, outside the 3.9
-target) 2088 units enter; the one that does not (`scala/package.tasty`) has a
-nested `PACKAGE` whose path is a `SHAREDtype` reference.
+target) all 2089 units enter (941 and 1148). The last one to do so,
+`scala/package.tasty`, has a nested `PACKAGE` whose path is a `SHAREDtype`
+link (issue #29).
 
 Deliberately not supported yet:
 
 - qualified-access qualifiers other than a package name or an enclosing
   definition — `UnsupportedQualifier` (none occur in the corpora);
-- `PACKAGE` paths other than a direct `TERMREFpkg`, such as a nested package
-  whose path is a `SHAREDtype` — `UnsupportedPackagePath`; resolving it needs
-  the shared-type resolution of Milestone 2;
+- `PACKAGE` paths other than a direct `TERMREFpkg` or a `SHAREDtype` link to
+  one — `UnsupportedPackagePath`;
 - the modifiers listed in §4 (no matching core flag, variance, accessor roles)
   and annotations;
 - an abstract type member is entered as `TypeAlias`; `SymbolKind` has no

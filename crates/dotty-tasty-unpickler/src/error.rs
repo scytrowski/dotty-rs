@@ -38,8 +38,9 @@ pub enum UnpickleError {
     /// `definition` is not a package, class, trait or object that encloses
     /// the qualified definition (or is the definition itself).
     InvalidQualifier { definition: u32 },
-    /// A `PACKAGE` node whose path is not a direct package reference
-    /// (`TERMREFpkg`), which is the only form this unpickler reads.
+    /// A `PACKAGE` node whose path is neither a direct package reference
+    /// (`TERMREFpkg`) nor a `SHAREDtype` link to one, which are the only forms
+    /// this unpickler reads.
     UnsupportedPackagePath { address: u32 },
     /// No definition node exists at an address the tree walk expected one.
     MissingDefinition { address: u32 },

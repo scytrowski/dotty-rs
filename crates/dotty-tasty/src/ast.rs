@@ -3948,6 +3948,11 @@ impl<'a> PackageNode<'a> {
     }
 
     /// Returns the direct package name when the path uses `TERMREFpkg`.
+    ///
+    /// A nested package can instead have a `SHAREDtype` link for its path,
+    /// which points at a `TERMREFpkg` written elsewhere in the file. That
+    /// needs the whole ASTs payload to follow, so this returns `None` for it
+    /// and the caller has to resolve the link (see [`Self::path`]).
     pub fn path_name(&self) -> Option<u32> {
         match &self.path {
             RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => match term.value {
