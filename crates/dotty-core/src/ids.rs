@@ -64,6 +64,17 @@ opaque_id!(
     SourceId
 );
 
+impl SourceId {
+    /// Creates an identifier from a compilation-session source index.
+    ///
+    /// A source registry remains responsible for assigning unique indexes;
+    /// this constructor lets parser-facing clients pass an existing source
+    /// identity across the crate boundary.
+    pub const fn from_index(index: u32) -> Self {
+        Self::new(index)
+    }
+}
+
 opaque_id!(
     /// Identifies an interned string owned by a `NameInterner`.
     NameId
@@ -192,6 +203,13 @@ mod tests {
         assert_eq!(ClassfileOriginId::new(7).index(), 7);
         assert_eq!(TastyOriginId::new(8).index(), 8);
         assert_eq!(CompletionId::new(9).index(), 9);
+    }
+
+    #[test]
+    fn source_id_can_be_created_from_a_public_session_index() {
+        let id = SourceId::from_index(12);
+
+        assert_eq!(id.index(), 12);
     }
 
     #[test]

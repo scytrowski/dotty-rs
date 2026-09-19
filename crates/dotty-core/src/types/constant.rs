@@ -7,7 +7,12 @@ use crate::ids::{NameId, TypeId};
 /// `String` holds an interned [`NameId`] rather than an owned `String` so
 /// that AST literals and (later) TASTy constant-pool entries share one
 /// string table instead of allocating separately.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// [`Constant::StringUtf16`] preserves the UTF-16 code units of a Scala
+/// string containing an unpaired surrogate. Rust strings cannot represent
+/// those values, so the parser keeps this explicit lossless representation
+/// until a later layer chooses how to encode or diagnose it.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
     Unit,
     Null,
@@ -20,6 +25,7 @@ pub enum Constant {
     Float(f32),
     Double(f64),
     String(NameId),
+    StringUtf16(Vec<u16>),
     Class(TypeId),
 }
 
@@ -40,6 +46,10 @@ mod tests {
         let ty = TypeId::new(4);
 
         assert_eq!(Constant::String(name), Constant::String(name));
+        assert_eq!(
+            Constant::StringUtf16(vec![0xD800]),
+            Constant::StringUtf16(vec![0xD800])
+        );
         assert_eq!(Constant::Class(ty), Constant::Class(ty));
         assert_ne!(Constant::String(name), Constant::Class(ty));
     }

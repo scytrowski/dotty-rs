@@ -55,6 +55,7 @@ mod tests {
         Tree {
             kind: TreeKind::Ident(Ident {
                 name: Name::new(NameId::new(raw), Namespace::Term),
+                backquoted: false,
             }),
             position: None,
             ty: (),
