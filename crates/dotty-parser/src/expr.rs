@@ -144,7 +144,7 @@ where
 
     fn parse_qualified_super(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let qualifier_mark = self.mark();
-        let Ok(name) = self.intern_current_term_name() else {
+        let Ok(name) = self.intern_current_type_name() else {
             return self.unexpected_expression();
         };
         self.advance();
@@ -755,6 +755,7 @@ mod tests {
             panic!("expected qualified this tree");
         };
 
+        assert!(outer.is_type());
         assert!(parser.diagnostics().is_empty());
         let outer_name = outer;
         let mix_name = mix.unwrap();
