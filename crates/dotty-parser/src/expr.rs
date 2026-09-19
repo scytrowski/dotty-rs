@@ -643,7 +643,12 @@ where
                     );
                     break;
                 }
+                let is_constructor_application =
+                    matches!(self.ast.get(qualifier).kind, TreeKind::New(_));
                 qualifier = self.parse_application(mark, qualifier);
+                if is_constructor_application {
+                    can_apply = false;
+                }
             } else {
                 break;
             }
@@ -1960,6 +1965,38 @@ mod tests {
             TextRange::new(0, 14).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_second_application_after_a_new_constructor() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new Foo(1)(2)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::IntegerLiteral, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::IntegerLiteral, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected the constructor application");
+        };
+        assert_eq!(application.args.len(), 1);
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::LeftParen)
+        );
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
