@@ -25,6 +25,7 @@ dependencies = [
  "dotty-classfile",
  "dotty-core",
  "dotty-tasty",
+ "dotty-tasty-unpickler",
 ]
 
 [[package]]

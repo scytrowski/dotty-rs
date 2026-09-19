@@ -1303,6 +1303,43 @@ directly, for the same reason `[BLOCKER 2]` removed `Symbol.declarations`: it
 would create a second, potentially-stale source of truth alongside the
 tree's own `ty`.
 
+### 9.1 Package identities (`packages.rs`)
+
+`Packages` is the session's package registry, one per `SemanticStore`, shared
+by every adapter (source frontend, TASTy unpickler, classfile loader) so the
+same path is the same `SymbolId` whichever saw it first. Contract:
+
+- one `SymbolKind::Package` symbol per path. Dotty's package term plus
+  package module class are deliberately collapsed, so `TYPEREFpkg` and
+  `TERMREFpkg` share one identity and `Type::ThisType` may name a package;
+- named in `Namespace::Term`, after its own segment, `SymbolInfo::Missing`;
+- an explicit root (empty path): empty name, no owner, own scope, also the
+  unnamed package. Dotty has two packages here: `<root>` and, below it, the
+  default package `<empty>` that a unit with no `package` clause lives in. The
+  core collapses them into this one root, as it collapses package term and
+  module class; adapters normalise: `<empty>` and `<root>` are the empty path; every named package's owner chain ends there and each
+  package is declared in its owner's scope;
+- a shared package keeps the origin of the adapter that entered it first;
+- transactional: `mark` / `roll_back_to` forget newer packages and
+  undeclare them from surviving owners.
+
+### 9.2 The symbol resolver port (`resolution.rs`)
+
+`SymbolResolver` is the format-agnostic boundary between an adapter and
+whatever can supply symbols the adapter did not enter itself (later, the
+classloader). A request is `MemberRequest { prefix: TypeId, name: Name,
+selector }` or a package path; the answer is a `SymbolId`. It contains no wire
+concept: no addresses, name-table references, tags or wire signatures, so it
+lives in `dotty-core`, not in an adapter, and the unpickler never depends on
+the classloader.
+
+`Ok(None)` means "this resolver cannot resolve it" and never "does not exist";
+`Err(ResolutionError)` (ambiguous, malformed state) is never lowered to `None`.
+Resolvers take `&SemanticStore`: until the port has a transactional contract
+they do not allocate, so a failed decode leaves nothing to undo. Overload
+selection by signature is a `#[non_exhaustive]` extension of `MemberSelector`;
+today only `Unique` exists. `NoResolver` answers `None` to everything.
+
 ## 10. `store/semantic_store.rs`
 
 `[MAJOR 5]` `SemanticContext` is renamed to `SemanticStore`. The prior name

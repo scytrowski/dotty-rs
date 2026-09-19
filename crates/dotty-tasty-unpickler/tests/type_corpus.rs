@@ -10,8 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dotty_core::store::SemanticStore;
+use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::{TastyPackages, TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
 /// Every node tag that is a type reference, or a `THIS` prefix.
 const REFERENCE_TAGS: [u8; 10] = [61, 62, 63, 64, 65, 90, 114, 115, 116, 117];
@@ -33,15 +34,35 @@ fn tasty_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// How the reference nodes of one kind fared.
+#[derive(Default)]
+struct Outcomes {
+    nodes: usize,
+    decoded: usize,
+    /// Well-formed references whose target lives outside the entered state, so
+    /// only an external resolver (a classpath) can supply it.
+    needs_external: usize,
+    ambiguous: usize,
+    signed: usize,
+    unsupported_prefix: usize,
+    /// Errors that mean a bug or malformed input, never an expected gap.
+    unexpected: usize,
+}
+
 #[derive(Default)]
 struct Tally {
     units: usize,
     units_with_a_decoded_type: usize,
     units_fully_decoded: usize,
-    nodes: usize,
-    decoded: usize,
-    unsupported: BTreeMap<u8, usize>,
+    /// References written by definition address (`*direct`, `*symbol`, `*pkg`,
+    /// `THIS`, `SHAREDtype`).
+    by_address: Outcomes,
+    /// Name-based `TYPEREF` and `TERMREF`.
+    named_type: Outcomes,
+    named_term: Outcomes,
+    unresolved_members: usize,
     unresolved_packages: usize,
+    unsupported: BTreeMap<u8, usize>,
     missing_symbols: usize,
     /// Tags of the nodes that missing-symbol references point at.
     missing_targets: BTreeMap<u8, usize>,
@@ -60,16 +81,17 @@ fn run(
     label: &str,
     bytes: &[u8],
     store: &mut SemanticStore,
-    packages: TastyPackages,
+    definitions: Definitions,
+    packages: Packages,
     tally: &mut Tally,
-) -> TastyPackages {
+) -> Packages {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
-    let addresses: Vec<u32> = {
+    let addresses: Vec<(u32, u8)> = {
         let index = file.ast_address_index().unwrap();
         index
             .iter_nodes()
             .filter(|node| REFERENCE_TAGS.contains(&node.tag))
-            .map(|node| u32::try_from(node.offset).unwrap())
+            .map(|node| (u32::try_from(node.offset).unwrap(), node.tag))
             .collect()
     };
 
@@ -100,16 +122,22 @@ fn run(
         false
     };
 
-    let mut unpickler = TastyUnpickler::with_packages(&file, store, packages);
+    let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
     unpickler.enter_symbols().unwrap();
 
     tally.units += 1;
     let (mut decoded, mut failed) = (0, 0);
-    for at in addresses {
-        tally.nodes += 1;
+    for (at, tag) in addresses {
+        let outcomes = match tag {
+            117 => &mut tally.named_type,
+            115 => &mut tally.named_term,
+            _ => &mut tally.by_address,
+        };
+        outcomes.nodes += 1;
         match unpickler.unpickle_type(at) {
             Ok(first) => {
                 decoded += 1;
+                outcomes.decoded += 1;
                 // Identity: decoding again never allocates a second type.
                 assert_eq!(unpickler.unpickle_type(at), Ok(first));
             }
@@ -119,19 +147,33 @@ fn run(
                     UnpickleError::UnsupportedType { tag, .. } => {
                         *tally.unsupported.entry(tag).or_default() += 1;
                     }
-                    UnpickleError::UnresolvedPackage { .. } => tally.unresolved_packages += 1,
+                    UnpickleError::UnresolvedPackage { .. } => {
+                        outcomes.needs_external += 1;
+                        tally.unresolved_packages += 1;
+                    }
+                    UnpickleError::UnresolvedMember { .. } => {
+                        outcomes.needs_external += 1;
+                        tally.unresolved_members += 1;
+                    }
+                    UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
+                    UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
+                    UnpickleError::UnsupportedResolutionPrefix { .. } => {
+                        outcomes.unsupported_prefix += 1;
+                    }
                     UnpickleError::MissingReferencedSymbol { to, .. } => {
                         tally.missing_symbols += 1;
                         tally.missing_outside_bodies += usize::from(!inside_a_body(to));
                         let tag = tags.get(&to).copied();
                         *tally.missing_targets.entry(tag.unwrap_or(0)).or_default() += 1;
                     }
-                    other => tally.unexpected.push(format!("{label} @{at}: {other:?}")),
+                    other => {
+                        outcomes.unexpected += 1;
+                        tally.unexpected.push(format!("{label} @{at}: {other:?}"));
+                    }
                 }
             }
         }
     }
-    tally.decoded += decoded;
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
     unpickler.into_parts().1
@@ -155,17 +197,19 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
         };
         drop(file);
         let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
         run(
             &path.display().to_string(),
             &bytes,
             &mut store,
-            TastyPackages::new(),
+            definitions,
+            Packages::new(),
             &mut tally,
         );
     }
 
     assert!(tally.units > 20, "found {} units", tally.units);
-    assert!(tally.decoded > 0);
+    assert!(tally.by_address.decoded > 0);
     assert_eq!(tally.unexpected, Vec::<String>::new());
 }
 
@@ -177,7 +221,8 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         // One store and one package registry per corpus, as a classpath
         // would have.
         let mut store = SemanticStore::new();
-        let mut packages = TastyPackages::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {
             let bytes = fs::read(&path).unwrap();
@@ -185,6 +230,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 &path.display().to_string(),
                 &bytes,
                 &mut store,
+                definitions,
                 packages,
                 &mut tally,
             );
@@ -202,11 +248,26 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             "units where every reference node decodes: {}",
             tally.units_fully_decoded
         );
+        for (label, outcomes) in [
+            ("by address", &tally.by_address),
+            ("named TYPEREF", &tally.named_type),
+            ("named TERMREF", &tally.named_term),
+        ] {
+            println!(
+                "{label}: nodes {}, decoded {}, need external {}, ambiguous {}, signed {}, unsupported prefix {}, unexpected {}",
+                outcomes.nodes,
+                outcomes.decoded,
+                outcomes.needs_external,
+                outcomes.ambiguous,
+                outcomes.signed,
+                outcomes.unsupported_prefix,
+                outcomes.unexpected,
+            );
+        }
         println!(
-            "reference nodes: {}, decoded: {}",
-            tally.nodes, tally.decoded
+            "unresolved: members {}, packages {}",
+            tally.unresolved_members, tally.unresolved_packages
         );
-        println!("unresolved packages: {}", tally.unresolved_packages);
         println!(
             "missing symbols (locals, other units): {}",
             tally.missing_symbols

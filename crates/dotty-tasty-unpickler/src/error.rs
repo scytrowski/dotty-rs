@@ -1,6 +1,8 @@
 use std::fmt;
 
-use dotty_core::ids::SymbolId;
+use dotty_core::ids::{SymbolId, TypeId};
+use dotty_core::names::Namespace;
+use dotty_core::resolution::ResolutionError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
 
 /// Why semantic unpickling of a TASTy file failed.
@@ -63,6 +65,39 @@ pub enum UnpickleError {
     /// that has not been entered into the package registry. Resolving
     /// packages outside the entered units belongs to the future resolver.
     UnresolvedPackage { address: u32, package: String },
+    /// The name-based reference at `address` is well formed and its prefix is
+    /// understood, but neither the entered state nor the resolver holds a
+    /// member `name` of `namespace` in it. This is not evidence the member
+    /// does not exist.
+    UnresolvedMember {
+        address: u32,
+        prefix: TypeId,
+        name: String,
+        namespace: Namespace,
+    },
+    /// The prefix holds `candidates` symbols under the requested name and
+    /// namespace (overloads), and the reference does not say which. Never
+    /// resolved by taking the first.
+    AmbiguousMember {
+        address: u32,
+        prefix: TypeId,
+        name: String,
+        candidates: usize,
+    },
+    /// The term reference at `address` carries a signature (`SIGNED` /
+    /// `TARGETSIGNED`), and selecting a member by signature is not
+    /// implemented. The signature is neither stripped nor ignored.
+    UnsupportedSignedReference { address: u32, name: String },
+    /// The prefix of the name-based reference at `address` is a form whose
+    /// members cannot be looked up here, and the resolver did not know it
+    /// either.
+    UnsupportedResolutionPrefix { address: u32, prefix: TypeId },
+    /// The resolver failed on the reference at `address`, or answered with a
+    /// symbol that cannot be the one requested.
+    ResolverFailure {
+        address: u32,
+        error: ResolutionError,
+    },
 }
 
 impl fmt::Display for UnpickleError {
@@ -119,6 +154,36 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the package reference at address {address} names package `{package}`, which has not been entered"
             ),
+            Self::UnresolvedMember {
+                address,
+                name,
+                namespace,
+                ..
+            } => write!(
+                formatter,
+                "the reference at address {address} names {namespace:?} member `{name}`, which is not in its prefix"
+            ),
+            Self::AmbiguousMember {
+                address,
+                name,
+                candidates,
+                ..
+            } => write!(
+                formatter,
+                "the reference at address {address} names `{name}`, which has {candidates} candidates in its prefix"
+            ),
+            Self::UnsupportedSignedReference { address, name } => write!(
+                formatter,
+                "the reference at address {address} to `{name}` carries a signature, which is not supported yet"
+            ),
+            Self::UnsupportedResolutionPrefix { address, .. } => write!(
+                formatter,
+                "the reference at address {address} has a prefix whose members cannot be looked up"
+            ),
+            Self::ResolverFailure { address, error } => write!(
+                formatter,
+                "the resolver failed on the reference at address {address}: {error}"
+            ),
             Self::DuplicateScope { symbol } => write!(
                 formatter,
                 "a declaration scope was already entered for symbol {}",
@@ -146,7 +211,12 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedType { .. }
             | Self::MissingReferencedSymbol { .. }
             | Self::InvalidReferenceKind { .. }
-            | Self::UnresolvedPackage { .. } => None,
+            | Self::UnresolvedPackage { .. }
+            | Self::UnresolvedMember { .. }
+            | Self::AmbiguousMember { .. }
+            | Self::UnsupportedSignedReference { .. }
+            | Self::UnsupportedResolutionPrefix { .. }
+            | Self::ResolverFailure { .. } => None,
         }
     }
 }

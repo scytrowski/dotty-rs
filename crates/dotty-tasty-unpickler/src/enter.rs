@@ -29,7 +29,7 @@ use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
     type_def_kind, type_param_kind, val_def_kind,
 };
-use crate::names::{qualified_segments, wire_name};
+use crate::names::{package_segments, wire_name};
 use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
 
@@ -90,15 +90,16 @@ impl TastyUnpickler<'_, '_, '_> {
     ) -> Result<(), UnpickleError> {
         let package = ast.node(at)?.decode_package()?;
         let path_name = package_path_name(ast, &package.path, at)?;
-        let path = qualified_segments(self.file.names(), path_name)?;
-
-        let symbol = self.packages.enter(
-            self.store,
-            &mut self.index,
-            &mut self.scope_journal,
-            self.origin,
-            &path,
-        )?;
+        // A unit in the default package has the empty path: the session root.
+        let path = package_segments(self.file.names(), path_name)?;
+        let chain = self.packages.enter(self.store, self.origin, &path);
+        for package in &chain {
+            self.index.share_scope(package.symbol, package.scope);
+        }
+        let symbol = chain
+            .last()
+            .map(|package| package.symbol)
+            .unwrap_or_else(|| unreachable!("non-empty path"));
         self.index.insert_symbol(at, symbol)?;
 
         for child in ast.children(at) {
@@ -370,7 +371,7 @@ impl TastyUnpickler<'_, '_, '_> {
 
         match qualifier {
             QualifierRef::Package(name) => {
-                let path = qualified_segments(self.file.names(), name)?;
+                let path = package_segments(self.file.names(), name)?;
                 chain
                     .into_iter()
                     .find(|candidate| {
@@ -438,7 +439,8 @@ impl TastyUnpickler<'_, '_, '_> {
         let mut current = Some(package);
         while let Some(symbol) = current {
             let symbol = self.store.symbols.get(symbol);
-            if symbol.kind != SymbolKind::Package {
+            // The root package, which has no owner, contributes no segment.
+            if symbol.kind != SymbolKind::Package || symbol.owner.is_none() {
                 break;
             }
             path.push(self.store.names.resolve(symbol.name.text()).to_owned());
@@ -457,6 +459,7 @@ impl TastyUnpickler<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::Definitions;
     use dotty_core::store::SemanticStore;
 
     const FOO: &[u8] = include_bytes!("../tests/fixtures/semantic/Foo.tasty");
@@ -477,7 +480,8 @@ mod tests {
     ) -> R {
         let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(bytes).unwrap();
         let mut store = SemanticStore::new();
-        let mut unpickler = TastyUnpickler::new(&file, &mut store);
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
         unpickler.enter_symbols().unwrap();
         let ast = AstView::new(&file).expect("the AST view builds");
         check(&mut unpickler, &ast)

@@ -20,6 +20,7 @@ mod ast_view;
 mod enter;
 mod error;
 mod index;
+mod lookup;
 mod mapping;
 mod names;
 mod packages;
@@ -30,6 +31,5 @@ mod unpickler;
 pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
     pub use crate::index::TastySemanticIndex;
-    pub use crate::packages::TastyPackages;
     pub use crate::unpickler::TastyUnpickler;
 }
