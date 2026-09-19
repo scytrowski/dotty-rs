@@ -21,7 +21,7 @@ mod recovery;
 mod spans;
 
 pub use compilation_unit::{ParseResult, parse_compilation_unit};
-pub use context::{Location, ParamOwner, ParseContext, ParseKind};
+pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::Cursor;
 pub use diagnostics::{ParseDiagnostic, ParseDiagnosticKind};
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
