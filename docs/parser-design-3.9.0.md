@@ -63,10 +63,11 @@ Source ranges are byte ranges in Rust. `Mark`, `span_from`, and `alloc_from`
 centralize position construction. Synthetic `INDENT`/`OUTDENT` tokens are
 zero-width, and EOF does not replace the end of the last real token.
 
-`Cursor` exposes a `CursorCheckpoint` generation for progress guards. The
-generation changes when the current token changes, so recovery does not rely
-on token object identity and works with a `TokenSource` that reuses one token
-allocation. A source that remains stuck is detected and terminates recovery.
+`Cursor` exposes a `CursorCheckpoint` containing the explicit logical position
+reported by `TokenSource` for progress guards. Recovery therefore does not
+rely on token object identity or token equality and works with a source that
+reuses one token allocation, including adjacent equal synthetic tokens. A
+source that remains stuck is detected and terminates recovery.
 
 ## Context, soft keywords, and scanner feedback
 

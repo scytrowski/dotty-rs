@@ -171,6 +171,10 @@ impl TokenSource for ContextualScanner {
         &self.tokens[self.current_index()]
     }
 
+    fn position(&self) -> usize {
+        self.current_index()
+    }
+
     fn advance(&mut self) {
         if self.position + 1 < self.tokens.len() {
             self.position += 1;

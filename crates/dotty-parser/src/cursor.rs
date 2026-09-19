@@ -3,13 +3,12 @@ use dotty_core::{ScannerEvent, Token, TokenKind, TokenSource};
 /// Opaque parser progress marker for a cursor position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorCheckpoint {
-    generation: u64,
+    position: usize,
 }
 
 /// Small adapter that keeps parser token access in one place.
 pub struct Cursor<S> {
     source: S,
-    generation: u64,
 }
 
 impl<S> Cursor<S>
@@ -18,10 +17,7 @@ where
 {
     /// Creates a cursor over a parser-facing token source.
     pub const fn new(source: S) -> Self {
-        Self {
-            source,
-            generation: 0,
-        }
+        Self { source }
     }
 
     /// Returns the current parser-facing token.
@@ -41,23 +37,19 @@ where
 
     /// Advances the token source.
     pub fn advance(&mut self) {
-        let before = self.source.current().clone();
         self.source.advance();
-        if self.source.current() != &before {
-            self.generation = self.generation.wrapping_add(1);
-        }
     }
 
     /// Captures the current explicit progress state.
-    pub const fn checkpoint(&self) -> CursorCheckpoint {
+    pub fn checkpoint(&self) -> CursorCheckpoint {
         CursorCheckpoint {
-            generation: self.generation,
+            position: self.source.position(),
         }
     }
 
-    /// Returns whether the token source changed since `checkpoint`.
-    pub const fn progressed_since(&self, checkpoint: CursorCheckpoint) -> bool {
-        self.generation != checkpoint.generation
+    /// Returns whether the token source advanced since `checkpoint`.
+    pub fn progressed_since(&self, checkpoint: CursorCheckpoint) -> bool {
+        self.source.position() != checkpoint.position
     }
 
     /// Returns the token `n` positions after the current token.
@@ -96,6 +88,7 @@ mod tests {
     struct ReusingTokenSource {
         current: Token,
         remaining: VecDeque<Token>,
+        position: usize,
     }
 
     impl TokenSource for ReusingTokenSource {
@@ -103,9 +96,14 @@ mod tests {
             &self.current
         }
 
+        fn position(&self) -> usize {
+            self.position
+        }
+
         fn advance(&mut self) {
             if let Some(next) = self.remaining.pop_front() {
                 self.current = next;
+                self.position += 1;
             }
         }
 
@@ -131,6 +129,10 @@ mod tests {
             &self.current
         }
 
+        fn position(&self) -> usize {
+            0
+        }
+
         fn advance(&mut self) {}
 
         fn lookahead(&mut self, _n: usize) -> &Token {
@@ -154,6 +156,10 @@ mod tests {
     impl TokenSource for VecTokenSource {
         fn current(&self) -> &Token {
             &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
         }
 
         fn advance(&mut self) {
@@ -258,10 +264,11 @@ mod tests {
     #[test]
     fn detects_progress_when_a_token_source_reuses_storage() {
         let first = token(TokenKind::Identifier, 0, 1);
-        let second = token(TokenKind::Eof, 1, 1);
+        let second = first.clone();
         let mut cursor = Cursor::new(ReusingTokenSource {
             current: first,
-            remaining: VecDeque::from([second]),
+            remaining: VecDeque::from([second, token(TokenKind::Eof, 1, 1)]),
+            position: 0,
         });
         let before = cursor.current() as *const Token;
         let checkpoint = cursor.checkpoint();
@@ -271,7 +278,7 @@ mod tests {
         let after = cursor.current() as *const Token;
         assert_eq!(before, after);
         assert!(cursor.progressed_since(checkpoint));
-        assert!(cursor.at(TokenKind::Eof));
+        assert!(cursor.at(TokenKind::Identifier));
     }
 
     #[test]

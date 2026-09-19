@@ -164,6 +164,10 @@ pub(crate) mod tests {
             &self.tokens[self.index]
         }
 
+        fn position(&self) -> usize {
+            self.index
+        }
+
         fn advance(&mut self) {
             if self.index + 1 < self.tokens.len() {
                 self.index += 1;

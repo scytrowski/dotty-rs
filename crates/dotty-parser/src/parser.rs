@@ -358,6 +358,10 @@ mod tests {
             &self.token
         }
 
+        fn position(&self) -> usize {
+            0
+        }
+
         fn advance(&mut self) {}
 
         fn lookahead(&mut self, _n: usize) -> &Token {
@@ -370,6 +374,10 @@ mod tests {
     impl TokenSource for SequenceTokenSource {
         fn current(&self) -> &Token {
             &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
         }
 
         fn advance(&mut self) {
@@ -392,6 +400,10 @@ mod tests {
     impl TokenSource for RecordingTokenSource {
         fn current(&self) -> &Token {
             &self.token
+        }
+
+        fn position(&self) -> usize {
+            0
         }
 
         fn advance(&mut self) {}
