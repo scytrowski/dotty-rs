@@ -540,6 +540,7 @@ mod tests {
                 capture_checking: false,
                 erased_definitions: false,
                 into: true,
+                postfix_ops: false,
             });
         let expected = parser.known_names().into;
 

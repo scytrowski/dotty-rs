@@ -4,7 +4,7 @@ use dotty_core::{
     TreeId, TreeKind, Untyped,
 };
 
-use crate::{ParseDiagnostic, ParseDiagnosticKind, Parser};
+use crate::{Location, ParseDiagnostic, ParseDiagnosticKind, Parser};
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -43,7 +43,7 @@ where
             let tree = if is_unsupported_start(self.current().kind) {
                 self.parse_unsupported_syntax()
             } else {
-                self.simple_expr()
+                self.with_location(Location::Elsewhere, |parser| parser.postfix_expr())
             };
             trees.push(tree);
 

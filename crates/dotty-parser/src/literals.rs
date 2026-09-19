@@ -14,6 +14,25 @@ where
             Err(_) => return self.unexpected_expression(),
         };
 
+        self.parse_number_with_spelling(mark, token_kind, spelling)
+    }
+
+    pub(crate) fn parse_negative_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let token_kind = self.current().kind;
+        let token_spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+        let spelling = format!("-{token_spelling}");
+        self.parse_number_with_spelling(mark, token_kind, &spelling)
+    }
+
+    fn parse_number_with_spelling(
+        &mut self,
+        mark: crate::Mark,
+        token_kind: TokenKind,
+        spelling: &str,
+    ) -> TreeId<Untyped> {
         let kind = match token_kind {
             TokenKind::LongLiteral => {
                 let Some(value) = parse_long_literal(spelling) else {
@@ -86,7 +105,11 @@ where
 }
 
 pub(crate) fn integer_radix(text: Option<&str>) -> u32 {
-    match text {
+    match text.map(|text| {
+        text.strip_prefix('-')
+            .or_else(|| text.strip_prefix('+'))
+            .unwrap_or(text)
+    }) {
         Some(text) if text.starts_with("0x") || text.starts_with("0X") => 16,
         Some(text) if text.starts_with("0b") || text.starts_with("0B") => 2,
         _ => 10,
@@ -95,14 +118,30 @@ pub(crate) fn integer_radix(text: Option<&str>) -> u32 {
 
 fn parse_long_literal(spelling: &str) -> Option<i64> {
     let digits = spelling.strip_suffix(['l', 'L'])?.replace('_', "");
-    let radix = integer_radix(Some(&digits));
+    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
+        (true, digits)
+    } else if let Some(digits) = digits.strip_prefix('+') {
+        (false, digits)
+    } else {
+        (false, digits.as_str())
+    };
+    let radix = integer_radix(Some(digits));
     let digits = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
         .or_else(|| digits.strip_prefix("0b"))
         .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(&digits);
-    i64::from_str_radix(digits, radix).ok()
+        .unwrap_or(digits);
+    let value = u64::from_str_radix(digits, radix).ok()?;
+    if negative {
+        if value == 1_u64 << 63 {
+            Some(i64::MIN)
+        } else {
+            i64::try_from(value).ok()?.checked_neg()
+        }
+    } else {
+        i64::try_from(value).ok()
+    }
 }
 
 fn parse_float_literal(spelling: &str) -> Option<f32> {

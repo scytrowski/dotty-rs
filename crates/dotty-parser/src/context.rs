@@ -46,6 +46,8 @@ pub struct ParserFeatures {
     pub erased_definitions: bool,
     /// Enables `into` syntax when that grammar is implemented.
     pub into: bool,
+    /// Enables legacy postfix operator syntax.
+    pub postfix_ops: bool,
 }
 
 /// Explicit parser context carried through nested grammar calls.
@@ -140,6 +142,7 @@ mod tests {
                 capture_checking: false,
                 erased_definitions: false,
                 into: false,
+                postfix_ops: false,
             }
         );
     }
@@ -150,10 +153,12 @@ mod tests {
             capture_checking: true,
             erased_definitions: false,
             into: true,
+            postfix_ops: false,
         };
 
         assert!(features.capture_checking);
         assert!(!features.erased_definitions);
         assert!(features.into);
+        assert!(!features.postfix_ops);
     }
 }

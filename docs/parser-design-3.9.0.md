@@ -122,7 +122,7 @@ the initial type-name subset used by type applications, and `literals.rs` owns
 numeric and string decoding. These names describe the current milestone; they
 do not claim complete Scala `simpleExpr` coverage.
 
-The smoke grammar currently covers:
+The currently implemented expression grammar covers:
 
 ```text
 identifier, backquoted identifier
@@ -137,6 +137,10 @@ new with simple or qualified type names and constructor applications
 simple type applications such as foo[A] and foo[A, B]
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
+prefix operators `-`, `+`, `~`, and `!` on the same physical line
+negative numeric literals using Scala's parser-level literal shape
+infix operators with Scala 3.9 precedence and associativity
+feature-gated legacy postfix operators (disabled by default)
 ```
 
 The implemented selections and applications are only the simple-expression
@@ -149,11 +153,14 @@ increments.
 
 ## Operator metadata
 
-The parser exposes Scala's precedence buckets and associativity helpers before
-full infix parsing exists. Assignment operators have precedence zero, letter
-operators one, and the symbolic groups follow Scala 3.9's `| ^ & =/! </> : +/-
-*/%` ordering. Operators ending in `:` are right-associative. Assignment
-classification excludes comparison operators such as `==` and `<=`.
+The operator-expression pipeline is layered as postfix/operator expression,
+infix expression, prefix expression, and simple expression. Prefix support is
+limited to `-`, `+`, `~`, and `!`; infix reduction uses Scala 3.9 precedence,
+left/right associativity, and mixed-associativity diagnostics. Operators
+ending in `:` are right-associative. Legacy postfix syntax is represented by
+`PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
+ascription, match clauses, colon arguments, and the remaining higher-level
+expression grammar are not implemented yet.
 
 ## Scala parser oracle
 
@@ -176,8 +183,9 @@ tools/scala-parser-oracle/compare.sh
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
 Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
-purpose and cover the implemented simple-expression subset, including
-`super`, `new`, type applications, suffix chains, and brace blocks. The same command is available
+purpose and cover the implemented simple- and operator-expression subset,
+including `super`, `new`, type applications, suffix chains, brace blocks,
+prefix operators, negative literals, and infix precedence/associativity. The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
 that workflow; it is intentionally not part of the automatic push/PR checks
