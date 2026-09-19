@@ -362,8 +362,7 @@ where
             TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
         ) {
             let checkpoint = self.cursor.checkpoint();
-            trees
-                .push(self.with_location(crate::Location::InBlock, |parser| parser.postfix_expr()));
+            trees.push(self.with_location(crate::Location::InBlock, |parser| parser.expr()));
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -697,9 +696,7 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(
-                    self.with_location(crate::Location::InArgs, |parser| parser.postfix_expr()),
-                );
+                args.push(self.with_location(crate::Location::InArgs, |parser| parser.expr()));
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -738,7 +735,7 @@ where
             );
         }
 
-        let first = self.with_location(crate::Location::InParens, |parser| parser.postfix_expr());
+        let first = self.with_location(crate::Location::InParens, |parser| parser.expr());
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             return self.alloc_from(
@@ -751,9 +748,7 @@ where
         while self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && self.current().kind != TokenKind::Eof
         {
-            elements.push(
-                self.with_location(crate::Location::InParens, |parser| parser.postfix_expr()),
-            );
+            elements.push(self.with_location(crate::Location::InParens, |parser| parser.expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
