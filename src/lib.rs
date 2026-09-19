@@ -15,6 +15,9 @@ pub use dotty_classfile::classfile;
 /// TASTy unpickler, and namer/typer.
 pub use dotty_core::core;
 
+/// Scala 3.9.0 source parser infrastructure and parser-facing AST APIs.
+pub use dotty_parser as parser;
+
 /// Classpath loading APIs, unifying TASTy and class file entries.
 pub use dotty_classloader::classloader;
 

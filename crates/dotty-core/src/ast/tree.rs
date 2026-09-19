@@ -114,6 +114,7 @@ mod tests {
         let tree = Tree::<Untyped> {
             kind: TreeKind::Ident(Ident {
                 name: Name::new(NameId::new(1), Namespace::Term),
+                backquoted: false,
             }),
             position: None,
             ty: (),
@@ -127,6 +128,7 @@ mod tests {
         let tree = Tree::<Typed> {
             kind: TreeKind::Ident(Ident {
                 name: Name::new(NameId::new(1), Namespace::Term),
+                backquoted: false,
             }),
             position: None,
             ty: TypeId::new(7),

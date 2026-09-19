@@ -9,6 +9,7 @@ dependencies = [
  "dotty-classfile",
  "dotty-classloader",
  "dotty-core",
+ "dotty-parser",
  "dotty-tasty",
  "dotty-tasty-unpickler",
 ]
@@ -36,6 +37,22 @@ version = "0.1.0"
 dependencies = [
  "dotty-core",
  "unicode-ident",
+]
+
+[[package]]
+name = "dotty-parser"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+]
+
+[[package]]
+name = "dotty-parser-smoke-dump"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "dotty-lexer",
+ "dotty-parser",
 ]
 
 [[package]]

@@ -4,6 +4,30 @@ use dotty::core::{
 };
 use dotty::tasty::{NodeCategory, SimpleTerm, TastyFile, TermValue, Writer};
 
+use dotty::core::{ScannerEvent, TextRange, Token, TokenKind, TokenSource, TokenValue};
+use dotty::parser::parse_compilation_unit;
+
+struct SingleTokenSource {
+    tokens: [Token; 2],
+    index: usize,
+}
+
+impl TokenSource for SingleTokenSource {
+    fn current(&self) -> &Token {
+        &self.tokens[self.index]
+    }
+
+    fn advance(&mut self) {
+        self.index = (self.index + 1).min(self.tokens.len() - 1);
+    }
+
+    fn lookahead(&mut self, n: usize) -> &Token {
+        &self.tokens[(self.index + n).min(self.tokens.len() - 1)]
+    }
+
+    fn observe(&mut self, _event: ScannerEvent) {}
+}
+
 #[test]
 fn exposes_the_tasty_api_under_the_dotty_namespace() {
     assert!(NodeCategory::is_known_tag(255));
@@ -56,6 +80,39 @@ fn exposes_the_core_semantic_api_under_the_dotty_namespace() {
     });
 
     assert_eq!(store.symbols.get(symbol).name, name);
+}
+
+#[test]
+fn exposes_the_parser_api_under_the_dotty_namespace() {
+    let source = "x";
+    let tokens = SingleTokenSource {
+        tokens: [
+            Token {
+                kind: TokenKind::Identifier,
+                span: TextRange::new(0, 1).unwrap(),
+                value: TokenValue::None,
+            },
+            Token {
+                kind: TokenKind::Eof,
+                span: TextRange::new(1, 1).unwrap(),
+                value: TokenValue::None,
+            },
+        ],
+        index: 0,
+    };
+    let mut names = dotty::core::NameInterner::new();
+    let result = parse_compilation_unit(
+        dotty::core::SourceText::new(source).unwrap(),
+        dotty::core::SourceId::from_index(0),
+        tokens,
+        &mut names,
+    );
+
+    assert!(result.diagnostics.is_empty());
+    assert!(matches!(
+        result.ast.get(result.root).kind,
+        dotty::core::TreeKind::Block(_)
+    ));
 }
 
 #[test]

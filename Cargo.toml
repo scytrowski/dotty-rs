@@ -12,6 +12,8 @@ members = [
     "crates/dotty-core",
     "crates/dotty-classloader",
     "crates/dotty-tasty-unpickler",
+    "crates/dotty-parser",
+    "tools/parser-smoke-dump",
 ]
 resolver = "3"
 
@@ -24,3 +26,4 @@ dotty-classfile = { path = "crates/dotty-classfile" }
 dotty-core = { path = "crates/dotty-core" }
 dotty-classloader = { path = "crates/dotty-classloader" }
 dotty-tasty-unpickler = { path = "crates/dotty-tasty-unpickler" }
+dotty-parser = { path = "crates/dotty-parser" }
