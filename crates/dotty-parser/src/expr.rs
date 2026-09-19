@@ -1,7 +1,7 @@
 use dotty_core::ast::{
     Apply, ApplyKind, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
 };
-use dotty_core::ast::{New, PrefixOp};
+use dotty_core::ast::{InfixOp, New, PrefixOp};
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
@@ -14,7 +14,131 @@ where
 {
     /// Parses an expression at the current operator-expression boundary.
     pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
-        self.prefix_expr()
+        let first = self.prefix_expr();
+        self.infix_expr(first)
+    }
+
+    fn infix_expr(&mut self, mut top: TreeId<Untyped>) -> TreeId<Untyped> {
+        let mut operators = Vec::new();
+
+        while let Some(operator) = self.current_infix_operator() {
+            let operator_precedence = {
+                let spelling = self.names.resolve(operator.name.text());
+                crate::infix::precedence(spelling)
+            };
+            let operator_left_associative = {
+                let spelling = self.names.resolve(operator.name.text());
+                !crate::infix::is_right_associative(spelling)
+            };
+
+            top = self.reduce_operator_stack(
+                &mut operators,
+                top,
+                operator_precedence,
+                operator_left_associative,
+                Some(operator.name),
+            );
+            self.advance();
+            operators.push(crate::OpInfo {
+                operand: top,
+                operator: operator.name,
+                offset: operator.offset,
+            });
+            top = self.prefix_expr();
+        }
+
+        self.reduce_operator_stack(&mut operators, top, 0, true, None)
+    }
+
+    fn current_infix_operator(&mut self) -> Option<PendingOperator> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Operator
+                | TokenKind::ColonOp
+        ) {
+            return None;
+        }
+
+        let spelling = self.current_text().ok()?;
+        if spelling == "=" {
+            return None;
+        }
+
+        let name = *self.intern_current_term_name().ok()?.as_name();
+        Some(PendingOperator {
+            name,
+            offset: self.current().span.start(),
+        })
+    }
+
+    fn reduce_operator_stack(
+        &mut self,
+        operators: &mut Vec<crate::OpInfo>,
+        mut top: TreeId<Untyped>,
+        precedence: u8,
+        left_associative: bool,
+        next_operator: Option<dotty_core::Name>,
+    ) -> TreeId<Untyped> {
+        if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
+            let stack_spelling = self.names.resolve(stack_top.operator.text()).to_owned();
+            let next_spelling = self.names.resolve(next_operator.text()).to_owned();
+            let stack_precedence = crate::infix::precedence(&stack_spelling);
+            if stack_precedence == precedence
+                && crate::infix::is_right_associative(&stack_spelling) == left_associative
+            {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    format!(
+                        "mixed left- and right-associative operators `{stack_spelling}` and `{next_spelling}`"
+                    ),
+                );
+            }
+        }
+
+        while let Some(stack_top) = operators.last() {
+            let stack_spelling = self.names.resolve(stack_top.operator.text());
+            let stack_precedence = crate::infix::precedence(stack_spelling);
+            if !(precedence < stack_precedence
+                || left_associative && precedence == stack_precedence)
+            {
+                break;
+            }
+
+            let stack_top = operators.pop().expect("operator stack was non-empty");
+            top = self.alloc_infix(stack_top.operand, stack_top.operator, top);
+        }
+        top
+    }
+
+    fn alloc_infix(
+        &mut self,
+        left: TreeId<Untyped>,
+        operator: dotty_core::Name,
+        right: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(left)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let end = self
+            .ast
+            .get(right)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(self.last_real_token_end);
+        let range = TextRange::new(start, end).expect("infix child spans are ordered");
+        self.alloc(
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp {
+                left,
+                op: operator,
+                right,
+            })),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
     }
 
     fn prefix_expr(&mut self) -> TreeId<Untyped> {
@@ -546,6 +670,12 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingOperator {
+    name: dotty_core::Name,
+    offset: u32,
+}
+
 const fn is_block_separator(kind: TokenKind) -> bool {
     matches!(
         kind,
@@ -857,6 +987,179 @@ mod tests {
             }) if value == -1.5
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_simple_infix_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let (left, operator, right, span) = {
+            let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind
+            else {
+                panic!("expected infix tree");
+            };
+            (
+                infix.left,
+                infix.op,
+                infix.right,
+                parser.ast().get(id).position.unwrap().span().range(),
+            )
+        };
+
+        assert!(matches!(parser.ast().get(left).kind, TreeKind::Ident(_)));
+        assert!(matches!(parser.ast().get(right).kind, TreeKind::Ident(_)));
+        assert_eq!(span, TextRange::new(0, 5).unwrap());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(operator.text()), "+");
+    }
+
+    #[test]
+    fn reduces_multiplication_before_addition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b * c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) = parser.ast().get(id).kind else {
+            panic!("expected outer infix tree");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(inner)) =
+            parser.ast().get(outer.right).kind
+        else {
+            panic!("expected multiplication on the right");
+        };
+
+        assert!(matches!(
+            parser.ast().get(outer.left).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(inner.left).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(inner.right).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reduces_colon_operators_right_associatively() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a :: b :: c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::ColonOp, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) = parser.ast().get(id).kind else {
+            panic!("expected outer infix tree");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(inner)) =
+            parser.ast().get(outer.right).kind
+        else {
+            panic!("expected right-associated inner tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(outer.left).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(inner.left).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(inner.right).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_alphabetic_infix_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a foo b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind else {
+            panic!("expected alphabetic infix tree");
+        };
+        let operator = infix.op;
+
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(operator.text()), "foo");
+    }
+
+    #[test]
+    fn reports_mixed_associativity_at_equal_precedence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b +: c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            crate::ParseDiagnosticKind::UnexpectedToken
+        );
     }
 
     #[test]
