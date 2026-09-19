@@ -22,13 +22,14 @@ use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Vi
 use dotty_tasty::tasty::{
     AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG,
     ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG, StandardSection, StructuredNode,
-    TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG, TastyFile, TermValue, VALDEF_TAG,
+    TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile,
+    TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
 use crate::mapping::{
-    DeclaredModifiers, QualifiedAccess, QualifierRef, TYPEREFPKG_TAG, def_def_kind, namespace_of,
-    term_param_kind, type_def_kind, type_param_kind, val_def_kind,
+    DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
+    type_def_kind, type_param_kind, val_def_kind,
 };
 use crate::names::{qualified_segments, wire_name};
 use crate::packages::enter_in_scope;

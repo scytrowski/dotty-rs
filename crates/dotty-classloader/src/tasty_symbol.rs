@@ -10,7 +10,8 @@ use dotty_tasty::tasty::{
     PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG,
     SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, StandardSection, StructuredNode, StructuredTree,
     TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
-    TYPEREF_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue, VALDEF_TAG,
+    TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
+    VALDEF_TAG,
 };
 use std::fmt;
 
@@ -547,9 +548,6 @@ fn decode_visibility(
         _ => None,
     })
 }
-
-/// `TYPEREFpkg NameRef`, which `dotty-tasty` has no constant for (issue #15).
-const TYPEREFPKG_TAG: u8 = 65;
 
 fn decode_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>) -> DeclaredQualifier {
     match tree {
