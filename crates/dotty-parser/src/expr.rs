@@ -22,8 +22,16 @@ where
         let mut operators = Vec::new();
 
         while let Some(operator) = self.current_infix_operator() {
+            let checkpoint = self.cursor.checkpoint();
             if self.features().postfix_ops && !self.operator_has_following_operand() {
                 self.advance();
+                if !self.cursor.progressed_since(checkpoint) {
+                    self.report(
+                        crate::ParseDiagnosticKind::UnexpectedToken,
+                        "parser made no progress while parsing a postfix operator",
+                    );
+                    break;
+                }
                 top = self.reduce_operator_stack(&mut operators, top, 0, true, None);
                 return self.alloc_postfix(top, operator.name);
             }
@@ -52,6 +60,14 @@ where
             });
             self.consume_infix_newlines();
             top = self.prefix_expr();
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing an infix expression",
+                );
+                break;
+            }
         }
 
         self.reduce_operator_stack(&mut operators, top, 0, true, None)
@@ -93,7 +109,11 @@ where
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
         ) {
+            let checkpoint = self.cursor.checkpoint();
             self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
         }
     }
 
@@ -578,6 +598,7 @@ where
         mut can_apply: bool,
     ) -> TreeId<Untyped> {
         loop {
+            let checkpoint = self.cursor.checkpoint();
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
                 let name = match self.current().kind {
                     TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -624,6 +645,14 @@ where
                 }
                 qualifier = self.parse_application(mark, qualifier);
             } else {
+                break;
+            }
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing an expression suffix",
+                );
                 break;
             }
         }
@@ -784,7 +813,10 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode};
-    use dotty_core::{HardKeyword, NameInterner, TextRange};
+    use dotty_core::{
+        HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
+        TokenSource,
+    };
 
     #[test]
     fn parses_an_identifier_with_its_source_span() {
@@ -862,6 +894,10 @@ mod tests {
         assert!(operand_is_ident);
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 2).unwrap()
+        );
         drop(parser);
         assert_eq!(names.resolve(operator_name.text()), operator);
     }
@@ -1304,6 +1340,10 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 10).unwrap()
+        );
         drop(parser);
         assert_eq!(names.resolve(operator.text()), "reverse");
     }
@@ -1328,6 +1368,203 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_operator_without_an_operand() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a +",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_operator_before_an_invalid_operand() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + *",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_operator_before_a_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + )",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_operator_before_an_opening_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + (",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_incomplete_prefix_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "!",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let _id = parser.postfix_expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_expression_inside_an_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(a + )",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Apply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_infix_expression_inside_a_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ a + }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Block(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_progress_failure_for_a_stuck_infix_token_source() {
+        struct StuckTokenSource {
+            current: Token,
+        }
+
+        impl TokenSource for StuckTokenSource {
+            fn current(&self) -> &Token {
+                &self.current
+            }
+
+            fn position(&self) -> usize {
+                0
+            }
+
+            fn advance(&mut self) {}
+
+            fn lookahead(&mut self, _n: usize) -> &Token {
+                &self.current
+            }
+
+            fn observe(&mut self, _event: ScannerEvent) {}
+        }
+
+        let mut names = NameInterner::new();
+        let token = token(TokenKind::Operator, 0, 1);
+        let mut parser = Parser::new(
+            SourceText::new("+").unwrap(),
+            SourceId::from_index(1),
+            StuckTokenSource { current: token },
+            &mut names,
+        );
+
+        let _id = parser.postfix_expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Operator);
         assert!(!parser.diagnostics().is_empty());
     }
 
