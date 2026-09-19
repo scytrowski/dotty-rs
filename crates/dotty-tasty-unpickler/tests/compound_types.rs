@@ -349,3 +349,103 @@ fn children_of(file: &TastyFile<'_>, at: u32) -> Vec<u32> {
         .map(|edge| u32::try_from(edge.child.offset).unwrap())
         .collect()
 }
+
+/// A `THIS` node over a shared type. `BYNAMEtype` (93) has the same wire
+/// shape (one type child), and the unit contains no `BYNAMEtype` (a by-name
+/// parameter is only written as a tree-level `BYNAMEtpt` over an `IDENTtpt`),
+/// so retagging exposes the type node without reconstructing a method type.
+const BY_NAME_NODE: u32 = 308;
+const BY_NAME_CHILD: u32 = 309;
+/// A real alias-form `TYPEBOUNDS` in the unit.
+const TYPE_BOUNDS: u32 = 159;
+
+#[test]
+fn a_by_name_type_wraps_its_result_and_is_not_lowered_to_it() {
+    let patched = retagged(COMPOUND, BY_NAME_NODE as usize, 90, 93);
+    let shown = decode_all(&patched, &[BY_NAME_NODE]);
+    assert_eq!(shown, ["=> Compound$"]);
+
+    let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let by_name = unpickler.unpickle_type(BY_NAME_NODE).unwrap();
+    let wrapped = unpickler.unpickle_type(BY_NAME_CHILD).unwrap();
+    let Type::ByName { result } = session.store.types.get(by_name) else {
+        panic!("lowered to {:?}", session.store.types.get(by_name));
+    };
+    assert_eq!(*result, wrapped);
+    assert_ne!(by_name, wrapped);
+}
+
+#[test]
+fn a_by_name_type_reports_the_error_of_its_child() {
+    // `=> T` where the wrapped node is an unsupported form.
+    let by_name = retagged(COMPOUND, BY_NAME_NODE as usize, 90, 93);
+    let by_name = retagged(&by_name, BY_NAME_CHILD as usize, 61, 66);
+    let file = TastyFile::parse_scala_3_9(&by_name).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let before = unpickler.index().type_count();
+    assert!(matches!(
+        unpickler.unpickle_type(BY_NAME_NODE),
+        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+    ));
+    assert_eq!(unpickler.index().type_count(), before);
+}
+
+#[test]
+fn a_super_type_keeps_the_this_type_and_the_super_type_in_their_roles() {
+    // `SUPERtype` has the wire shape of `ANDtype`: two types. The compiler
+    // writes none in this unit, so retag the `A & B` node: `this` is `A`,
+    // `super` is `B`.
+    let patched = retagged(COMPOUND, AND as usize, 165, 158);
+    assert_eq!(decode_all(&patched, &[AND]), ["super(A, B)"]);
+
+    let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let id = unpickler.unpickle_type(AND).unwrap();
+    let Type::SuperType {
+        this_type,
+        super_type,
+    } = session.store.types.get(id)
+    else {
+        panic!("not a super type");
+    };
+    assert_ne!(this_type, super_type);
+    assert_eq!(show(&session.store, *this_type), "A");
+    assert_eq!(show(&session.store, *super_type), "B");
+}
+
+#[test]
+fn unsupported_neighbours_stay_explicit() {
+    // Alias-form `TYPEBOUNDS`, as the compiler wrote it.
+    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    assert!(matches!(
+        unpickler.unpickle_type(TYPE_BOUNDS),
+        Err(UnpickleError::UnsupportedType { tag: 163, .. })
+    ));
+    drop(unpickler);
+    // The other three have no instance in the unit; a length-prefixed node
+    // retagged to their tag must be refused, never lowered to a child.
+    for tag in [193u8, 153, 170] {
+        let patched = retagged(COMPOUND, AND as usize, 165, tag);
+        let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+        let mut session = Session::new();
+        let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+        unpickler.enter_symbols().unwrap();
+        assert!(
+            matches!(
+                unpickler.unpickle_type(AND),
+                Err(UnpickleError::UnsupportedType { tag: found, .. }) if found == tag
+            ),
+            "tag {tag}"
+        );
+    }
+}
