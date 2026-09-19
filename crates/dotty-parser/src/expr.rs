@@ -224,7 +224,36 @@ where
         } else {
             tpt
         };
-        self.alloc_from(mark, TreeKind::New(New { tpt }))
+        let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
+        if self
+            .cursor
+            .at(TokenKind::Punctuation(Punctuation::LeftParen))
+        {
+            new_tree
+        } else {
+            let constructor = self.constructor_select(new_tree);
+            self.alloc_from(
+                mark,
+                TreeKind::Apply(Apply {
+                    function: constructor,
+                    args: Vec::new(),
+                    kind: ApplyKind::Regular,
+                }),
+            )
+        }
+    }
+
+    fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
+        let position = self.ast.get(function).position;
+        let name = dotty_core::TermName::new(self.names.intern("<init>"));
+        self.alloc(
+            TreeKind::Select(Select {
+                qualifier: function,
+                name: *name.as_name(),
+                backquoted: false,
+            }),
+            position,
+        )
     }
 
     fn parse_type_application(
@@ -320,6 +349,11 @@ where
         function: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
         self.advance();
+        let function = if matches!(self.ast.get(function).kind, TreeKind::New(_)) {
+            self.constructor_select(function)
+        } else {
+            function
+        };
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
@@ -711,7 +745,14 @@ mod tests {
         );
 
         let id = parser.simple_expr();
-        let TreeKind::New(New { tpt }) = parser.ast().get(id).kind else {
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected implicit constructor application");
+        };
+        let TreeKind::Select(selection) = parser.ast().get(application.function).kind else {
+            panic!("expected constructor selection");
+        };
+        let init_name = selection.name;
+        let TreeKind::New(New { tpt }) = parser.ast().get(selection.qualifier).kind else {
             panic!("expected new tree");
         };
         let TreeKind::Ident(ident) = parser.ast().get(tpt).kind else {
@@ -724,6 +765,8 @@ mod tests {
             TextRange::new(0, 7).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(init_name.text()), "<init>");
     }
 
     #[test]
@@ -748,7 +791,10 @@ mod tests {
         let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
             panic!("expected constructor application");
         };
-        let TreeKind::New(New { tpt }) = parser.ast().get(application.function).kind else {
+        let TreeKind::Select(selection) = parser.ast().get(application.function).kind else {
+            panic!("expected constructor selection");
+        };
+        let TreeKind::New(New { tpt }) = parser.ast().get(selection.qualifier).kind else {
             panic!("expected new function");
         };
         let TreeKind::Select(selection) = parser.ast().get(tpt).kind else {
@@ -859,7 +905,10 @@ mod tests {
         let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
             panic!("expected constructor application");
         };
-        let TreeKind::New(New { tpt }) = parser.ast().get(application.function).kind else {
+        let TreeKind::Select(selection) = parser.ast().get(application.function).kind else {
+            panic!("expected constructor selection");
+        };
+        let TreeKind::New(New { tpt }) = parser.ast().get(selection.qualifier).kind else {
             panic!("expected new tree");
         };
         assert!(matches!(parser.ast().get(tpt).kind, TreeKind::TypeApply(_)));
@@ -1002,7 +1051,7 @@ mod tests {
 
         let id = parser.simple_expr();
 
-        assert!(matches!(parser.ast().get(id).kind, TreeKind::New(_)));
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Apply(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
