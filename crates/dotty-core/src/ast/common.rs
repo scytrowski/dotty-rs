@@ -52,7 +52,7 @@ pub struct Super<P: AstPhase> {
 }
 
 /// A literal constant.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Literal {
     pub value: Constant,
 }

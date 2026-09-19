@@ -279,14 +279,12 @@ where
         let Some(value) = decode_string_literal(text) else {
             return self.unexpected_expression();
         };
-        let value = self.names.intern(&value);
+        let value = match value {
+            DecodedString::Scalar(value) => Constant::String(self.names.intern(&value)),
+            DecodedString::Utf16(units) => Constant::StringUtf16(units),
+        };
         self.advance();
-        self.alloc_from(
-            mark,
-            TreeKind::Literal(Literal {
-                value: Constant::String(value),
-            }),
-        )
+        self.alloc_from(mark, TreeKind::Literal(Literal { value }))
     }
 
     fn parse_literal(&mut self, mark: crate::Mark, value: Constant) -> TreeId<Untyped> {
@@ -409,7 +407,12 @@ fn parse_double_literal(spelling: &str) -> Option<f64> {
         .ok()
 }
 
-fn decode_string_literal(text: &str) -> Option<String> {
+enum DecodedString {
+    Scalar(String),
+    Utf16(Vec<u16>),
+}
+
+fn decode_string_literal(text: &str) -> Option<DecodedString> {
     let multiline = text.starts_with("\"\"\"");
     let body = if multiline {
         text.strip_prefix("\"\"\"")?.strip_suffix("\"\"\"")?
@@ -417,28 +420,29 @@ fn decode_string_literal(text: &str) -> Option<String> {
         text.strip_prefix('"')?.strip_suffix('"')?
     };
     let characters: Vec<char> = body.chars().collect();
-    let mut value = String::new();
+    let mut units = Vec::new();
     let mut index = 0;
 
     while index < characters.len() {
         let character = characters[index];
         index += 1;
         if multiline || character != '\\' {
-            value.push(character);
+            let mut encoded = [0; 2];
+            units.extend(character.encode_utf16(&mut encoded).iter().copied());
             continue;
         }
 
         let escaped = *characters.get(index)?;
         index += 1;
         match escaped {
-            'b' => value.push('\u{0008}'),
-            't' => value.push('\t'),
-            'n' => value.push('\n'),
-            'f' => value.push('\u{000c}'),
-            'r' => value.push('\r'),
-            '\\' => value.push('\\'),
-            '"' => value.push('"'),
-            '\'' => value.push('\''),
+            'b' => units.push('\u{0008}' as u16),
+            't' => units.push('\t' as u16),
+            'n' => units.push('\n' as u16),
+            'f' => units.push('\u{000c}' as u16),
+            'r' => units.push('\r' as u16),
+            '\\' => units.push('\\' as u16),
+            '"' => units.push('"' as u16),
+            '\'' => units.push('\'' as u16),
             'u' | 'U' => {
                 while characters
                     .get(index)
@@ -447,8 +451,8 @@ fn decode_string_literal(text: &str) -> Option<String> {
                     index += 1;
                 }
                 let digits: String = characters.get(index..index + 4)?.iter().collect();
-                let code_point = u32::from_str_radix(&digits, 16).ok()?;
-                value.push(char::from_u32(code_point)?);
+                let code_unit = u16::from_str_radix(&digits, 16).ok()?;
+                units.push(code_unit);
                 index += 4;
             }
             '0'..='7' => {
@@ -461,14 +465,17 @@ fn decode_string_literal(text: &str) -> Option<String> {
                     digits.push(characters[index]);
                     index += 1;
                 }
-                let code_point = u32::from_str_radix(&digits, 8).ok()?;
-                value.push(char::from_u32(code_point)?);
+                let code_unit = u16::from_str_radix(&digits, 8).ok()?;
+                units.push(code_unit);
             }
             _ => return None,
         }
     }
 
-    Some(value)
+    Some(match String::from_utf16(&units) {
+        Ok(value) => DecodedString::Scalar(value),
+        Err(_) => DecodedString::Utf16(units),
+    })
 }
 
 const fn is_unsupported_start(kind: TokenKind) -> bool {
@@ -869,6 +876,57 @@ mod tests {
         drop(parser);
 
         assert_eq!(names.resolve(value), "A");
+    }
+
+    #[test]
+    fn decodes_a_surrogate_pair_to_a_scalar_string_value() {
+        let source = r#""\uD834\uDD1E""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected scalar string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "𝄞");
+    }
+
+    #[test]
+    fn preserves_an_unpaired_surrogate_as_utf16_code_units() {
+        let source = r#""a\uD800b""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::Literal(Literal {
+            value: Constant::StringUtf16(units),
+        }) = tree.kind
+        else {
+            panic!("expected UTF-16 string literal tree");
+        };
+        assert_eq!(units, vec!['a' as u16, 0xD800, 'b' as u16]);
     }
 
     #[test]

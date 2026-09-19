@@ -1057,13 +1057,17 @@ pub enum Constant {
     Float(f32),
     Double(f64),
     String(NameId),
+    StringUtf16(Vec<u16>),
     Class(TypeId),
 }
 ```
 
 `Constant::String` uses `NameId` (interned, see §5) rather than an owned
 `String`, so AST literals and future TASTy constant pool entries share one
-string table instead of allocating separately.
+string table instead of allocating separately. `StringUtf16` is the
+lossless representation for Scala string values containing an unpaired
+UTF-16 surrogate; well-formed surrogate pairs are normalized to scalar
+values in `Constant::String`.
 
 ```rust
 pub struct ClassInfo {
