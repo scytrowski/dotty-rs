@@ -14,18 +14,16 @@
 //! that method but are not members of any scope. Definitions inside method
 //! bodies (locals) are not entered.
 
-use std::collections::HashMap;
-
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;
 use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
 use dotty_tasty::tasty::{
-    AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG,
-    ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG, StandardSection, StructuredNode,
-    TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
-    TastyFile, TermValue, VALDEF_TAG,
+    DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG, ParameterNode, RawTree, SHAREDTYPE_TAG,
+    StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG,
+    TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
 
+use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
 use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
@@ -34,67 +32,6 @@ use crate::mapping::{
 use crate::names::{qualified_segments, wire_name};
 use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
-
-/// The file's AST as the enter pass walks it: nodes by absolute address, and
-/// each node's direct children in wire order.
-pub(crate) struct AstView<'bytes> {
-    index: AstAddressIndex<'bytes>,
-    children: HashMap<u32, Vec<AstTreeNode>>,
-    /// The ASTs section payload, for decoding a tree shared at an address.
-    payload: &'bytes [u8],
-}
-
-impl<'bytes> AstView<'bytes> {
-    pub fn new(file: &TastyFile<'bytes>) -> Result<Self, UnpickleError> {
-        let index = file.ast_address_index()?;
-        let mut children: HashMap<u32, Vec<AstTreeNode>> = HashMap::new();
-        for edge in index.iter_tree_edges() {
-            children
-                .entry(address(edge.parent.offset))
-                .or_default()
-                .push(edge.child);
-        }
-        let payload = file
-            .section(StandardSection::Asts)
-            .map_or(&[][..], |section| section.payload);
-        Ok(Self {
-            index,
-            children,
-            payload,
-        })
-    }
-
-    /// Decodes the independent tree rooted at `at`. This is how a
-    /// `SHAREDtype` reference is followed: the compiler writes a repeated
-    /// subtree once and every other occurrence names its address.
-    ///
-    /// `at` comes from an untrusted reference, so it must be the start of a
-    /// visible AST node: an address inside another node's payload, or past the
-    /// end of the section, would decode as an unrelated tree. `from` is the
-    /// referring definition, for the error.
-    fn tree_at(&self, at: u32, from: u32) -> Result<RawTree<'bytes>, UnpickleError> {
-        if self.index.get_node(at).is_none() {
-            return Err(UnpickleError::InvalidReferenceTarget { from, to: at });
-        }
-        let mut reader = Reader::with_range(self.payload, at as usize, self.payload.len())
-            .map_err(AstError::from)?;
-        Ok(RawTree::decode_with_base_offset(&mut reader, 0).map_err(AstError::from)?)
-    }
-
-    fn node(&self, at: u32) -> Result<&RawNode<'bytes>, UnpickleError> {
-        self.index
-            .get(at)
-            .ok_or(UnpickleError::MissingDefinition { address: at })
-    }
-
-    fn children(&self, at: u32) -> &[AstTreeNode] {
-        self.children.get(&at).map_or(&[], Vec::as_slice)
-    }
-}
-
-/// How many `SHAREDtype` links a qualifier may chain before it is treated as
-/// a cycle.
-const MAX_SHARED_DEPTH: usize = 16;
 
 /// What is known about a definition when its symbol is allocated.
 struct Declaration<'a> {
@@ -106,12 +43,6 @@ struct Declaration<'a> {
     owner: SymbolId,
     /// Whether the symbol is a member of its owner's declaration scope.
     member: bool,
-}
-
-/// The AST address for an absolute offset. TASTy addresses fit `u32`; a
-/// larger offset cannot name a node.
-fn address(offset: usize) -> u32 {
-    u32::try_from(offset).unwrap_or(u32::MAX)
 }
 
 /// The name reference of a `PACKAGE` node's path, which is a direct

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use dotty_core::ids::{ScopeId, SymbolId};
+use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 
 use crate::error::UnpickleError;
 
@@ -20,13 +20,23 @@ use crate::error::UnpickleError;
 ///
 /// Declaration scopes are keyed by the *owning symbol* rather than by an
 /// address: a package can be spread over several `PACKAGE` nodes that share
-/// one symbol and one scope, so no single node address identifies it. Maps
-/// for shared types and typed trees are added by the milestones that
-/// populate them.
+/// one symbol and one scope, so no single node address identifies it.
+///
+/// Type identity follows the same rule: one semantic type node address owns
+/// at most one [`TypeId`]. This is address identity, not structural
+/// interning: two separately written, structurally equal type trees have
+/// different addresses and may have different `TypeId`s. A `SHAREDtype` node
+/// is an indirection and has no entry of its own; it resolves to the entry of
+/// the node it names. A map for typed trees is added by the milestone that
+/// populates it.
 #[derive(Debug, Default, Clone)]
 pub struct TastySemanticIndex {
     symbols: HashMap<u32, SymbolId>,
     scopes: HashMap<SymbolId, ScopeId>,
+    types: HashMap<u32, TypeId>,
+    /// Type addresses in the order they were recorded, so a failed type
+    /// operation can forget the newest ones.
+    type_order: Vec<u32>,
 }
 
 impl TastySemanticIndex {
@@ -43,6 +53,16 @@ impl TastySemanticIndex {
     /// and classes).
     pub fn scope_of(&self, symbol: SymbolId) -> Option<ScopeId> {
         self.scopes.get(&symbol).copied()
+    }
+
+    /// The type decoded for the type node at `address`, if any.
+    pub fn type_at(&self, address: u32) -> Option<TypeId> {
+        self.types.get(&address).copied()
+    }
+
+    /// The number of type addresses that have a `TypeId`.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
     }
 
     /// The number of definition addresses that have a symbol.
@@ -67,6 +87,37 @@ impl TastySemanticIndex {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(symbol);
                 Ok(())
+            }
+        }
+    }
+
+    /// Records the type for a type-node address.
+    ///
+    /// Like [`insert_symbol`](Self::insert_symbol), a second `TypeId` for an
+    /// address is rejected and the existing entry is kept.
+    pub(crate) fn insert_type(&mut self, address: u32, ty: TypeId) -> Result<(), UnpickleError> {
+        match self.types.entry(address) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(UnpickleError::DuplicateType { address })
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(ty);
+                self.type_order.push(address);
+                Ok(())
+            }
+        }
+    }
+
+    /// A position to [`roll_back_types`](Self::roll_back_types).
+    pub(crate) fn mark_types(&self) -> usize {
+        self.type_order.len()
+    }
+
+    /// Forgets every type address recorded after `mark`.
+    pub(crate) fn roll_back_types(&mut self, mark: usize) {
+        while self.type_order.len() > mark {
+            if let Some(address) = self.type_order.pop() {
+                self.types.remove(&address);
             }
         }
     }
@@ -199,6 +250,77 @@ mod tests {
             result,
             Err(UnpickleError::DuplicateDefinition { address: 4 })
         );
+    }
+
+    fn allocate_type(store: &mut SemanticStore) -> TypeId {
+        store.types.alloc(dotty_core::types::Type::NoPrefix)
+    }
+
+    #[test]
+    fn a_new_index_knows_no_types() {
+        let index = TastySemanticIndex::new();
+
+        assert_eq!(index.type_at(4), None);
+        assert_eq!(index.type_count(), 0);
+    }
+
+    #[test]
+    fn an_inserted_type_address_resolves_to_its_type() {
+        let mut store = SemanticStore::new();
+        let ty = allocate_type(&mut store);
+        let mut index = TastySemanticIndex::new();
+
+        index.insert_type(4, ty).unwrap();
+
+        assert_eq!(index.type_at(4), Some(ty));
+        assert_eq!(index.type_count(), 1);
+    }
+
+    #[test]
+    fn distinct_type_addresses_keep_distinct_types() {
+        let mut store = SemanticStore::new();
+        let (first, second) = (allocate_type(&mut store), allocate_type(&mut store));
+        let mut index = TastySemanticIndex::new();
+
+        index.insert_type(4, first).unwrap();
+        index.insert_type(9, second).unwrap();
+
+        assert_eq!(index.type_at(4), Some(first));
+        assert_eq!(index.type_at(9), Some(second));
+    }
+
+    #[test]
+    fn a_second_type_for_an_address_is_rejected_and_keeps_the_first() {
+        let mut store = SemanticStore::new();
+        let (first, second) = (allocate_type(&mut store), allocate_type(&mut store));
+        let mut index = TastySemanticIndex::new();
+        index.insert_type(4, first).unwrap();
+
+        assert_eq!(
+            index.insert_type(4, second),
+            Err(UnpickleError::DuplicateType { address: 4 })
+        );
+        assert_eq!(
+            index.insert_type(4, first),
+            Err(UnpickleError::DuplicateType { address: 4 })
+        );
+        assert_eq!(index.type_at(4), Some(first));
+        assert_eq!(index.type_count(), 1);
+    }
+
+    #[test]
+    fn rolling_back_forgets_only_the_types_recorded_after_the_mark() {
+        let mut store = SemanticStore::new();
+        let (first, second) = (allocate_type(&mut store), allocate_type(&mut store));
+        let mut index = TastySemanticIndex::new();
+        index.insert_type(4, first).unwrap();
+        let mark = index.mark_types();
+        index.insert_type(9, second).unwrap();
+
+        index.roll_back_types(mark);
+
+        assert_eq!(index.type_at(4), Some(first));
+        assert_eq!(index.type_at(9), None);
     }
 
     #[test]

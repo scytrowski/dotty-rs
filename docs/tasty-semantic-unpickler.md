@@ -1,9 +1,14 @@
 # TASTy semantic unpickler
 
-Status: Milestone 1 (semantic index and symbol entering) is complete
-(`crates/dotty-tasty-unpickler`). Milestone 2 (core type references) is next.
-Only pass 1 exists: every entered symbol is `SymbolInfo::Missing`; no type is
-decoded.
+Status (`crates/dotty-tasty-unpickler`):
+
+- Milestone 1, semantic index and symbol entering: complete.
+- Milestone 2a, core type identity and reference resolution: implemented
+  (§4, "Types").
+- Milestone 2b, compound non-binder types: next.
+
+Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
+request by address and are not yet attached to symbols.
 
 Target: Scala 3.9.0 / TASTy 28.9.0. The wire format is documented in
 [`tasty-format-3.9.0.md`](tasty-format-3.9.0.md) and the decoding API in
@@ -41,7 +46,8 @@ function. It follows an enter-before-complete model:
 | Pass | Result | Milestone |
 |------|--------|-----------|
 | 1. Enter | symbols, owners, declaration scopes; `SymbolInfo::Missing` | 1 |
-| 2. Types | semantic `TypeId`s, using `TypeArena::reserve`/`fill` for binders | 2–4 |
+| 2a. Type identity | address-keyed `TypeId`s; references, `THIS`, `SHAREDtype` | 2a |
+| 2b. Types | compound types (`Applied`, bounds, `And`/`Or`, ...), then binders with `TypeArena::reserve`/`fill` | 2b–4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
@@ -54,9 +60,19 @@ definition address -> exactly one SymbolId
 shared type address -> exactly one TypeId
 ```
 
-Direct references (`TYPEREFdirect`, `TERMREFdirect`, `SHAREDtype`, ...) resolve
-through the semantic index by address, never by rendering a name and searching
-for it. Names are used only where TASTy itself encodes a target by name.
+Direct references (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFsymbol`,
+`TERMREFsymbol`) resolve through the semantic index by address, never by
+rendering a name and searching for it. Names are used only where TASTy itself
+encodes a target by name. The type map is address identity, not structural
+interning: two separately written, equal type trees have different addresses
+and may have different `TypeId`s. A `SHAREDtype` node is an indirection with
+no `TypeId` of its own: it resolves to the `TypeId` of the node it names.
+
+Every address the unpickler follows comes from untrusted bytes, so both passes
+reach the AST through one `AstView` (`ast_view.rs`), whose `tree_at` accepts
+an address only if it is the start of a visible indexed node. There is one
+definition of a valid AST reference, and one bound (`MAX_SHARED_DEPTH`) on
+chained `SHAREDtype` links.
 
 Owner and scope membership stay distinct, as in `dotty-core`: a symbol's
 `owner` says who semantically holds it, while a `Scope` says where it can be
@@ -191,9 +207,9 @@ The semantic index differs from the sketch of the project document in two
 deliberate ways. Scopes are keyed by the owning `SymbolId`, not by address,
 because a package spans several `PACKAGE` nodes and several units, so no
 single address identifies its scope, and a class scope has to be reachable
-from the class symbol for `ClassInfo.declarations` anyway. The `types` and
-`trees` maps are added by the milestones that populate them (2 and 7), so no
-field is dead.
+from the class symbol for `ClassInfo.declarations` anyway. The `types` map was
+added by Milestone 2a, and the `trees` map is added by the milestone that
+populates it (7), so no field is dead.
 
 ### Entering definitions
 
@@ -210,14 +226,77 @@ own type parameters, and constructor parameters that are members (`Field`).
 Method parameters, and a `private[this]` constructor parameter, are owned but
 not declared in any scope.
 
-The index's payload for a `TYPEPARAM`/`PARAM` node omits the parameter's
-name, so parameter names and modifiers come from the parent's structural
-decoding (`TemplateStructure`, `DefDefBody`) and are paired with the index's
-child addresses in wire order; a disagreement is
-`UnpickleError::ParameterMismatch`.
+A `TYPEPARAM`/`PARAM` node's name and modifiers are decoded from the node
+itself, at its own address.
 
 Not entered: definitions inside method bodies, parameters of type-lambda
 aliases, and companion links.
+
+### Types (pass 2a)
+
+`TastyUnpickler::unpickle_type(address)` returns the `TypeId` of the type node
+at an absolute AST address (`types.rs`). It runs after `enter_symbols`,
+because references resolve through the index.
+
+What decodes a type, what stays lazy, and what enters the index:
+
+- A type is decoded only when it is asked for: by `unpickle_type`, or as a
+  prefix or `SHAREDtype` target of a node that is. Nothing walks the AST looking
+  for type-like nodes, and method bodies are not read.
+- Decoding is cache-first: `index.type_at(address)` is returned if present.
+  Otherwise the node is decoded, its type allocated, and its address recorded.
+  Only nodes that allocate a type enter `index.types`; a `SHAREDtype` node does
+  not.
+- Nothing is attached to symbols yet (`SymbolInfo::Missing`); that is
+  Milestone 5.
+
+Forms decoded:
+
+| TASTy | wire shape | semantic type |
+|-------|------------|---------------|
+| `TYPEREFdirect` | `ASTRef` | `TypeRef { NoPrefix, symbol }` |
+| `TERMREFdirect` | `ASTRef` | `TermRef { NoPrefix, symbol }` |
+| `TYPEREFsymbol` | `ASTRef Type` | `TypeRef { prefix, symbol }` |
+| `TERMREFsymbol` | `ASTRef Type` | `TermRef { prefix, symbol }` |
+| `TYPEREFpkg` / `TERMREFpkg` | `NameRef` | `TypeRef` / `TermRef { NoPrefix, package }` |
+| `THIS` | `Type` | `ThisType { class }` |
+| `SHAREDtype` | `ASTRef` | the `TypeId` of the named node |
+
+- `*direct` names a local symbol by the address of its definition and has no
+  prefix on the wire, so its prefix is `Type::NoPrefix`. This is a decision, not
+  a default: nothing is dropped, because the encoding has nothing to drop.
+- `*symbol` differs from `*direct` in carrying a real prefix (`THIS`, a
+  package, another reference), which is decoded and kept. The two are not
+  flattened into one form.
+- The target of `*direct` and `*symbol` is `index.symbol_at(address)`. An
+  address that is not the start of a node is `InvalidReferenceTarget`; a
+  visible node with no entered symbol (a local definition, which pass 1 does
+  not enter) is `MissingReferencedSymbol { from, to }`. The symbol must also
+  be of the right kind, because the index only says that one exists: a
+  `TYPEREF*` needs a type-namespace symbol, a `TERMREF*` a term-namespace one,
+  and the argument of `THIS` a class, trait or module class; otherwise it is
+  `InvalidReferenceKind { from, to }`.
+- `TYPEREFpkg` / `TERMREFpkg` name a package by path. They resolve only to a
+  package already in the `TastyPackages` registry, and never create one, since
+  the name is untrusted; any other package is `UnresolvedPackage`. Resolving
+  packages outside the entered units belongs to the resolver.
+- `THIS` is decoded only because it is the prefix of most real references. Its
+  argument must be a class reference by address (or a package); only its symbol
+  is kept, so nothing is allocated for the argument.
+- `SHAREDtype` allocates nothing: `type_id(SHAREDtype(X)) == type_id(X)`,
+  exactly, including through a chain of links. A chain longer than
+  `MAX_SHARED_DEPTH`, which includes any cycle, is `InvalidReferenceTarget`.
+
+Everything else is `UnsupportedType { tag, address }`: it is never lowered to
+`NoType`, `NoPrefix` or `Error`. This includes the name-based `TYPEREF` /
+`TERMREF` (a member looked up by name in a prefix needs the resolver; a
+heuristic lookup by name is exactly what the address model avoids) and
+`TYPEREFin` / `TERMREFin`.
+
+`unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
+type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
+every address it recorded is forgotten, so a failure half way through a prefix
+chain leaves nothing reachable.
 
 ## 5. Errors
 
@@ -228,16 +307,23 @@ bugs, not for external input.
 
 ## 6. Relationship with `dotty-classloader`
 
-`dotty-classloader/src/tasty_symbol.rs` still holds a best-effort,
-name-based `.tasty` reader. It is a compatibility bridge and stays untouched
-until the unpickler reproduces its behaviour with tests (Milestone 6). The
-unpickler crate does not depend on `dotty-classloader`.
+`dotty-classloader/src/tasty_symbol.rs` holds a best-effort, name-based
+`.tasty` reader. It is a compatibility bridge, not the target model: it is
+maintained (issues #11 and #16 fixed constructor fields and qualified
+visibility there) but is replaced only when the unpickler reproduces its
+behaviour with tests (Milestone 6). The unpickler crate does not depend on
+`dotty-classloader`.
 
 ## 7. Milestones
 
 1. **Semantic index and symbol entering** — complete.
-2. **Core type references** (`TypeRef`, `TermRef`, prefixes, `ThisType`,
-   `SuperType`, constants, `Applied`, bounds, `And`/`Or`) — next.
+2. **Core types**, in increments:
+   - 2a: type identity and reference resolution (`TypeRef`, `TermRef`,
+     prefixes, `ThisType`, `SHAREDtype`) — complete;
+   - 2b: compound non-binder types (`SuperType`, constants, `Applied`, bounds,
+     `And`/`Or`, `ByName`) — next. The measurement in §8 shows that name-based
+     `TYPEREF`/`TERMREF` are the largest remaining gap, so 2b should decide how
+     they resolve against the entered units before the resolver exists.
 3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
@@ -252,7 +338,10 @@ workspace green.
 Milestone 1 delivers `TastyUnpickler::enter_symbols`, `TastySemanticIndex`
 (`symbol_at`, `scope_of`, `symbol_count`) and the mappings of §4. Definition
 addresses map to exactly one `SymbolId`; a second entry for an address is
-`UnpickleError::DuplicateDefinition`.
+`UnpickleError::DuplicateDefinition`. Milestone 2a adds
+`TastyUnpickler::unpickle_type` and `TastySemanticIndex::type_at` /
+`type_count`; a second `TypeId` for an address is
+`UnpickleError::DuplicateType`.
 
 Measured on real compiler output: all 37 small `dotty-tasty` fixtures enter
 without error. On the manifest-backed corpora (`scala3-library` and
@@ -274,16 +363,67 @@ Deliberately not supported yet:
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
 - companion links (`SymbolLinks::companion`);
+- name-based `TYPEREF`/`TERMREF`, `TYPEREFin`/`TERMREFin`, and every other
+  type form beyond §4 "Types" — `UnsupportedType`;
+- packages outside the registry — `UnresolvedPackage`;
 - reconciling the package registry with the classloader's own (Milestone 6, issue #5).
 
-Known issues in neighbouring crates that this work found: #9 (`render_name`
-one-based, fixed: `NameRef` is now zero-based), #10 (qualified visibility, fixed by `Visibility::PrivateWithin` /
-`ProtectedWithin` in `dotty-core`), #11 (`.tasty` loading misses `val` constructor parameters), #13
-(index payload of parameter nodes omits the name).
+Defects this work found in neighbouring crates were fixed there: `NameRef`
+is zero-based (#9), qualified visibility is `Visibility::PrivateWithin` /
+`ProtectedWithin` (#10), and a category-five node with a padded length prefix
+(`161, 0, 253`) is indexed at its tag instead of one byte later (found by the
+Milestone 2a corpus measurement, which saw references to real addresses that
+named no node).
+
+### Type pass measurement
+
+`type_corpus.rs` enters every unit of the two corpora (one store and one
+package registry per corpus, as a classpath would have) and decodes every
+reference node (`SHAREDtype`, `*direct`, `*pkg`, `THIS`, `*symbol`, name-based
+`TYPEREF`/`TERMREF`) as its own root. Nested prefixes are therefore counted
+again as roots, so the figures measure coverage of the forms, not distinct
+types. The measurement is `#[ignore]`d in CI (run it with `--ignored`); a
+smaller test runs over the small fixtures.
+
+| | scala3-library | scala3-compiler |
+|---|---|---|
+| units reaching the supported subset | 941 / 941 | 1148 / 1148 |
+| reference nodes | 381,546 | 1,007,987 |
+| decoded | 160,391 (42%) | 289,176 (29%) |
+| unexpected errors | 0 | 0 |
+| `MissingReferencedSymbol` | 34,188 | 116,377 |
+| `UnresolvedPackage` | 9,137 | 51,337 |
+
+Every `MissingReferencedSymbol` target is something pass 1 documents as not
+entered: a local definition (inside a `val`/`def` body, a block, or a pattern
+`case`, including those in constructor arguments) or a parameter of a
+type-lambda alias. The measurement asserts that no target is anything else, so
+a definition pass 1 should have entered would fail it. No unit decodes all its reference nodes:
+every unit refers to `java.lang.Object` or `scala.*` by name.
+
+Unsupported tags, most common first (library / compiler), which order PR 2b:
+
+| tag | node | library | compiler |
+|-----|------|---------|----------|
+| 117 | `TYPEREF` (by name) | 140,593 | 387,780 |
+| 115 | `TERMREF` (by name) | 14,021 | 120,003 |
+| 163 | `TYPEBOUNDS` | 11,599 | 587 |
+| 161 | `APPLIEDtype` | 8,232 | 38,404 |
+| 153 | `ANNOTATEDtype` | 1,372 | 1,231 |
+| 170 | `TYPELAMBDAtype` | 757 | 145 |
+| 165 | `ANDtype` | 624 | 743 |
+| 167 | `ORtype` | 406 | 1,048 |
+| 193 | `FLEXIBLEtype` | 140 | 575 |
+
+By far the largest gap is the name-based reference, which is what the
+compiler writes for anything defined outside the current unit; it is 2–3x the
+rest combined. Unresolved packages (`scala`, `java.lang`, ...) are the same
+gap: the package is not in the registry until its own unit has been entered.
 
 ## 9. Review of Milestone 1
 
-Answers to the review questions asked before Milestone 2:
+This is a record of the review made when Milestone 1 was delivered; §8 is the
+current state. Answers to the review questions asked before Milestone 2:
 
 1. **Does every TASTy definition have a stable `SymbolId`?** Every package,
    class, trait, object, module class, type member, `val`/`var`, method,
@@ -300,19 +440,20 @@ Answers to the review questions asked before Milestone 2:
    carry an owner; scopes carry membership; symbols have no `children`.
 6. **Is `dotty-core` still unaware of TASTy?** Yes. Its only change is the
    format-agnostic `Visibility::PrivateWithin` / `ProtectedWithin` (#10);
-   `dotty-tasty` and `dotty-classloader` are untouched.
+   at that time `dotty-tasty` and `dotty-classloader` were untouched.
 7. **Did it avoid name heuristics where an address exists?** Yes. Names are
    read only to name symbols; no reference is resolved by name.
 8. **Is the index sufficient for `TYPEREFsymbol`/`TERMREFsymbol`?** Yes for
    definitions of this unit: a `TYPEREFsymbol`/`TYPEREFdirect` carries the
    target's absolute address (in `Foo`, the class parameter type refers to
    address 9, the constructor's to its own copy at 49), and `symbol_at`
-   resolves it. Missing: the `types` map for `SHAREDtype` caching and
-   references to other units.
+   resolves it. (The `types` map for `SHAREDtype` caching was missing then;
+   Milestone 2a added it. References to other units still wait for the
+   resolver.)
 9. **Did real TASTy expose gaps in `dotty-core`?** `Visibility` could not
    express `private[X]` (#10, since added); `SymbolKind` has no abstract-type
    kind; `Definitions` has no root package.
-10. **Can Milestone 2 be implemented without redesigning PR1?** Yes. It adds
-    the `types` map and resolution on top of the existing index. The one
-    remaining corpus failure, a nested `PACKAGE` with a `SHAREDtype` path,
-    needs the shared-type resolution of Milestone 2.
+10. **Can Milestone 2 be implemented without redesigning PR1?** Yes, and 2a did
+    exactly that: it added the `types` map and resolution on top of the
+    existing index. The one corpus failure then, a nested `PACKAGE` with a
+    `SHAREDtype` path, was fixed separately (#29).

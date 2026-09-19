@@ -1,10 +1,13 @@
 //! The semantic unpickler driver.
 
+use std::rc::Rc;
+
+use dotty_core::ids::TypeId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
 use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
-use crate::enter::AstView;
+use crate::ast_view::AstView;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::{ScopeJournal, TastyPackages};
@@ -31,6 +34,8 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) packages: TastyPackages,
     /// Declarations made into scopes during the current `enter_symbols`.
     pub(crate) scope_journal: ScopeJournal,
+    /// The file's AST view, built on first use and shared by both passes.
+    ast: Option<Rc<AstView<'bytes>>>,
 }
 
 impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
@@ -56,6 +61,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             index: TastySemanticIndex::new(),
             packages,
             scope_journal: Vec::new(),
+            ast: None,
         }
     }
 
@@ -113,8 +119,49 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         Ok(&self.index)
     }
 
+    /// The AST view of the file, built the first time it is needed.
+    pub(crate) fn ast_view(&mut self) -> Result<Rc<AstView<'bytes>>, UnpickleError> {
+        if let Some(ast) = &self.ast {
+            return Ok(Rc::clone(ast));
+        }
+        let ast = Rc::new(AstView::new(self.file)?);
+        self.ast = Some(Rc::clone(&ast));
+        Ok(ast)
+    }
+
+    /// Pass 2a: the semantic type of the type node at `address`.
+    ///
+    /// `address` is the absolute AST address of a type node, such as one
+    /// reported by `dotty-tasty`'s address index. The result is cached in the
+    /// index by address, so decoding the same address again, or reaching it
+    /// through a `SHAREDtype` link, returns the same `TypeId`. A
+    /// `SHAREDtype` node is not a type of its own: decoding it returns the
+    /// `TypeId` of the node it names.
+    ///
+    /// Decoding is lazy: only the addressed node and the prefixes it refers to
+    /// are decoded, and only decoded nodes enter the index. The forms decoded
+    /// so far are the reference forms; anything else is an
+    /// `UnsupportedType` error. Symbols must have been entered first
+    /// ([`enter_symbols`](Self::enter_symbols)), because references resolve
+    /// through the index. See `docs/tasty-semantic-unpickler.md`.
+    ///
+    /// The call is atomic: on failure every type allocated and every address
+    /// recorded by this call is taken back, so the store and the index are as
+    /// they were.
+    pub fn unpickle_type(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
+        let ast = self.ast_view()?;
+        let checkpoint = self.store.checkpoint();
+        let mark = self.index.mark_types();
+        let result = self.type_at(&ast, address, address, 0);
+        if result.is_err() {
+            self.store.rollback_to(checkpoint);
+            self.index.roll_back_types(mark);
+        }
+        result
+    }
+
     fn enter_all(&mut self) -> Result<(), UnpickleError> {
-        let ast = AstView::new(self.file)?;
+        let ast = self.ast_view()?;
         let roots = self.file.asts()?;
         for node in roots.iter() {
             if node.tag == PACKAGE_TAG {
