@@ -191,16 +191,15 @@ impl TastyUnpickler<'_, '_, '_> {
             },
             RawTree::LengthNode(node) if tag == APPLIEDTYPE_TAG => {
                 let shape = node.decode_applied_type()?;
-                if shape.arguments.is_empty() {
-                    // Upstream's `appliedTo(Nil)` is the constructor itself;
-                    // the compiler never writes it, and an `Applied` with no
-                    // arguments would be a second spelling of that type.
-                    return Err(UnpickleError::MalformedType {
-                        address: at,
-                        reason: "an application has no arguments",
-                    });
-                }
                 let ids = self.decode_children(ast, at, shape.arguments.len() + 1, depth)?;
+                if shape.arguments.is_empty() {
+                    // The grammar allows `Type*` to be empty, and Dotty's
+                    // `appliedTo(Nil)` is the constructor itself. So is
+                    // this node: it owns the constructor's `TypeId`, like a
+                    // `SHAREDtype` link, rather than a second `Applied` spelling.
+                    self.index.insert_type(at, ids[0])?;
+                    return Ok(ids[0]);
+                }
                 Type::Applied {
                     tycon: ids[0],
                     args: ids[1..].to_vec(),

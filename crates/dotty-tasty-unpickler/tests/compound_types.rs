@@ -19,10 +19,11 @@
 //! The compiler writes no `SUPERtype` and only tree-level `BYNAMEtpt` in this
 //! unit, so those two are reached by retagging nodes of the same wire shape;
 //! every patch first asserts what it overwrites.
-use dotty_core::Definitions;
 use dotty_core::ids::TypeId;
 use dotty_core::store::SemanticStore;
+use dotty_core::symbols::SymbolOrigin;
 use dotty_core::types::Type;
+use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{StandardSection, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -500,11 +501,11 @@ fn nested_intersections(depth: usize) -> Vec<u8> {
 
 /// A file whose ASTs section is exactly `ast`.
 fn file_with_ast(ast: &[u8]) -> Vec<u8> {
-    let names =
-        dotty_tasty::tasty::NameTable::from_entries(vec![dotty_tasty::tasty::RawName::Utf8(
-            "ASTs".to_owned(),
-        )])
-        .unwrap();
+    let names = dotty_tasty::tasty::NameTable::from_entries(vec![
+        dotty_tasty::tasty::RawName::Utf8("ASTs".to_owned()),
+        dotty_tasty::tasty::RawName::Utf8("p".to_owned()),
+    ])
+    .unwrap();
     let sections =
         dotty_tasty::tasty::SectionTable::from_sections(vec![dotty_tasty::tasty::Section::new(
             0, ast,
@@ -540,22 +541,29 @@ fn a_deeply_nested_compound_type_is_an_error_not_a_stack_overflow() {
 }
 
 #[test]
-fn an_application_of_no_arguments_is_malformed() {
-    // `APPLIEDtype` holding only its constructor (a nullary leaf).
+fn an_application_of_no_arguments_is_its_constructor() {
+    // `APPLIEDtype Length Type` with an empty `Type*`, as Dotty's
+    // `appliedTo(Nil)`: the node at 0 wraps a `TYPEREFpkg` to package `p` at 2.
     let mut node = vec![161];
-    node.extend(nat(1));
-    node.push(2);
+    node.extend(nat(2));
+    node.extend([65, 0x81]);
     let bytes = file_with_ast(&node);
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
     let mut session = Session::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
-    assert_eq!(
-        unpickler.unpickle_type(0),
-        Err(UnpickleError::MalformedType {
-            address: 0,
-            reason: "an application has no arguments"
-        })
-    );
+    let mut packages = Packages::new();
+    packages.enter(&mut session.store, SymbolOrigin::Synthetic, &["p"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    let applied = unpickler.unpickle_type(0).unwrap();
+    let constructor = unpickler.unpickle_type(2).unwrap();
+    // Same id, not a second `Applied` spelling; each address has an entry.
+    assert_eq!(applied, constructor);
+    assert_eq!(unpickler.index().type_at(0), Some(constructor));
+    assert_eq!(unpickler.unpickle_type(0), Ok(constructor));
+    assert!(matches!(
+        session.store.types.get(applied),
+        Type::TypeRef { .. }
+    ));
 }
 
 #[test]

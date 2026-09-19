@@ -89,7 +89,7 @@ pub enum UnpickleError {
     /// implemented. The signature is neither stripped nor ignored.
     UnsupportedSignedReference { address: u32, name: String },
     /// The compound type node at `address` has a shape the semantic model
-    /// cannot express (for example an application of no arguments).
+    /// cannot express: its indexed children disagree with its wire shape.
     MalformedType { address: u32, reason: &'static str },
     /// The prefix of the name-based reference at `address` is a form whose
     /// members cannot be looked up here, and the resolver did not know it
