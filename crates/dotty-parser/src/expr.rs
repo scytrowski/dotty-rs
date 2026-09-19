@@ -1,5 +1,5 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Assign, Block, Ident, NamedArg, Parens, Select, Super, This, Tuple,
+    Apply, ApplyKind, Assign, Block, Ident, If, NamedArg, Parens, Select, Super, This, Tuple,
     UntypedNode,
 };
 use dotty_core::ast::{InfixOp, New, PrefixOp};
@@ -22,8 +22,63 @@ where
     }
 
     fn expr1(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::If) {
+            let mark = self.mark();
+            return self.parse_if_expr(mark);
+        }
+
         let tree = self.postfix_expr();
         self.expr1_rest(tree)
+    }
+
+    fn parse_if_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let parenthesized_condition =
+            self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Then);
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
+            self.advance();
+        } else if !parenthesized_condition {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `then` after if condition",
+            );
+        }
+        let then_branch = self.expr();
+        let else_branch = if self.accept(TokenKind::Keyword(dotty_core::HardKeyword::Else)) {
+            self.expr()
+        } else {
+            self.synthetic_unit_at(self.last_real_token_end)
+        };
+
+        self.alloc_from(
+            mark,
+            TreeKind::If(If {
+                cond,
+                then_branch,
+                else_branch,
+            }),
+        )
+    }
+
+    fn parse_control_condition(&mut self, terminator: dotty_core::HardKeyword) -> TreeId<Untyped> {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return self.expr();
+        }
+
+        let tree = self.simple_expr();
+        if self.current().kind == TokenKind::Keyword(terminator) {
+            return tree;
+        }
+
+        if matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::ColonOp
+        ) {
+            return self.infix_expr(tree);
+        }
+
+        tree
     }
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
@@ -450,7 +505,10 @@ where
     }
 
     fn synthetic_unit(&mut self) -> TreeId<Untyped> {
-        let start = self.current().span.start();
+        self.synthetic_unit_at(self.current().span.start())
+    }
+
+    fn synthetic_unit_at(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width synthetic unit range");
         self.alloc(
             TreeKind::Literal(dotty_core::ast::Literal {
@@ -976,6 +1034,194 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_with_then_and_else() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then yes else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Keyword(HardKeyword::Else), 14, 18),
+                token(TokenKind::Identifier, 19, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 21).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_with_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (c) yes else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Keyword(HardKeyword::Else), 11, 15),
+                token(TokenKind::Identifier, 16, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_infix_if_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if a + b > c then x else y",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Then), 13, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Else), 20, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_without_else_as_a_synthetic_unit() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then yes",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Unit
+            })
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.else_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(13, 13).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 13).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn attaches_nested_if_else_to_the_nearest_if() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if a then if b then x else y else z",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Keyword(HardKeyword::If), 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Keyword(HardKeyword::Then), 15, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Keyword(HardKeyword::Else), 22, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Else), 29, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(outer) = parser.ast().get(id).kind else {
+            panic!("expected outer if tree");
+        };
+        let TreeKind::If(inner) = parser.ast().get(outer.then_branch).kind else {
+            panic!("expected nested if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(inner.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(outer.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
