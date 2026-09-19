@@ -470,13 +470,25 @@ where
 
     fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
-        let mut trees = Vec::new();
-        self.consume_block_separators();
+        let (stats, expr) =
+            self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `}` to close block",
+            );
+        }
+        self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+    }
 
-        while !matches!(
-            self.current().kind,
-            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
-        ) {
+    fn parse_expression_block_body(
+        &mut self,
+        end: TokenKind,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        let mut trees = Vec::new();
+        self.consume_block_separators(end);
+
+        while self.current().kind != end && self.current().kind != TokenKind::Eof {
             let checkpoint = self.cursor.checkpoint();
             trees.push(self.with_location(crate::Location::InBlock, |parser| parser.expr()));
 
@@ -493,17 +505,14 @@ where
             }
 
             if is_block_separator(self.current().kind) {
-                self.consume_block_separators();
-            } else if !matches!(
-                self.current().kind,
-                TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
-            ) {
+                self.consume_block_separators(end);
+            } else if self.current().kind != end && self.current().kind != TokenKind::Eof {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
                     "expected a block statement separator",
                 );
                 self.recover_until(crate::RecoverySet::Statement);
-                self.consume_block_separators();
+                self.consume_block_separators(end);
             }
         }
 
@@ -511,17 +520,11 @@ where
             Some(expr) => expr,
             None => self.synthetic_unit(),
         };
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close block",
-            );
-        }
-        self.alloc_from(mark, TreeKind::Block(Block { stats: trees, expr }))
+        (trees, expr)
     }
 
-    fn consume_block_separators(&mut self) {
-        while is_block_separator(self.current().kind) {
+    fn consume_block_separators(&mut self, end: TokenKind) {
+        while is_block_separator(self.current().kind) && self.current().kind != end {
             self.advance();
         }
     }
