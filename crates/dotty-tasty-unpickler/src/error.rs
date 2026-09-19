@@ -55,6 +55,10 @@ pub enum UnpickleError {
     /// visible AST node but has no symbol entered by pass 1 (for example a
     /// local definition, or a definition in another unit).
     MissingReferencedSymbol { from: u32, to: u32 },
+    /// The type node at `from` refers to the definition at `to`, which has an
+    /// entered symbol of the wrong kind: a `TYPEREF*` must name a type-namespace
+    /// symbol, a `TERMREF*` a term-namespace one, and `THIS` a class.
+    InvalidReferenceKind { from: u32, to: u32 },
     /// The `TYPEREFpkg` / `TERMREFpkg` node at `address` names a package
     /// that has not been entered into the package registry. Resolving
     /// packages outside the entered units belongs to the future resolver.
@@ -107,6 +111,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the type node at address {from} refers to address {to}, which has no entered symbol"
             ),
+            Self::InvalidReferenceKind { from, to } => write!(
+                formatter,
+                "the type node at address {from} refers to the definition at address {to}, which is the wrong kind of symbol for it"
+            ),
             Self::UnresolvedPackage { address, package } => write!(
                 formatter,
                 "the package reference at address {address} names package `{package}`, which has not been entered"
@@ -137,6 +145,7 @@ impl std::error::Error for UnpickleError {
             | Self::DuplicateType { .. }
             | Self::UnsupportedType { .. }
             | Self::MissingReferencedSymbol { .. }
+            | Self::InvalidReferenceKind { .. }
             | Self::UnresolvedPackage { .. } => None,
         }
     }

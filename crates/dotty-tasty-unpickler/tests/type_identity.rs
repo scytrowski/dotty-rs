@@ -36,6 +36,8 @@ const TYPEREFSYMBOL_TAG: u8 = 116;
 const TERMREFSYMBOL_TAG: u8 = 114;
 const TYPEREFDIRECT_TAG: u8 = 63;
 const TERMREFDIRECT_TAG: u8 = 62;
+const TERMREFPKG_TAG: u8 = 64;
+const TYPEREFPKG_TAG: u8 = 65;
 
 const FIRST_REFERENCE: u32 = 10;
 const SHARED_TO_FIRST: u32 = 22;
@@ -135,17 +137,35 @@ fn a_direct_reference_resolves_to_the_symbol_at_its_target_address() {
     assert_eq!(store.types.get(prefix), &Type::NoPrefix);
 }
 
+/// The address of a `VALDEF` or `DEFDEF`, which pass 1 enters as a
+/// term-namespace symbol, below 128 so that it is a one-byte natural number.
+fn small_term_definition() -> u32 {
+    let mut candidates = nodes_with_tag(DISTINCT, 129);
+    candidates.extend(nodes_with_tag(DISTINCT, 130));
+    candidates
+        .into_iter()
+        .filter(|&at| at < 128)
+        .min()
+        .expect("a term definition below address 128")
+}
+
+/// The two-byte natural number for `address` (below 16384).
+fn nat2(address: u32) -> [u8; 2] {
+    [(address >> 7) as u8, 0x80 | (address & 0x7f) as u8]
+}
+
 #[test]
 fn a_direct_term_reference_is_a_term_ref_with_no_prefix() {
-    // TERMREFdirect and TYPEREFdirect have the same wire shape, so the
-    // compiler's reference to `T` becomes a term reference by its tag.
+    // TERMREFdirect and TYPEREFdirect have the same wire shape. Point the
+    // compiler's reference at a term definition and change the tag.
+    let term = small_term_definition();
+    let [hi, lo] = nat2(term);
     let bytes = patched(
         DISTINCT,
         TYPE_PARAMETER_REFERENCE as usize,
-        &[TYPEREFDIRECT_TAG],
-        &[TERMREFDIRECT_TAG],
+        &[TYPEREFDIRECT_TAG, 2, 207],
+        &[TERMREFDIRECT_TAG, hi, lo],
     );
-    let target = target_of(&bytes, TYPE_PARAMETER_REFERENCE as usize);
 
     let (ty, store, index) = with_unpickler(&bytes, |unpickler| {
         unpickler.unpickle_type(TYPE_PARAMETER_REFERENCE).unwrap()
@@ -153,8 +173,138 @@ fn a_direct_term_reference_is_a_term_ref_with_no_prefix() {
 
     let (prefix, symbol, is_type) = reference(&store, ty);
     assert!(!is_type);
-    assert_eq!(Some(symbol), index.symbol_at(target));
+    assert_eq!(Some(symbol), index.symbol_at(term));
     assert_eq!(store.types.get(prefix), &Type::NoPrefix);
+}
+
+#[test]
+fn a_type_reference_to_a_term_symbol_is_rejected() {
+    let term = small_term_definition();
+    let [hi, lo] = nat2(term);
+    let bytes = patched(
+        DISTINCT,
+        TYPE_PARAMETER_REFERENCE as usize,
+        &[TYPEREFDIRECT_TAG, 2, 207],
+        &[TYPEREFDIRECT_TAG, hi, lo],
+    );
+
+    let (result, _, index) = with_unpickler(&bytes, |unpickler| {
+        unpickler.unpickle_type(TYPE_PARAMETER_REFERENCE)
+    });
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::InvalidReferenceKind {
+            from: TYPE_PARAMETER_REFERENCE,
+            to: term
+        })
+    );
+    assert_eq!(index.type_count(), 0);
+}
+
+#[test]
+fn a_term_reference_to_a_type_symbol_is_rejected() {
+    // The reference to the type parameter `T`, retagged as a term reference.
+    let bytes = patched(
+        DISTINCT,
+        TYPE_PARAMETER_REFERENCE as usize,
+        &[TYPEREFDIRECT_TAG],
+        &[TERMREFDIRECT_TAG],
+    );
+
+    let (result, _, _) = with_unpickler(&bytes, |unpickler| {
+        unpickler.unpickle_type(TYPE_PARAMETER_REFERENCE)
+    });
+
+    assert!(matches!(
+        result,
+        Err(UnpickleError::InvalidReferenceKind {
+            from: TYPE_PARAMETER_REFERENCE,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_type_symbol_reference_to_a_term_symbol_is_rejected() {
+    let term = small_term_definition();
+    let bytes = patched(
+        DISTINCT,
+        REFERENCE_WITH_THIS_PREFIX as usize,
+        &[TYPEREFSYMBOL_TAG, 234],
+        &[TYPEREFSYMBOL_TAG, 0x80 | term as u8],
+    );
+
+    let (result, _, index) = with_unpickler(&bytes, |unpickler| {
+        unpickler.unpickle_type(REFERENCE_WITH_THIS_PREFIX)
+    });
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::InvalidReferenceKind {
+            from: REFERENCE_WITH_THIS_PREFIX,
+            to: term
+        })
+    );
+    // Its `THIS` prefix was decoded first and is taken back.
+    assert_eq!(index.type_count(), 0);
+}
+
+#[test]
+fn a_term_symbol_reference_to_a_type_symbol_is_rejected() {
+    // A reference to `one` (TERMREFsymbol) retargeted at a class.
+    let refs = nodes_with_tag(DISTINCT, TERMREFSYMBOL_TAG);
+    let class = *nodes_with_tag(DISTINCT, 131)
+        .iter()
+        .find(|&&at| at < 128)
+        .expect("a type definition below address 128");
+    let at = refs
+        .into_iter()
+        .find(|&at| {
+            let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
+            let payload = file.section(StandardSection::Asts).unwrap().payload;
+            payload[at as usize + 1] & 0x80 != 0
+        })
+        .expect("a TERMREFsymbol with a one-byte target");
+    let target = target_of(DISTINCT, at as usize);
+    let bytes = patched(
+        DISTINCT,
+        at as usize,
+        &[TERMREFSYMBOL_TAG, 0x80 | target as u8],
+        &[TERMREFSYMBOL_TAG, 0x80 | class as u8],
+    );
+
+    let (result, _, _) = with_unpickler(&bytes, |unpickler| unpickler.unpickle_type(at));
+
+    assert!(matches!(
+        result,
+        Err(UnpickleError::InvalidReferenceKind { from, to }) if from == at && to == class
+    ));
+}
+
+#[test]
+fn this_of_a_term_symbol_is_rejected() {
+    // 133 is `TYPEREFsymbol(Inner, THIS(TYPEREFsymbol(Left)))`; the `THIS`
+    // argument at 136 is retargeted at a term definition.
+    let term = small_term_definition();
+    let bytes = patched(
+        DISTINCT,
+        136,
+        &[TYPEREFSYMBOL_TAG, 212],
+        &[TYPEREFSYMBOL_TAG, 0x80 | term as u8],
+    );
+
+    let (result, _, _) = with_unpickler(&bytes, |unpickler| {
+        unpickler.unpickle_type(REFERENCE_WITH_THIS_PREFIX)
+    });
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::InvalidReferenceKind {
+            from: 136,
+            to: term
+        })
+    );
 }
 
 #[test]
@@ -484,38 +634,84 @@ fn name_based_and_unmodelled_types_are_explicitly_unsupported() {
     assert_eq!(index.type_count(), 0);
 }
 
-#[test]
-fn a_package_reference_resolves_to_the_entered_package_symbol() {
-    let packages = nodes_with_tag(DISTINCT, 64);
-    let entered = packages
-        .iter()
-        .map(|&at| {
-            (
-                at,
-                with_unpickler(DISTINCT, |unpickler| unpickler.unpickle_type(at)),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut resolved = 0;
-    for (at, (result, store, _)) in entered {
+/// The `TERMREFpkg` nodes of the unit that name an entered package, and
+/// those that do not.
+fn package_references() -> (Vec<u32>, Vec<u32>) {
+    let (mut resolved, mut unresolved) = (Vec::new(), Vec::new());
+    for at in nodes_with_tag(DISTINCT, 64) {
+        let (result, _, _) = with_unpickler(DISTINCT, |unpickler| unpickler.unpickle_type(at));
         match result {
-            Ok(ty) => {
-                let (prefix, symbol, is_type) = reference(&store, ty);
-                assert!(!is_type);
-                assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Package);
-                assert_eq!(store.types.get(prefix), &Type::NoPrefix);
-                resolved += 1;
-            }
-            // `scala` and `java.lang` are not entered by this unit.
-            Err(UnpickleError::UnresolvedPackage { address, package }) => {
-                assert_eq!(address, at);
-                assert!(!package.is_empty());
-            }
+            Ok(_) => resolved.push(at),
+            Err(UnpickleError::UnresolvedPackage { .. }) => unresolved.push(at),
             Err(other) => panic!("unexpected error at {at}: {other:?}"),
         }
     }
-    assert!(resolved > 0);
+    (resolved, unresolved)
+}
+
+#[test]
+fn a_term_package_reference_resolves_to_the_entered_package_symbol() {
+    let (resolved, _) = package_references();
+    assert!(!resolved.is_empty());
+
+    for at in resolved {
+        let (ty, store, _) =
+            with_unpickler(DISTINCT, |unpickler| unpickler.unpickle_type(at).unwrap());
+        let (prefix, symbol, is_type) = reference(&store, ty);
+        assert!(!is_type, "TERMREFpkg at {at}");
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Package);
+        assert_eq!(store.types.get(prefix), &Type::NoPrefix);
+    }
+}
+
+#[test]
+fn a_type_package_reference_resolves_to_the_entered_package_symbol() {
+    // TYPEREFpkg (65) has the wire shape of TERMREFpkg (64).
+    let (resolved, _) = package_references();
+    // Not the path of the unit's own `PACKAGE`, which pass 1 must still read.
+    let at = *resolved.last().unwrap();
+    assert!(at > 10);
+    let bytes = patched(DISTINCT, at as usize, &[TERMREFPKG_TAG], &[TYPEREFPKG_TAG]);
+
+    let (ty, store, _) = with_unpickler(&bytes, |unpickler| unpickler.unpickle_type(at).unwrap());
+
+    let (prefix, symbol, is_type) = reference(&store, ty);
+    assert!(is_type);
+    assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Package);
+    assert_eq!(store.types.get(prefix), &Type::NoPrefix);
+}
+
+#[test]
+fn an_unentered_term_package_is_unresolved_not_created() {
+    let (_, unresolved) = package_references();
+    assert!(!unresolved.is_empty());
+
+    let ((result, symbols), _, _) = with_unpickler(DISTINCT, |unpickler| {
+        let symbols = unpickler.index().symbol_count();
+        (unpickler.unpickle_type(unresolved[0]), symbols)
+    });
+
+    assert!(matches!(
+        result,
+        Err(UnpickleError::UnresolvedPackage { address, ref package })
+            if address == unresolved[0] && !package.is_empty()
+    ));
+    assert!(symbols > 0);
+}
+
+#[test]
+fn an_unentered_type_package_is_unresolved_not_created() {
+    let (_, unresolved) = package_references();
+    let at = unresolved[0];
+    let bytes = patched(DISTINCT, at as usize, &[TERMREFPKG_TAG], &[TYPEREFPKG_TAG]);
+
+    let (result, _, index) = with_unpickler(&bytes, |unpickler| unpickler.unpickle_type(at));
+
+    assert!(matches!(
+        result,
+        Err(UnpickleError::UnresolvedPackage { address, .. }) if address == at
+    ));
+    assert_eq!(index.type_count(), 0);
 }
 
 #[test]

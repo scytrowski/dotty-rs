@@ -271,7 +271,11 @@ Forms decoded:
 - The target of `*direct` and `*symbol` is `index.symbol_at(address)`. An
   address that is not the start of a node is `InvalidReferenceTarget`; a
   visible node with no entered symbol (a local definition, which pass 1 does
-  not enter) is `MissingReferencedSymbol { from, to }`.
+  not enter) is `MissingReferencedSymbol { from, to }`. The symbol must also
+  be of the right kind, because the index only says that one exists: a
+  `TYPEREF*` needs a type-namespace symbol, a `TERMREF*` a term-namespace one,
+  and the argument of `THIS` a class, trait or module class; otherwise it is
+  `InvalidReferenceKind { from, to }`.
 - `TYPEREFpkg` / `TERMREFpkg` name a package by path. They resolve only to a
   package already in the `TastyPackages` registry, and never create one, since
   the name is untrusted; any other package is `UnresolvedPackage`. Resolving

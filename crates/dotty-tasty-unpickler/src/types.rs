@@ -28,6 +28,8 @@
 //! never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};
+use dotty_core::names::Namespace;
+use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
     RawTree, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
@@ -97,12 +99,12 @@ impl TastyUnpickler<'_, '_, '_> {
                     return self.type_at(ast, *target, at, depth + 1);
                 }
                 (TYPEREFDIRECT_TAG, TermValue::AstRef(target)) => {
-                    let symbol = self.referenced_symbol(ast, at, *target)?;
+                    let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
                     let prefix = self.store.types.alloc(Type::NoPrefix);
                     Type::TypeRef { prefix, symbol }
                 }
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
-                    let symbol = self.referenced_symbol(ast, at, *target)?;
+                    let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;
                     let prefix = self.store.types.alloc(Type::NoPrefix);
                     Type::TermRef { prefix, symbol }
                 }
@@ -124,7 +126,12 @@ impl TastyUnpickler<'_, '_, '_> {
                 ..
             } if tag == TYPEREFSYMBOL_TAG || tag == TERMREFSYMBOL_TAG => {
                 let prefix = self.decode_type(ast, child, depth)?;
-                let symbol = self.referenced_symbol(ast, at, *target)?;
+                let namespace = if tag == TYPEREFSYMBOL_TAG {
+                    Namespace::Type
+                } else {
+                    Namespace::Term
+                };
+                let symbol = self.referenced_symbol(ast, at, *target, namespace)?;
                 if tag == TYPEREFSYMBOL_TAG {
                     Type::TypeRef { prefix, symbol }
                 } else {
@@ -143,20 +150,43 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 
     /// The symbol entered for the definition at `target`, named by the type
-    /// node at `from`. Resolved by address only.
+    /// node at `from`, which must be in the `expected` namespace. Resolved by
+    /// address only.
     fn referenced_symbol(
         &self,
         ast: &AstView<'_>,
         from: u32,
         target: u32,
+        expected: Namespace,
     ) -> Result<SymbolId, UnpickleError> {
         if let Some(symbol) = self.index.symbol_at(target) {
+            // The index only says a symbol exists: a type reference to a
+            // `val`, or a term reference to a `class`, would build an
+            // inconsistent type from untrusted input.
+            if self.store.symbols.get(symbol).name.namespace() != expected {
+                return Err(UnpickleError::InvalidReferenceKind { from, to: target });
+            }
             return Ok(symbol);
         }
         if ast.is_node(target) {
             Err(UnpickleError::MissingReferencedSymbol { from, to: target })
         } else {
             Err(UnpickleError::InvalidReferenceTarget { from, to: target })
+        }
+    }
+
+    /// Like [`referenced_symbol`](Self::referenced_symbol), for the argument of
+    /// `THIS`, which must be a class, trait or module class.
+    fn referenced_class(
+        &self,
+        ast: &AstView<'_>,
+        from: u32,
+        target: u32,
+    ) -> Result<SymbolId, UnpickleError> {
+        let symbol = self.referenced_symbol(ast, from, target, Namespace::Type)?;
+        match self.store.symbols.get(symbol).kind {
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => Ok(symbol),
+            _ => Err(UnpickleError::InvalidReferenceKind { from, to: target }),
         }
     }
 
@@ -189,7 +219,7 @@ impl TastyUnpickler<'_, '_, '_> {
         match class {
             RawTree::Leaf(term) => match (tag, &term.value) {
                 (TYPEREFDIRECT_TAG, TermValue::AstRef(target)) => {
-                    self.referenced_symbol(ast, at, *target)
+                    self.referenced_class(ast, at, *target)
                 }
                 (TYPEREFPKG_TAG, TermValue::NameRef(name)) => self.referenced_package(at, *name),
                 (SHAREDTYPE_TAG, TermValue::AstRef(target)) => {
@@ -205,7 +235,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 _ => Err(UnpickleError::UnsupportedType { tag, address: at }),
             },
             RawTree::NatAst { value, .. } if tag == TYPEREFSYMBOL_TAG => {
-                self.referenced_symbol(ast, at, *value)
+                self.referenced_class(ast, at, *value)
             }
             _ => Err(UnpickleError::UnsupportedType { tag, address: at }),
         }
