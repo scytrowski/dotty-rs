@@ -10,7 +10,9 @@
 use dotty_classloader::classloader::{
     BinaryName, ClassLoader, CompositeClassPath, DirectoryClassPath,
 };
-use dotty_core::{ClassInfo, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId};
+use dotty_core::{
+    ClassInfo, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId, Visibility,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -181,4 +183,95 @@ fn loads_animal_directly_as_an_interface_with_no_declared_interfaces() {
             .resolve(store.symbols.get(super_symbol).name.text()),
         "Object"
     );
+}
+
+fn tasty_visibility_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility")
+}
+
+/// Loads `class` (a class of the `visibility` fixture package) and returns
+/// its symbol.
+fn load_visibility_class(store: &mut SemanticStore, class: &str) -> SymbolId {
+    let synthetic_jdk = TemporaryDirectory::new(&format!("tasty-visibility-{class}"));
+    write_synthetic_object_class(synthetic_jdk.path());
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(tasty_visibility_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut loader = ClassLoader::new(class_path, store);
+    loader
+        .load_class(&BinaryName::from_internal(format!(
+            "me/cytrowski/tastyfixtures/visibility/{class}"
+        )))
+        .unwrap_or_else(|error| panic!("{class} should load: {error:?}"))
+}
+
+/// The package `levels_up` owners above the class (0 is its own package).
+fn package_above(store: &SemanticStore, class: SymbolId, levels_up: usize) -> SymbolId {
+    let mut symbol = store
+        .symbols
+        .get(class)
+        .owner
+        .expect("a class has a package");
+    for _ in 0..levels_up {
+        symbol = store
+            .symbols
+            .get(symbol)
+            .owner
+            .expect("an enclosing package");
+    }
+    symbol
+}
+
+/// Issue #16: `private[X]` on a `.tasty` class used to leave it `Public`.
+#[test]
+fn a_class_private_to_its_own_package_is_private_within_that_package() {
+    let mut store = SemanticStore::new();
+
+    let class = load_visibility_class(&mut store, "InOwnPackage");
+
+    assert_eq!(
+        store.symbols.get(class).visibility,
+        Visibility::PrivateWithin(package_above(&store, class, 0))
+    );
+}
+
+#[test]
+fn a_class_private_to_an_enclosing_package_is_private_within_that_package() {
+    let mut store = SemanticStore::new();
+
+    let in_parent = load_visibility_class(&mut store, "InEnclosingPackage");
+    let in_outer = load_visibility_class(&mut store, "InOuterPackage");
+
+    // `visibility` is one level below `tastyfixtures`, and two below `me`'s
+    // child `cytrowski`: me / cytrowski / tastyfixtures / visibility.
+    assert_eq!(
+        store.symbols.get(in_parent).visibility,
+        Visibility::PrivateWithin(package_above(&store, in_parent, 1))
+    );
+    assert_eq!(
+        store.symbols.get(in_outer).visibility,
+        Visibility::PrivateWithin(package_above(&store, in_outer, 3))
+    );
+}
+
+#[test]
+fn a_top_level_private_class_is_private_within_its_package() {
+    let mut store = SemanticStore::new();
+
+    let class = load_visibility_class(&mut store, "PlainPrivate");
+
+    assert_eq!(
+        store.symbols.get(class).visibility,
+        Visibility::PrivateWithin(package_above(&store, class, 0))
+    );
+}
+
+#[test]
+fn a_class_with_no_access_modifier_stays_public() {
+    let mut store = SemanticStore::new();
+
+    let class = load_visibility_class(&mut store, "Open");
+
+    assert_eq!(store.symbols.get(class).visibility, Visibility::Public);
 }
