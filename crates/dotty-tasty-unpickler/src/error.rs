@@ -44,6 +44,21 @@ pub enum UnpickleError {
     UnsupportedPackagePath { address: u32 },
     /// No definition node exists at an address the tree walk expected one.
     MissingDefinition { address: u32 },
+    /// A second `TypeId` was recorded for a type-node address that already
+    /// has one, which would break the address-identity invariant.
+    DuplicateType { address: u32 },
+    /// The type node at `address` has a tag the type pass does not decode
+    /// yet (a later increment) or that is not a type at all. The node is
+    /// never lowered to a placeholder type.
+    UnsupportedType { tag: u8, address: u32 },
+    /// The type node at `from` refers to the definition at `to`, which is a
+    /// visible AST node but has no symbol entered by pass 1 (for example a
+    /// local definition, or a definition in another unit).
+    MissingReferencedSymbol { from: u32, to: u32 },
+    /// The `TYPEREFpkg` / `TERMREFpkg` node at `address` names a package
+    /// that has not been entered into the package registry. Resolving
+    /// packages outside the entered units belongs to the future resolver.
+    UnresolvedPackage { address: u32, package: String },
 }
 
 impl fmt::Display for UnpickleError {
@@ -80,6 +95,22 @@ impl fmt::Display for UnpickleError {
             Self::MissingDefinition { address } => {
                 write!(formatter, "no definition node at address {address}")
             }
+            Self::DuplicateType { address } => write!(
+                formatter,
+                "a type was already recorded for the type node at address {address}"
+            ),
+            Self::UnsupportedType { tag, address } => write!(
+                formatter,
+                "the type node at address {address} has tag {tag}, which is not decoded yet"
+            ),
+            Self::MissingReferencedSymbol { from, to } => write!(
+                formatter,
+                "the type node at address {from} refers to address {to}, which has no entered symbol"
+            ),
+            Self::UnresolvedPackage { address, package } => write!(
+                formatter,
+                "the package reference at address {address} names package `{package}`, which has not been entered"
+            ),
             Self::DuplicateScope { symbol } => write!(
                 formatter,
                 "a declaration scope was already entered for symbol {}",
@@ -102,7 +133,11 @@ impl std::error::Error for UnpickleError {
             | Self::InvalidReferenceTarget { .. }
             | Self::InvalidQualifier { .. }
             | Self::UnsupportedPackagePath { .. }
-            | Self::MissingDefinition { .. } => None,
+            | Self::MissingDefinition { .. }
+            | Self::DuplicateType { .. }
+            | Self::UnsupportedType { .. }
+            | Self::MissingReferencedSymbol { .. }
+            | Self::UnresolvedPackage { .. } => None,
         }
     }
 }

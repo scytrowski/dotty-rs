@@ -7,17 +7,23 @@
 //! one-pass tree decoder, because TASTy has forward references, shared nodes
 //! and recursive binders. See `docs/tasty-semantic-unpickler.md`.
 //!
-//! So far only pass 1 exists: `TastyUnpickler::enter_symbols` enters packages,
-//! classes, their members and parameters into the store, and records each
-//! definition address in a `TastySemanticIndex`. Entered symbols have no type
-//! yet (`SymbolInfo::Missing`).
+//! Two passes exist so far. Pass 1, `TastyUnpickler::enter_symbols`, enters
+//! packages, classes, their members and parameters into the store, and records
+//! each definition address in a `TastySemanticIndex`; entered symbols have no
+//! type yet (`SymbolInfo::Missing`). Pass 2a, `TastyUnpickler::unpickle_type`,
+//! gives each type node address at most one `TypeId` and resolves reference
+//! types (`TypeRef`, `TermRef`, `ThisType`, `SHAREDtype`) through the index by
+//! address, never by name; other type forms are an explicit
+//! `UnpickleError::UnsupportedType`.
 
+mod ast_view;
 mod enter;
 mod error;
 mod index;
 mod mapping;
 mod names;
 mod packages;
+mod types;
 mod unpickler;
 
 /// Semantic TASTy unpickling APIs.
