@@ -1,8 +1,8 @@
 # `dotty-parser` design for Scala 3.9.0
 
-Status: initial parser infrastructure. This document describes the boundary
-and the deliberately small first grammar increment; it is not a promise of
-full Scala grammar coverage.
+Status: incremental parser implementation. This document describes the
+boundary and the deliberately small current grammar increment; it is not a
+promise of full Scala grammar coverage.
 
 The compatibility target is Scala 3.9.0 and TASTy format 28.9.0. Versioned
 parser behavior must be compared with the pinned Scala release rather than
@@ -117,9 +117,10 @@ definitions and package-level forms.
 
 The current expression and literal implementation is split by responsibility:
 `compilation_unit.rs` owns orchestration and statement separators, `expr.rs`
-owns the deliberately incomplete simple-expression subset, and `literals.rs`
-owns numeric and string decoding. These names describe the current milestone;
-they do not claim complete Scala `simpleExpr` coverage.
+owns the deliberately incomplete simple-expression pipeline, `types.rs` owns
+the initial type-name subset used by type applications, and `literals.rs` owns
+numeric and string decoding. These names describe the current milestone; they
+do not claim complete Scala `simpleExpr` coverage.
 
 The smoke grammar currently covers:
 
@@ -129,14 +130,22 @@ integer, long, decimal, exponent, float, and double literals
 string literals
 true, false, null, this
 (expr), (), and (a, b, ...)
-simple selections such as `foo.bar`
-simple applications such as `foo(42)`
+simple selections such as foo.bar and foo.`bar`
+simple applications such as foo(42) and foo(1, 2)
+super, qualified super, and simple mixin-qualified super
+new with simple or qualified type names and constructor applications
+simple type applications such as foo[A] and foo[A, B]
+brace blocks with separator-delimited expressions
+repeated `.`, `[...]`, and `(...)` suffix chaining
 ```
 
-The smoke grammar is plumbing coverage, not a substitute for the Scala
-grammar. Operators, selections, applications, types, patterns, definitions,
-control flow, templates, interpolation, XML, quotes, and macros remain
-follow-up increments.
+The implemented selections and applications are only the simple-expression
+subset above. Full selection/application grammar, including advanced argument
+forms such as `using`, named arguments, and colon arguments, remains future
+work. Likewise, the type parser currently handles only the simple type names
+needed by these type applications. Operators, patterns, definitions, control
+flow, templates, interpolation, XML, quotes, and macros remain follow-up
+increments.
 
 ## Operator metadata
 
@@ -166,8 +175,9 @@ tools/scala-parser-oracle/compare.sh
 ```
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
-Rust UTF-8 byte offsets before comparing. The initial ASCII fixtures are tiny
-on purpose and cover the complete smoke subset. The same command is available
+Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
+purpose and cover the implemented simple-expression subset, including
+`super`, `new`, type applications, suffix chains, and brace blocks. The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
 that workflow; it is intentionally not part of the automatic push/PR checks

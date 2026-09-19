@@ -19,9 +19,11 @@ compiler presentation rather than a compatibility protocol.
 Compiler source offsets are UTF-16 code-unit offsets. Consumers comparing them
 with Rust source spans must convert them to UTF-8 byte offsets first.
 
-The initial fixtures cover the expression forms currently represented by the
-Rust smoke parser: identifiers, numeric and string literals, `this`,
-parentheses, the empty tuple, a two-element tuple, simple selections, and
-simple applications, including empty and multiple argument lists.
+The fixtures cover the expression forms currently represented by the Rust
+parser: identifiers, numeric and string literals, `this`, parentheses, the
+empty tuple, tuples, simple selections and applications, `super`, `new`,
+simple type applications, repeated suffix chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
-Backquoted identifier fixtures cover standalone and selected names.
+Backquoted identifier fixtures cover standalone and selected names. The
+corpus intentionally does not claim coverage for the rest of Scala's
+expression, type, or argument grammar.
