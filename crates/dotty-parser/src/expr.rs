@@ -1,5 +1,5 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
+    Apply, ApplyKind, Assign, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
 };
 use dotty_core::ast::{InfixOp, New, PrefixOp};
 use dotty_core::{
@@ -25,8 +25,46 @@ where
         self.expr1_rest(tree)
     }
 
-    fn expr1_rest(&mut self, tree: TreeId<Untyped>) -> TreeId<Untyped> {
-        tree
+    fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
+        if !self.current_is_bare_assignment() {
+            return lhs;
+        }
+
+        self.advance();
+        let rhs = self.expr();
+        if !is_assignable_lhs(&self.ast.get(lhs).kind) {
+            self.report(
+                crate::ParseDiagnosticKind::UnexpectedToken,
+                "left-hand side is not assignable",
+            );
+            return lhs;
+        }
+
+        self.alloc_assign(lhs, rhs)
+    }
+
+    fn current_is_bare_assignment(&mut self) -> bool {
+        self.current().kind == TokenKind::Operator && self.current_text().ok() == Some("=")
+    }
+
+    fn alloc_assign(&mut self, lhs: TreeId<Untyped>, rhs: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(lhs)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let end = self
+            .ast
+            .get(rhs)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(self.last_real_token_end);
+        let range = TextRange::new(start, end).expect("assignment child spans are ordered");
+        self.alloc(
+            TreeKind::Assign(Assign { lhs, rhs }),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
     }
 
     /// Parses an expression at the current operator-expression boundary.
@@ -773,6 +811,17 @@ where
     }
 }
 
+fn is_assignable_lhs(kind: &TreeKind<Untyped>) -> bool {
+    matches!(
+        kind,
+        TreeKind::Ident(_)
+            | TreeKind::Select(_)
+            | TreeKind::Apply(_)
+            | TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+            | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingOperator {
     name: dotty_core::Name,
@@ -905,6 +954,202 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_identifier_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x = y",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(assignment.rhs).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 5).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_selection_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "obj.x = y",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_application_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "arr(i) = y",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn assignment_rhs_is_a_full_right_associative_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a = b = c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(outer) = parser.ast().get(id).kind else {
+            panic!("expected outer assignment tree");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.rhs).kind,
+            TreeKind::Assign(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn assignment_rhs_preserves_operator_precedence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x = a + b * c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) =
+            parser.ast().get(assignment.rhs).kind
+        else {
+            panic!("expected infix right-hand side");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.right).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_literal_assignment_target() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1 = x",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_infix_assignment_target() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b = c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     fn assert_prefix_operator_parses(source: &str, operator: &str) {
