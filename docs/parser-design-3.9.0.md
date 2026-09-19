@@ -117,10 +117,11 @@ definitions and package-level forms.
 
 The current expression and literal implementation is split by responsibility:
 `compilation_unit.rs` owns orchestration and statement separators, `expr.rs`
-owns the deliberately incomplete simple-expression pipeline, `types.rs` owns
-the initial type-name subset used by type applications, and `literals.rs` owns
-numeric and string decoding. These names describe the current milestone; they
-do not claim complete Scala `simpleExpr` coverage.
+owns the incremental `Expr`/`Expr1` through operator- and simple-expression
+pipeline, `types.rs` owns the initial type-name subset used by type
+applications, and `literals.rs` owns numeric and string decoding. These names
+describe the current milestone; they do not claim complete Scala expression
+coverage.
 
 The currently implemented expression grammar covers:
 
@@ -141,15 +142,24 @@ prefix operators `-`, `+`, `~`, and `!` on the same physical line
 negative numeric literals using Scala's parser-level literal shape
 infix operators with Scala 3.9 precedence and associativity
 feature-gated legacy postfix operators (disabled by default)
+ordinary assignment with bare `=`
+named arguments in the narrow bare-identifier form
+the initial `if` and `while` expression forms
 ```
 
 The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
-forms such as `using`, named arguments, and colon arguments, remains future
-work. Likewise, the type parser currently handles only the simple type names
-needed by these type applications. Operators, patterns, definitions, control
-flow, templates, interpolation, XML, quotes, and macros remain follow-up
-increments.
+forms such as `using` and colon arguments, remains future work. Likewise, the
+type parser currently handles only the simple type names needed by these type
+applications. Patterns, definitions, remaining control flow (`try`, `for`,
+`match`, `throw`, and `return`), templates, interpolation, XML, quotes, and
+macros remain follow-up increments.
+
+An `if` without an `else` uses a zero-width synthetic
+`Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the
+smallest representation compatible with the current AST contract for Dotty's
+absent `EmptyTree`; the oracle omits that synthetic child when normalizing the
+tree.
 
 ## Operator metadata
 
@@ -158,9 +168,10 @@ infix expression, prefix expression, and simple expression. Prefix support is
 limited to `-`, `+`, `~`, and `!`; infix reduction uses Scala 3.9 precedence,
 left/right associativity, and mixed-associativity diagnostics. Operators
 ending in `:` are right-associative. Legacy postfix syntax is represented by
-`PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
-ascription, match clauses, colon arguments, and the remaining higher-level
-expression grammar are not implemented yet.
+`PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment and
+the initial `if`/`while` forms are implemented above this layer; ascription,
+match clauses, colon arguments, and the remaining higher-level expression
+grammar are not implemented yet.
 
 ## Scala parser oracle
 
@@ -183,9 +194,10 @@ tools/scala-parser-oracle/compare.sh
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
 Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
-purpose and cover the implemented simple- and operator-expression subset,
-including `super`, `new`, type applications, suffix chains, brace blocks,
-prefix operators, negative literals, and infix precedence/associativity. The same command is available
+purpose and cover the implemented simple-, operator-, and initial `Expr1`
+subset, including `super`, `new`, type applications, suffix chains, brace
+blocks, prefix operators, negative literals, infix precedence/associativity,
+assignment, named arguments, and `if`/`while`. The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
 that workflow; it is intentionally not part of the automatic push/PR checks

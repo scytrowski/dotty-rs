@@ -43,7 +43,7 @@ where
             let tree = if is_unsupported_start(self.current().kind) {
                 self.parse_unsupported_syntax()
             } else {
-                self.with_location(Location::Elsewhere, |parser| parser.postfix_expr())
+                self.with_location(Location::Elsewhere, |parser| parser.expr())
             };
             trees.push(tree);
 
@@ -130,9 +130,7 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
         TokenKind::Keyword(
             HardKeyword::Class
                 | HardKeyword::Def
-                | HardKeyword::If
                 | HardKeyword::For
-                | HardKeyword::While
                 | HardKeyword::Try
                 | HardKeyword::Match
                 | HardKeyword::Val

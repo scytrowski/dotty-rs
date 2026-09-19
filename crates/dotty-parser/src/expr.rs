@@ -1,5 +1,6 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
+    Apply, ApplyKind, Assign, Block, Ident, If, NamedArg, Parens, Select, Super, This, Tuple,
+    UntypedNode, While,
 };
 use dotty_core::ast::{InfixOp, New, PrefixOp};
 use dotty_core::{
@@ -12,6 +13,224 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses a complete expression at the future `Expr` grammar boundary.
+    ///
+    /// Lambdas, polyfunctions, and placeholder expressions will extend this
+    /// entry point in later milestones. For now `Expr` is exactly `Expr1`.
+    pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        self.expr1()
+    }
+
+    fn expr1(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::If) {
+            let mark = self.mark();
+            return self.parse_if_expr(mark);
+        }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While) {
+            let mark = self.mark();
+            return self.parse_while_expr(mark);
+        }
+
+        let tree = self.postfix_expr();
+        self.expr1_rest(tree)
+    }
+
+    fn parse_if_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let parenthesized_condition =
+            self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Then);
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
+            self.advance();
+        } else if !parenthesized_condition {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `then` after if condition",
+            );
+        }
+        let then_branch = self.parse_control_body();
+        let else_branch = if let Some(separator_end) = self.accept_else_after_optional_separator() {
+            if let Some(separator_end) = separator_end {
+                self.extend_tree_end(then_branch, separator_end);
+            }
+            self.parse_control_body()
+        } else {
+            self.synthetic_unit_at(self.last_real_token_end)
+        };
+
+        self.alloc_from(
+            mark,
+            TreeKind::If(If {
+                cond,
+                then_branch,
+                else_branch,
+            }),
+        )
+    }
+
+    fn accept_else_after_optional_separator(&mut self) -> Option<Option<u32>> {
+        let mut lookahead = 0;
+        let mut separator_end = None;
+        loop {
+            let token = self.cursor.lookahead(lookahead);
+            let kind = token.kind;
+            if is_else_separator(kind) {
+                if kind == TokenKind::Punctuation(Punctuation::Semicolon) {
+                    separator_end = Some(token.span.end());
+                }
+                lookahead += 1;
+                continue;
+            }
+            if kind != TokenKind::Keyword(dotty_core::HardKeyword::Else) {
+                return None;
+            }
+            break;
+        }
+
+        while is_else_separator(self.current().kind) {
+            self.advance();
+        }
+        self.advance();
+        Some(separator_end)
+    }
+
+    fn extend_tree_end(&mut self, tree: TreeId<Untyped>, end: u32) {
+        let Some(position) = self.ast.get(tree).position else {
+            return;
+        };
+        let range = position.span().range();
+        let range = TextRange::new(range.start(), end).expect("tree span endpoints are ordered");
+        self.ast.get_mut(tree).position =
+            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+    }
+
+    fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let parenthesized_condition =
+            self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Do);
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
+            self.advance();
+        } else if !parenthesized_condition {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `do` after while condition",
+            );
+        }
+        let body = self.parse_control_body();
+
+        self.alloc_from(mark, TreeKind::While(While { cond, body }))
+    }
+
+    fn parse_control_body(&mut self) -> TreeId<Untyped> {
+        self.consume_control_newlines();
+        if self.current().kind == TokenKind::Indent {
+            return self.parse_indented_block();
+        }
+        self.expr()
+    }
+
+    fn consume_control_newlines(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while consuming control-flow newlines",
+                );
+                break;
+            }
+        }
+    }
+
+    fn parse_indented_block(&mut self) -> TreeId<Untyped> {
+        self.advance();
+        let mark = self.mark();
+        let (stats, expr) = self.parse_expression_block_body(TokenKind::Outdent);
+        if !self.accept(TokenKind::Outdent) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected an outdent to close an indented block",
+            );
+        }
+        let is_single_expression = stats.is_empty()
+            && self.ast.get(expr).position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() != range.end()
+            });
+        if is_single_expression {
+            expr
+        } else {
+            self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        }
+    }
+
+    fn parse_control_condition(&mut self, terminator: dotty_core::HardKeyword) -> TreeId<Untyped> {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return self.expr();
+        }
+
+        let tree = self.simple_expr();
+        if self.current().kind == TokenKind::Keyword(terminator) {
+            return tree;
+        }
+
+        if matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::ColonOp
+        ) {
+            return self.infix_expr(tree);
+        }
+
+        tree
+    }
+
+    fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
+        if !self.current_is_bare_assignment() {
+            return lhs;
+        }
+
+        self.advance();
+        let rhs = self.expr();
+        if !is_assignable_lhs(&self.ast.get(lhs).kind) {
+            self.report(
+                crate::ParseDiagnosticKind::UnexpectedToken,
+                "left-hand side is not assignable",
+            );
+            return lhs;
+        }
+
+        self.alloc_assign(lhs, rhs)
+    }
+
+    fn current_is_bare_assignment(&mut self) -> bool {
+        self.current().kind == TokenKind::Operator && self.current_text().ok() == Some("=")
+    }
+
+    fn alloc_assign(&mut self, lhs: TreeId<Untyped>, rhs: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(lhs)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let end = self
+            .ast
+            .get(rhs)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(self.last_real_token_end);
+        let range = TextRange::new(start, end).expect("assignment child spans are ordered");
+        self.alloc(
+            TreeKind::Assign(Assign { lhs, rhs }),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
+    }
+
     /// Parses an expression at the current operator-expression boundary.
     pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
         let first = self.prefix_expr();
@@ -337,16 +556,27 @@ where
 
     fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
-        let mut trees = Vec::new();
-        self.consume_block_separators();
+        let (stats, expr) =
+            self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `}` to close block",
+            );
+        }
+        self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+    }
 
-        while !matches!(
-            self.current().kind,
-            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
-        ) {
+    fn parse_expression_block_body(
+        &mut self,
+        end: TokenKind,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        let mut trees = Vec::new();
+        self.consume_block_separators(end);
+
+        while self.current().kind != end && self.current().kind != TokenKind::Eof {
             let checkpoint = self.cursor.checkpoint();
-            trees
-                .push(self.with_location(crate::Location::InBlock, |parser| parser.postfix_expr()));
+            trees.push(self.with_location(crate::Location::InBlock, |parser| parser.expr()));
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -361,17 +591,14 @@ where
             }
 
             if is_block_separator(self.current().kind) {
-                self.consume_block_separators();
-            } else if !matches!(
-                self.current().kind,
-                TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
-            ) {
+                self.consume_block_separators(end);
+            } else if self.current().kind != end && self.current().kind != TokenKind::Eof {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
                     "expected a block statement separator",
                 );
                 self.recover_until(crate::RecoverySet::Statement);
-                self.consume_block_separators();
+                self.consume_block_separators(end);
             }
         }
 
@@ -379,23 +606,20 @@ where
             Some(expr) => expr,
             None => self.synthetic_unit(),
         };
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close block",
-            );
-        }
-        self.alloc_from(mark, TreeKind::Block(Block { stats: trees, expr }))
+        (trees, expr)
     }
 
-    fn consume_block_separators(&mut self) {
-        while is_block_separator(self.current().kind) {
+    fn consume_block_separators(&mut self, end: TokenKind) {
+        while is_block_separator(self.current().kind) && self.current().kind != end {
             self.advance();
         }
     }
 
     fn synthetic_unit(&mut self) -> TreeId<Untyped> {
-        let start = self.current().span.start();
+        self.synthetic_unit_at(self.current().span.start())
+    }
+
+    fn synthetic_unit_at(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width synthetic unit range");
         self.alloc(
             TreeKind::Literal(dotty_core::ast::Literal {
@@ -680,9 +904,7 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(
-                    self.with_location(crate::Location::InArgs, |parser| parser.postfix_expr()),
-                );
+                args.push(self.argument_expr());
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -710,6 +932,28 @@ where
         )
     }
 
+    fn argument_expr(&mut self) -> TreeId<Untyped> {
+        let tree = self.with_location(crate::Location::InArgs, |parser| parser.expr());
+        self.normalize_named_argument(tree)
+    }
+
+    fn normalize_named_argument(&mut self, tree: TreeId<Untyped>) -> TreeId<Untyped> {
+        let TreeKind::Assign(assignment) = self.ast.get(tree).kind else {
+            return tree;
+        };
+        let TreeKind::Ident(identifier) = self.ast.get(assignment.lhs).kind else {
+            return tree;
+        };
+
+        self.alloc(
+            TreeKind::NamedArg(NamedArg {
+                name: identifier.name,
+                arg: assignment.rhs,
+            }),
+            self.ast.get(tree).position,
+        )
+    }
+
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
         if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
@@ -721,7 +965,7 @@ where
             );
         }
 
-        let first = self.with_location(crate::Location::InParens, |parser| parser.postfix_expr());
+        let first = self.with_location(crate::Location::InParens, |parser| parser.expr());
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             return self.alloc_from(
@@ -734,9 +978,7 @@ where
         while self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && self.current().kind != TokenKind::Eof
         {
-            elements.push(
-                self.with_location(crate::Location::InParens, |parser| parser.postfix_expr()),
-            );
+            elements.push(self.with_location(crate::Location::InParens, |parser| parser.expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
@@ -761,6 +1003,17 @@ where
     }
 }
 
+fn is_assignable_lhs(kind: &TreeKind<Untyped>) -> bool {
+    matches!(
+        kind,
+        TreeKind::Ident(_)
+            | TreeKind::Select(_)
+            | TreeKind::Apply(_)
+            | TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+            | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingOperator {
     name: dotty_core::Name,
@@ -775,6 +1028,13 @@ const fn is_block_separator(kind: TokenKind) -> bool {
             | TokenKind::Punctuation(Punctuation::Semicolon)
             | TokenKind::Indent
             | TokenKind::Outdent
+    )
+}
+
+const fn is_else_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline | TokenKind::Newlines | TokenKind::Punctuation(Punctuation::Semicolon)
     )
 }
 
@@ -869,6 +1129,956 @@ mod tests {
         assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_entry_preserves_operator_expression_behavior() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_with_then_and_else() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then yes else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Keyword(HardKeyword::Else), 14, 18),
+                token(TokenKind::Identifier, 19, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 21).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_with_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (c) yes else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Keyword(HardKeyword::Else), 11, 15),
+                token(TokenKind::Identifier, 16, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_else_after_a_semicolon_separator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then a; else b",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Else), 13, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.then_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(10, 12).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_else_after_a_separator_in_parenthesized_if() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (c) a; else b",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Else), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.then_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(7, 9).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leaves_a_non_else_statement_separator_unconsumed() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then a\nnext",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_infix_if_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if a + b > c then x else y",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Then), 13, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Else), 20, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_do_and_a_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Identifier, 11, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(while_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_a_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while (c) body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_an_infix_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while i < n do step",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Do), 12, 14),
+                token(TokenKind::Identifier, 15, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_do_after_a_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while (c) do body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Do), 10, 12),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_single_indented_if_branch_as_its_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then\n  yes\nelse\n  no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Outdent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Else), 16, 20),
+                token(TokenKind::Indent, 23, 23),
+                token(TokenKind::Identifier, 23, 25),
+                token(TokenKind::Outdent, 25, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_multiple_expressions_in_an_indented_while_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do\n  step\n  next",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Indent, 13, 13),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 20, 24),
+                token(TokenKind::Outdent, 24, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+        let TreeKind::Block(ref block) = parser.ast().get(while_tree.body).kind else {
+            panic!("expected an indented block body");
+        };
+
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_if_without_else_as_a_synthetic_unit() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then yes",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Unit
+            })
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(if_tree.else_branch)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(13, 13).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 13).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn attaches_nested_if_else_to_the_nearest_if() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if a then if b then x else y else z",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Keyword(HardKeyword::If), 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Keyword(HardKeyword::Then), 15, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Keyword(HardKeyword::Else), 22, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Else), 29, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(outer) = parser.ast().get(id).kind else {
+            panic!("expected outer if tree");
+        };
+        let TreeKind::If(inner) = parser.ast().get(outer.then_branch).kind else {
+            panic!("expected nested if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(inner.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(outer.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_identifier_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x = y",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(assignment.rhs).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 5).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_selection_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "obj.x = y",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_application_assignment() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "arr(i) = y",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(assignment.lhs).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn normalizes_a_bare_identifier_assignment_to_a_named_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(x = 1)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::IntegerLiteral, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        let TreeKind::NamedArg(named) = parser.ast().get(application.args[0]).kind else {
+            panic!("expected named argument tree");
+        };
+        let name = named.name;
+
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name.text()), "x");
+    }
+
+    #[test]
+    fn named_argument_keeps_a_full_expression_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(x = a + b)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        let TreeKind::NamedArg(named) = parser.ast().get(application.args[0]).kind else {
+            panic!("expected named argument tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(named.arg).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn normalizes_multiple_named_arguments_in_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(x = 1, y = 2)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::IntegerLiteral, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::IntegerLiteral, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        let names_in_args: Vec<_> = application
+            .args
+            .iter()
+            .map(|arg| match parser.ast().get(*arg).kind {
+                TreeKind::NamedArg(named) => named.name,
+                _ => panic!("expected named argument tree"),
+            })
+            .collect();
+
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(
+            names_in_args
+                .iter()
+                .map(|name| names.resolve(name.text()))
+                .collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+    }
+
+    #[test]
+    fn does_not_normalize_a_selection_assignment_to_a_named_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo(obj.x = 1)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::Dot), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::IntegerLiteral, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::Assign(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn assignment_rhs_is_a_full_right_associative_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a = b = c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(outer) = parser.ast().get(id).kind else {
+            panic!("expected outer assignment tree");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.rhs).kind,
+            TreeKind::Assign(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn assignment_rhs_preserves_operator_precedence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x = a + b * c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+            panic!("expected assignment tree");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) =
+            parser.ast().get(assignment.rhs).kind
+        else {
+            panic!("expected infix right-hand side");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.right).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_literal_assignment_target() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1 = x",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_infix_assignment_target() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b = c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(!matches!(parser.ast().get(id).kind, TreeKind::Assign(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_assignment_without_a_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_if_without_a_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_if_without_a_then_branch() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_while_without_a_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_indented_body_without_an_outdent() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do\n  step",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Indent, 13, 13),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     fn assert_prefix_operator_parses(source: &str, operator: &str) {
