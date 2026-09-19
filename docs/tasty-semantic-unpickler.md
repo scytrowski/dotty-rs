@@ -339,6 +339,11 @@ Compound forms (Milestone 2c1):
 - `And` / `Or` keep the operand order and nesting the compiler wrote: no
   commutative normalisation, no flattening. `BYNAMEtype` is a wrapper, never
   lowered to its result. `SUPERtype` is the type node, not the term `SUPER`.
+- An application with no arguments (upstream's `appliedTo(Nil)` is the
+  constructor itself; the compiler never writes it) is `MalformedType`, as is
+  a node whose children disagree with its shape. Nesting is bounded by the
+  AST index depth (1024), which the tests exercise at 1000 nested
+  intersections on a default test-thread stack.
 - The structural decoders in `dotty-tasty` (`decode_applied_type`,
   `decode_and_type`, ...) return child trees whose offsets are relative to the
   node payload. The unpickler uses them to check the shape only and takes the

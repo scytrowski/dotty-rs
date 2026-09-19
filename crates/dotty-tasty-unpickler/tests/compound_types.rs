@@ -470,3 +470,106 @@ fn a_failure_inside_a_nested_compound_forgets_the_compounds_already_built() {
     // The intact sibling node still decodes.
     assert!(unpickler.unpickle_type(OR).is_ok());
 }
+
+/// `n` as a TASTy natural number (big-endian base 128, the last byte marked).
+fn nat(n: usize) -> Vec<u8> {
+    let mut bytes = vec![u8::try_from(n & 0x7f).unwrap() | 0x80];
+    let mut rest = n >> 7;
+    while rest > 0 {
+        bytes.insert(0, u8::try_from(rest & 0x7f).unwrap());
+        rest >>= 7;
+    }
+    bytes
+}
+
+/// A file whose only AST node is `depth` nested `ANDtype`s over a leaf the
+/// decoder does not support, written from the inside out.
+fn nested_intersections(depth: usize) -> Vec<u8> {
+    const LEAF: u8 = 2;
+    let mut node = vec![LEAF];
+    for _ in 0..depth {
+        let mut payload = node;
+        payload.push(LEAF);
+        let mut outer = vec![165];
+        outer.extend(nat(payload.len()));
+        outer.extend(payload);
+        node = outer;
+    }
+    file_with_ast(&node)
+}
+
+/// A file whose ASTs section is exactly `ast`.
+fn file_with_ast(ast: &[u8]) -> Vec<u8> {
+    let names =
+        dotty_tasty::tasty::NameTable::from_entries(vec![dotty_tasty::tasty::RawName::Utf8(
+            "ASTs".to_owned(),
+        )])
+        .unwrap();
+    let sections =
+        dotty_tasty::tasty::SectionTable::from_sections(vec![dotty_tasty::tasty::Section::new(
+            0, ast,
+        )]);
+    TastyFile::from_parts(
+        dotty_tasty::tasty::Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 0,
+            tooling_version: "Scala 3.9.0".to_owned(),
+            uuid: [0; 16],
+        },
+        names,
+        sections,
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+#[test]
+fn a_deeply_nested_compound_type_is_an_error_not_a_stack_overflow() {
+    // As deep as the AST index allows a node to be, on a default (2 MiB) test
+    // thread stack.
+    let bytes = nested_intersections(1000);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    assert!(matches!(
+        unpickler.unpickle_type(0),
+        Err(UnpickleError::UnsupportedType { tag: 2, .. })
+    ));
+}
+
+#[test]
+fn an_application_of_no_arguments_is_malformed() {
+    // `APPLIEDtype` holding only its constructor (a nullary leaf).
+    let mut node = vec![161];
+    node.extend(nat(1));
+    node.push(2);
+    let bytes = file_with_ast(&node);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    assert_eq!(
+        unpickler.unpickle_type(0),
+        Err(UnpickleError::MalformedType {
+            address: 0,
+            reason: "an application has no arguments"
+        })
+    );
+}
+
+#[test]
+fn a_compound_node_with_the_wrong_operand_count_is_an_error() {
+    // `ANDtype` with three operands: the structural decoder refuses it.
+    let mut node = vec![165];
+    node.extend(nat(3));
+    node.extend([2, 2, 2]);
+    let bytes = file_with_ast(&node);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    assert!(matches!(
+        unpickler.unpickle_type(0),
+        Err(UnpickleError::Ast(_))
+    ));
+}
