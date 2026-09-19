@@ -384,7 +384,7 @@ where
         top
     }
 
-    fn alloc_infix(
+    pub(crate) fn alloc_infix(
         &mut self,
         left: TreeId<Untyped>,
         operator: dotty_core::Name,
@@ -649,7 +649,7 @@ where
         self.parse_super_tail(mark, qualifier)
     }
 
-    fn parse_super(
+    pub(crate) fn parse_super(
         &mut self,
         mark: crate::Mark,
         qualifier: Option<TreeId<Untyped>>,
@@ -777,7 +777,7 @@ where
         )
     }
 
-    fn parse_type_application(
+    pub(crate) fn parse_type_application(
         &mut self,
         mark: crate::Mark,
         function: TreeId<Untyped>,

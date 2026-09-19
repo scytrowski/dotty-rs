@@ -22,8 +22,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "$#" -gt 1 ]]; then
-  echo "usage: $0 [source-file]" >&2
+mode_args=()
+if [[ "$#" -eq 3 && "$1" == "--mode" && "$2" == "pattern" ]]; then
+  mode_args=("$1" "$2")
+  shift 2
+elif [[ "$#" -gt 1 ]]; then
+  echo "usage: $0 [--mode pattern] [source-file]" >&2
   exit 2
 fi
 
@@ -45,7 +49,12 @@ fi
 
 cd "${script_dir}"
 sbt_output=$(mktemp "${TMPDIR:-/tmp}/scala-parser-oracle.XXXXXX.log")
-if ! sbt --error "run ${source_path}" >"${sbt_output}" 2>&1; then
+run_command="run"
+if [[ "${#mode_args[@]}" -eq 2 ]]; then
+  run_command+=" ${mode_args[*]}"
+fi
+run_command+=" ${source_path}"
+if ! sbt --error "${run_command}" >"${sbt_output}" 2>&1; then
   cat "${sbt_output}" >&2
   exit 1
 fi
