@@ -16,8 +16,9 @@ where
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let tree = self.simple_expr_atom(mark);
+        let can_apply = !matches!(self.ast.get(tree).kind, TreeKind::Block(_));
 
-        self.simple_expr_rest(mark, tree)
+        self.simple_expr_rest(mark, tree, can_apply)
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -332,6 +333,7 @@ where
         &mut self,
         mark: crate::Mark,
         mut qualifier: TreeId<Untyped>,
+        can_apply: bool,
     ) -> TreeId<Untyped> {
         loop {
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
@@ -369,6 +371,13 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
             {
+                if !can_apply {
+                    self.report(
+                        crate::ParseDiagnosticKind::UnexpectedToken,
+                        "a block expression cannot be applied as a function",
+                    );
+                    break;
+                }
                 qualifier = self.parse_application(mark, qualifier);
             } else {
                 break;
@@ -1132,6 +1141,32 @@ mod tests {
         ));
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_application_of_a_block_expression() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "{ x }(y)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        let TreeKind::Block(Block { expr, .. }) = result.ast.get(result.root).kind else {
+            panic!("expected compilation-unit block root");
+        };
+
+        assert!(matches!(result.ast.get(expr).kind, TreeKind::Block(_)));
+        assert!(!result.diagnostics.is_empty());
     }
 
     #[test]
