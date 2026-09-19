@@ -19,6 +19,7 @@ mod names;
 mod parser;
 mod recovery;
 mod spans;
+mod types;
 
 pub use compilation_unit::{ParseResult, parse_compilation_unit};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};

@@ -1,3 +1,4 @@
+use dotty_core::ast::New;
 use dotty_core::ast::{Apply, ApplyKind, Ident, Parens, Select, Super, This, Tuple, UntypedNode};
 use dotty_core::{Constant, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -61,6 +62,7 @@ where
                 self.alloc_from(mark, TreeKind::This(This { qual: None }))
             }
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
+            TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             _ => self.unexpected_expression(),
         }
@@ -134,6 +136,12 @@ where
                 mix,
             }),
         )
+    }
+
+    fn parse_new(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let tpt = self.simple_type();
+        self.alloc_from(mark, TreeKind::New(New { tpt }))
     }
 
     fn simple_expr_rest(
@@ -270,7 +278,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Literal, Parens, Super, This, Tuple, UntypedNode};
+    use dotty_core::ast::{Literal, New, Parens, Super, This, Tuple, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
     #[test]
@@ -550,6 +558,73 @@ mod tests {
         assert_eq!(names.resolve(outer_name.text()), "Outer");
         assert_eq!(names.resolve(mix_name.text()), "Base");
         assert_eq!(names.resolve(selected_name.text()), "foo");
+    }
+
+    #[test]
+    fn parses_new_with_a_simple_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new Foo",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::New(New { tpt }) = parser.ast().get(id).kind else {
+            panic!("expected new tree");
+        };
+        let TreeKind::Ident(ident) = parser.ast().get(tpt).kind else {
+            panic!("expected constructed type");
+        };
+
+        assert!(ident.name.is_type());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 7).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_new_qualified_type_and_constructor_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new foo.Bar(1)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::Dot), 7, 8),
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 11, 12),
+                token(TokenKind::IntegerLiteral, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+            panic!("expected constructor application");
+        };
+        let TreeKind::New(New { tpt }) = parser.ast().get(application.function).kind else {
+            panic!("expected new function");
+        };
+        let TreeKind::Select(selection) = parser.ast().get(tpt).kind else {
+            panic!("expected qualified constructed type");
+        };
+
+        assert!(selection.name.is_type());
+        assert_eq!(application.args.len(), 1);
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 14).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
