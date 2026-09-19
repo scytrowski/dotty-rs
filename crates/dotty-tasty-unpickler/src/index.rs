@@ -71,6 +71,12 @@ impl TastySemanticIndex {
         }
     }
 
+    /// Records the scope of a package that another unit entered, for the
+    /// unit to find with `scope_of`. Recording it twice is not an error.
+    pub(crate) fn share_scope(&mut self, symbol: SymbolId, scope: ScopeId) {
+        self.scopes.entry(symbol).or_insert(scope);
+    }
+
     /// Records the declaration scope owned by `symbol`.
     ///
     /// A symbol has at most one declaration scope; a second one is rejected
