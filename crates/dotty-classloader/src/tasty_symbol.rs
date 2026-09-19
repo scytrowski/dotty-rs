@@ -6,7 +6,7 @@ use dotty_classfile::access_flags::{
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, AstError,
     CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
-    FINAL_TAG, IdentNode, MUTABLE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
+    FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
     PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG,
     SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, StandardSection, StructuredNode, StructuredTree,
     TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
@@ -290,18 +290,27 @@ pub(crate) fn decode(
     })
 }
 
-/// Reconstructs a field for every primary-constructor term parameter
-/// tagged [`FIELDACCESSOR_TAG`] or [`CASEACCESSOR_TAG`] — a `class C(val
-/// x: Int)`/`case class C(x: Int)` parameter that is also a real field.
+/// Reconstructs a field for every primary-constructor term parameter that is
+/// also a member: a `class C(val x: Int)` / `class C(var x: Int)` /
+/// `case class C(x: Int)` parameter.
 ///
-/// A `val`/`var`-less constructor parameter (plain `class C(x: Int)`)
-/// carries neither tag and is skipped: it is only ever a constructor-local
-/// binding at the source level, even though real Scala bytecode happens
-/// to also retain it as a private synthetic JVM field to support later
-/// use inside the class body — an implementation detail this reconstructs
-/// the *source-level* member set, not the compiled one, so it stays
-/// unmodeled, mirroring how `.class` loading does not surface a
-/// JVM-only synthetic field as a "real" member either.
+/// A member parameter is recognised by **not** being `private[this]`, i.e. by
+/// not carrying both `PRIVATE` and `LOCAL`, or by carrying
+/// [`CASEACCESSOR_TAG`] / [`FIELDACCESSOR_TAG`]. `val x` has an empty modifier
+/// tail and `var x` only `MUTABLE`: `FIELDACCESSOR` is on the generated
+/// *setter* (`x_=`), not on the parameter, so looking only for the accessor
+/// tags missed every ordinary `val`/`var` parameter (issue #11).
+/// `private val x` and `protected val x` keep their `PRIVATE`/`PROTECTED`
+/// modifier without `LOCAL`, so they are fields too, with that access.
+///
+/// A plain constructor parameter (`class C(x: Int)`) is `private[this]` and is
+/// skipped: it is only ever a constructor-local binding at the source level,
+/// even though real Scala bytecode happens to also retain it as a private
+/// synthetic JVM field to support later use inside the class body — an
+/// implementation detail this reconstructs the *source-level* member set, not
+/// the compiled one, so it stays unmodeled, mirroring how `.class` loading
+/// does not surface a JVM-only synthetic field as a "real" member either. An
+/// explicit `private[this] val x` has the same tail and is skipped with it.
 ///
 /// `template.stats` never repeats these parameters as separate `ValDef`s
 /// (dotty's own pickler does not duplicate a constructor-parameter field's
@@ -319,13 +328,7 @@ fn decode_constructor_accessor_fields(
             continue;
         };
         let body = parameter.decode_body()?;
-        let is_accessor = body.tail.iter().any(|item| {
-            matches!(
-                item,
-                DefinitionTail::Modifier(FIELDACCESSOR_TAG | CASEACCESSOR_TAG)
-            )
-        });
-        if !is_accessor {
+        if !is_member_parameter(&body.tail) {
             continue;
         }
         let Some(field_name) = wire_name(file, parameter.name()) else {
@@ -339,6 +342,16 @@ fn decode_constructor_accessor_fields(
     }
 
     Ok(fields)
+}
+
+/// Whether a constructor term parameter with this modifier tail is a member
+/// of its class (see [`decode_constructor_accessor_fields`]).
+fn is_member_parameter(tail: &[DefinitionTail<'_>]) -> bool {
+    let has = |wanted: u8| {
+        tail.iter()
+            .any(|item| matches!(item, DefinitionTail::Modifier(tag) if *tag == wanted))
+    };
+    has(FIELDACCESSOR_TAG) || has(CASEACCESSOR_TAG) || !(has(PRIVATE_TAG) && has(LOCAL_TAG))
 }
 
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
@@ -1292,6 +1305,52 @@ mod tests {
     #[test]
     fn an_open_class_has_no_declared_visibility() {
         assert_eq!(declared_visibility("Open"), None);
+    }
+
+    fn fields_fixture(class: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/tasty_fields/me/cytrowski/tastyfixtures/fields")
+                .join(format!("{class}.tasty")),
+        )
+        .unwrap_or_else(|error| panic!("fixture {class} should exist: {error}"))
+    }
+
+    fn decoded_fields(class: &str) -> Vec<DecodedTastyField> {
+        decode(&fields_fixture(class), &BinaryName::from_internal(class))
+            .unwrap()
+            .fields
+    }
+
+    fn field_names(fields: &[DecodedTastyField]) -> Vec<&str> {
+        fields.iter().map(|field| field.name.as_str()).collect()
+    }
+
+    /// Issue #11: `class P(val a: Int, b: Int, var c: Int)`. `FIELDACCESSOR`
+    /// is on the setter `c_=`, not on `a` or `c`, so a `val`/`var` parameter
+    /// is recognised by not being `private[this]`.
+    #[test]
+    fn a_val_and_a_var_constructor_parameter_are_fields_and_a_plain_one_is_not() {
+        let fields = decoded_fields("P");
+
+        assert_eq!(field_names(&fields), vec!["a", "c"]);
+        // A `val` is final, a `var` is not.
+        assert!(fields[0].flags.is_public() && fields[0].flags.is_final());
+        assert!(fields[1].flags.is_public() && !fields[1].flags.is_final());
+    }
+
+    #[test]
+    fn a_private_or_protected_val_parameter_is_a_field_with_that_access() {
+        let fields = decoded_fields("Q");
+
+        assert_eq!(field_names(&fields), vec!["d", "e"]);
+        assert!(fields[0].flags.is_private());
+        assert!(fields[1].flags.is_protected());
+    }
+
+    #[test]
+    fn a_plain_parameter_is_not_a_field_but_a_body_val_still_is() {
+        assert_eq!(field_names(&decoded_fields("Body")), vec!["inBody"]);
     }
 
     /// `case_class/Point.tasty`'s real `case class Point(x: Int, y: Int)`
