@@ -191,3 +191,428 @@ fn decode_string_literal(text: &str) -> Option<DecodedString> {
         Err(_) => DecodedString::Utf16(units),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::ast::{Literal, UntypedNode};
+    use dotty_core::{HardKeyword, NameInterner};
+
+    #[test]
+    fn parses_an_integer_as_a_raw_whole_number() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "42",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = tree.kind else {
+            panic!("expected raw number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(10));
+        assert_eq!(names.resolve(number.text), "42");
+    }
+
+    #[test]
+    fn preserves_hexadecimal_integer_radix() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xff",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
+            panic!("expected raw number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(16));
+    }
+
+    #[test]
+    fn preserves_binary_integer_radix() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0b1010",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
+            panic!("expected raw number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(2));
+    }
+
+    #[test]
+    fn decodes_a_decimal_long_literal_as_a_long_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1L",
+            vec![
+                token(TokenKind::LongLiteral, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(1)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_hexadecimal_long_literal_as_a_long_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xffL",
+            vec![
+                token(TokenKind::LongLiteral, 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(255)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_float_suffix_as_a_float_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5f",
+            vec![
+                token(TokenKind::FloatLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Float(value)
+            }) if value == 1.5
+        ));
+    }
+
+    #[test]
+    fn decodes_a_double_suffix_as_a_double_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5d",
+            vec![
+                token(TokenKind::DoubleLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Double(value)
+            }) if value == 1.5
+        ));
+    }
+
+    #[test]
+    fn parses_a_string_literal_without_retaining_quote_delimiters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "\"hello\"",
+            vec![
+                token(TokenKind::StringLiteral, 0, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = tree.kind
+        else {
+            panic!("expected string literal tree");
+        };
+        assert_eq!(names.resolve(value), "hello");
+    }
+
+    #[test]
+    fn decodes_escaped_characters_in_a_string_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "\"a\\n\"",
+            vec![
+                token(TokenKind::StringLiteral, 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "a\n");
+    }
+
+    #[test]
+    fn decodes_an_uppercase_unicode_escape_in_a_string_literal() {
+        let source = r#""\U0041""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "A");
+    }
+
+    #[test]
+    fn decodes_repeated_uppercase_unicode_escape_prefixes() {
+        let source = r#""\UU0041""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "A");
+    }
+
+    #[test]
+    fn decodes_mixed_case_unicode_escape_prefixes() {
+        let source = r#""\uU0041""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "A");
+    }
+
+    #[test]
+    fn decodes_a_surrogate_pair_to_a_scalar_string_value() {
+        let source = r#""\uD834\uDD1E""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected scalar string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "𝄞");
+    }
+
+    #[test]
+    fn preserves_an_unpaired_surrogate_as_utf16_code_units() {
+        let source = r#""a\uD800b""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::Literal(Literal {
+            value: Constant::StringUtf16(units),
+        }) = tree.kind
+        else {
+            panic!("expected UTF-16 string literal tree");
+        };
+        assert_eq!(units, vec!['a' as u16, 0xD800, 'b' as u16]);
+    }
+
+    #[test]
+    fn preserves_newlines_in_a_triple_quoted_string_literal() {
+        let source = "\"\"\"a\nb\"\"\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "a\nb");
+    }
+
+    #[test]
+    fn parses_true_as_a_boolean_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "true",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::True), 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Boolean(true)
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_false_as_a_boolean_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "false",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::False), 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Boolean(false)
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_null_as_a_null_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "null",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Null), 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Null
+            })
+        ));
+    }
+}
