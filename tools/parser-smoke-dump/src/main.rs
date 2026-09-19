@@ -93,11 +93,10 @@ fn render_tree(
         .collect::<Vec<_>>();
     if let TreeKind::Super(super_tree) = &tree.kind
         && matches!(arena.get(super_tree.qual).kind, TreeKind::This(this) if this.qual.is_none())
+        && let Some(position) = tree.position
     {
-        if let Some(position) = tree.position {
-            let start = position.span().range().start();
-            rendered_children[0] = render_synthetic_this(start);
-        }
+        let start = position.span().range().start();
+        rendered_children[0] = render_synthetic_this(start);
     }
     if let TreeKind::Super(super_tree) = &tree.kind
         && let Some(mix) = super_tree.mix
