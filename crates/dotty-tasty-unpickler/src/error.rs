@@ -30,9 +30,14 @@ pub enum UnpickleError {
     /// shape this unpickler does not read. `tag` is the qualifier node's tag.
     /// Package names and references to enclosing definitions are supported.
     UnsupportedQualifier { tag: u8 },
-    /// A reference points at an address that has no entered symbol, or an
-    /// entered symbol of the wrong sort. `from` is the referring definition.
+    /// A reference points at an address that is not the start of a visible AST
+    /// node (out of range, or inside another node's payload), or at one that
+    /// has no entered symbol. `from` is the referring definition.
     InvalidReferenceTarget { from: u32, to: u32 },
+    /// The qualifier of a `private[Q]` / `protected[Q]` modifier at
+    /// `definition` is not a package, class, trait or object that encloses
+    /// the qualified definition (or is the definition itself).
+    InvalidQualifier { definition: u32 },
     /// A `PACKAGE` node whose path is not a direct package reference
     /// (`TERMREFpkg`), which is the only form this unpickler reads.
     UnsupportedPackagePath { address: u32 },
@@ -64,7 +69,11 @@ impl fmt::Display for UnpickleError {
             ),
             Self::InvalidReferenceTarget { from, to } => write!(
                 formatter,
-                "definition at address {from} refers to address {to}, which has no symbol"
+                "definition at address {from} refers to address {to}, which is not a valid target"
+            ),
+            Self::InvalidQualifier { definition } => write!(
+                formatter,
+                "the access qualifier of the definition at address {definition} does not enclose it"
             ),
             Self::UnsupportedPackagePath { address } => write!(
                 formatter,
@@ -97,6 +106,7 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedName { .. }
             | Self::UnsupportedQualifier { .. }
             | Self::InvalidReferenceTarget { .. }
+            | Self::InvalidQualifier { .. }
             | Self::UnsupportedPackagePath { .. }
             | Self::MissingDefinition { .. }
             | Self::ParameterMismatch { .. } => None,

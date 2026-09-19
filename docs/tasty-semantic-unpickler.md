@@ -118,12 +118,25 @@ completed), the accessor roles `FIELDACCESSOR`, `CASEACCESSOR`,
 Qualified access maps to `Visibility::PrivateWithin(Q)` /
 `ProtectedWithin(Q)`. The modifier's qualifier tree is one of `TYPEREFpkg`
 (a package by name), `TYPEREFsymbol` (an enclosing definition, by address),
-or a `SHAREDtype` link to either; it is resolved after the definition's own
-symbol exists, since the qualifier may be the definition itself
-(`class A { private[A] ... }`), and an enclosing definition is always entered
-before its members. A package qualifier reuses the unit's package symbol. Any
-other qualifier shape is `UnpickleError::UnsupportedQualifier`, and a
-`TYPEREFsymbol` address with no entered symbol is `InvalidReferenceTarget`.
+or a `SHAREDtype` link to either. The qualifier comes from untrusted input, so
+it is validated:
+
+- a `SHAREDtype` target must be the start of a visible AST node (checked
+  against the global AST index before anything is decoded); an address inside
+  another node's payload, or past the end of the section, is
+  `InvalidReferenceTarget { from, to }`;
+- the resolved qualifier must be a package, class, trait or object that
+  encloses the qualified definition, or the definition itself
+  (`class A { private[A] ... }`); anything else is
+  `InvalidQualifier { definition }`;
+- a package qualifier is found among the owners of the definition and is never
+  entered, so an untrusted name cannot create package symbols.
+
+The qualifier is resolved after the definition's own symbol exists, because it
+may be the definition itself, and an enclosing definition is always entered
+before its members. Any other qualifier shape is
+`UnpickleError::UnsupportedQualifier`, and a `TYPEREFsymbol` address with no
+entered symbol is `InvalidReferenceTarget`.
 `private[this]` is an unqualified `Private` (with `LOCAL`).
 
 ### Packages
