@@ -1804,6 +1804,105 @@ mod tests {
         assert!(!parser.diagnostics().is_empty());
     }
 
+    #[test]
+    fn recovers_from_assignment_without_a_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_if_without_a_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_if_without_a_then_branch() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_while_without_a_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_indented_body_without_an_outdent() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do\n  step",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Indent, 13, 13),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
     fn assert_prefix_operator_parses(source: &str, operator: &str) {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
