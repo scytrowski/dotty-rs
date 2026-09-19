@@ -11,7 +11,8 @@ use dotty_classloader::classloader::{
     BinaryName, ClassLoader, CompositeClassPath, DirectoryClassPath,
 };
 use dotty_core::{
-    ClassInfo, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId, Visibility,
+    ClassInfo, Name, Namespace, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId,
+    Visibility,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -274,4 +275,51 @@ fn a_class_with_no_access_modifier_stays_public() {
     let class = load_visibility_class(&mut store, "Open");
 
     assert_eq!(store.symbols.get(class).visibility, Visibility::Public);
+}
+
+fn tasty_fields_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_fields")
+}
+
+/// The names of the fields the loader entered into the declarations scope of
+/// `class` (of the `fields` fixture package), for each of `probes`.
+fn entered_fields<'a>(class: &str, probes: &[&'a str]) -> Vec<&'a str> {
+    let synthetic_jdk = TemporaryDirectory::new(&format!("tasty-fields-{class}"));
+    write_synthetic_object_class(synthetic_jdk.path());
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(tasty_fields_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut store = SemanticStore::new();
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let symbol = loader
+        .load_class(&BinaryName::from_internal(format!(
+            "me/cytrowski/tastyfixtures/fields/{class}"
+        )))
+        .unwrap_or_else(|error| panic!("{class} should load: {error:?}"));
+    drop(loader);
+
+    let scope = class_info(&store, symbol).declarations;
+    probes
+        .iter()
+        .copied()
+        .filter(|probe| {
+            let text = store.names.intern(probe);
+            store
+                .scopes
+                .get(scope)
+                .lookup(&Name::new(text, Namespace::Term))
+                .is_some()
+        })
+        .collect()
+}
+
+/// Issue #11: a `val`/`var` constructor parameter is a field of a class
+/// loaded from `.tasty`, as it is when loaded from `.class`; a plain
+/// parameter is not.
+#[test]
+fn val_and_var_constructor_parameters_are_entered_as_fields() {
+    assert_eq!(entered_fields("P", &["a", "b", "c"]), vec!["a", "c"]);
+    assert_eq!(entered_fields("Q", &["d", "e"]), vec!["d", "e"]);
+    assert_eq!(entered_fields("Body", &["x", "inBody"]), vec!["inBody"]);
 }
