@@ -707,4 +707,99 @@ mod tests {
         ));
         assert!(result.diagnostics.is_empty());
     }
+
+    #[test]
+    fn reports_a_missing_pattern_after_an_alternative() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x |",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(_)
+        ));
+    }
+
+    #[test]
+    fn reports_a_missing_pattern_after_a_binder() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x @",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Bind(_)
+        ));
+    }
+
+    #[test]
+    fn recovers_from_an_unclosed_extractor_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Apply(_)
+        ));
+    }
+
+    #[test]
+    fn preserves_full_spans_for_bind_and_alternative_patterns() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x @ Foo(y)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+        let bind = result.ast.get(result.root);
+
+        assert_eq!(
+            bind.position.unwrap().span().range(),
+            TextRange::new(0, 10).unwrap()
+        );
+        let TreeKind::Bind(Bind { body, .. }) = bind.kind else {
+            panic!("expected bind pattern");
+        };
+        assert_eq!(
+            result.ast.get(body).position.unwrap().span().range(),
+            TextRange::new(4, 10).unwrap()
+        );
+    }
 }
