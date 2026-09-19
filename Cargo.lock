@@ -11,6 +11,7 @@ dependencies = [
  "dotty-core",
  "dotty-parser",
  "dotty-tasty",
+ "dotty-tasty-unpickler",
 ]
 
 [[package]]
@@ -60,6 +61,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dotty-tasty-unpickler"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "dotty-tasty",
 ]
 
 [[package]]

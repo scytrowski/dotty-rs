@@ -1,0 +1,406 @@
+//! Reading names out of a TASTy name table.
+//!
+//! In Scala 3.9.0 compiler output, name references — in AST payloads and
+//! inside composite name entries alike — are **zero-based** indexes into the
+//! name table. For instance the constructor name is entry 14 and the signed
+//! constructor entry says `original: 14`. `dotty-tasty`'s
+//! `TastyFile::render_name` follows a one-based convention instead, so it
+//! resolves composite names (such as qualified package names) against the
+//! wrong entries. This module therefore reads the table directly and does not
+//! go through `render_name`.
+
+use dotty_tasty::tasty::{NameTable, RawName};
+
+use crate::error::UnpickleError;
+
+/// Composite names nest a handful of levels at most; anything deeper is a
+/// malformed (or cyclic) table rather than a real name.
+const MAX_NAME_DEPTH: usize = 64;
+
+/// Renders the name at the zero-based wire `reference` to its Scala spelling.
+///
+/// A signed name (a method name carrying its erased signature) reads as its
+/// original name: the signature is not part of the name, and overloads are
+/// told apart by definition address, not by signature text.
+pub(crate) fn wire_name(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
+    resolve(names, reference, reference, 0)
+}
+
+/// Splits a possibly qualified name into its segments, outermost first.
+///
+/// `me.cytrowski.semantic` becomes `["me", "cytrowski", "semantic"]`. Splitting
+/// the structure rather than the rendered text keeps a segment that itself
+/// contains a dot intact.
+pub(crate) fn qualified_segments(
+    names: &NameTable,
+    reference: u32,
+) -> Result<Vec<String>, UnpickleError> {
+    let mut segments = Vec::new();
+    collect_segments(names, reference, reference, 0, &mut segments)?;
+    Ok(segments)
+}
+
+fn collect_segments(
+    names: &NameTable,
+    root: u32,
+    reference: u32,
+    depth: usize,
+    segments: &mut Vec<String>,
+) -> Result<(), UnpickleError> {
+    if depth > MAX_NAME_DEPTH {
+        return Err(UnpickleError::InvalidNameReference { reference: root });
+    }
+    let entry = usize::try_from(reference)
+        .ok()
+        .and_then(|index| names.entries().get(index));
+    match entry {
+        Some(RawName::Qualified { prefix, selector }) => {
+            collect_segments(names, root, *prefix, depth + 1, segments)?;
+            segments.push(wire_name(names, *selector)?);
+        }
+        _ => segments.push(wire_name(names, reference)?),
+    }
+    Ok(())
+}
+
+fn resolve(
+    names: &NameTable,
+    root: u32,
+    reference: u32,
+    depth: usize,
+) -> Result<String, UnpickleError> {
+    if depth > MAX_NAME_DEPTH {
+        return Err(UnpickleError::InvalidNameReference { reference: root });
+    }
+    let entry = usize::try_from(reference)
+        .ok()
+        .and_then(|index| names.entries().get(index))
+        .ok_or(UnpickleError::InvalidNameReference { reference })?;
+    let inner = |reference: u32| resolve(names, root, reference, depth + 1);
+
+    Ok(match entry {
+        RawName::Utf8(text) => text.clone(),
+        RawName::Qualified { prefix, selector } => {
+            format!("{}.{}", inner(*prefix)?, inner(*selector)?)
+        }
+        RawName::Expanded { prefix, selector } => {
+            format!("{}$${}", inner(*prefix)?, inner(*selector)?)
+        }
+        RawName::ExpandPrefix { prefix, selector } => {
+            format!("{}${}", inner(*prefix)?, inner(*selector)?)
+        }
+        RawName::Unique {
+            separator,
+            uniqid,
+            underlying,
+        } => {
+            let separator = inner(*separator)?;
+            let underlying = match underlying {
+                Some(underlying) => inner(*underlying)?,
+                None => String::new(),
+            };
+            if underlying.is_empty() && separator == "$" {
+                format!("${uniqid}$")
+            } else {
+                format!("{underlying}{separator}{uniqid}")
+            }
+        }
+        RawName::DefaultGetter { underlying, index } => {
+            format!("{}$default${}", inner(*underlying)?, u64::from(*index) + 1)
+        }
+        RawName::SuperAccessor { underlying } => format!("super${}", inner(*underlying)?),
+        RawName::InlineAccessor { underlying } => format!("inline${}", inner(*underlying)?),
+        RawName::ObjectClass { underlying } => format!("{}$", inner(*underlying)?),
+        RawName::BodyRetainer { underlying } => {
+            format!("{}$retainedBody", inner(*underlying)?)
+        }
+        RawName::Signed { original, .. } | RawName::TargetSigned { original, .. } => {
+            inner(*original)?
+        }
+        RawName::Unknown { .. } => {
+            return Err(UnpickleError::UnsupportedName { reference });
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Entry 0 is a placeholder standing for the leading section name every
+    /// real table has, so that references in these tables start at 1 and stay
+    /// valid under `dotty-tasty`'s own table validation.
+    fn table(entries: Vec<RawName>) -> NameTable {
+        let mut all = vec![RawName::Utf8("ASTs".to_owned())];
+        all.extend(entries);
+        NameTable::from_entries(all).unwrap()
+    }
+
+    fn utf8(text: &str) -> RawName {
+        RawName::Utf8(text.to_owned())
+    }
+
+    #[test]
+    fn a_plain_name_is_its_text() {
+        let names = table(vec![utf8("Foo")]);
+
+        assert_eq!(wire_name(&names, 1).unwrap(), "Foo");
+    }
+
+    #[test]
+    fn references_are_zero_based() {
+        let names = table(vec![utf8("Foo")]);
+
+        assert_eq!(wire_name(&names, 0).unwrap(), "ASTs");
+    }
+
+    #[test]
+    fn a_qualified_name_joins_prefix_and_selector_with_a_dot() {
+        let names = table(vec![
+            utf8("java"),
+            utf8("lang"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 3).unwrap(), "java.lang");
+    }
+
+    #[test]
+    fn nested_qualified_names_render_the_whole_path() {
+        let names = table(vec![
+            utf8("me"),
+            utf8("cytrowski"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            utf8("semantic"),
+            RawName::Qualified {
+                prefix: 3,
+                selector: 4,
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 5).unwrap(), "me.cytrowski.semantic");
+    }
+
+    #[test]
+    fn qualified_segments_split_a_path_outermost_first() {
+        let names = table(vec![
+            utf8("me"),
+            utf8("cytrowski"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            utf8("semantic"),
+            RawName::Qualified {
+                prefix: 3,
+                selector: 4,
+            },
+        ]);
+
+        assert_eq!(
+            qualified_segments(&names, 5).unwrap(),
+            ["me", "cytrowski", "semantic"]
+        );
+    }
+
+    #[test]
+    fn qualified_segments_of_a_simple_name_is_that_name() {
+        let names = table(vec![utf8("scala")]);
+
+        assert_eq!(qualified_segments(&names, 1).unwrap(), ["scala"]);
+    }
+
+    #[test]
+    fn qualified_segments_keep_a_segment_containing_a_dot_whole() {
+        let names = table(vec![
+            utf8("a"),
+            utf8("b.c"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        assert_eq!(qualified_segments(&names, 3).unwrap(), ["a", "b.c"]);
+    }
+
+    #[test]
+    fn qualified_segments_of_a_missing_reference_is_an_invalid_reference() {
+        let names = table(vec![utf8("a")]);
+
+        assert_eq!(
+            qualified_segments(&names, 9),
+            Err(UnpickleError::InvalidNameReference { reference: 9 })
+        );
+    }
+
+    #[test]
+    fn an_object_class_name_gets_a_dollar_suffix() {
+        let names = table(vec![utf8("O"), RawName::ObjectClass { underlying: 1 }]);
+
+        assert_eq!(wire_name(&names, 2).unwrap(), "O$");
+    }
+
+    #[test]
+    fn a_signed_name_reads_as_its_original_name() {
+        let names = table(vec![
+            utf8("<init>"),
+            utf8("Unit"),
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 3).unwrap(), "<init>");
+    }
+
+    #[test]
+    fn a_target_signed_name_reads_as_its_original_name() {
+        let names = table(vec![
+            utf8("f"),
+            utf8("Unit"),
+            utf8("g"),
+            RawName::TargetSigned {
+                original: 1,
+                target: 3,
+                result_signature: 2,
+                parameter_signatures: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 4).unwrap(), "f");
+    }
+
+    #[test]
+    fn a_default_getter_name_counts_parameters_from_one() {
+        let names = table(vec![
+            utf8("f"),
+            RawName::DefaultGetter {
+                underlying: 1,
+                index: 0,
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 2).unwrap(), "f$default$1");
+    }
+
+    #[test]
+    fn a_unique_name_appends_separator_and_id_to_its_underlying_name() {
+        let names = table(vec![
+            utf8("x"),
+            utf8("$"),
+            RawName::Unique {
+                separator: 2,
+                uniqid: 1,
+                underlying: Some(1),
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 3).unwrap(), "x$1");
+    }
+
+    #[test]
+    fn expanded_and_expand_prefix_names_use_their_own_separators() {
+        let names = table(vec![
+            utf8("Outer"),
+            utf8("x"),
+            RawName::Expanded {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::ExpandPrefix {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        assert_eq!(wire_name(&names, 3).unwrap(), "Outer$$x");
+        assert_eq!(wire_name(&names, 4).unwrap(), "Outer$x");
+    }
+
+    #[test]
+    fn accessor_and_retainer_names_keep_their_conventional_prefixes() {
+        let names = table(vec![
+            utf8("m"),
+            RawName::SuperAccessor { underlying: 1 },
+            RawName::InlineAccessor { underlying: 1 },
+            RawName::BodyRetainer { underlying: 1 },
+        ]);
+
+        assert_eq!(wire_name(&names, 2).unwrap(), "super$m");
+        assert_eq!(wire_name(&names, 3).unwrap(), "inline$m");
+        assert_eq!(wire_name(&names, 4).unwrap(), "m$retainedBody");
+    }
+
+    #[test]
+    fn a_reference_past_the_table_is_an_invalid_reference() {
+        let names = table(vec![utf8("Foo")]);
+
+        assert_eq!(
+            wire_name(&names, 9),
+            Err(UnpickleError::InvalidNameReference { reference: 9 })
+        );
+    }
+
+    #[test]
+    fn an_unknown_name_entry_is_unsupported_not_guessed() {
+        let names = table(vec![RawName::Unknown {
+            tag: 200,
+            payload: Vec::new(),
+        }]);
+
+        assert_eq!(
+            wire_name(&names, 1),
+            Err(UnpickleError::UnsupportedName { reference: 1 })
+        );
+    }
+
+    #[test]
+    fn a_self_referencing_name_stops_at_the_depth_limit() {
+        // Built directly: zero-based self-reference (entry 1 refers to 1)
+        // passes the one-based validation of `dotty-tasty`.
+        let names = table(vec![RawName::ObjectClass { underlying: 1 }]);
+
+        assert_eq!(
+            wire_name(&names, 1),
+            Err(UnpickleError::InvalidNameReference { reference: 1 })
+        );
+    }
+
+    #[test]
+    fn the_fixture_package_and_class_names_resolve_from_the_real_table() {
+        use dotty_tasty::tasty::{PACKAGE_TAG, TYPEDEF_TAG, TastyFile};
+
+        let bytes = include_bytes!("../tests/fixtures/semantic/Foo.tasty");
+        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+        let package = file
+            .asts()
+            .unwrap()
+            .iter()
+            .find(|node| node.tag == PACKAGE_TAG)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        let class = package
+            .stats
+            .iter()
+            .find(|node| node.tag == TYPEDEF_TAG)
+            .unwrap()
+            .decode_definition()
+            .unwrap();
+
+        assert_eq!(
+            wire_name(file.names(), package.path_name().unwrap()).unwrap(),
+            "me.cytrowski.tastyfixtures.semantic"
+        );
+        assert_eq!(wire_name(file.names(), class.name()).unwrap(), "Foo");
+    }
+}

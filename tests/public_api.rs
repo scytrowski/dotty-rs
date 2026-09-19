@@ -129,3 +129,26 @@ fn reencodes_structured_asts_through_the_public_facade() {
     reparsed.validate_ast_reference_targets().unwrap();
     assert_eq!(reparsed.source_file(), file.source_file());
 }
+
+#[test]
+fn exposes_the_tasty_unpickler_error_under_the_dotty_namespace() {
+    use dotty::tasty::AstError;
+    use dotty::tasty_unpickler::UnpickleError;
+
+    let error = UnpickleError::from(AstError::InvalidTag { tag: 1, offset: 7 });
+
+    assert_eq!(
+        error,
+        UnpickleError::Ast(AstError::InvalidTag { tag: 1, offset: 7 })
+    );
+}
+
+#[test]
+fn exposes_an_empty_tasty_semantic_index_through_the_dotty_namespace() {
+    use dotty::tasty_unpickler::TastySemanticIndex;
+
+    let index = TastySemanticIndex::new();
+
+    assert_eq!(index.symbol_at(0), None);
+    assert_eq!(index.symbol_count(), 0);
+}
