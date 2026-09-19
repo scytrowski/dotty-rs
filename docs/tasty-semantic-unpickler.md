@@ -8,8 +8,9 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 2b, semantic name resolution (canonical session identities, the
   package contract, the resolver boundary, name-based `TYPEREF`/`TERMREF`):
   implemented (§4, "Name-based references").
-- Milestone 2c1, compositional non-binder types: in progress. Milestone 2c2
-  (the remaining core-model gaps: bounds, flexible types, constants) follows.
+- Milestone 2c1, compositional non-binder types (`Applied`, `And`, `Or`,
+  `SuperType`, `ByName`): implemented (§4, "Types"). Milestone 2c2 (the
+  remaining core-model gaps: alias bounds, flexible types, constants) is next.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -319,8 +320,38 @@ Forms decoded:
   exactly, including through a chain of links. A chain longer than
   `MAX_SHARED_DEPTH`, which includes any cycle, is `InvalidReferenceTarget`.
 
+Compound forms (Milestone 2c1):
+
+| TASTy | wire shape | semantic type |
+|-------|------------|---------------|
+| `APPLIEDtype` | `Type Type*` | `Applied { tycon, args }` |
+| `ANDtype` | `Type Type` | `And { left, right }` |
+| `ORtype` | `Type Type` | `Or { left, right }` |
+| `SUPERtype` | `Type Type` | `SuperType { this_type, super_type }` |
+| `BYNAMEtype` | `Type` | `ByName { result }` |
+
+- Every child is decoded through the same entry point as a top-level type
+  (`type_at`), so it is cached, `SHAREDtype`-aware and name-resolved like any
+  other, and a child's error is the error of the whole node (never wrapped).
+- One compound node address owns one `TypeId`; equal trees at different
+  addresses are different ids, and a `SHAREDtype` to a compound node returns
+  its exact id.
+- `And` / `Or` keep the operand order and nesting the compiler wrote: no
+  commutative normalisation, no flattening. `BYNAMEtype` is a wrapper, never
+  lowered to its result. `SUPERtype` is the type node, not the term `SUPER`.
+- The structural decoders in `dotty-tasty` (`decode_applied_type`,
+  `decode_and_type`, ...) return child trees whose offsets are relative to the
+  node payload. The unpickler uses them to check the shape only and takes the
+  children's absolute addresses from the AST index; using the relative trees
+  would key a nested type under a wrong address.
+- Neither corpus contains a `SUPERtype`, and a by-name parameter is
+  written only as a tree-level `BYNAMEtpt`, so their tests retag nodes of the
+  same wire shape.
+
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
-`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`.
+`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
+`TYPEBOUNDS` (alias-only and two-sided), `ANNOTATEDtype`, `TYPELAMBDAtype`,
+`FLEXIBLEtype` and constants.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -428,7 +459,7 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      `TYPEREF`/`TERMREF`) — complete. The resolver *interface* moves earlier
      than classloader *integration*, which stays in Milestone 6;
    - 2c1: compositional non-binder types (`Applied`, `And`, `Or`,
-     `SuperType`, `ByName`) — in progress;
+     `SuperType`, `ByName`) — complete;
    - 2c2: the core-model gaps the 2c1 measurement exposes (bounds and alias
      bounds, `Flexible`, constants) — next.
 3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
@@ -533,19 +564,60 @@ entered: a local definition (inside a `val`/`def` body, a block, or a pattern
 type-lambda alias (34,215 / 117,268). The measurement asserts that no target is
 anything else.
 
-Unsupported tags now, most common first (library / compiler):
+### Compound types after 2c1 (library / compiler)
 
-| tag | node | library | compiler |
-|-----|------|---------|----------|
-| 163 | `TYPEBOUNDS` | 11,599 | 587 |
-| 161 | `APPLIEDtype` | 8,306 | 38,439 |
-| 153 | `ANNOTATEDtype` | 1,372 | 1,231 |
-| 170 | `TYPELAMBDAtype` | 757 | 145 |
-| 165 | `ANDtype` | 624 | 744 |
-| 167 | `ORtype` | 406 | 1,048 |
-| 193 | `FLEXIBLEtype` | 140 | 575 |
+Each row is a node of the corpus decoded as its own root. "Child failures"
+name the first failing child, so a node that did not decode is not an
+unsupported node: the decoder for the form works, and a child could not be
+built.
 
-These ordered Milestone 2c1 (Milestone 2c2 is designed from the 2c1 measurement).
+| node | nodes | decoded | external | local | unsupported form | ambiguous / signed / prefix |
+|------|-------|---------|----------|-------|------------------|-----------------------------|
+| `APPLIEDtype` | 9,350 / 13,854 | 4,573 (49%) / 561 (4%) | 3,103 / 13,158 | 847 / 22 | 806 / 109 | 0 / 0 / 21 and 4 |
+| `ANDtype` | 548 / 791 | 139 / 52 | 93 / 360 | 252 / 378 | 64 / 0 | 0 / 0 / 0 and 1 |
+| `ORtype` | 285 / 989 | 25 / 71 | 241 / 905 | 14 / 4 | 5 / 9 | 0 |
+| `BYNAMEtype` | 28 / 19 | 6 / 4 | 6 / 15 | 0 | 16 / 0 | 0 |
+| `SUPERtype` | 0 / 0 | | | | | |
+
+"External" is `UnresolvedMember` / `UnresolvedPackage`, "local" is a reference
+to a definition pass 1 does not enter, "unsupported form" a child with no
+decoder yet (most often `TYPEBOUNDS` and `ANNOTATEDtype`). No `APPLIEDtype`
+is `UnsupportedType`. There were 0 unexpected errors in either corpus.
+
+The compiler corpus mostly applies types from the library (`List`, `Option`,
+...), which are not entered there: 13,158 of its 13,854 `APPLIEDtype` nodes
+fail on an external constructor or argument, which a classpath resolver
+(Milestone 6) is expected to turn into decodes. The real `SUPERtype` does not
+occur in either corpus, so the decoder is covered by a retagged node.
+
+Nodes with no decoder yet (instances in the corpus, not the repeated failures
+the 2b table counted):
+
+| node | library | compiler |
+|------|---------|----------|
+| `TYPEBOUNDS` | 853 | 922 |
+| `ANNOTATEDtype` | 2,014 | 5,409 |
+| `TYPELAMBDAtype` | 739 | 148 |
+| `FLEXIBLEtype` | 238 | 552 |
+
+`TYPEBOUNDS` by wire shape:
+
+| shape | library | compiler |
+|-------|---------|----------|
+| two-sided (`low`, `high`) | 806 (94%) | 223 (24%) |
+| alias-only (one type) | 47 (6%) | 699 (76%) |
+| with a variance marker | 90 | 0 |
+
+The two corpora disagree about which form dominates, and the alias form is
+not a two-sided range with equal ends (upstream keeps a distinct
+`TypeAlias`). Milestone 2c2 therefore cannot fold aliases into `Bounds`: it
+needs either an alias representation in `dotty-core` or an explicit rule for
+what the alias form means for the consumer. `FLEXIBLEtype` (Kotlin-style
+nullability marks) has no `dotty-core` variant, and constants still need a
+lossless representation (float and double bits, unpaired UTF-16 chars), so
+those three are the 2c2 agenda, ahead of binders. The earlier 2b table
+counted failing roots (`TYPEBOUNDS` 11,599 / 587, ...); the counts above are
+nodes, which is what a design decision needs.
 
 ## 9. Review of Milestone 1
 
