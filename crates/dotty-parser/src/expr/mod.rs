@@ -649,7 +649,7 @@ where
         self.parse_super_tail(mark, qualifier)
     }
 
-    fn parse_super(
+    pub(crate) fn parse_super(
         &mut self,
         mark: crate::Mark,
         qualifier: Option<TreeId<Untyped>>,

@@ -236,11 +236,15 @@ where
                 self.advance();
                 self.alloc_from(mark, TreeKind::This(dotty_core::ast::This { qual: None }))
             }
+            TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_pattern_parens(mark),
             _ => self.unexpected_pattern(),
         };
 
-        if matches!(self.ast().get(tree).kind, TreeKind::Ident(_)) {
+        if matches!(
+            self.ast().get(tree).kind,
+            TreeKind::Ident(_) | TreeKind::This(_) | TreeKind::Super(_) | TreeKind::Select(_)
+        ) {
             self.simple_pattern_rest(mark, tree)
         } else {
             tree
@@ -656,6 +660,50 @@ mod tests {
         assert!(matches!(
             result.ast.get(result.root).kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_super_member_pattern_without_symbol_resolution() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "super.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_this_member_pattern_as_a_selection() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "this.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::This), 0, 4),
+                token(TokenKind::Punctuation(Punctuation::Dot), 4, 5),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Select(_)
         ));
         assert!(result.diagnostics.is_empty());
     }
