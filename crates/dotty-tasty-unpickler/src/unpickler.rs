@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use dotty_core::ids::TypeId;
+use dotty_core::resolution::{NoResolver, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
 use dotty_core::{Definitions, Packages};
@@ -35,6 +36,9 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) origin: SymbolOrigin,
     pub(crate) index: TastySemanticIndex,
     pub(crate) packages: Packages,
+    /// Asked for members the entered state does not hold. Owned, and given
+    /// the store to read on each request; it never opens files here.
+    pub(crate) resolver: Box<dyn SymbolResolver>,
     /// Declarations made into scopes during the current `enter_symbols`.
     pub(crate) scope_journal: ScopeJournal,
     /// The file's AST view, built on first use and shared by both passes.
@@ -74,9 +78,17 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             origin,
             index: TastySemanticIndex::new(),
             packages,
+            resolver: Box::new(NoResolver),
             scope_journal: Vec::new(),
             ast: None,
         }
+    }
+
+    /// Uses `resolver` for the name-based references the entered state cannot
+    /// resolve. Without one, [`NoResolver`] leaves them unresolved.
+    pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver>) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// The origin stamped on every symbol this unpickler enters.

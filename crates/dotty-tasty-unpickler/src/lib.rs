@@ -20,7 +20,6 @@ mod ast_view;
 mod enter;
 mod error;
 mod index;
-#[allow(dead_code)] // wired into the type decoder by the next increment
 mod lookup;
 mod mapping;
 mod names;

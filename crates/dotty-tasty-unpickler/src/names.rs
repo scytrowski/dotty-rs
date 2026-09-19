@@ -28,6 +28,17 @@ pub(crate) fn wire_name(names: &NameTable, reference: u32) -> Result<String, Unp
     resolve(names, reference, reference, 0)
 }
 
+/// Whether the name at `reference` is a signed name (`SIGNED` or
+/// `TARGETSIGNED`), which carries an erased signature that [`wire_name`] drops.
+pub(crate) fn is_signed(names: &NameTable, reference: u32) -> bool {
+    matches!(
+        usize::try_from(reference)
+            .ok()
+            .and_then(|index| names.entries().get(index)),
+        Some(RawName::Signed { .. } | RawName::TargetSigned { .. })
+    )
+}
+
 /// Splits a possibly qualified name into its segments, outermost first.
 ///
 /// `me.cytrowski.semantic` becomes `["me", "cytrowski", "semantic"]`. Splitting

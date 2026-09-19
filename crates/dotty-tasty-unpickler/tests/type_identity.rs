@@ -595,18 +595,14 @@ fn a_reference_to_an_address_that_is_not_a_node_is_an_invalid_target() {
 }
 
 #[test]
-fn name_based_and_unmodelled_types_are_explicitly_unsupported() {
-    // The compiler writes a reference to `java.lang.Object` (in another
-    // unit) with the name-based TYPEREF (117), which needs the resolver.
-    let by_name = nodes_with_tag(DISTINCT, 117);
+fn unmodelled_types_are_explicitly_unsupported() {
+    // Annotated types are not decoded yet. (Name-based references are: see
+    // `tests/name_resolution.rs`.)
     let annotation = nodes_with_tag(DISTINCT, 173);
-    assert!(!by_name.is_empty() && !annotation.is_empty());
+    assert!(!annotation.is_empty());
 
     let (results, _, index) = with_unpickler(DISTINCT, |unpickler| {
-        let mut results = vec![
-            unpickler.unpickle_type(by_name[0]),
-            unpickler.unpickle_type(annotation[0]),
-        ];
+        let mut results = vec![unpickler.unpickle_type(annotation[0])];
         // A definition is not a type.
         results.push(unpickler.unpickle_type(0));
         results
@@ -615,19 +611,12 @@ fn name_based_and_unmodelled_types_are_explicitly_unsupported() {
     assert_eq!(
         results[0],
         Err(UnpickleError::UnsupportedType {
-            tag: 117,
-            address: by_name[0]
-        })
-    );
-    assert_eq!(
-        results[1],
-        Err(UnpickleError::UnsupportedType {
             tag: 173,
             address: annotation[0]
         })
     );
     assert!(matches!(
-        results[2],
+        results[1],
         Err(UnpickleError::UnsupportedType {
             tag: 128,
             address: 0
