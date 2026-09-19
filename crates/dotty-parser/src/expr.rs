@@ -44,6 +44,7 @@ where
                 operator: operator.name,
                 offset: operator.offset,
             });
+            self.consume_infix_newlines();
             top = self.prefix_expr();
         }
 
@@ -71,6 +72,23 @@ where
             name,
             offset: self.current().span.start(),
         })
+    }
+
+    fn consume_infix_newlines(&mut self) {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) || !can_start_prefix_expr(self.cursor.lookahead(1).kind)
+        {
+            return;
+        }
+
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            self.advance();
+        }
     }
 
     fn reduce_operator_stack(
@@ -699,6 +717,31 @@ const fn is_numeric_literal(kind: TokenKind) -> bool {
     )
 }
 
+const fn can_start_prefix_expr(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Operator
+            | TokenKind::Keyword(
+                dotty_core::HardKeyword::True
+                    | dotty_core::HardKeyword::False
+                    | dotty_core::HardKeyword::Null
+                    | dotty_core::HardKeyword::This
+                    | dotty_core::HardKeyword::Super
+                    | dotty_core::HardKeyword::New
+            )
+            | TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1174,53 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(operator.text()), "foo");
+    }
+
+    #[test]
+    fn consumes_a_statement_newline_after_an_infix_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a +\nb",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_a_newline_before_an_infix_operator_as_a_statement_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a\n+ b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
