@@ -20,14 +20,10 @@ use dotty_tasty::tasty::{
     GIVEN_TAG, IMPLICIT_TAG, INLINE_TAG, LAZY_TAG, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, OPAQUE_TAG,
     OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PRIVATE_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG,
     RawTree, SEALED_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, TRAIT_TAG, TRANSPARENT_TAG,
-    TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
+    TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
-
-/// `TYPEREFpkg` (`docs/tasty-format-3.9.0.md`, tag 65). `dotty-tasty` does
-/// not export a constant for this tag (issue #15).
-pub(crate) const TYPEREFPKG_TAG: u8 = 65;
 
 /// The name TASTy gives every constructor.
 const CONSTRUCTOR_NAME: &str = "<init>";

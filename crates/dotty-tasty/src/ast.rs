@@ -28,6 +28,8 @@ pub const DEFAULT_MAX_AST_INDEX_DEPTH: usize = 1024;
 
 /// Scala 3.9.0 TASTy tag constant TERMREFPKG_TAG.
 pub const TERMREFPKG_TAG: u8 = 64;
+/// Scala 3.9.0 TASTy tag constant TYPEREFPKG_TAG.
+pub const TYPEREFPKG_TAG: u8 = 65;
 /// Scala 3.9.0 TASTy tag constant SHAREDTERM_TAG.
 pub const SHAREDTERM_TAG: u8 = 60;
 /// Scala 3.9.0 TASTy tag constant SHAREDTYPE_TAG.
