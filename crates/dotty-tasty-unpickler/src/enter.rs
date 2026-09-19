@@ -22,8 +22,8 @@ use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Vi
 use dotty_tasty::tasty::{
     AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG,
     ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG, StandardSection, StructuredNode,
-    TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile,
-    TermValue, VALDEF_TAG,
+    TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TastyFile, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
@@ -114,6 +114,42 @@ fn address(offset: usize) -> u32 {
     u32::try_from(offset).unwrap_or(u32::MAX)
 }
 
+/// The name reference of a `PACKAGE` node's path, which is a direct
+/// `TERMREFpkg` or a `SHAREDtype` link to one.
+///
+/// The compiler writes a repeated subtree once, so a nested package whose
+/// path has already been written elsewhere (for example inside an import)
+/// refers to it by address. The link is followed with [`AstView::tree_at`],
+/// which rejects an address that is not the start of a node, and a chain
+/// longer than [`MAX_SHARED_DEPTH`] is treated as a cycle. Any other path form
+/// is `UnsupportedPackagePath`.
+fn package_path_name(ast: &AstView<'_>, path: &RawTree<'_>, at: u32) -> Result<u32, UnpickleError> {
+    let unsupported = UnpickleError::UnsupportedPackagePath { address: at };
+    let RawTree::Leaf(term) = path else {
+        return Err(unsupported);
+    };
+    let mut target = match (term.tag, &term.value) {
+        (TERMREFPKG_TAG, TermValue::NameRef(name)) => return Ok(*name),
+        (SHAREDTYPE_TAG, TermValue::AstRef(target)) => *target,
+        _ => return Err(unsupported),
+    };
+
+    for _ in 0..=MAX_SHARED_DEPTH {
+        let RawTree::Leaf(term) = ast.tree_at(target, at)? else {
+            return Err(unsupported);
+        };
+        match (term.tag, term.value) {
+            (TERMREFPKG_TAG, TermValue::NameRef(name)) => return Ok(name),
+            (SHAREDTYPE_TAG, TermValue::AstRef(next)) => target = next,
+            _ => return Err(unsupported),
+        }
+    }
+    Err(UnpickleError::InvalidReferenceTarget {
+        from: at,
+        to: target,
+    })
+}
+
 impl TastyUnpickler<'_, '_, '_> {
     /// Enters a `PACKAGE` node: its package symbol, then its members.
     pub(crate) fn enter_package(
@@ -122,9 +158,7 @@ impl TastyUnpickler<'_, '_, '_> {
         at: u32,
     ) -> Result<(), UnpickleError> {
         let package = ast.node(at)?.decode_package()?;
-        let path_name = package
-            .path_name()
-            .ok_or(UnpickleError::UnsupportedPackagePath { address: at })?;
+        let path_name = package_path_name(ast, &package.path, at)?;
         let path = qualified_segments(self.file.names(), path_name)?;
 
         let symbol = self.packages.enter(
