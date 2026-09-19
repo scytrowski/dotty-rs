@@ -22,6 +22,8 @@ where
         let Some(operator) = self.current_prefix_operator() else {
             return self.simple_expr();
         };
+        let is_negated_number = self.current_text().ok() == Some("-")
+            && is_numeric_literal(self.cursor.lookahead(1).kind);
         let operator_end = self.current().span.end();
         let operator_position = self.current_span();
         self.advance();
@@ -36,6 +38,11 @@ where
                 "a prefix operator must be followed by its operand on the same line",
             );
             return self.error_expr(operator_position);
+        }
+
+        if is_negated_number {
+            let number = self.parse_negative_number(mark);
+            return self.simple_expr_rest(mark, number, true);
         }
 
         let operand = self.prefix_expr();
@@ -550,11 +557,23 @@ const fn is_block_separator(kind: TokenKind) -> bool {
     )
 }
 
+const fn is_numeric_literal(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Literal, New, Parens, Super, This, Tuple, UntypedNode};
+    use dotty_core::ast::{Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
     #[test]
@@ -718,6 +737,126 @@ mod tests {
             parser.diagnostics()[0].kind(),
             crate::ParseDiagnosticKind::ExpectedExpression
         );
+    }
+
+    #[test]
+    fn preserves_the_sign_in_a_negated_integer_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-42",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::IntegerLiteral, 1, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = tree.kind else {
+            panic!("expected signed number tree");
+        };
+        assert_eq!(number.kind, NumberKind::Whole(10));
+        assert_eq!(names.resolve(number.text), "-42");
+    }
+
+    #[test]
+    fn decodes_a_negated_long_literal_as_a_negative_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-1L",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::LongLiteral, 1, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(-1)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_the_sign_in_a_negated_decimal_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-1.5",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::DecimalLiteral, 1, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let tree = parser.ast().get(id).clone();
+        drop(parser);
+
+        let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = tree.kind else {
+            panic!("expected signed decimal tree");
+        };
+        assert_eq!(number.kind, NumberKind::Decimal);
+        assert_eq!(names.resolve(number.text), "-1.5");
+    }
+
+    #[test]
+    fn decodes_a_negated_float_literal_as_a_negative_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-1.5f",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::FloatLiteral, 1, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Float(value)
+            }) if value == -1.5
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_a_negated_double_literal_as_a_negative_constant() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-1.5d",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::DoubleLiteral, 1, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Double(value)
+            }) if value == -1.5
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
