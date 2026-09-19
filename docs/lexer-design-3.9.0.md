@@ -370,6 +370,7 @@ The future parser will consume a token source, not a production `Vec<Token>`:
 ```rust
 trait TokenSource {
     fn current(&self) -> &Token;
+    fn position(&self) -> usize;
     fn advance(&mut self);
     fn lookahead(&mut self, n: usize) -> &Token;
     fn observe(&mut self, event: ScannerEvent);

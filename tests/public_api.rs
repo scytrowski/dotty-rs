@@ -17,6 +17,10 @@ impl TokenSource for SingleTokenSource {
         &self.tokens[self.index]
     }
 
+    fn position(&self) -> usize {
+        self.index
+    }
+
     fn advance(&mut self) {
         self.index = (self.index + 1).min(self.tokens.len() - 1);
     }

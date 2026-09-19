@@ -32,12 +32,29 @@ pub enum ParseKind {
     Pattern,
 }
 
+/// Feature policy used by grammar productions whose meaning is dialect- or
+/// feature-dependent in Scala 3.9.0.
+///
+/// These switches deliberately do not affect lexical tokenization. A word
+/// remains an identifier until a future grammar production consults the
+/// policy in a context where that word has contextual meaning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParserFeatures {
+    /// Enables capture-checking syntax when that grammar is implemented.
+    pub capture_checking: bool,
+    /// Enables `erased` definitions when that grammar is implemented.
+    pub erased_definitions: bool,
+    /// Enables `into` syntax when that grammar is implemented.
+    pub into: bool,
+}
+
 /// Explicit parser context carried through nested grammar calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseContext {
     pub location: Location,
     pub parse_kind: ParseKind,
     pub param_owner: Option<ParamOwner>,
+    pub features: ParserFeatures,
 }
 
 impl Default for ParseContext {
@@ -46,6 +63,7 @@ impl Default for ParseContext {
             location: Location::Elsewhere,
             parse_kind: ParseKind::Expr,
             param_owner: None,
+            features: ParserFeatures::default(),
         }
     }
 }
@@ -62,6 +80,7 @@ mod tests {
                 location: Location::Elsewhere,
                 parse_kind: ParseKind::Expr,
                 param_owner: None,
+                features: ParserFeatures::default(),
             }
         );
     }
@@ -111,5 +130,30 @@ mod tests {
         assert_ne!(ParseKind::Expr, ParseKind::Type);
         assert_ne!(ParseKind::Type, ParseKind::Pattern);
         assert_ne!(ParseKind::Expr, ParseKind::Pattern);
+    }
+
+    #[test]
+    fn feature_policy_defaults_to_disabled() {
+        assert_eq!(
+            ParserFeatures::default(),
+            ParserFeatures {
+                capture_checking: false,
+                erased_definitions: false,
+                into: false,
+            }
+        );
+    }
+
+    #[test]
+    fn feature_policy_flags_are_independent() {
+        let features = ParserFeatures {
+            capture_checking: true,
+            erased_definitions: false,
+            into: true,
+        };
+
+        assert!(features.capture_checking);
+        assert!(!features.erased_definitions);
+        assert!(features.into);
     }
 }

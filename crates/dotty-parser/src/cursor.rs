@@ -1,5 +1,11 @@
 use dotty_core::{ScannerEvent, Token, TokenKind, TokenSource};
 
+/// Opaque parser progress marker for a cursor position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorCheckpoint {
+    position: usize,
+}
+
 /// Small adapter that keeps parser token access in one place.
 pub struct Cursor<S> {
     source: S,
@@ -34,6 +40,18 @@ where
         self.source.advance();
     }
 
+    /// Captures the current explicit progress state.
+    pub fn checkpoint(&self) -> CursorCheckpoint {
+        CursorCheckpoint {
+            position: self.source.position(),
+        }
+    }
+
+    /// Returns whether the token source advanced since `checkpoint`.
+    pub fn progressed_since(&self, checkpoint: CursorCheckpoint) -> bool {
+        self.source.position() != checkpoint.position
+    }
+
     /// Returns the token `n` positions after the current token.
     pub fn lookahead(&mut self, n: usize) -> &Token {
         self.source.lookahead(n)
@@ -59,11 +77,69 @@ where
 mod tests {
     use super::*;
     use dotty_core::{Punctuation, TextRange, TokenValue};
+    use std::collections::VecDeque;
 
     struct VecTokenSource {
         tokens: Vec<Token>,
         index: usize,
         observed: Vec<ScannerEvent>,
+    }
+
+    struct ReusingTokenSource {
+        current: Token,
+        remaining: VecDeque<Token>,
+        position: usize,
+    }
+
+    impl TokenSource for ReusingTokenSource {
+        fn current(&self) -> &Token {
+            &self.current
+        }
+
+        fn position(&self) -> usize {
+            self.position
+        }
+
+        fn advance(&mut self) {
+            if let Some(next) = self.remaining.pop_front() {
+                self.current = next;
+                self.position += 1;
+            }
+        }
+
+        fn lookahead(&mut self, n: usize) -> &Token {
+            if n == 0 {
+                &self.current
+            } else {
+                self.remaining
+                    .get(n - 1)
+                    .unwrap_or_else(|| self.remaining.back().unwrap_or(&self.current))
+            }
+        }
+
+        fn observe(&mut self, _event: ScannerEvent) {}
+    }
+
+    struct StuckTokenSource {
+        current: Token,
+    }
+
+    impl TokenSource for StuckTokenSource {
+        fn current(&self) -> &Token {
+            &self.current
+        }
+
+        fn position(&self) -> usize {
+            0
+        }
+
+        fn advance(&mut self) {}
+
+        fn lookahead(&mut self, _n: usize) -> &Token {
+            &self.current
+        }
+
+        fn observe(&mut self, _event: ScannerEvent) {}
     }
 
     impl VecTokenSource {
@@ -80,6 +156,10 @@ mod tests {
     impl TokenSource for VecTokenSource {
         fn current(&self) -> &Token {
             &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
         }
 
         fn advance(&mut self) {
@@ -179,5 +259,38 @@ mod tests {
         cursor.advance();
 
         assert!(cursor.at(TokenKind::Eof));
+    }
+
+    #[test]
+    fn detects_progress_when_a_token_source_reuses_storage() {
+        let first = token(TokenKind::Identifier, 0, 1);
+        let second = first.clone();
+        let mut cursor = Cursor::new(ReusingTokenSource {
+            current: first,
+            remaining: VecDeque::from([second, token(TokenKind::Eof, 1, 1)]),
+            position: 0,
+        });
+        let before = cursor.current() as *const Token;
+        let checkpoint = cursor.checkpoint();
+
+        cursor.advance();
+
+        let after = cursor.current() as *const Token;
+        assert_eq!(before, after);
+        assert!(cursor.progressed_since(checkpoint));
+        assert!(cursor.at(TokenKind::Identifier));
+    }
+
+    #[test]
+    fn reports_no_progress_when_a_token_source_does_not_advance() {
+        let mut cursor = Cursor::new(StuckTokenSource {
+            current: token(TokenKind::Identifier, 0, 1),
+        });
+        let checkpoint = cursor.checkpoint();
+
+        cursor.advance();
+
+        assert!(!cursor.progressed_since(checkpoint));
+        assert!(cursor.at(TokenKind::Identifier));
     }
 }
