@@ -23,7 +23,10 @@ object Main:
     val fields = collection.mutable.ArrayBuffer.empty[String]
     val normalizedKind = tree match
       case tuple: dotty.tools.dotc.ast.untpd.Tuple if childTrees(tuple).isEmpty => "Literal"
-      case _ => tree.getClass.getSimpleName.stripSuffix("$")
+      case _ =>
+        tree.getClass.getSimpleName.stripSuffix("$") match
+          case "WhileDo" => "While"
+          case name => name
     fields += field("kind", quote(normalizedKind))
     fields += field("span", span(tree))
 

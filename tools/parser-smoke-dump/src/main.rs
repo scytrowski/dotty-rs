@@ -137,6 +137,10 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Ident(_) => "Ident",
         TreeKind::Select(_) => "Select",
         TreeKind::Apply(_) => "Apply",
+        TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Assign(_) => "Assign",
+        TreeKind::If(_) => "If",
+        TreeKind::While(_) => "While",
         TreeKind::This(_) => "This",
         TreeKind::Super(_) => "Super",
         TreeKind::New(_) => "New",
@@ -175,6 +179,23 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children.extend(application.args.iter().copied());
             children
         }
+        TreeKind::NamedArg(named) => vec![named.arg],
+        TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
+        TreeKind::If(if_tree) => {
+            let mut children = vec![if_tree.cond, if_tree.then_branch];
+            let include_else = arena
+                .get(if_tree.else_branch)
+                .position
+                .is_some_and(|position| {
+                    let range = position.span().range();
+                    range.start() != range.end()
+                });
+            if include_else {
+                children.push(if_tree.else_branch);
+            }
+            children
+        }
+        TreeKind::While(while_tree) => vec![while_tree.cond, while_tree.body],
         TreeKind::Block(block) => {
             let mut children = Vec::with_capacity(block.stats.len() + 1);
             children.extend(block.stats.iter().copied());
