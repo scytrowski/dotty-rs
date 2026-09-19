@@ -44,7 +44,17 @@ object Main:
         fields += field("literal", quote(slice(tuple, source)))
       case _ =>
 
-    val children = childTrees(tree).map(child => render(child, source)).mkString("[", ",", "]")
+    val rawChildren = childTrees(tree)
+    val operatorIndex = normalizedKind match
+      case "PrefixOp"  => Some(0)
+      case "InfixOp"   => Some(1)
+      case "PostfixOp" => Some(1)
+      case _            => None
+    operatorIndex.flatMap(index => rawChildren.lift(index)).foreach: operatorTree =>
+      fields += field("operator", quote(operatorName(operatorTree, source)))
+    val children = rawChildren.zipWithIndex
+      .collect { case (child, index) if !operatorIndex.contains(index) => render(child, source) }
+      .mkString("[", ",", "]")
     fields += field("children", children)
     fields.mkString("{", ",", "}")
 
@@ -68,6 +78,11 @@ object Main:
     val start = math.max(0, math.min(tree.span.start, source.length))
     val end = math.max(start, math.min(tree.span.end, source.length))
     source.substring(start, end)
+
+  private def operatorName(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
+    slice(tree, source) match
+      case text if text.startsWith("`") && text.endsWith("`") => text.drop(1).dropRight(1)
+      case text => text
 
   private def isBackquotedIdent(ident: dotty.tools.dotc.ast.Trees.Ident[?], source: String): Boolean =
     val text = slice(ident, source)

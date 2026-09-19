@@ -84,6 +84,24 @@ fn render_tree(
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
         }
+        TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => {
+            fields.push(format!(
+                "\"operator\":{}",
+                quote(names.resolve(prefix.op.text()))
+            ));
+        }
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+            fields.push(format!(
+                "\"operator\":{}",
+                quote(names.resolve(infix.op.text()))
+            ));
+        }
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => {
+            fields.push(format!(
+                "\"operator\":{}",
+                quote(names.resolve(postfix.op.text()))
+            ));
+        }
         _ => {}
     }
 
@@ -127,6 +145,9 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Literal(_) => "Literal",
         TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
         TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens",
+        TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) if tuple.elements.is_empty() => {
             "Literal"
         }
@@ -171,6 +192,9 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         }
         TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => vec![parens.inner],
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => tuple.elements.clone(),
+        TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => vec![prefix.operand],
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
         _ => Vec::new(),
     }
 }

@@ -224,7 +224,7 @@ where
             return self.simple_expr_rest(mark, number, true);
         }
 
-        let operand = self.prefix_expr();
+        let operand = self.simple_expr();
         self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(UntypedNode::PrefixOp(PrefixOp {
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_prefix_operators() {
+    fn rejects_a_second_prefix_operator_as_a_nested_prefix() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "!!x",
@@ -900,25 +900,10 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.postfix_expr();
-        let (outer_operator, inner_operator) = {
-            let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(outer)) = parser.ast().get(id).kind
-            else {
-                panic!("expected outer prefix operator tree");
-            };
-            let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(inner)) =
-                parser.ast().get(outer.operand).kind
-            else {
-                panic!("expected inner prefix operator tree");
-            };
-            (outer.op, inner.op)
-        };
+        let _id = parser.postfix_expr();
 
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().is_empty());
-        drop(parser);
-        assert_eq!(names.resolve(outer_operator.text()), "!");
-        assert_eq!(names.resolve(inner_operator.text()), "!");
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
