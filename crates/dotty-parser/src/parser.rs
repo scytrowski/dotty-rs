@@ -246,24 +246,27 @@ where
         self.source.slice(span)
     }
 
+    fn current_name_text(&self) -> Result<&'src str, SourceTextError> {
+        let text = self.current_text()?;
+        if self.current().kind == TokenKind::BackquotedIdentifier {
+            Ok(text
+                .strip_prefix('`')
+                .and_then(|text| text.strip_suffix('`'))
+                .unwrap_or(text))
+        } else {
+            Ok(text)
+        }
+    }
+
     /// Interns the current token spelling in the term namespace.
     pub fn intern_current_term_name(&mut self) -> Result<TermName, SourceTextError> {
-        let span = self.current().span;
-        let text = self.source.slice(span)?;
-        let text = if self.current().kind == TokenKind::BackquotedIdentifier {
-            text.strip_prefix('`')
-                .and_then(|text| text.strip_suffix('`'))
-                .unwrap_or(text)
-        } else {
-            text
-        };
+        let text = self.current_name_text()?;
         Ok(TermName::new(self.names.intern(text)))
     }
 
     /// Interns the current token spelling in the type namespace.
     pub fn intern_current_type_name(&mut self) -> Result<TypeName, SourceTextError> {
-        let span = self.current().span;
-        let text = self.source.slice(span)?;
+        let text = self.current_name_text()?;
         Ok(TypeName::new(self.names.intern(text)))
     }
 
@@ -467,6 +470,24 @@ mod tests {
     fn current_type_name_uses_the_type_namespace() {
         let mut names = NameInterner::new();
         let mut parser = parser_for("Value", TextRange::new(0, 5).unwrap(), &mut names);
+        let name = parser.intern_current_type_name().expect("valid token span");
+        drop(parser);
+
+        assert!(name.as_name().is_type());
+        assert_eq!(names.resolve(name.as_name().text()), "Value");
+    }
+
+    #[test]
+    fn current_type_name_strips_backquoted_delimiters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_with_tokens(
+            "`Value`",
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
         let name = parser.intern_current_type_name().expect("valid token span");
         drop(parser);
 
