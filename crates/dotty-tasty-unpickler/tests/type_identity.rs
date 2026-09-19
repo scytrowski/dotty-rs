@@ -22,6 +22,7 @@
 //! | 434     | `TYPEREFdirect` to the local class `Hidden`, which has no symbol |
 //! | 445     | `SHAREDtype(434)`, a two-byte target                            |
 
+use dotty_core::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolKind;
@@ -72,7 +73,8 @@ fn with_unpickler<R>(
 ) -> (R, SemanticStore, TastySemanticIndex) {
     let file = TastyFile::parse_scala_3_9(bytes).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols().unwrap();
     let result = check(&mut unpickler);
     let index = unpickler.into_index();
@@ -593,18 +595,14 @@ fn a_reference_to_an_address_that_is_not_a_node_is_an_invalid_target() {
 }
 
 #[test]
-fn name_based_and_unmodelled_types_are_explicitly_unsupported() {
-    // The compiler writes a reference to `java.lang.Object` (in another
-    // unit) with the name-based TYPEREF (117), which needs the resolver.
-    let by_name = nodes_with_tag(DISTINCT, 117);
+fn unmodelled_types_are_explicitly_unsupported() {
+    // Annotated types are not decoded yet. (Name-based references are: see
+    // `tests/name_resolution.rs`.)
     let annotation = nodes_with_tag(DISTINCT, 173);
-    assert!(!by_name.is_empty() && !annotation.is_empty());
+    assert!(!annotation.is_empty());
 
     let (results, _, index) = with_unpickler(DISTINCT, |unpickler| {
-        let mut results = vec![
-            unpickler.unpickle_type(by_name[0]),
-            unpickler.unpickle_type(annotation[0]),
-        ];
+        let mut results = vec![unpickler.unpickle_type(annotation[0])];
         // A definition is not a type.
         results.push(unpickler.unpickle_type(0));
         results
@@ -613,19 +611,12 @@ fn name_based_and_unmodelled_types_are_explicitly_unsupported() {
     assert_eq!(
         results[0],
         Err(UnpickleError::UnsupportedType {
-            tag: 117,
-            address: by_name[0]
-        })
-    );
-    assert_eq!(
-        results[1],
-        Err(UnpickleError::UnsupportedType {
             tag: 173,
             address: annotation[0]
         })
     );
     assert!(matches!(
-        results[2],
+        results[1],
         Err(UnpickleError::UnsupportedType {
             tag: 128,
             address: 0
@@ -769,7 +760,8 @@ fn a_failed_decode_takes_back_everything_it_allocated() {
 fn type_decoding_does_not_disturb_entered_symbols_or_scopes() {
     let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols().unwrap();
     let symbols = unpickler.index().symbol_count();
 
@@ -777,4 +769,38 @@ fn type_decoding_does_not_disturb_entered_symbols_or_scopes() {
     let _ = unpickler.unpickle_type(LOCAL_CLASS_REFERENCE);
 
     assert_eq!(unpickler.index().symbol_count(), symbols);
+}
+
+#[test]
+fn every_reference_without_a_prefix_reuses_the_sessions_canonical_no_prefix() {
+    let (resolved, _) = package_references();
+    let type_package_at = *resolved.last().unwrap();
+    let term_package_at = *resolved.first().unwrap();
+    assert_ne!(type_package_at, term_package_at);
+    let bytes = patched(
+        DISTINCT,
+        type_package_at as usize,
+        &[TERMREFPKG_TAG],
+        &[TYPEREFPKG_TAG],
+    );
+
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+    unpickler.enter_symbols().unwrap();
+
+    // TYPEREFdirect, TYPEREFpkg and TERMREFpkg: three wire forms, one session.
+    let decoded = [
+        unpickler.unpickle_type(TYPE_PARAMETER_REFERENCE).unwrap(),
+        unpickler.unpickle_type(type_package_at).unwrap(),
+        unpickler.unpickle_type(term_package_at).unwrap(),
+    ];
+    drop(unpickler);
+
+    for ty in decoded {
+        let (prefix, _, _) = reference(&store, ty);
+        // The `TypeId` itself, not just an equal-looking `NoPrefix`.
+        assert_eq!(prefix, definitions.no_prefix);
+    }
 }

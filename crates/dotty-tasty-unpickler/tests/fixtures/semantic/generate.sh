@@ -42,7 +42,10 @@ sources=$(cd "$fixture_dir" && ls -- *.scala)
 (cd "$fixture_dir" && java -cp "$compiler_class_path" dotty.tools.dotc.Main \
   -usejavacp:false -classpath "$library_class_path" -d "$work_dir" $sources)
 
-for tasty in "$work_dir"/me/cytrowski/tastyfixtures/semantic/*.tasty; do
+# DefaultPackage.scala has no `package` clause, so its units land in the root of
+# the output directory; everything else is in the fixtures package.
+for tasty in "$work_dir"/*.tasty "$work_dir"/me/cytrowski/tastyfixtures/semantic/*.tasty; do
+  [[ -f "$tasty" ]] || continue
   cp "$tasty" "$fixture_dir/"
   echo "regenerated $(basename "$tasty")"
 done

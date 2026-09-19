@@ -1,10 +1,11 @@
 //! A `PACKAGE` whose path is a `SHAREDtype` link (issue #29), over the real
 //! `scala3-library/scala/package.tasty`.
 //!
-//! The unit has two `PACKAGE` nodes: `@0` over `<empty>`, and a nested one at
+//! The unit has two `PACKAGE` nodes: `@0` over `<empty>` (the root package), and a nested one at
 //! `@21` whose path is not written out but linked to the `TERMREFpkg("scala")`
 //! leaf at address 9, which sits inside an earlier import.
 
+use dotty_core::Definitions;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolKind;
 use dotty_tasty::tasty::{StandardSection, TastyFile};
@@ -29,7 +30,8 @@ fn enter(
 > {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols()?;
     let index = unpickler.into_index();
     Ok((store, index))
@@ -62,7 +64,11 @@ fn the_unit_with_a_shared_package_path_enters() {
     let nested = index.symbol_at(NESTED_PACKAGE).unwrap();
     assert_eq!(store.symbols.get(nested).kind, SymbolKind::Package);
     assert_eq!(name_of(&store, nested), "scala");
-    assert_eq!(name_of(&store, outer), "<empty>");
+    // `<empty>` is the default package, which the session models as its root:
+    // the `scala` package inside it is owned by the root.
+    assert_eq!(name_of(&store, outer), "");
+    assert_eq!(store.symbols.get(outer).owner, None);
+    assert_eq!(store.symbols.get(nested).owner, Some(outer));
 }
 
 #[test]
@@ -119,9 +125,10 @@ fn a_failed_unit_leaves_the_store_untouched() {
     let file_bytes = linked_to(5);
     let file = TastyFile::parse_compatible_with(&file_bytes, 28, 9, 0).unwrap();
     let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
     let before = store.checkpoint();
 
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     assert!(unpickler.enter_symbols().is_err());
     drop(unpickler);
 

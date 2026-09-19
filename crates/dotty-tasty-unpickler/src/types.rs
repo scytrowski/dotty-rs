@@ -11,7 +11,7 @@
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
-//! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { NoPrefix, symbol }`     |
+//! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { no_prefix, symbol }`    |
 //! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { NoPrefix, symbol }`     |
 //! | `TYPEREFsymbol`       | `ASTRef Type` (prefix)    | `TypeRef { prefix, symbol }`       |
 //! | `TERMREFsymbol`       | `ASTRef Type` (prefix)    | `TermRef { prefix, symbol }`       |
@@ -28,17 +28,19 @@
 //! never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};
-use dotty_core::names::Namespace;
+use dotty_core::names::{Name, Namespace};
+use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    RawTree, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    RawTree, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG,
+    THIS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
-use crate::names::qualified_segments;
+use crate::lookup::{LocalLookup, lookup_member};
+use crate::names::{is_signed, package_segments, wire_name};
 use crate::unpickler::TastyUnpickler;
 
 /// The tag and absolute address of a tree's root node.
@@ -100,22 +102,22 @@ impl TastyUnpickler<'_, '_, '_> {
                 }
                 (TYPEREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
                 }
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TermRef { prefix, symbol }
                 }
                 (TYPEREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
                 }
                 (TERMREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TermRef { prefix, symbol }
                 }
                 _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
@@ -138,6 +140,22 @@ impl TastyUnpickler<'_, '_, '_> {
                     Type::TermRef { prefix, symbol }
                 }
             }
+            RawTree::NatAst {
+                value: name, child, ..
+            } if tag == TYPEREF_TAG || tag == TERMREF_TAG => {
+                let prefix = self.decode_type(ast, child, depth)?;
+                let namespace = if tag == TYPEREF_TAG {
+                    Namespace::Type
+                } else {
+                    Namespace::Term
+                };
+                let symbol = self.resolved_member(at, *name, prefix, namespace)?;
+                if tag == TYPEREF_TAG {
+                    Type::TypeRef { prefix, symbol }
+                } else {
+                    Type::TermRef { prefix, symbol }
+                }
+            }
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
                 class: self.this_class(ast, child, depth)?,
             },
@@ -147,6 +165,71 @@ impl TastyUnpickler<'_, '_, '_> {
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
+    }
+
+    /// The member of `prefix` a name-based `TYPEREF` / `TERMREF` at `at`
+    /// means: the prefix's own declaration scope first, then the resolver.
+    /// Never a search by text across owners, never the first of several
+    /// overloads.
+    fn resolved_member(
+        &mut self,
+        at: u32,
+        name_ref: u32,
+        prefix: TypeId,
+        namespace: Namespace,
+    ) -> Result<SymbolId, UnpickleError> {
+        let text = wire_name(self.file.names(), name_ref)?;
+        if namespace == Namespace::Term && is_signed(self.file.names(), name_ref) {
+            return Err(UnpickleError::UnsupportedSignedReference {
+                address: at,
+                name: text,
+            });
+        }
+        let name = Name::new(self.store.names.intern(&text), namespace);
+
+        let local = lookup_member(self.store, &self.index, &self.packages, prefix, &name);
+        let unsupported_prefix = local == LocalLookup::UnsupportedPrefix;
+        match local {
+            LocalLookup::Found(symbol) => return Ok(symbol),
+            LocalLookup::Ambiguous { candidates } => {
+                return Err(UnpickleError::AmbiguousMember {
+                    address: at,
+                    prefix,
+                    name: text,
+                    candidates,
+                });
+            }
+            LocalLookup::NotFound | LocalLookup::ScopeUnknown | LocalLookup::UnsupportedPrefix => {}
+        }
+
+        let request = MemberRequest {
+            prefix,
+            name,
+            selector: MemberSelector::Unique,
+        };
+        let failure = |error| UnpickleError::ResolverFailure { address: at, error };
+        match self
+            .resolver
+            .resolve_member(&*self.store, &request)
+            .map_err(failure)?
+        {
+            Some(symbol) if self.store.symbols.get(symbol).name.namespace() == namespace => {
+                Ok(symbol)
+            }
+            Some(_) => Err(failure(ResolutionError::Malformed {
+                reason: format!("the symbol for `{text}` is in the wrong namespace"),
+            })),
+            None if unsupported_prefix => Err(UnpickleError::UnsupportedResolutionPrefix {
+                address: at,
+                prefix,
+            }),
+            None => Err(UnpickleError::UnresolvedMember {
+                address: at,
+                prefix,
+                name: text,
+                namespace,
+            }),
+        }
     }
 
     /// The symbol entered for the definition at `target`, named by the type
@@ -192,25 +275,43 @@ impl TastyUnpickler<'_, '_, '_> {
 
     /// The package symbol for a `TYPEREFpkg` / `TERMREFpkg` naming `name`.
     ///
-    /// Only a package already entered into the registry resolves; one that is
-    /// not is an error, never created here, because a reference name is
-    /// untrusted and resolving beyond the entered units is the resolver's job.
-    fn referenced_package(&self, at: u32, name: u32) -> Result<SymbolId, UnpickleError> {
-        let path = qualified_segments(self.file.names(), name)?;
+    /// A package in the session's registry resolves. Any other is asked of the
+    /// resolver, and is an error if it does not know it: a package is never
+    /// created here, because a reference name is untrusted.
+    fn referenced_package(&mut self, at: u32, name: u32) -> Result<SymbolId, UnpickleError> {
+        let path = package_segments(self.file.names(), name)?;
         let segments: Vec<&str> = path.iter().map(String::as_str).collect();
-        self.packages
-            .symbol(&segments)
-            .ok_or_else(|| UnpickleError::UnresolvedPackage {
-                address: at,
-                package: path.join("."),
-            })
+        if let Some(symbol) = self.packages.symbol(&segments) {
+            return Ok(symbol);
+        }
+        let unresolved = || UnpickleError::UnresolvedPackage {
+            address: at,
+            package: path.join("."),
+        };
+        let failure = |error| UnpickleError::ResolverFailure { address: at, error };
+        match self
+            .resolver
+            .resolve_package(&*self.store, &segments)
+            .map_err(failure)?
+        {
+            Some(symbol) if self.store.symbols.get(symbol).kind == SymbolKind::Package => {
+                Ok(symbol)
+            }
+            Some(_) => Err(failure(ResolutionError::Malformed {
+                reason: format!(
+                    "the symbol for package `{}` is not a package",
+                    path.join(".")
+                ),
+            })),
+            None => Err(unresolved()),
+        }
     }
 
     /// The class named by the argument of a `THIS` node: a class reference by
     /// address or a package. Only its symbol is kept, so nothing is allocated
     /// for the argument itself.
     fn this_class(
-        &self,
+        &mut self,
         ast: &AstView<'_>,
         class: &RawTree<'_>,
         depth: usize,
@@ -236,6 +337,15 @@ impl TastyUnpickler<'_, '_, '_> {
             },
             RawTree::NatAst { value, .. } if tag == TYPEREFSYMBOL_TAG => {
                 self.referenced_class(ast, at, *value)
+            }
+            // The class of an external `this`, named through its prefix.
+            RawTree::NatAst { value, child, .. } if tag == TYPEREF_TAG => {
+                let prefix = self.decode_type(ast, child, depth)?;
+                let symbol = self.resolved_member(at, *value, prefix, Namespace::Type)?;
+                match self.store.symbols.get(symbol).kind {
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => Ok(symbol),
+                    _ => Err(UnpickleError::InvalidReferenceKind { from: at, to: at }),
+                }
             }
             _ => Err(UnpickleError::UnsupportedType { tag, address: at }),
         }

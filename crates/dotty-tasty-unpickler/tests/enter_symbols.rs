@@ -1,6 +1,7 @@
 //! Runs the symbol-entering pass over the real `semantic/Foo.tasty` fixture
 //! and checks the result through `dotty-core`.
 
+use dotty_core::Definitions;
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
@@ -35,7 +36,8 @@ struct Entered {
 fn enter_foo() -> Entered {
     let file = TastyFile::parse_scala_3_9(FOO_TASTY).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols().unwrap();
     let origin = unpickler.origin();
     let index = unpickler.into_index();
@@ -103,7 +105,7 @@ fn the_package_node_maps_to_the_innermost_package_symbol() {
 
     assert_eq!(
         entered.package_chain(package),
-        ["me", "cytrowski", "tastyfixtures", "semantic"]
+        ["", "me", "cytrowski", "tastyfixtures", "semantic"]
     );
 }
 
@@ -118,11 +120,12 @@ fn every_package_segment_is_a_package_symbol() {
         current = entered.store.symbols.get(symbol).owner;
     }
 
-    assert_eq!(kinds, [SymbolKind::Package; 4]);
+    // Four segments and the session's root package.
+    assert_eq!(kinds, [SymbolKind::Package; 5]);
 }
 
 #[test]
-fn the_outermost_package_has_no_owner() {
+fn the_outermost_package_is_owned_by_the_root_which_has_no_owner() {
     let entered = enter_foo();
     let package = entered.index.symbol_at(PACKAGE_ADDRESS).unwrap();
 
@@ -131,7 +134,9 @@ fn the_outermost_package_has_no_owner() {
         .first()
         .expect("non-empty chain");
 
-    assert_eq!(entered.store.symbols.get(outermost).owner, None);
+    let root = entered.store.symbols.get(outermost);
+    assert_eq!(root.owner, None);
+    assert_eq!(entered.name(outermost), "");
 }
 
 #[test]

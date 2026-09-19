@@ -5,7 +5,10 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 1, semantic index and symbol entering: complete.
 - Milestone 2a, core type identity and reference resolution: implemented
   (§4, "Types").
-- Milestone 2b, compound non-binder types: next.
+- Milestone 2b, semantic name resolution (canonical session identities, the
+  package contract, the resolver boundary, name-based `TYPEREF`/`TERMREF`):
+  implemented (§4, "Name-based references").
+- Milestone 2c, compound non-binder types: next.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -33,9 +36,10 @@ The unpickler interprets TASTy that is already decoded. It does not:
 - introduce a second semantic model: it fills the canonical `Symbol`, `Type`,
   `Scope` and `ClassInfo` values of `dotty-core`.
 
-References to symbols defined outside the current TASTy unit will go through
-an external resolver abstraction (`SymbolResolver`, Milestone 6). The unpickler
-never loads files itself.
+References to symbols defined outside the current TASTy unit go through the
+`SymbolResolver` port of `dotty-core` (Milestone 2b defines the port; the
+classloader implements it in Milestone 6). The unpickler never loads files
+itself.
 
 ## 2. Multi-pass architecture
 
@@ -47,7 +51,8 @@ function. It follows an enter-before-complete model:
 |------|--------|-----------|
 | 1. Enter | symbols, owners, declaration scopes; `SymbolInfo::Missing` | 1 |
 | 2a. Type identity | address-keyed `TypeId`s; references, `THIS`, `SHAREDtype` | 2a |
-| 2b. Types | compound types (`Applied`, bounds, `And`/`Or`, ...), then binders with `TypeArena::reserve`/`fill` | 2b–4 |
+| 2b. Name resolution | name-based `TYPEREF`/`TERMREF` through the prefix scope and the `SymbolResolver` port | 2b |
+| 2c. Compound types | `Applied`, bounds, `And`/`Or`, ..., then binders with `TypeArena::reserve`/`fill` | 2c–4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
@@ -176,7 +181,8 @@ registered origin id are not undone; both are harmless.
 structurally. A package is keyed by its path, so repeated `PACKAGE` nodes
 share one symbol, and the `PACKAGE` node address maps to the innermost
 package. Each package owns a declaration scope and is entered into its
-parent's scope. The outermost package has no owner. A path that is neither a
+parent's scope. The outermost package is owned by the session's explicit root
+package (empty name, no owner). A path that is neither a
 `TERMREFpkg` nor a `SHAREDtype` link to one (below) is
 `UnpickleError::UnsupportedPackagePath`.
 
@@ -190,7 +196,7 @@ treated as a cycle, and a target that is not a `TERMREFpkg` is
 only a direct `TERMREFpkg`, because resolving a link needs the whole ASTs
 payload, which the node does not have.
 
-Package symbols are shared between units through a `TastyPackages` registry
+Package symbols are shared between units through a `dotty_core::Packages` registry
 (path to symbol and scope) that the caller carries from one unpickler to the
 next: `TastyUnpickler::with_packages` takes it and `into_parts` returns it
 with the unit's index. A second unit in the same package reuses the symbol,
@@ -198,10 +204,33 @@ the owner chain and the scope, records the shared scope in its own index, and
 declares its members into it. The registry belongs to one `SemanticStore`, and
 a shared package keeps the origin of the unit that first entered it.
 `TastyUnpickler::new` starts from an empty registry, so a lone unit behaves as
-before. Placement is a caller-side decision on purpose: the classloader
-(Milestone 6) owns the store and the order units are loaded in, and its own
-`.class` package registry (issue #5, no scopes yet) has to be reconciled with
-this one there, not here.
+before.
+
+The caller owns the session and passes the store's `Definitions` (bootstrapped
+once) to `new`/`with_packages`. The unpickler never bootstraps, and every
+reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,
+`TERMREFpkg`) reuses `definitions.no_prefix`, so the same reference is the same
+`TypeId` whichever adapter decoded it.
+
+The package model is a session contract of `dotty-core` (`docs/dotty-core-design.md`
+§9.1), not the unpickler's: one term-named `Package` symbol per path with an
+explicit root, shared with the classloader, whose `PackageRegistry` now enters
+packages through the same `dotty_core::Packages`. Dotty's package term and
+module class are collapsed on purpose, so `TYPEREFpkg` and `TERMREFpkg` are one
+identity and `THIS` may name a package. `LoadingSession::with_packages` /
+`into_packages` carry the registry between the two adapters; the convergence
+tests live in `dotty-classloader`.
+
+**Default package.** A unit with no `package` clause is written as a `PACKAGE`
+over `TERMREFpkg <empty>` (real Scala 3.9.0 output:
+`tests/fixtures/semantic/DefaultPackage.scala`, and `scala/package.tasty`). The
+unpickler normalises the wire spelling (`names.rs`, `package_segments`): a
+leading `<empty>` or `<root>` segment is dropped and a bare empty name is the
+root, so the unit's package is the session root, not a package named
+`<empty>`. Its top-level classes are owned by and declared in the root, where
+the classloader also puts a class with no `/`; a name-based reference to a
+default-package class of another unit resolves in the root's scope. Which adapter runs first, and who owns the
+registry between them, stays a caller decision until Milestone 6.
 
 The semantic index differs from the sketch of the project document in two
 deliberate ways. Scopes are keyed by the owning `SymbolId`, not by address,
@@ -277,7 +306,7 @@ Forms decoded:
   and the argument of `THIS` a class, trait or module class; otherwise it is
   `InvalidReferenceKind { from, to }`.
 - `TYPEREFpkg` / `TERMREFpkg` name a package by path. They resolve only to a
-  package already in the `TastyPackages` registry, and never create one, since
+  package already in the `dotty_core::Packages` registry, and never create one, since
   the name is untrusted; any other package is `UnresolvedPackage`. Resolving
   packages outside the entered units belongs to the resolver.
 - `THIS` is decoded only because it is the prefix of most real references. Its
@@ -288,15 +317,86 @@ Forms decoded:
   `MAX_SHARED_DEPTH`, which includes any cycle, is `InvalidReferenceTarget`.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
-`NoType`, `NoPrefix` or `Error`. This includes the name-based `TYPEREF` /
-`TERMREF` (a member looked up by name in a prefix needs the resolver; a
-heuristic lookup by name is exactly what the address model avoids) and
-`TYPEREFin` / `TERMREFin`.
+`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
 every address it recorded is forgotten, so a failure half way through a prefix
-chain leaves nothing reachable.
+chain leaves nothing reachable. The resolver participates in the same
+transaction trivially: it takes `&SemanticStore` and cannot allocate.
+
+### Session identities
+
+One `SemanticStore` has one `Definitions` and one `dotty_core::Packages`, and
+the caller owns them. `TastyUnpickler::new` / `with_packages` take the
+store's `Definitions` (bootstrapped once by the caller; the unpickler never
+bootstraps), and every reference without a prefix (`TYPEREFdirect`,
+`TERMREFdirect`, `TYPEREFpkg`, `TERMREFpkg`) reuses `definitions.no_prefix`,
+so the same reference is the same `TypeId` whichever adapter decoded it.
+
+The package model is a session contract of `dotty-core`
+(`docs/dotty-core-design.md` §9.1), not the unpickler's: one term-named
+`Package` symbol per path, an explicit root that is also the unnamed package,
+each package declared in its owner's scope. It is shared with the classloader,
+whose `PackageRegistry` enters packages through the same `Packages`. Dotty's
+package term and package module class are collapsed on purpose, so `TYPEREFpkg`
+and `TERMREFpkg` are one identity, and `Type::ThisType` may name a package
+(the core doc comment says so). `LoadingSession::with_packages` /
+`into_packages` carry the registry between the two adapters; the convergence
+tests live in `dotty-classloader`. Which adapter runs first, and who owns the
+registry between them, stays a caller decision until Milestone 6.
+
+### Name-based references (pass 2b)
+
+```text
+address-bearing ref -> semantic index        (TYPEREFsymbol, *direct, ...)
+name-bearing ref    -> prefix scope, then SymbolResolver   (TYPEREF, TERMREF)
+```
+
+Never a search by rendered name across owners. For
+`TYPEREF name prefix` / `TERMREF name prefix` the unpickler:
+
+1. decodes the prefix to a `TypeId` (recursively, cached by address);
+2. interns the name in `Namespace::Type` (`TYPEREF`) or `Namespace::Term`
+   (`TERMREF`), so a type never matches a term of the same text;
+3. finds the prefix's lookup owner and declaration scope (`lookup.rs`):
+   `ThisType`, `TypeRef` of a class, trait, module class or package, and
+   `TermRef` of a package or an object are understood. The scope is the unit's own
+   (`TastySemanticIndex::scope_of`), the session package registry's
+   (`Packages::scope_of`), or the `declarations` of a completed `ClassInfo`, in
+   that order; `Symbol` has no `declarations` field;
+4. calls `Scope::lookup_all`: one candidate is the result, several are
+   `AmbiguousMember` (overloads are never resolved by taking the first);
+5. when the prefix is understood but the scope has no answer or is unknown
+   here, or the prefix has no lookup semantics, asks the resolver, whose
+   answer is checked for its namespace. `Ok(None)` gives `UnresolvedMember`
+   (or `UnsupportedResolutionPrefix` for a prefix that has no lookup
+   semantics); a resolver `Err` is `ResolverFailure`, never lowered to
+   "not found".
+
+`TYPEREFpkg` / `TERMREFpkg` and the argument of `THIS` follow the same rule:
+a package in the registry resolves, any other is asked of
+`SymbolResolver::resolve_package`, and `UnresolvedPackage` only when the
+resolver does not know it either. A package is never created from a name.
+`THIS` may name its class through a name-based `TYPEREF`.
+
+Deferred, each with a typed error and not a guess:
+
+- **Signed term references** (`SIGNED` / `TARGETSIGNED`) are
+  `UnsupportedSignedReference`. The signature is neither stripped nor
+  ignored, and no overload is picked. Selecting by signature is a follow-up
+  that extends `MemberSelector`.
+- **Objects** are searchable prefixes through their module class, derived
+  and not stored: the owner's scope declares `Foo` (`Object`) and `Foo$`
+  (`ModuleClass`), the pair TASTy itself names. `SymbolLinks::companion` is not
+  used, because it links a class to its companion object. An object with no
+  single module class in its owner's scope is `UnsupportedResolutionPrefix`.
+- **Cross-unit class members.** `TastySemanticIndex` is unit-local, so a class
+  entered by another unit is found only through the package registry (its
+  top-level classes are declared in the package scope) or, once completed, its
+  `ClassInfo`. The members of another unit's class are the resolver's or
+  Milestone 5's. Nothing hides this with name search.
+- **Inheritance.** Lookup sees the prefix's own declarations, not its parents'.
 
 ## 5. Errors
 
@@ -320,10 +420,12 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
 2. **Core types**, in increments:
    - 2a: type identity and reference resolution (`TypeRef`, `TermRef`,
      prefixes, `ThisType`, `SHAREDtype`) — complete;
-   - 2b: compound non-binder types (`SuperType`, constants, `Applied`, bounds,
-     `And`/`Or`, `ByName`) — next. The measurement in §8 shows that name-based
-     `TYPEREF`/`TERMREF` are the largest remaining gap, so 2b should decide how
-     they resolve against the entered units before the resolver exists.
+   - 2b: semantic name resolution (canonical `Definitions`/`NoPrefix`, the
+     package contract, the `SymbolResolver` port, name-based
+     `TYPEREF`/`TERMREF`) — complete. The resolver *interface* moves earlier
+     than classloader *integration*, which stays in Milestone 6;
+   - 2c: compound non-binder types (`SuperType`, constants, `Applied`, bounds,
+     `And`/`Or`, `ByName`) — next.
 3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
@@ -363,10 +465,13 @@ Deliberately not supported yet:
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
 - companion links (`SymbolLinks::companion`);
-- name-based `TYPEREF`/`TERMREF`, `TYPEREFin`/`TERMREFin`, and every other
-  type form beyond §4 "Types" — `UnsupportedType`;
-- packages outside the registry — `UnresolvedPackage`;
-- reconciling the package registry with the classloader's own (Milestone 6, issue #5).
+- `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
+  `UnsupportedType`;
+- signed term references, object prefixes, cross-unit class members and
+  inherited members (§4, "Name-based references");
+- packages and members outside the entered state with no resolver that knows
+  them — `UnresolvedPackage`, `UnresolvedMember`;
+- wiring the classloader in as a `SymbolResolver` (Milestone 6).
 
 Defects this work found in neighbouring crates were fixed there: `NameRef`
 is zero-based (#9), qualified visibility is `Visibility::PrivateWithin` /
@@ -378,47 +483,64 @@ named no node).
 ### Type pass measurement
 
 `type_corpus.rs` enters every unit of the two corpora (one store and one
-package registry per corpus, as a classpath would have) and decodes every
-reference node (`SHAREDtype`, `*direct`, `*pkg`, `THIS`, `*symbol`, name-based
-`TYPEREF`/`TERMREF`) as its own root. Nested prefixes are therefore counted
-again as roots, so the figures measure coverage of the forms, not distinct
-types. The measurement is `#[ignore]`d in CI (run it with `--ignored`); a
-smaller test runs over the small fixtures.
+package registry per corpus, in path order, as a classpath would have) and
+decodes every reference node as its own root, with `NoResolver`. Nested
+prefixes are therefore counted again as roots, so the figures measure coverage
+of the forms, not distinct types. The measurement is `#[ignore]`d in CI (run it
+with `--ignored`); a smaller test runs over the small fixtures.
+
+Milestone 2a reported 140,593 / 387,780 `TYPEREF` and 14,021 / 120,003 `TERMREF`
+*errors*. Those counted every root whose decode failed on a nested name-based
+node, so they overstated the nodes: the corpora hold 21,360 / 64,125 `TYPEREF`
+and 4,482 / 36,762 `TERMREF` nodes.
+
+Name-based references after 2b (library / compiler):
 
 | | scala3-library | scala3-compiler |
 |---|---|---|
-| units reaching the supported subset | 941 / 941 | 1148 / 1148 |
-| reference nodes | 381,546 | 1,007,987 |
-| decoded | 160,391 (42%) | 289,176 (29%) |
+| `TYPEREF` nodes | 21,360 | 64,125 |
+| decoded from entered state | 10,085 (47%) | 5,435 (8%) |
+| need external resolution | 11,150 (52%) | 58,236 (91%) |
+| prefix without lookup semantics | 79 (0.4%) | 272 (0.4%) |
+| `TERMREF` nodes | 4,482 | 36,762 |
+| decoded from entered state | 1,742 (39%) | 9,174 (25%) |
+| need external resolution | 2,205 (49%) | 23,572 (64%) |
+| signed (`UnsupportedSignedReference`) | 518 (12%) | 3,876 (11%) |
+| prefix without lookup semantics | 12 (0.3%) | 26 (0.1%) |
+| ambiguous | 0 | 0 |
 | unexpected errors | 0 | 0 |
-| `MissingReferencedSymbol` | 34,188 | 116,377 |
-| `UnresolvedPackage` | 9,137 | 51,337 |
+
+"Need external resolution" is `UnresolvedMember` or `UnresolvedPackage`: a
+well-formed reference whose target is not in the entered state (the library
+refers to `java.lang` and `scala.*` from outside; the compiler corpus refers
+to the library). The few `TYPEREF` nodes left over (46 / 182) are not
+broken down here.
+
+Order of processing matters: units are entered in path order into one store, so
+a package member from a later unit is unresolved for an earlier one. The
+figures are therefore a lower bound of what a session with every unit entered
+would resolve locally, not a property of TASTy. Class members of another unit
+are not visible at all (§4).
 
 Every `MissingReferencedSymbol` target is something pass 1 documents as not
 entered: a local definition (inside a `val`/`def` body, a block, or a pattern
 `case`, including those in constructor arguments) or a parameter of a
-type-lambda alias. The measurement asserts that no target is anything else, so
-a definition pass 1 should have entered would fail it. No unit decodes all its reference nodes:
-every unit refers to `java.lang.Object` or `scala.*` by name.
+type-lambda alias (34,215 / 117,268). The measurement asserts that no target is
+anything else.
 
-Unsupported tags, most common first (library / compiler), which order PR 2b:
+Unsupported tags now, most common first (library / compiler):
 
 | tag | node | library | compiler |
 |-----|------|---------|----------|
-| 117 | `TYPEREF` (by name) | 140,593 | 387,780 |
-| 115 | `TERMREF` (by name) | 14,021 | 120,003 |
 | 163 | `TYPEBOUNDS` | 11,599 | 587 |
-| 161 | `APPLIEDtype` | 8,232 | 38,404 |
+| 161 | `APPLIEDtype` | 8,306 | 38,439 |
 | 153 | `ANNOTATEDtype` | 1,372 | 1,231 |
 | 170 | `TYPELAMBDAtype` | 757 | 145 |
-| 165 | `ANDtype` | 624 | 743 |
+| 165 | `ANDtype` | 624 | 744 |
 | 167 | `ORtype` | 406 | 1,048 |
 | 193 | `FLEXIBLEtype` | 140 | 575 |
 
-By far the largest gap is the name-based reference, which is what the
-compiler writes for anything defined outside the current unit; it is 2–3x the
-rest combined. Unresolved packages (`scala`, `java.lang`, ...) are the same
-gap: the package is not in the registry until its own unit has been entered.
+These order Milestone 2c.
 
 ## 9. Review of Milestone 1
 

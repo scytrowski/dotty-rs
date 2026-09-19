@@ -1,6 +1,7 @@
 //! Access modifiers, including qualified `private[Q]` / `protected[Q]`, over
 //! real Scala 3.9.0 compiler output (`fixtures/semantic/Access.scala`).
 
+use dotty_core::Definitions;
 use dotty_core::ids::SymbolId;
 use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
@@ -19,7 +20,8 @@ struct Entered {
 fn enter(bytes: &[u8]) -> Entered {
     let file = TastyFile::parse_scala_3_9(bytes).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols().unwrap();
     let index = unpickler.into_index();
     Entered { store, index }

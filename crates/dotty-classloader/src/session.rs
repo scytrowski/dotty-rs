@@ -68,6 +68,22 @@ pub struct LoadingSession {
 }
 
 impl LoadingSession {
+    /// A fresh session that continues from the session-wide package
+    /// registry another adapter (for example the TASTy unpickler) has been
+    /// filling, so both agree on every package's `SymbolId`.
+    pub fn with_packages(packages: dotty_core::Packages) -> Self {
+        Self {
+            packages: PackageRegistry::from_packages(packages),
+            ..Self::new()
+        }
+    }
+
+    /// Hands the package registry back, to give to the next adapter working
+    /// on the same store. The session's other state is dropped.
+    pub fn into_packages(self) -> dotty_core::Packages {
+        self.packages.into_packages()
+    }
+
     /// A fresh session with no classes or packages resolved yet — the
     /// starting point for the first `ClassLoader` in a sequence sharing one
     /// `SemanticStore`.

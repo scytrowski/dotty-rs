@@ -47,6 +47,10 @@ pub enum Type {
         symbol: SymbolId,
     },
 
+    /// `C.this`. `class` is a class, trait or module class, or a package:
+    /// the core keeps one `SymbolKind::Package` symbol per package, shared by
+    /// `TYPEREFpkg` and `TERMREFpkg` (see [`crate::packages`]), so `this` of a
+    /// package names that one symbol.
     ThisType {
         class: SymbolId,
     },

@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dotty_core::Definitions;
 use dotty_core::store::SemanticStore;
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
@@ -49,7 +50,8 @@ fn every_small_fixture_enters_without_error_and_declares_at_least_one_symbol() {
         let file = TastyFile::parse_scala_3_9(&bytes)
             .unwrap_or_else(|error| panic!("{} does not parse: {error}", path.display()));
         let mut store = SemanticStore::new();
-        let mut unpickler = TastyUnpickler::new(&file, &mut store);
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
 
         let index = unpickler
             .enter_symbols()

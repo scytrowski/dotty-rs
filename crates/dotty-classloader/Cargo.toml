@@ -7,3 +7,6 @@ edition = "2024"
 dotty-tasty = { path = "../dotty-tasty" }
 dotty-classfile = { path = "../dotty-classfile" }
 dotty-core = { path = "../dotty-core" }
+
+[dev-dependencies]
+dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
