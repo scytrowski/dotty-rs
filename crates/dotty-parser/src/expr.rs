@@ -12,6 +12,23 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses a complete expression at the future `Expr` grammar boundary.
+    ///
+    /// Lambdas, polyfunctions, and placeholder expressions will extend this
+    /// entry point in later milestones. For now `Expr` is exactly `Expr1`.
+    pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        self.expr1()
+    }
+
+    fn expr1(&mut self) -> TreeId<Untyped> {
+        let tree = self.postfix_expr();
+        self.expr1_rest(tree)
+    }
+
+    fn expr1_rest(&mut self, tree: TreeId<Untyped>) -> TreeId<Untyped> {
+        tree
+    }
+
     /// Parses an expression at the current operator-expression boundary.
     pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
         let first = self.prefix_expr();
@@ -867,6 +884,30 @@ mod tests {
         let id = parser.postfix_expr();
 
         assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_entry_preserves_operator_expression_behavior() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a + b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
