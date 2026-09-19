@@ -203,11 +203,45 @@ where
             None
         };
 
-        self.alloc_from(
+        let super_tree = self.alloc_from(
             mark,
             TreeKind::Super(Super {
                 qual: qualifier,
                 mix,
+            }),
+        );
+
+        if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected a selector after `super`",
+            );
+            return super_tree;
+        }
+
+        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+        let name = match self.current().kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                match self.intern_current_term_name() {
+                    Ok(name) => name,
+                    Err(_) => return super_tree,
+                }
+            }
+            _ => {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected an identifier after `super.`",
+                );
+                return super_tree;
+            }
+        };
+        self.advance();
+        self.alloc_from(
+            mark,
+            TreeKind::Select(Select {
+                qualifier: super_tree,
+                name: *name.as_name(),
+                backquoted,
             }),
         )
     }
@@ -729,6 +763,68 @@ mod tests {
         assert_eq!(names.resolve(outer_name.text()), "Outer");
         assert_eq!(names.resolve(mix_name.text()), "Base");
         assert_eq!(names.resolve(selected_name.text()), "foo");
+    }
+
+    #[test]
+    fn rejects_super_without_a_selector() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Super(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_qualified_super_without_a_selector() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Outer.super",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Super), 6, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Super(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_mixin_qualified_super_without_a_selector() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super[Base]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Super(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
