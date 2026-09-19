@@ -11,7 +11,7 @@
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
-//! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { NoPrefix, symbol }`     |
+//! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { no_prefix, symbol }`    |
 //! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { NoPrefix, symbol }`     |
 //! | `TYPEREFsymbol`       | `ASTRef Type` (prefix)    | `TypeRef { prefix, symbol }`       |
 //! | `TERMREFsymbol`       | `ASTRef Type` (prefix)    | `TermRef { prefix, symbol }`       |
@@ -100,22 +100,22 @@ impl TastyUnpickler<'_, '_, '_> {
                 }
                 (TYPEREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
                 }
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TermRef { prefix, symbol }
                 }
                 (TYPEREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
                 }
                 (TERMREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
-                    let prefix = self.store.types.alloc(Type::NoPrefix);
+                    let prefix = self.definitions.no_prefix;
                     Type::TermRef { prefix, symbol }
                 }
                 _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),

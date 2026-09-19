@@ -457,6 +457,7 @@ impl TastyUnpickler<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::Definitions;
     use dotty_core::store::SemanticStore;
 
     const FOO: &[u8] = include_bytes!("../tests/fixtures/semantic/Foo.tasty");
@@ -477,7 +478,8 @@ mod tests {
     ) -> R {
         let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(bytes).unwrap();
         let mut store = SemanticStore::new();
-        let mut unpickler = TastyUnpickler::new(&file, &mut store);
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
         unpickler.enter_symbols().unwrap();
         let ast = AstView::new(&file).expect("the AST view builds");
         check(&mut unpickler, &ast)

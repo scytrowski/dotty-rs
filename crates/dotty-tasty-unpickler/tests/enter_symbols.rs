@@ -1,6 +1,7 @@
 //! Runs the symbol-entering pass over the real `semantic/Foo.tasty` fixture
 //! and checks the result through `dotty-core`.
 
+use dotty_core::Definitions;
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
@@ -35,7 +36,8 @@ struct Entered {
 fn enter_foo() -> Entered {
     let file = TastyFile::parse_scala_3_9(FOO_TASTY).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols().unwrap();
     let origin = unpickler.origin();
     let index = unpickler.into_index();

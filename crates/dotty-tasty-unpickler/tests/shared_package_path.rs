@@ -5,6 +5,7 @@
 //! `@21` whose path is not written out but linked to the `TERMREFpkg("scala")`
 //! leaf at address 9, which sits inside an earlier import.
 
+use dotty_core::Definitions;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolKind;
 use dotty_tasty::tasty::{StandardSection, TastyFile};
@@ -29,7 +30,8 @@ fn enter(
 > {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
     let mut store = SemanticStore::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     unpickler.enter_symbols()?;
     let index = unpickler.into_index();
     Ok((store, index))
@@ -119,9 +121,10 @@ fn a_failed_unit_leaves_the_store_untouched() {
     let file_bytes = linked_to(5);
     let file = TastyFile::parse_compatible_with(&file_bytes, 28, 9, 0).unwrap();
     let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
     let before = store.checkpoint();
 
-    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
     assert!(unpickler.enter_symbols().is_err());
     drop(unpickler);
 

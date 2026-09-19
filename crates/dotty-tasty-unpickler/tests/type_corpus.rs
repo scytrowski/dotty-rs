@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dotty_core::Definitions;
 use dotty_core::store::SemanticStore;
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyPackages, TastyUnpickler, UnpickleError};
@@ -60,6 +61,7 @@ fn run(
     label: &str,
     bytes: &[u8],
     store: &mut SemanticStore,
+    definitions: Definitions,
     packages: TastyPackages,
     tally: &mut Tally,
 ) -> TastyPackages {
@@ -100,7 +102,7 @@ fn run(
         false
     };
 
-    let mut unpickler = TastyUnpickler::with_packages(&file, store, packages);
+    let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
     unpickler.enter_symbols().unwrap();
 
     tally.units += 1;
@@ -155,10 +157,12 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
         };
         drop(file);
         let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
         run(
             &path.display().to_string(),
             &bytes,
             &mut store,
+            definitions,
             TastyPackages::new(),
             &mut tally,
         );
@@ -177,6 +181,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         // One store and one package registry per corpus, as a classpath
         // would have.
         let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
         let mut packages = TastyPackages::new();
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {
@@ -185,6 +190,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 &path.display().to_string(),
                 &bytes,
                 &mut store,
+                definitions,
                 packages,
                 &mut tally,
             );

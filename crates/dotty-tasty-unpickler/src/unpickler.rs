@@ -2,6 +2,7 @@
 
 use std::rc::Rc;
 
+use dotty_core::Definitions;
 use dotty_core::ids::TypeId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
@@ -29,6 +30,8 @@ use crate::packages::{ScopeJournal, TastyPackages};
 pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) file: &'file TastyFile<'bytes>,
     pub(crate) store: &'store mut SemanticStore,
+    /// The session's canonical definitions, bootstrapped once by the caller.
+    pub(crate) definitions: Definitions,
     pub(crate) origin: SymbolOrigin,
     pub(crate) index: TastySemanticIndex,
     pub(crate) packages: TastyPackages,
@@ -41,8 +44,17 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
 impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// Prepares to unpickle `file` into `store`, registering a fresh TASTy
     /// origin that every entered symbol carries.
-    pub fn new(file: &'file TastyFile<'bytes>, store: &'store mut SemanticStore) -> Self {
-        Self::with_packages(file, store, TastyPackages::new())
+    ///
+    /// `definitions` must be the ones bootstrapped for `store`: the caller
+    /// owns the session and bootstraps exactly once, so every adapter on the
+    /// store shares one canonical `NoPrefix`. The unpickler never
+    /// bootstraps.
+    pub fn new(
+        file: &'file TastyFile<'bytes>,
+        store: &'store mut SemanticStore,
+        definitions: Definitions,
+    ) -> Self {
+        Self::with_packages(file, store, definitions, TastyPackages::new())
     }
 
     /// Like [`new`](Self::new), but reuses the package symbols and scopes
@@ -51,12 +63,14 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     pub fn with_packages(
         file: &'file TastyFile<'bytes>,
         store: &'store mut SemanticStore,
+        definitions: Definitions,
         packages: TastyPackages,
     ) -> Self {
         let origin = SymbolOrigin::Tasty(store.origins.register_tasty());
         Self {
             file,
             store,
+            definitions,
             origin,
             index: TastySemanticIndex::new(),
             packages,

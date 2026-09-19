@@ -198,7 +198,13 @@ the owner chain and the scope, records the shared scope in its own index, and
 declares its members into it. The registry belongs to one `SemanticStore`, and
 a shared package keeps the origin of the unit that first entered it.
 `TastyUnpickler::new` starts from an empty registry, so a lone unit behaves as
-before. Placement is a caller-side decision on purpose: the classloader
+before.
+
+The caller owns the session and passes the store's `Definitions` (bootstrapped
+once) to `new`/`with_packages`. The unpickler never bootstraps, and every
+reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,
+`TERMREFpkg`) reuses `definitions.no_prefix`, so the same reference is the same
+`TypeId` whichever adapter decoded it. Placement is a caller-side decision on purpose: the classloader
 (Milestone 6) owns the store and the order units are loaded in, and its own
 `.class` package registry (issue #5, no scopes yet) has to be reconciled with
 this one there, not here.
