@@ -1320,6 +1320,23 @@ same path is the same `SymbolId` whichever saw it first. Contract:
 - transactional: `mark` / `roll_back_to` forget newer packages and
   undeclare them from surviving owners.
 
+### 9.2 The symbol resolver port (`resolution.rs`)
+
+`SymbolResolver` is the format-agnostic boundary between an adapter and
+whatever can supply symbols the adapter did not enter itself (later, the
+classloader). A request is `MemberRequest { prefix: TypeId, name: Name,
+selector }` or a package path; the answer is a `SymbolId`. It contains no wire
+concept: no addresses, name-table references, tags or wire signatures, so it
+lives in `dotty-core`, not in an adapter, and the unpickler never depends on
+the classloader.
+
+`Ok(None)` means "this resolver cannot resolve it" and never "does not exist";
+`Err(ResolutionError)` (ambiguous, malformed state) is never lowered to `None`.
+Resolvers take `&SemanticStore`: until the port has a transactional contract
+they do not allocate, so a failed decode leaves nothing to undo. Overload
+selection by signature is a `#[non_exhaustive]` extension of `MemberSelector`;
+today only `Unique` exists. `NoResolver` answers `None` to everything.
+
 ## 10. `store/semantic_store.rs`
 
 `[MAJOR 5]` `SemanticContext` is renamed to `SemanticStore`. The prior name
