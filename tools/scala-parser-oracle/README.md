@@ -25,5 +25,7 @@ empty tuple, tuples, simple selections and applications, `super`, `new`,
 simple type applications, repeated suffix chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
 Backquoted identifier fixtures cover standalone and selected names. The
-corpus intentionally does not claim coverage for the rest of Scala's
-expression, type, or argument grammar.
+corpus also covers the initial `Expr1` subset: ordinary assignment, the
+narrow bare-identifier named-argument form, and `if`/`while` expressions,
+including basic indented bodies. It intentionally does not claim coverage for
+the rest of Scala's expression, type, or argument grammar.
