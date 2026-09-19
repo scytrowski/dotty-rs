@@ -1134,11 +1134,15 @@ pub enum ParameterNode<'a> {
     TypeParam {
         name: u32,
         body: &'a [u8],
+        /// Full node payload (name followed by `body`), as for definition nodes.
+        payload: &'a [u8],
         offset: usize,
     },
     TermParam {
         name: u32,
         body: &'a [u8],
+        /// Full node payload (name followed by `body`), as for definition nodes.
+        payload: &'a [u8],
         offset: usize,
     },
 }
@@ -1172,6 +1176,14 @@ impl<'a> ParameterNode<'a> {
     pub fn body(&self) -> &'a [u8] {
         match self {
             Self::TypeParam { body, .. } | Self::TermParam { body, .. } => body,
+        }
+    }
+
+    /// Node payload including the leading name, matching the shape of the
+    /// definition nodes.
+    pub fn payload(&self) -> &'a [u8] {
+        match self {
+            Self::TypeParam { payload, .. } | Self::TermParam { payload, .. } => payload,
         }
     }
 
@@ -1933,7 +1945,7 @@ fn collect_parameters_nodes<'a>(
         let raw = RawNode {
             tag: parameter.tag(),
             offset: absolute_offset,
-            payload: parameter.body(),
+            payload: parameter.payload(),
         };
         output.push(raw);
         let visible = AstTreeNode {
@@ -3830,11 +3842,13 @@ impl<'a> RawNode<'a> {
             TYPEPARAM_TAG => Ok(ParameterNode::TypeParam {
                 name,
                 body,
+                payload: self.payload,
                 offset: self.offset,
             }),
             PARAM_TAG => Ok(ParameterNode::TermParam {
                 name,
                 body,
+                payload: self.payload,
                 offset: self.offset,
             }),
             _ => Err(AstError::UnexpectedTag {
