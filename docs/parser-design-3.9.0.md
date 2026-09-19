@@ -48,6 +48,10 @@ parse_compilation_unit(source, source_id, tokens, names) -> ParseResult
 parser diagnostics. Syntax errors are represented both by diagnostics and,
 where recovery needs a tree-shaped placeholder, by `UntypedNode::Error`.
 
+Parser tooling also exposes `parse_pattern_fragment(...)`. It parses one
+standalone source pattern through the real pattern productions, requires the
+fragment to end at EOF, and is not a separate pattern dialect.
+
 ## Token access and source text
 
 Grammar code uses `Cursor` for `current`, `kind`, `at`, `advance`, lookahead,
@@ -116,12 +120,13 @@ zero-width `Literal(Constant::Unit)` expression, not an error node. This
 convention keeps one stable root while later grammar increments add
 definitions and package-level forms.
 
-The current expression and literal implementation is split by responsibility:
-`compilation_unit.rs` owns orchestration and statement separators, `expr.rs`
-owns the incremental `Expr`/`Expr1` through operator- and simple-expression
+The current expression, pattern, and literal implementation is split by
+responsibility: `compilation_unit.rs` owns orchestration and statement
+separators, `expr/` owns the incremental `Expr`/`Expr1` through operator- and
+simple-expression pipeline, `patterns.rs` owns the source-level pattern
 pipeline, `types.rs` owns the initial type-name subset used by type
 applications, and `literals.rs` owns numeric and string decoding. These names
-describe the current milestone; they do not claim complete Scala expression
+describe the current milestone; they do not claim complete Scala grammar
 coverage.
 
 The currently implemented expression grammar covers:
@@ -152,9 +157,24 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms such as `using` and colon arguments, remains future work. Likewise, the
 type parser currently handles only the simple type names needed by these type
-applications. Patterns, definitions, remaining control flow (`try`, `for`,
-`match`, `throw`, and `return`), templates, interpolation, XML, quotes, and
-macros remain follow-up increments.
+applications.
+
+The current source-level pattern grammar is layered as:
+
+```text
+Pattern -> Pattern1 -> Pattern2 -> InfixPattern -> SimplePattern
+```
+
+It covers identifiers and `_`, literals including negative numbers,
+parentheses and tuples, syntactic selections including `this.member` and
+`super.member`, extractor-shaped `Apply`/`TypeApply` trees, `@` binders,
+simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
+named extractor arguments. Extractor-looking source patterns intentionally
+remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
+phases. Sequence patterns, `given`, quoted and XML patterns, full
+`RefinedType`, match/case grammar, definitions, remaining control flow
+(`try`, `for`, `match`, `throw`, and `return`), templates, interpolation,
+quotes, and macros remain follow-up increments.
 
 An `if` without an `else` uses a zero-width synthetic
 `Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the
@@ -177,7 +197,8 @@ grammar are not implemented yet.
 ## Scala parser oracle
 
 `tools/scala-parser-oracle` is pinned to Scala 3.9.0, JDK 25, and sbt 2.0.9.
-It invokes the compiler parser and emits a deterministic JSON view containing
+It invokes the compiler parser in expression mode by default, or the real
+`Parser.pattern()` entry in pattern mode, and emits a deterministic JSON view containing
 `kind`, `span`, `name`, `literal`, and `children`. It does not compare
 compiler `Tree.show` output. Nodes without a source span are omitted from the
 normalized child list; this removes compiler-only synthetic qualifiers such as
@@ -195,10 +216,14 @@ tools/scala-parser-oracle/compare.sh
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
 Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
-purpose and cover the implemented simple-, operator-, and initial `Expr1`
-subset, including `super`, `new`, type applications, suffix chains, brace
-blocks, prefix operators, negative literals, infix precedence/associativity,
-assignment, named arguments, and `if`/`while`. The same command is available
+purpose and cover the implemented simple-, operator-, initial `Expr1`, and
+source-pattern subsets, including `super`, `new`, type applications, suffix
+chains, brace blocks, prefix operators, negative literals, infix
+precedence/associativity, assignment, named arguments, `if`/`while`, binders,
+typed patterns, extractor applications, infix patterns, alternatives, and
+named pattern arguments. Pattern fixtures live under
+`tools/scala-parser-oracle/fixtures/patterns/`; `compare.sh` runs both modes.
+The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
 that workflow; it is intentionally not part of the automatic push/PR checks
