@@ -22,6 +22,12 @@ where
         let mut operators = Vec::new();
 
         while let Some(operator) = self.current_infix_operator() {
+            if self.features().postfix_ops && !self.operator_has_following_operand() {
+                self.advance();
+                top = self.reduce_operator_stack(&mut operators, top, 0, true, None);
+                return self.alloc_postfix(top, operator.name);
+            }
+
             let operator_precedence = {
                 let spelling = self.names.resolve(operator.name.text());
                 crate::infix::precedence(spelling)
@@ -91,6 +97,15 @@ where
         }
     }
 
+    fn operator_has_following_operand(&mut self) -> bool {
+        match self.cursor.lookahead(1).kind {
+            TokenKind::Newline | TokenKind::Newlines => {
+                can_start_prefix_expr(self.cursor.lookahead(2).kind)
+            }
+            kind => can_start_prefix_expr(kind),
+        }
+    }
+
     fn reduce_operator_stack(
         &mut self,
         operators: &mut Vec<crate::OpInfo>,
@@ -154,6 +169,28 @@ where
                 left,
                 op: operator,
                 right,
+            })),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
+    }
+
+    fn alloc_postfix(
+        &mut self,
+        operand: TreeId<Untyped>,
+        operator: dotty_core::Name,
+    ) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(operand)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let end = self.last_real_token_end;
+        let range = TextRange::new(start, end).expect("postfix span endpoints are ordered");
+        self.alloc(
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(dotty_core::ast::PostfixOp {
+                operand,
+                op: operator,
             })),
             Some(SourceSpan::new(self.source_id, Span::without_point(range))),
         )
@@ -1250,6 +1287,63 @@ mod tests {
             parser.diagnostics()[0].kind(),
             crate::ParseDiagnosticKind::UnexpectedToken
         );
+    }
+
+    #[test]
+    fn parses_a_postfix_operator_when_the_feature_is_enabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "xs reverse",
+            vec![
+                token(TokenKind::Identifier, 0, 2),
+                token(TokenKind::Identifier, 3, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            postfix_ops: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.postfix_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) = parser.ast().get(id).kind
+        else {
+            panic!("expected postfix tree");
+        };
+        let operator = postfix.op;
+
+        assert!(matches!(
+            parser.ast().get(postfix.operand).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(operator.text()), "reverse");
+    }
+
+    #[test]
+    fn rejects_a_postfix_operator_when_the_feature_is_disabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "xs reverse",
+            vec![
+                token(TokenKind::Identifier, 0, 2),
+                token(TokenKind::Identifier, 3, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(!matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
