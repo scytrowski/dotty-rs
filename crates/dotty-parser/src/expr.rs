@@ -1,6 +1,6 @@
 use dotty_core::ast::{
     Apply, ApplyKind, Assign, Block, Ident, If, NamedArg, Parens, Select, Super, This, Tuple,
-    UntypedNode,
+    UntypedNode, While,
 };
 use dotty_core::ast::{InfixOp, New, PrefixOp};
 use dotty_core::{
@@ -25,6 +25,10 @@ where
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::If) {
             let mark = self.mark();
             return self.parse_if_expr(mark);
+        }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While) {
+            let mark = self.mark();
+            return self.parse_while_expr(mark);
         }
 
         let tree = self.postfix_expr();
@@ -59,6 +63,24 @@ where
                 else_branch,
             }),
         )
+    }
+
+    fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let parenthesized_condition =
+            self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Do);
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
+            self.advance();
+        } else if !parenthesized_condition {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `do` after while condition",
+            );
+        }
+        let body = self.expr();
+
+        self.alloc_from(mark, TreeKind::While(While { cond, body }))
     }
 
     fn parse_control_condition(&mut self, terminator: dotty_core::HardKeyword) -> TreeId<Untyped> {
@@ -1137,6 +1159,127 @@ mod tests {
         assert!(matches!(
             parser.ast().get(if_tree.cond).kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_do_and_a_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while c do body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Do), 8, 10),
+                token(TokenKind::Identifier, 11, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(while_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_a_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while (c) body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_an_infix_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while i < n do step",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Do), 12, 14),
+                token(TokenKind::Identifier, 15, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_while_with_do_after_a_parenthesized_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while (c) do body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Do), 10, 12),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.body).kind,
+            TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }

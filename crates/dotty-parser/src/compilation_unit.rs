@@ -131,7 +131,6 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
             HardKeyword::Class
                 | HardKeyword::Def
                 | HardKeyword::For
-                | HardKeyword::While
                 | HardKeyword::Try
                 | HardKeyword::Match
                 | HardKeyword::Val
