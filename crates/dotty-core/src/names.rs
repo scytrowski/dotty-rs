@@ -106,6 +106,11 @@ impl NameInterner {
         id
     }
 
+    /// The id of `text` if it has been interned, without interning it.
+    pub fn get(&self, text: &str) -> Option<NameId> {
+        self.lookup.get(text).copied()
+    }
+
     /// Resolves a previously interned [`NameId`] back to its text.
     ///
     /// Panics if `id` was not produced by this interner — an `id` from a
@@ -119,6 +124,15 @@ impl NameInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_finds_only_text_that_was_interned() {
+        let mut interner = NameInterner::new();
+        let id = interner.intern("Foo");
+
+        assert_eq!(interner.get("Foo"), Some(id));
+        assert_eq!(interner.get("Bar"), None);
+    }
 
     #[test]
     fn interning_the_same_text_twice_returns_the_same_id() {

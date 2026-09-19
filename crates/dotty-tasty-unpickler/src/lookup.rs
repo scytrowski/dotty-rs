@@ -8,14 +8,14 @@
 //! ```
 //!
 //! Only prefixes whose lookup semantics are understood are searched:
-//! `ThisType`, and `TypeRef`/`TermRef` naming a class, trait, module class or
-//! package. Anything else is `UnsupportedPrefix`. There is no textual
+//! `ThisType`, `TypeRef` naming a class, trait, module class or package, and
+//! `TermRef` naming a package or an object (through its module class). Anything else is `UnsupportedPrefix`. There is no textual
 //! fallback and no search across owners. The lookup is not inheritance-aware:
 //! it sees the members the prefix's own scope declares.
 
 use dotty_core::Packages;
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
-use dotty_core::names::Name;
+use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
@@ -44,7 +44,12 @@ pub(crate) enum LocalLookup {
 
 /// The symbol whose declarations a prefix type denotes, if the prefix is a
 /// form whose lookup semantics are understood.
-pub(crate) fn lookup_owner(store: &SemanticStore, prefix: TypeId) -> Option<SymbolId> {
+pub(crate) fn lookup_owner(
+    store: &SemanticStore,
+    index: &TastySemanticIndex,
+    packages: &Packages,
+    prefix: TypeId,
+) -> Option<SymbolId> {
     let is_scope_owner = |symbol: SymbolId| {
         matches!(
             store.symbols.get(symbol).kind,
@@ -54,12 +59,34 @@ pub(crate) fn lookup_owner(store: &SemanticStore, prefix: TypeId) -> Option<Symb
     match store.types.get(prefix) {
         Type::ThisType { class } => Some(*class),
         Type::TypeRef { symbol, .. } if is_scope_owner(*symbol) => Some(*symbol),
-        // A term reference is a searchable prefix only when it names a
-        // package. An object's declarations are found through its module
-        // class, which the core does not link to the object yet.
-        Type::TermRef { symbol, .. } if store.symbols.get(*symbol).kind == SymbolKind::Package => {
-            Some(*symbol)
-        }
+        // A term reference is a searchable prefix when it names a package, or
+        // an object, whose declarations are those of its module class.
+        Type::TermRef { symbol, .. } => match store.symbols.get(*symbol).kind {
+            SymbolKind::Package => Some(*symbol),
+            SymbolKind::Object => module_class_of(store, index, packages, *symbol),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The module class of an object: the `ModuleClass` its owner declares under
+/// the object's name with the object-class suffix (`Foo` and `Foo$`), which is
+/// how TASTy names the pair. Derived from the owner's scope, as `dotty-core`
+/// derives it, not stored, since `SymbolLinks::companion` links a class to its
+/// companion object instead. `None` unless exactly one such class is declared.
+fn module_class_of(
+    store: &SemanticStore,
+    index: &TastySemanticIndex,
+    packages: &Packages,
+    object: SymbolId,
+) -> Option<SymbolId> {
+    let object = store.symbols.get(object);
+    let scope = declaration_scope_of(store, index, packages, object.owner?)?;
+    let class_text = format!("{}$", store.names.resolve(object.name.text()));
+    let class_name = Name::new(store.names.get(&class_text)?, Namespace::Type);
+    match store.scopes.get(scope).lookup_all(&class_name) {
+        [only] if store.symbols.get(*only).kind == SymbolKind::ModuleClass => Some(*only),
         _ => None,
     }
 }
@@ -97,7 +124,7 @@ pub(crate) fn lookup_member(
     prefix: TypeId,
     name: &Name,
 ) -> LocalLookup {
-    let Some(owner) = lookup_owner(store, prefix) else {
+    let Some(owner) = lookup_owner(store, index, packages, prefix) else {
         return LocalLookup::UnsupportedPrefix;
     };
     let Some(scope) = declaration_scope_of(store, index, packages, owner) else {
@@ -327,6 +354,44 @@ mod tests {
         assert_eq!(world.index.scope_of(chain[0].symbol), None);
         assert_eq!(world.lookup(term, &class_name), LocalLookup::Found(member));
         assert_eq!(world.lookup(ty, &class_name), LocalLookup::Found(member));
+    }
+
+    #[test]
+    fn an_object_prefix_is_searched_through_its_module_class() {
+        let mut world = World::new();
+        let (owner, owner_scope) = world.class("Outer");
+        let object_name = world.name("Obj", Namespace::Term);
+        let class_name = world.name("Obj$", Namespace::Type);
+        let object = world.declare(owner_scope, owner, object_name, SymbolKind::Object);
+        let module_class = world.declare(owner_scope, owner, class_name, SymbolKind::ModuleClass);
+        let module_scope = world.store.scopes.alloc(Scope::new(Some(module_class)));
+        world
+            .index
+            .insert_scope(module_class, module_scope)
+            .unwrap();
+        let inner = world.name("Inner", Namespace::Type);
+        let member = world.declare(module_scope, module_class, inner, SymbolKind::Class);
+        let prefix = world.store.types.alloc(Type::TermRef {
+            prefix: world.no_prefix,
+            symbol: object,
+        });
+
+        assert_eq!(world.lookup(prefix, &inner), LocalLookup::Found(member));
+    }
+
+    #[test]
+    fn an_object_without_a_module_class_is_not_searched() {
+        let mut world = World::new();
+        let (owner, owner_scope) = world.class("Outer");
+        let object_name = world.name("Obj", Namespace::Term);
+        let object = world.declare(owner_scope, owner, object_name, SymbolKind::Object);
+        let inner = world.name("Inner", Namespace::Type);
+        let prefix = world.store.types.alloc(Type::TermRef {
+            prefix: world.no_prefix,
+            symbol: object,
+        });
+
+        assert_eq!(world.lookup(prefix, &inner), LocalLookup::UnsupportedPrefix);
     }
 
     #[test]

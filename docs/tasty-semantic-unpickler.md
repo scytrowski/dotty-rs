@@ -351,7 +351,7 @@ Never a search by rendered name across owners. For
    (`TERMREF`), so a type never matches a term of the same text;
 3. finds the prefix's lookup owner and declaration scope (`lookup.rs`):
    `ThisType`, `TypeRef` of a class, trait, module class or package, and
-   `TermRef` of a package are understood. The scope is the unit's own
+   `TermRef` of a package or an object are understood. The scope is the unit's own
    (`TastySemanticIndex::scope_of`), the session package registry's
    (`Packages::scope_of`), or the `declarations` of a completed `ClassInfo`, in
    that order; `Symbol` has no `declarations` field;
@@ -376,10 +376,11 @@ Deferred, each with a typed error and not a guess:
   `UnsupportedSignedReference`. The signature is neither stripped nor
   ignored, and no overload is picked. Selecting by signature is a follow-up
   that extends `MemberSelector`.
-- **Object prefixes.** A `TermRef` to an object is not searched: the core does
-  not yet link an object to its module class (`SymbolLinks::companion` is not
-  set by pass 1), so the object's declarations cannot be found without a name
-  heuristic. It is `UnsupportedResolutionPrefix` unless the resolver knows it.
+- **Objects** are searchable prefixes through their module class, derived
+  and not stored: the owner's scope declares `Foo` (`Object`) and `Foo$`
+  (`ModuleClass`), the pair TASTy itself names. `SymbolLinks::companion` is not
+  used, because it links a class to its companion object. An object with no
+  single module class in its owner's scope is `UnsupportedResolutionPrefix`.
 - **Cross-unit class members.** `TastySemanticIndex` is unit-local, so a class
   entered by another unit is found only through the package registry (its
   top-level classes are declared in the package scope) or, once completed, its
@@ -489,13 +490,13 @@ Name-based references after 2b (library / compiler):
 |---|---|---|
 | `TYPEREF` nodes | 21,360 | 64,125 |
 | decoded from entered state | 10,085 (47%) | 5,435 (8%) |
-| need external resolution | 10,273 (48%) | 51,500 (80%) |
-| prefix without lookup semantics | 956 (4%) | 7,008 (11%) |
+| need external resolution | 11,150 (52%) | 58,236 (91%) |
+| prefix without lookup semantics | 79 (0.4%) | 272 (0.4%) |
 | `TERMREF` nodes | 4,482 | 36,762 |
 | decoded from entered state | 1,742 (39%) | 9,174 (25%) |
-| need external resolution | 1,992 (44%) | 19,576 (53%) |
+| need external resolution | 2,205 (49%) | 23,572 (64%) |
 | signed (`UnsupportedSignedReference`) | 518 (12%) | 3,876 (11%) |
-| prefix without lookup semantics | 225 (5%) | 4,022 (11%) |
+| prefix without lookup semantics | 12 (0.3%) | 26 (0.1%) |
 | ambiguous | 0 | 0 |
 | unexpected errors | 0 | 0 |
 

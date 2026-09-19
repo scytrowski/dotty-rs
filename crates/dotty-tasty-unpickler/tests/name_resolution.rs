@@ -24,6 +24,7 @@
 //! | 32   | `Left`                                                     |
 //! | 33   | `Inner`                                                    |
 //! | 34   | `make`                                                     |
+//! | 53   | `one`                                                      |
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,6 +62,7 @@ const SIGNED_INIT_NAME: u8 = 13;
 const LEFT_NAME: u8 = 32;
 const INNER_NAME: u8 = 33;
 const MAKE_NAME: u8 = 34;
+const ONE_NAME: u8 = 53;
 
 /// Rewrites the `tag natural` head of the node at `at` to `tag` naming
 /// `value` (below 128), after checking it is a `from` node. A natural of two
@@ -364,9 +366,9 @@ fn overloads_are_ambiguous_and_the_first_is_never_taken() {
 }
 
 #[test]
-fn a_prefix_without_lookup_semantics_is_reported_not_searched() {
-    // The prefix (49) becomes a direct term reference to a definition, whose
-    // members are not searched: only packages are term prefixes here.
+fn an_object_prefix_is_searched_through_its_module_class() {
+    // The prefix (49) becomes a direct term reference to the object
+    // `Distinct`, and the node a `TERMREF one`: a member of `Distinct$`.
     let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
     let payload = file.section(StandardSection::Asts).unwrap().payload;
     assert_eq!(payload[OBJECT_PREFIX as usize], 61);
@@ -379,18 +381,17 @@ fn a_prefix_without_lookup_semantics_is_reported_not_searched() {
         OBJECT_REFERENCE as usize,
         TERMREFSYMBOL_TAG,
         TERMREF_TAG,
-        DISTINCT_NAME,
+        ONE_NAME,
     );
 
-    let (result, _) = decode(&bytes, OBJECT_REFERENCE, None);
+    let (result, store) = decode(&bytes, OBJECT_REFERENCE, None);
 
-    assert!(matches!(
-        result,
-        Err(UnpickleError::UnsupportedResolutionPrefix {
-            address: OBJECT_REFERENCE,
-            ..
-        })
-    ));
+    let (prefix, symbol, is_type) = member(&store, result.unwrap());
+    assert!(!is_type);
+    assert_eq!(text(&store, symbol), "one");
+    assert_eq!(owner_text(&store, symbol), "Distinct$");
+    let (_, object, _) = member(&store, prefix);
+    assert_eq!(store.symbols.get(object).kind, SymbolKind::Object);
 }
 
 // --- the resolver ---
