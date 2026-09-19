@@ -1,4 +1,4 @@
-//! Pass 2a: the identity of semantic types, and reference types.
+//! Semantic types: identity, references, name resolution, and compound types.
 //!
 //! One type node address owns at most one `TypeId`. Decoding is lazy and
 //! cache-first: [`type_at`](TastyUnpickler::type_at) returns the id already
@@ -6,26 +6,55 @@
 //! records the address. It is address identity, not structural interning:
 //! equal trees at different addresses get different ids.
 //!
-//! The forms decoded here are the ones whose target is named by address (or by
-//! a package path already entered), so no reference is resolved by name:
+//! ## Reference forms
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
 //! | `TYPEREFdirect`       | `ASTRef`                  | `TypeRef { no_prefix, symbol }`    |
-//! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { NoPrefix, symbol }`     |
+//! | `TERMREFdirect`       | `ASTRef`                  | `TermRef { no_prefix, symbol }`    |
 //! | `TYPEREFsymbol`       | `ASTRef Type` (prefix)    | `TypeRef { prefix, symbol }`       |
 //! | `TERMREFsymbol`       | `ASTRef Type` (prefix)    | `TermRef { prefix, symbol }`       |
-//! | `TYPEREFpkg`          | `NameRef`                 | `TypeRef { NoPrefix, package }`    |
-//! | `TERMREFpkg`          | `NameRef`                 | `TermRef { NoPrefix, package }`    |
+//! | `TYPEREFpkg`          | `NameRef`                 | `TypeRef { no_prefix, package }`   |
+//! | `TERMREFpkg`          | `NameRef`                 | `TermRef { no_prefix, package }`   |
+//! | `TYPEREF`             | `NameRef Type` (prefix)   | `TypeRef { prefix, member }`       |
+//! | `TERMREF`             | `NameRef Type` (prefix)   | `TermRef { prefix, member }`       |
 //! | `THIS`                | `Type` (a class type ref) | `ThisType { class }`               |
 //! | `SHAREDtype`          | `ASTRef`                  | the `TypeId` of the named node     |
 //!
-//! `THIS` is decoded only because it is the prefix of most real references.
+//! ## Name resolution
 //!
-//! Everything else is `UnsupportedType`, including the name-based
-//! `TYPEREF`/`TERMREF` (they look a member up by name in a prefix, which needs
-//! the future resolver) and `TYPEREFin`/`TERMREFin`. Unsupported input is
-//! never lowered to `NoType`, `NoPrefix` or `Error`.
+//! `TYPEREF` and `TERMREF` name a member of their prefix rather than a
+//! definition. The member is looked up in the prefix's own declaration scope
+//! (an entered class, an object through its module class, a package), and
+//! otherwise asked of the session's
+//! [`SymbolResolver`](dotty_core::resolution::SymbolResolver). Nothing is
+//! searched by text across owners, and a signed term reference or several
+//! overloads is an explicit error, not a guess.
+//!
+//! ## Compound types
+//!
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `APPLIEDtype`         | `Type Type*`              | `Applied { tycon, args }`          |
+//! | `ANDtype`             | `Type Type`               | `And { left, right }`              |
+//! | `ORtype`              | `Type Type`               | `Or { left, right }`               |
+//! | `SUPERtype`           | `Type Type`               | `SuperType { this_type, super_type }` |
+//! | `BYNAMEtype`          | `Type`                    | `ByName { result }`                |
+//!
+//! `And` and `Or` keep the operand order and nesting the compiler wrote: no
+//! commutative normalisation, no flattening. `BYNAMEtype` stays a wrapper; it
+//! is never lowered to its result. `SUPERtype` is the type node, not the
+//! term-level `SUPER`.
+//!
+//! Every child is decoded through the same entry point as a top-level type, so
+//! it is cached, shared and resolved like any other, and a child's error is
+//! the error of the whole node. Compound nodes are not interned: equal trees
+//! at different addresses keep different ids.
+//!
+//! Every other form is `UnsupportedType`: `TYPEBOUNDS`, `ANNOTATEDtype`,
+//! `TYPELAMBDAtype`, `FLEXIBLEtype`, constants, method/poly/param types,
+//! refinements, recursive and match types, and `TYPEREFin`/`TERMREFin`.
+//! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
@@ -33,8 +62,9 @@ use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    RawTree, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG,
-    THIS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    ANDTYPE_TAG, APPLIEDTYPE_TAG, BYNAMETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG,
+    SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -159,12 +189,95 @@ impl TastyUnpickler<'_, '_, '_> {
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
                 class: self.this_class(ast, child, depth)?,
             },
+            RawTree::LengthNode(node) if tag == APPLIEDTYPE_TAG => {
+                let shape = node.decode_applied_type()?;
+                let ids = self.decode_children(ast, at, shape.arguments.len() + 1, depth)?;
+                if shape.arguments.is_empty() {
+                    // The grammar allows `Type*` to be empty, and Dotty's
+                    // `appliedTo(Nil)` is the constructor itself. So is
+                    // this node: it owns the constructor's `TypeId`, like a
+                    // `SHAREDtype` link, rather than a second `Applied` spelling.
+                    self.index.insert_type(at, ids[0])?;
+                    return Ok(ids[0]);
+                }
+                Type::Applied {
+                    tycon: ids[0],
+                    args: ids[1..].to_vec(),
+                }
+            }
+            RawTree::LengthNode(node) if tag == ANDTYPE_TAG => {
+                node.decode_and_type()?;
+                let [left, right] = self.decode_binary(ast, at, depth)?;
+                Type::And { left, right }
+            }
+            RawTree::LengthNode(node) if tag == ORTYPE_TAG => {
+                node.decode_or_type()?;
+                let [left, right] = self.decode_binary(ast, at, depth)?;
+                Type::Or { left, right }
+            }
+            RawTree::LengthNode(node) if tag == SUPERTYPE_TAG => {
+                node.decode_super_type()?;
+                let [this_type, super_type] = self.decode_binary(ast, at, depth)?;
+                Type::SuperType {
+                    this_type,
+                    super_type,
+                }
+            }
+            RawTree::Ast { .. } if tag == BYNAMETYPE_TAG => {
+                let result = self.decode_type(ast, &tree.decode_by_name_type()?.child, depth)?;
+                Type::ByName { result }
+            }
             _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
         };
 
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
+    }
+
+    /// Decodes the `count` child types of the length-prefixed node at `at`,
+    /// in wire order, each through [`type_at`](Self::type_at), so a child is
+    /// cached, shared and resolved like any other type.
+    ///
+    /// The children are taken from the AST index, not from the structural
+    /// decoders' trees: those are relative to the node's payload, while a
+    /// type is keyed by its absolute address. The structural decoder has
+    /// already checked the node's shape; `count` guards the two agreeing.
+    fn decode_children(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        count: usize,
+        depth: usize,
+    ) -> Result<Vec<TypeId>, UnpickleError> {
+        let children: Vec<u32> = ast
+            .children(at)
+            .iter()
+            .map(|child| address(child.offset))
+            .collect();
+        if children.len() != count {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the node's children do not match its shape",
+            });
+        }
+        children
+            .into_iter()
+            .map(|child| self.type_at(ast, child, at, depth))
+            .collect()
+    }
+
+    /// The two operands of a binary type node, left first. What they mean is
+    /// up to the caller: `And` and `Or` operands, or the `this` and `super`
+    /// parts of a `SuperType`.
+    fn decode_binary(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<[TypeId; 2], UnpickleError> {
+        let ids = self.decode_children(ast, at, 2, depth)?;
+        Ok([ids[0], ids[1]])
     }
 
     /// The member of `prefix` a name-based `TYPEREF` / `TERMREF` at `at`

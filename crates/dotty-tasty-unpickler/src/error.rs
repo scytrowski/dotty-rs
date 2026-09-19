@@ -88,6 +88,9 @@ pub enum UnpickleError {
     /// `TARGETSIGNED`), and selecting a member by signature is not
     /// implemented. The signature is neither stripped nor ignored.
     UnsupportedSignedReference { address: u32, name: String },
+    /// The compound type node at `address` has a shape the semantic model
+    /// cannot express: its indexed children disagree with its wire shape.
+    MalformedType { address: u32, reason: &'static str },
     /// The prefix of the name-based reference at `address` is a form whose
     /// members cannot be looked up here, and the resolver did not know it
     /// either.
@@ -176,6 +179,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the reference at address {address} to `{name}` carries a signature, which is not supported yet"
             ),
+            Self::MalformedType { address, reason } => write!(
+                formatter,
+                "the type at address {address} is malformed: {reason}"
+            ),
             Self::UnsupportedResolutionPrefix { address, .. } => write!(
                 formatter,
                 "the reference at address {address} has a prefix whose members cannot be looked up"
@@ -215,6 +222,7 @@ impl std::error::Error for UnpickleError {
             | Self::UnresolvedMember { .. }
             | Self::AmbiguousMember { .. }
             | Self::UnsupportedSignedReference { .. }
+            | Self::MalformedType { .. }
             | Self::UnsupportedResolutionPrefix { .. }
             | Self::ResolverFailure { .. } => None,
         }
