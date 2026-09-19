@@ -33,7 +33,14 @@
 //!
 //! ## Compound types
 //!
-//! (Filled in as each form is decoded.)
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `APPLIEDtype`         | `Type Type*`              | `Applied { tycon, args }`          |
+//!
+//! Every child is decoded through the same entry point as a top-level type, so
+//! it is cached, shared and resolved like any other, and a child's error is
+//! the error of the whole node. Compound nodes are not interned: equal trees
+//! at different addresses keep different ids.
 //!
 //! Every other form is `UnsupportedType`: `TYPEBOUNDS`, `ANNOTATEDtype`,
 //! `TYPELAMBDAtype`, `FLEXIBLEtype`, constants, method/poly/param types,
@@ -46,8 +53,9 @@ use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    RawTree, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG,
-    THIS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    APPLIEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, THIS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -172,12 +180,32 @@ impl TastyUnpickler<'_, '_, '_> {
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
                 class: self.this_class(ast, child, depth)?,
             },
+            RawTree::LengthNode(node) if tag == APPLIEDTYPE_TAG => {
+                let applied = node.decode_applied_type()?;
+                let tycon = self.decode_type(ast, &applied.tycon, depth)?;
+                let args = self.decode_types(ast, &applied.arguments, depth)?;
+                Type::Applied { tycon, args }
+            }
             _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
         };
 
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
+    }
+
+    /// Decodes `trees` in wire order, each through [`decode_type`](Self::decode_type),
+    /// so a child is cached, shared and resolved like any other type.
+    fn decode_types(
+        &mut self,
+        ast: &AstView<'_>,
+        trees: &[RawTree<'_>],
+        depth: usize,
+    ) -> Result<Vec<TypeId>, UnpickleError> {
+        trees
+            .iter()
+            .map(|tree| self.decode_type(ast, tree, depth))
+            .collect()
     }
 
     /// The member of `prefix` a name-based `TYPEREF` / `TERMREF` at `at`
