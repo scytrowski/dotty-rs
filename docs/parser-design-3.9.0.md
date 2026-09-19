@@ -166,10 +166,11 @@ tools/scala-parser-oracle/compare.sh
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
 Rust UTF-8 byte offsets before comparing. The initial ASCII fixtures are tiny
-on purpose and cover the complete smoke subset. The same command runs as the
-separate `Scala 3.9 parser oracle` job in `.github/workflows/ci.yml`, so a
-normalized Scala/Rust mismatch fails CI. It is a required parser check in
-addition to the Rust formatting, test, clippy, documentation, and diff checks.
+on purpose and cover the complete smoke subset. The same command is available
+as the manually dispatched `Scala 3.9 parser oracle` workflow in
+`.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
+that workflow; it is intentionally not part of the automatic push/PR checks
+while the oracle remains an opt-in, comparatively expensive parser gate.
 
 ## Extension rule
 
