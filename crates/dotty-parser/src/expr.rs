@@ -7,11 +7,16 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    /// Parses the deliberately small expression subset used by the smoke milestone.
-    pub(crate) fn parse_smoke_expr(&mut self) -> TreeId<Untyped> {
+    /// Parses one simple expression and all of its currently supported suffixes.
+    pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        let tree = self.simple_expr_atom(mark);
 
-        let tree = match self.current().kind {
+        self.simple_expr_rest(mark, tree)
+    }
+
+    fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let Ok(name) = self.intern_current_term_name() else {
@@ -48,12 +53,10 @@ where
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             _ => self.unexpected_expression(),
-        };
-
-        self.parse_select_suffix(mark, tree)
+        }
     }
 
-    fn parse_select_suffix(
+    fn simple_expr_rest(
         &mut self,
         mark: crate::Mark,
         mut qualifier: TreeId<Untyped>,
@@ -106,7 +109,7 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(self.parse_smoke_expr());
+                args.push(self.simple_expr());
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -145,7 +148,7 @@ where
             );
         }
 
-        let first = self.parse_smoke_expr();
+        let first = self.simple_expr();
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             return self.alloc_from(
@@ -158,7 +161,7 @@ where
         while self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && self.current().kind != TokenKind::Eof
         {
-            elements.push(self.parse_smoke_expr());
+            elements.push(self.simple_expr());
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
@@ -202,7 +205,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let tree = parser.ast().get(id).clone();
         drop(parser);
 
@@ -229,7 +232,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Ident(ident) = parser.ast().get(id).kind else {
             panic!("expected identifier tree");
         };
@@ -250,7 +253,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -272,7 +275,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })) =
             parser.ast().get(id).kind
@@ -295,7 +298,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -321,7 +324,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple { ref elements })) =
             parser.ast().get(id).kind
@@ -353,7 +356,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let (name, qualifier) = match parser.ast().get(id).kind {
             TreeKind::Select(selection) => (selection.name, selection.qualifier),
@@ -381,7 +384,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Select(selection) = parser.ast().get(id).kind else {
             panic!("expected selection tree");
         };
@@ -405,7 +408,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
             panic!("expected application tree");
@@ -436,7 +439,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
             panic!("expected application tree");
@@ -462,7 +465,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
             panic!("expected application tree");
@@ -488,7 +491,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,

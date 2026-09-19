@@ -211,7 +211,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let tree = parser.ast().get(id).clone();
         drop(parser);
 
@@ -234,7 +234,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
             panic!("expected raw number tree");
@@ -254,7 +254,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = parser.ast().get(id).kind else {
             panic!("expected raw number tree");
@@ -274,7 +274,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -296,7 +296,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -318,7 +318,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -340,7 +340,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -362,7 +362,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let tree = parser.ast().get(id).clone();
         drop(parser);
 
@@ -387,7 +387,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -412,7 +412,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -437,7 +437,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -462,7 +462,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -487,7 +487,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -512,7 +512,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let tree = parser.ast().get(id).clone();
         drop(parser);
 
@@ -538,7 +538,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
         let TreeKind::Literal(Literal {
             value: Constant::String(value),
         }) = parser.ast().get(id).kind
@@ -562,7 +562,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -584,7 +584,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
@@ -606,7 +606,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_smoke_expr();
+        let id = parser.simple_expr();
 
         assert!(matches!(
             parser.ast().get(id).kind,
