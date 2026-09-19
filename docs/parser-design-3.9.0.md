@@ -34,7 +34,9 @@ a development-only integration.
 `Parser<'src, 'names, S>` owns the cursor, source view, source ID, untyped AST
 arena, parse context, diagnostics, and known parser names. It borrows the
 session's `NameInterner`. `SourceId` is supplied by the compilation session;
-the parser does not allocate or reinterpret source identity.
+the parser does not allocate or reinterpret source identity. `ParserFeatures`
+is carried in the context as a separate policy for future dialect- or
+feature-dependent grammar.
 
 The public compilation entry point is:
 
@@ -61,6 +63,11 @@ Source ranges are byte ranges in Rust. `Mark`, `span_from`, and `alloc_from`
 centralize position construction. Synthetic `INDENT`/`OUTDENT` tokens are
 zero-width, and EOF does not replace the end of the last real token.
 
+`Cursor` exposes a `CursorCheckpoint` generation for progress guards. The
+generation changes when the current token changes, so recovery does not rely
+on token object identity and works with a `TokenSource` that reuses one token
+allocation. A source that remains stuck is detected and terminates recovery.
+
 ## Context, soft keywords, and scanner feedback
 
 `ParseContext` explicitly tracks Scala parser concepts from 3.9.0:
@@ -74,8 +81,12 @@ zero-width, and EOF does not replace the end of the last real token.
 Scoped helpers restore the previous context after nested parsing, including
 recovery paths. `KnownNames` pre-interns the Scala 3.9 soft keywords `as`,
 `derives`, `extension`, `infix`, `inline`, `opaque`, `open`, `transparent`,
-and `using`. The lexer still emits these as identifiers; parser context gives
-them grammar meaning.
+and `using`. It also interns the future feature-dependent names `into`,
+`erased`, and `tracked`. The lexer still emits all of these as identifiers;
+parser context gives them grammar meaning only in the appropriate production.
+`ParserFeatures` currently exposes independent switches for capture checking,
+erased definitions, and `into`, all disabled by default. The switches are a
+boundary for future grammar work, not an implementation of those features.
 
 The parser forwards `ColonEol`, `Indented`, `Outdented`, and `ArrowIndented`
 events through readable helpers. This keeps layout and colon reclassification
@@ -98,9 +109,16 @@ panic.
 
 The current compilation-unit root is a synthetic `TreeKind::Block`. Earlier
 expressions become its statements and the final expression becomes its `expr`
-field. An empty unit receives a recoverable expression error. This convention
-keeps one stable root while later grammar increments add definitions and
-package-level forms.
+field. An empty valid unit has no statements and receives a synthetic
+zero-width `Literal(Constant::Unit)` expression, not an error node. This
+convention keeps one stable root while later grammar increments add
+definitions and package-level forms.
+
+The current expression and literal implementation is split by responsibility:
+`compilation_unit.rs` owns orchestration and statement separators, `expr.rs`
+owns the deliberately incomplete simple-expression subset, and `literals.rs`
+owns numeric and string decoding. These names describe the current milestone;
+they do not claim complete Scala `simpleExpr` coverage.
 
 The smoke grammar currently covers:
 
@@ -148,7 +166,10 @@ tools/scala-parser-oracle/compare.sh
 
 Scala source spans are UTF-16 offsets; the comparison script converts them to
 Rust UTF-8 byte offsets before comparing. The initial ASCII fixtures are tiny
-on purpose and cover the complete smoke subset.
+on purpose and cover the complete smoke subset. The same command runs as the
+separate `Scala 3.9 parser oracle` job in `.github/workflows/ci.yml`, so a
+normalized Scala/Rust mismatch fails CI. It is a required parser check in
+addition to the Rust formatting, test, clippy, documentation, and diff checks.
 
 ## Extension rule
 
