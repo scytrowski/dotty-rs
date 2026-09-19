@@ -333,7 +333,7 @@ where
         &mut self,
         mark: crate::Mark,
         mut qualifier: TreeId<Untyped>,
-        can_apply: bool,
+        mut can_apply: bool,
     ) -> TreeId<Untyped> {
         loop {
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
@@ -362,11 +362,13 @@ where
                         backquoted,
                     }),
                 );
+                can_apply = true;
             } else if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBracket))
             {
                 qualifier = self.parse_type_application(mark, qualifier);
+                can_apply = true;
             } else if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
@@ -1167,6 +1169,42 @@ mod tests {
 
         assert!(matches!(result.ast.get(expr).kind, TreeKind::Block(_)));
         assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn allows_application_after_selecting_from_a_block_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ f }.foo(1)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::IntegerLiteral, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+            panic!("expected application tree");
+        };
+        assert_eq!(application.args.len(), 1);
+        let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+            panic!("expected selection tree");
+        };
+        assert!(matches!(
+            parser.ast().get(selection.qualifier).kind,
+            TreeKind::Block(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
