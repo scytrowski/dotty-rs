@@ -87,7 +87,7 @@ pub enum TermValue {
     Null,
     /// AST address reference.
     AstRef(u32),
-    /// One-based name-table reference.
+    /// Zero-based name-table reference.
     NameRef(u32),
     /// Unsigned natural number.
     Nat(u32),
@@ -124,7 +124,7 @@ pub enum ConstantValue {
     FloatBits(u32),
     /// IEEE-754 double-precision bit pattern.
     DoubleBits(u64),
-    /// One-based name-table reference for a string constant.
+    /// Zero-based name-table reference.for a string constant.
     String(NameRef),
 }
 

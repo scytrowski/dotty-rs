@@ -1692,11 +1692,52 @@ fn subslice_offset(source: &[u8], subslice: &[u8]) -> Option<usize> {
         .find(|start| std::ptr::eq(source[*start..].as_ptr(), subslice.as_ptr()))
 }
 
+/// The absolute offset of the tag byte of a category-five `node` in `source`.
+///
+/// The header is the tag followed by the payload length as a natural number.
+/// The compiler normally writes the shortest encoding, but a length may be
+/// padded with leading zero groups (`161, 0, 253` is a length of 125 in two
+/// bytes), and such a node still starts at its tag. So the header width is not
+/// derived from the length alone: the start is the position, before the
+/// payload, of a tag byte followed by a length prefix that encodes exactly
+/// this payload's length, preferring the shortest such prefix.
 fn raw_node_offset(source: &[u8], node: &RawNode<'_>) -> usize {
-    let header_length = 1usize.saturating_add(nat_width(node.payload.len()));
-    subslice_offset(source, node.payload)
-        .and_then(|payload_offset| payload_offset.checked_sub(header_length))
+    let canonical = nat_width(node.payload.len());
+    let Some(payload_offset) = subslice_offset(source, node.payload) else {
+        return node.offset;
+    };
+    // A `u32` natural number is at most five bytes long.
+    for width in canonical..=canonical.max(5) {
+        let Some(start) = payload_offset.checked_sub(1 + width) else {
+            break;
+        };
+        if source[start] == node.tag
+            && encodes_length(&source[start + 1..payload_offset], node.payload.len())
+        {
+            return start;
+        }
+    }
+    payload_offset
+        .checked_sub(1 + canonical)
         .unwrap_or(node.offset)
+}
+
+/// Whether `prefix` is one natural number, in TASTy's big-endian base-128
+/// encoding whose last byte has the high bit set, equal to `length`.
+fn encodes_length(prefix: &[u8], length: usize) -> bool {
+    let Some((last, groups)) = prefix.split_last() else {
+        return false;
+    };
+    if last & 0x80 == 0 || groups.iter().any(|byte| byte & 0x80 != 0) {
+        return false;
+    }
+    let value = groups
+        .iter()
+        .chain(std::iter::once(last))
+        .try_fold(0usize, |acc, byte| {
+            acc.checked_mul(128)?.checked_add(usize::from(byte & 0x7f))
+        });
+    value == Some(length)
 }
 
 fn collect_raw_nodes_deep<'a>(
@@ -10008,5 +10049,49 @@ mod tests {
                 limit: 1,
             })
         );
+    }
+
+    /// A length may be padded with a leading zero group; the node still
+    /// starts at its tag, not one byte later.
+    #[test]
+    fn a_node_with_a_padded_length_prefix_is_located_at_its_tag() {
+        let mut source = vec![7, 7];
+        let start = source.len();
+        source.extend_from_slice(&[APPLIEDTYPE_TAG, 0, 0x80 | 125]);
+        source.extend(std::iter::repeat_n(1, 125));
+        let node = RawNode {
+            tag: APPLIEDTYPE_TAG,
+            offset: start,
+            payload: &source[start + 3..],
+        };
+
+        assert_eq!(super::raw_node_offset(&source, &node), start);
+    }
+
+    #[test]
+    fn a_node_with_a_canonical_length_prefix_is_located_at_its_tag() {
+        let mut source = vec![7, 7];
+        let start = source.len();
+        source.extend_from_slice(&[APPLIEDTYPE_TAG, 1, 0x80 | 7]);
+        source.extend(std::iter::repeat_n(1, 135));
+        let node = RawNode {
+            tag: APPLIEDTYPE_TAG,
+            offset: start,
+            payload: &source[start + 3..],
+        };
+
+        assert_eq!(super::raw_node_offset(&source, &node), start);
+    }
+
+    #[test]
+    fn a_short_node_is_located_at_its_tag() {
+        let source = [7, APPLIEDTYPE_TAG, 0x80 | 2, 1, 1];
+        let node = RawNode {
+            tag: APPLIEDTYPE_TAG,
+            offset: 1,
+            payload: &source[3..],
+        };
+
+        assert_eq!(super::raw_node_offset(&source, &node), 1);
     }
 }
