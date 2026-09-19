@@ -47,7 +47,7 @@ struct EnteredPackage {
 ///
 /// Pass the registry from one unpickler to the next
 /// ([`TastyUnpickler::with_packages`](crate::tasty_unpickler::TastyUnpickler::with_packages),
-/// [`into_packages`](crate::tasty_unpickler::TastyUnpickler::into_packages))
+/// [`into_parts`](crate::tasty_unpickler::TastyUnpickler::into_parts))
 /// to share packages between units. A registry describes the store it was
 /// filled from: using it with another store would hand out ids that mean
 /// something else there.
