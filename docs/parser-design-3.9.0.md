@@ -86,8 +86,9 @@ and `using`. It also interns the future feature-dependent names `into`,
 `erased`, and `tracked`. The lexer still emits all of these as identifiers;
 parser context gives them grammar meaning only in the appropriate production.
 `ParserFeatures` currently exposes independent switches for capture checking,
-erased definitions, and `into`, all disabled by default. The switches are a
-boundary for future grammar work, not an implementation of those features.
+erased definitions, `into`, and legacy `postfix_ops`, all disabled by default.
+The switches are a boundary for future grammar work, not an implementation of
+those features.
 
 The parser forwards `ColonEol`, `Indented`, `Outdented`, and `ArrowIndented`
 events through readable helpers. This keeps layout and colon reclassification
@@ -102,9 +103,9 @@ and `UnsupportedSyntax`, with a source ID and source span.
 Reusable recovery sets cover statements, arguments, type arguments, and case
 clauses. Every recovery loop checks that the token source advances; a broken
 external source cannot turn recovery into an infinite loop. Valid but not yet
-implemented constructs such as `class`, `def`, and `if` produce an
-`UnsupportedSyntax` diagnostic and a recoverable error tree instead of a
-panic.
+implemented constructs such as `class`, `def`, `for`, `try`, and `match`
+produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
+of a panic.
 
 ## AST root and current grammar
 

@@ -1,6 +1,6 @@
 use dotty_core::{Name, TreeId, Untyped};
 
-/// Operand/operator state used by future Dotty-style infix reduction.
+/// Operand/operator state used by Dotty-style infix reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpInfo {
     pub operand: TreeId<Untyped>,

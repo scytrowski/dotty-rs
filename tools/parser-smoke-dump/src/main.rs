@@ -81,6 +81,12 @@ fn render_tree(
                 fields.push("\"backquoted\":true".to_owned());
             }
         }
+        TreeKind::NamedArg(named) => {
+            fields.push(format!(
+                "\"name\":{}",
+                quote(names.resolve(named.name.text()))
+            ));
+        }
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
         }

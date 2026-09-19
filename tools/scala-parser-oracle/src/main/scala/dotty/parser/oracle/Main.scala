@@ -39,6 +39,8 @@ object Main:
         fields += field("name", quote(select.name.toString))
         if isBackquotedSelect(select, source) then
           fields += field("backquoted", "true")
+      case named: dotty.tools.dotc.ast.Trees.NamedArg[?] =>
+        fields += field("name", quote(named.name.toString))
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
