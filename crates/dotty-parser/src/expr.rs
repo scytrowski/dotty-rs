@@ -1,7 +1,7 @@
-use dotty_core::ast::New;
 use dotty_core::ast::{
     Apply, ApplyKind, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
 };
+use dotty_core::ast::{New, PrefixOp};
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
@@ -14,7 +14,57 @@ where
 {
     /// Parses an expression at the current operator-expression boundary.
     pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
-        self.simple_expr()
+        self.prefix_expr()
+    }
+
+    fn prefix_expr(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let Some(operator) = self.current_prefix_operator() else {
+            return self.simple_expr();
+        };
+        let operator_end = self.current().span.end();
+        let operator_position = self.current_span();
+        self.advance();
+
+        if matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) || self.has_physical_line_break(operator_end, self.current().span.start())
+        {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "a prefix operator must be followed by its operand on the same line",
+            );
+            return self.error_expr(operator_position);
+        }
+
+        let operand = self.prefix_expr();
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::PrefixOp(PrefixOp {
+                op: *operator.as_name(),
+                operand,
+            })),
+        )
+    }
+
+    fn current_prefix_operator(&mut self) -> Option<dotty_core::TermName> {
+        if self.current().kind != TokenKind::Operator {
+            return None;
+        }
+
+        match self.current_text().ok()? {
+            "-" | "+" | "~" | "!" => self.intern_current_term_name().ok(),
+            _ => None,
+        }
+    }
+
+    fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
+        self.source
+            .as_str()
+            .get(start as usize..end as usize)
+            .map(|text| text.chars().any(dotty_core::is_line_break_char))
+            .unwrap_or(true)
     }
 
     /// Parses one simple expression and all of its currently supported suffixes.
@@ -551,6 +601,123 @@ mod tests {
         assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    fn assert_prefix_operator_parses(source: &str, operator: &str) {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, operator.len() as u32),
+                token(
+                    TokenKind::Identifier,
+                    operator.len() as u32,
+                    source.len() as u32,
+                ),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let (operator_name, operand_is_ident) = {
+            let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) = parser.ast().get(id).kind
+            else {
+                panic!("expected prefix operator tree");
+            };
+            (
+                prefix.op,
+                matches!(parser.ast().get(prefix.operand).kind, TreeKind::Ident(_)),
+            )
+        };
+        assert!(operand_is_ident);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(operator_name.text()), operator);
+    }
+
+    #[test]
+    fn parses_minus_as_a_prefix_operator() {
+        assert_prefix_operator_parses("-x", "-");
+    }
+
+    #[test]
+    fn parses_plus_as_a_prefix_operator() {
+        assert_prefix_operator_parses("+x", "+");
+    }
+
+    #[test]
+    fn parses_bang_as_a_prefix_operator() {
+        assert_prefix_operator_parses("!x", "!");
+    }
+
+    #[test]
+    fn parses_tilde_as_a_prefix_operator() {
+        assert_prefix_operator_parses("~x", "~");
+    }
+
+    #[test]
+    fn parses_nested_prefix_operators() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "!!x",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+        let (outer_operator, inner_operator) = {
+            let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(outer)) = parser.ast().get(id).kind
+            else {
+                panic!("expected outer prefix operator tree");
+            };
+            let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(inner)) =
+                parser.ast().get(outer.operand).kind
+            else {
+                panic!("expected inner prefix operator tree");
+            };
+            (outer.op, inner.op)
+        };
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(outer_operator.text()), "!");
+        assert_eq!(names.resolve(inner_operator.text()), "!");
+    }
+
+    #[test]
+    fn rejects_a_prefix_operator_whose_operand_starts_on_the_next_line() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-\nx",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            crate::ParseDiagnosticKind::ExpectedExpression
+        );
     }
 
     #[test]
