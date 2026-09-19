@@ -410,9 +410,7 @@ where
         if matches!(spelling, "|" | "@" | "=") {
             return None;
         }
-        if self.pattern_operand_offset().is_none() {
-            return None;
-        }
+        self.pattern_operand_offset()?;
         Some(*self.intern_current_term_name().ok()?.as_name())
     }
 

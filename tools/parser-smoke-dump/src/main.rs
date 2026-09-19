@@ -21,7 +21,7 @@ fn main() {
         process::exit(2);
     }
 
-    let source = match fs::read_to_string(&path) {
+    let source = match fs::read_to_string(path) {
         Ok(source) => source,
         Err(error) => {
             eprintln!("failed to read {path}: {error}");
