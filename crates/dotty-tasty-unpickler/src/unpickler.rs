@@ -59,9 +59,31 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
 
     /// Pass 1: enters a symbol for every definition in the file.
     ///
-    /// Malformed or unsupported input is a typed error; symbols entered
-    /// before the failure stay in the store.
+    /// Malformed or unsupported input is a typed error, and the call is
+    /// atomic: on failure the store holds exactly the symbols, scopes, types
+    /// and annotations it held before the call, and the index and package
+    /// registry are as they were, so nothing half-entered can be found later.
+    /// Interned names and the origin registered by [`new`](Self::new) stay,
+    /// which is harmless. The unpickler is usable afterwards, for example to
+    /// retry.
     pub fn enter_symbols(&mut self) -> Result<&TastySemanticIndex, UnpickleError> {
+        let checkpoint = self.store.checkpoint();
+        let index = self.index.clone();
+        let packages = self.packages.clone();
+
+        if let Err(error) = self.enter_all() {
+            // One unpickler owns its package symbols and scopes (see
+            // `PackageRegistry`), so everything this call changed was
+            // allocated by it, and truncating the arenas undoes it.
+            self.store.rollback_to(checkpoint);
+            self.index = index;
+            self.packages = packages;
+            return Err(error);
+        }
+        Ok(&self.index)
+    }
+
+    fn enter_all(&mut self) -> Result<(), UnpickleError> {
         let ast = AstView::new(self.file)?;
         let roots = self.file.asts()?;
         for node in roots.iter() {
@@ -70,6 +92,6 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                 self.enter_package(&ast, at)?;
             }
         }
-        Ok(&self.index)
+        Ok(())
     }
 }

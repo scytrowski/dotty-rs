@@ -73,6 +73,16 @@ impl ScopeArena {
         id
     }
 
+    /// The number of scopes allocated so far.
+    pub(crate) fn len(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Drops every scope allocated after the arena held `len` scopes.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.scopes.truncate(len);
+    }
+
     /// Panics if `id` was not allocated by this arena — see
     /// `docs/dotty-core-design.md`, "Error handling policy."
     pub fn get(&self, id: ScopeId) -> &Scope {

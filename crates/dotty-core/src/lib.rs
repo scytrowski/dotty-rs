@@ -60,7 +60,7 @@ pub use source::{
     LineIndex, SourceSpan, SourceText, SourceTextError, Span, SpanError, TextRange, TextRangeError,
     is_line_break_char,
 };
-pub use store::SemanticStore;
+pub use store::{SemanticStore, StoreCheckpoint};
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
     SymbolOrigin, SymbolTable, Visibility,

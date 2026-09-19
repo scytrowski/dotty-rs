@@ -42,6 +42,16 @@ impl AnnotationArena {
         id
     }
 
+    /// The number of annotations allocated so far.
+    pub(crate) fn len(&self) -> usize {
+        self.annotations.len()
+    }
+
+    /// Drops every annotation allocated after the arena held `len`.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.annotations.truncate(len);
+    }
+
     /// Panics if `id` was not allocated by this arena — see
     /// `docs/dotty-core-design.md`, "Error handling policy."
     pub fn get(&self, id: AnnotationId) -> &Annotation {

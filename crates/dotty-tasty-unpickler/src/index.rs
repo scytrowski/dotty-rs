@@ -23,7 +23,7 @@ use crate::error::UnpickleError;
 /// one symbol and one scope, so no single node address identifies it. Maps
 /// for shared types and typed trees are added by the milestones that
 /// populate them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TastySemanticIndex {
     symbols: HashMap<u32, SymbolId>,
     scopes: HashMap<SymbolId, ScopeId>,

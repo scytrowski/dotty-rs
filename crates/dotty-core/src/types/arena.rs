@@ -54,6 +54,17 @@ impl TypeArena {
         id
     }
 
+    /// The number of type slots allocated so far.
+    pub(crate) fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Drops every type slot allocated after the arena held `len` slots.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.types.truncate(len);
+        self.filled.truncate(len);
+    }
+
     /// Panics if `id` was not allocated by this arena, or was `reserve`-d but
     /// never `fill`-ed.
     pub fn get(&self, id: TypeId) -> &Type {
