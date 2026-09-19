@@ -30,8 +30,12 @@ object Main:
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
         fields += field("name", quote(ident.name.toString))
+        if isBackquotedIdent(ident, source) then
+          fields += field("backquoted", "true")
       case select: dotty.tools.dotc.ast.Trees.Select[?] =>
         fields += field("name", quote(select.name.toString))
+        if isBackquotedSelect(select, source) then
+          fields += field("backquoted", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
@@ -64,6 +68,15 @@ object Main:
     val start = math.max(0, math.min(tree.span.start, source.length))
     val end = math.max(start, math.min(tree.span.end, source.length))
     source.substring(start, end)
+
+  private def isBackquotedIdent(ident: dotty.tools.dotc.ast.Trees.Ident[?], source: String): Boolean =
+    val text = slice(ident, source)
+    text.startsWith("`") && text.endsWith("`")
+
+  private def isBackquotedSelect(select: dotty.tools.dotc.ast.Trees.Select[?], source: String): Boolean =
+    val text = slice(select, source)
+    val dot = text.lastIndexOf('.')
+    dot >= 0 && text.substring(dot + 1).startsWith("`")
 
   private def field(name: String, value: String): String =
     s"${quote(name)}:$value"

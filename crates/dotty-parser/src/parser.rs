@@ -250,6 +250,13 @@ where
     pub fn intern_current_term_name(&mut self) -> Result<TermName, SourceTextError> {
         let span = self.current().span;
         let text = self.source.slice(span)?;
+        let text = if self.current().kind == TokenKind::BackquotedIdentifier {
+            text.strip_prefix('`')
+                .and_then(|text| text.strip_suffix('`'))
+                .unwrap_or(text)
+        } else {
+            text
+        };
         Ok(TermName::new(self.names.intern(text)))
     }
 
@@ -493,7 +500,13 @@ mod tests {
             .intern_current_term_name()
             .expect("valid token span")
             .as_name();
-        let id = parser.alloc(TreeKind::Ident(dotty_core::ast::Ident { name }), Some(span));
+        let id = parser.alloc(
+            TreeKind::Ident(dotty_core::ast::Ident {
+                name,
+                backquoted: false,
+            }),
+            Some(span),
+        );
 
         assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
         assert_eq!(parser.ast().get(id).position, Some(span));
@@ -614,7 +627,13 @@ mod tests {
             .as_name();
 
         parser.advance();
-        let id = parser.alloc_from(mark, TreeKind::Ident(dotty_core::ast::Ident { name }));
+        let id = parser.alloc_from(
+            mark,
+            TreeKind::Ident(dotty_core::ast::Ident {
+                name,
+                backquoted: false,
+            }),
+        );
 
         assert_eq!(
             parser.ast().get(id).position.unwrap().span().range(),

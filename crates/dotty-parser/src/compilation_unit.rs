@@ -94,6 +94,7 @@ where
 
         let tree = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let Ok(name) = self.intern_current_term_name() else {
                     return self.unexpected_expression();
                 };
@@ -102,6 +103,7 @@ where
                     mark,
                     TreeKind::Ident(Ident {
                         name: *name.as_name(),
+                        backquoted,
                     }),
                 )
             }
@@ -154,12 +156,14 @@ where
                         return qualifier;
                     }
                 };
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 self.advance();
                 qualifier = self.alloc_from(
                     mark,
                     TreeKind::Select(Select {
                         qualifier,
                         name: *name.as_name(),
+                        backquoted,
                     }),
                 );
             } else if self
@@ -565,6 +569,28 @@ mod tests {
             tree.position.unwrap().span().range(),
             TextRange::new(0, 1).unwrap()
         );
+        assert!(!ident.backquoted);
+    }
+
+    #[test]
+    fn parses_a_backquoted_identifier_without_its_delimiters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "`x`",
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Ident(ident) = parser.ast().get(id).kind else {
+            panic!("expected identifier tree");
+        };
+
+        assert!(ident.backquoted);
+        assert_eq!(names.resolve(ident.name.text()), "x");
     }
 
     #[test]
@@ -985,6 +1011,29 @@ mod tests {
 
         assert_eq!(names.resolve(name.text()), "bar");
         assert!(qualifier_is_ident);
+    }
+
+    #[test]
+    fn parses_a_backquoted_selection_without_its_delimiters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo.`bar`",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+                token(TokenKind::BackquotedIdentifier, 4, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+            panic!("expected selection tree");
+        };
+
+        assert!(selection.backquoted);
+        assert_eq!(names.resolve(selection.name.text()), "bar");
     }
 
     #[test]

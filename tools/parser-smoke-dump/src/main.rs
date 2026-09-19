@@ -68,12 +68,18 @@ fn render_tree(
                 "\"name\":{}",
                 quote(names.resolve(ident.name.text()))
             ));
+            if ident.backquoted {
+                fields.push("\"backquoted\":true".to_owned());
+            }
         }
         TreeKind::Select(selection) => {
             fields.push(format!(
                 "\"name\":{}",
                 quote(names.resolve(selection.name.text()))
             ));
+            if selection.backquoted {
+                fields.push("\"backquoted\":true".to_owned());
+            }
         }
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));

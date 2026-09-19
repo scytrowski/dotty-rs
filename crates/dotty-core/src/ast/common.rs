@@ -17,17 +17,22 @@ use crate::ids::TreeId;
 use crate::names::{Name, TermName, TypeName};
 use crate::types::Constant;
 
-/// `name`.
+/// `name`, preserving whether the source used backquotes around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ident {
     pub name: Name,
+    pub backquoted: bool,
 }
 
 /// `qualifier.name`, or `qualifier#name` if `qualifier` is a type.
+///
+/// The `backquoted` flag preserves whether the selected name was written in
+/// backquotes in the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Select<P: AstPhase> {
     pub qualifier: TreeId<P>,
     pub name: Name,
+    pub backquoted: bool,
 }
 
 /// `qual.this`. `qual` is the optional enclosing class-name qualifier — a
@@ -388,10 +393,14 @@ mod tests {
 
     #[test]
     fn ident_and_select_carry_a_name() {
-        let ident = Ident { name: name(1) };
+        let ident = Ident {
+            name: name(1),
+            backquoted: false,
+        };
         let select = Select {
             qualifier: tree_id(2),
             name: name(1),
+            backquoted: false,
         };
 
         assert_eq!(ident.name, select.name);

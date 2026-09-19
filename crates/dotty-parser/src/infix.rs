@@ -131,6 +131,7 @@ mod tests {
         let operand = ast.alloc(Tree {
             kind: TreeKind::Ident(Ident {
                 name: *term.as_name(),
+                backquoted: false,
             }),
             position: None,
             ty: (),

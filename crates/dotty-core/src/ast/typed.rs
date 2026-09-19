@@ -27,7 +27,10 @@ impl<'a> TypedAstBuilder<'a> {
 
     pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
         self.arena.alloc(Tree {
-            kind: TreeKind::Ident(Ident { name }),
+            kind: TreeKind::Ident(Ident {
+                name,
+                backquoted: false,
+            }),
             position,
             ty,
         })
