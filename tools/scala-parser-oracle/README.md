@@ -9,6 +9,7 @@ it with the selected SDKMAN defaults:
 
 ```text
 ./run path/to/input.scala
+./run --mode pattern path/to/pattern.scala
 ```
 
 With no argument, `run` reads the source from standard input. The output keeps
@@ -19,7 +20,7 @@ compiler presentation rather than a compatibility protocol.
 Compiler source offsets are UTF-16 code-unit offsets. Consumers comparing them
 with Rust source spans must convert them to UTF-8 byte offsets first.
 
-The fixtures cover the expression forms currently represented by the Rust
+The default fixtures cover the expression forms currently represented by the Rust
 parser: identifiers, numeric and string literals, `this`, parentheses, the
 empty tuple, tuples, simple selections and applications, `super`, `new`,
 simple type applications, repeated suffix chains, and brace blocks.
@@ -29,3 +30,10 @@ corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, and `if`/`while` expressions,
 including basic indented bodies. It intentionally does not claim coverage for
 the rest of Scala's expression, type, or argument grammar.
+
+Fixtures under `fixtures/patterns/` use the explicit `pattern` mode. Scala
+mode calls Dotty's real `Parser.pattern()` entry and Rust mode calls the
+parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
+in synthetic `match` expressions. The normalized tree compares `Bind`,
+`Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
+arguments as they appear before semantic extractor lowering.

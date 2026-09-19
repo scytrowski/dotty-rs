@@ -8,14 +8,17 @@ import dotty.tools.dotc.util.SourceFile
 
 object Main:
   def main(args: Array[String]): Unit =
-    if args.length != 1 then
-      throw IllegalArgumentException("usage: scala-parser-oracle <source-file>")
+    val (mode, path) = args.toList match
+      case path :: Nil => ("expr", path)
+      case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
+      case _ => throw IllegalArgumentException("usage: scala-parser-oracle [--mode pattern] <source-file>")
 
-    val path = Paths.get(args(0))
-    val source = Files.readString(path)
-    val sourceFile = SourceFile.virtual(path.toString, source)
+    val sourcePath = Paths.get(path)
+    val source = Files.readString(sourcePath)
+    val sourceFile = SourceFile.virtual(sourcePath.toString, source)
     val context = (new ContextBase).initialCtx
-    val tree = new Parsers.Parser(sourceFile)(using context).expr()
+    val parser = new Parsers.Parser(sourceFile)(using context)
+    val tree = if mode == "pattern" then parser.pattern() else parser.expr()
 
     println(render(tree, source))
 
@@ -39,6 +42,10 @@ object Main:
         fields += field("name", quote(select.name.toString))
         if isBackquotedSelect(select, source) then
           fields += field("backquoted", "true")
+      case named: dotty.tools.dotc.ast.Trees.NamedArg[?] =>
+        fields += field("name", quote(named.name.toString))
+      case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
+        fields += field("name", quote(bind.name.toString))
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
