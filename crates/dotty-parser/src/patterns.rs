@@ -237,6 +237,9 @@ where
                 self.alloc_from(mark, TreeKind::This(dotty_core::ast::This { qual: None }))
             }
             TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
+            TokenKind::Keyword(HardKeyword::Given) | TokenKind::Quote | TokenKind::XmlStart => {
+                self.unsupported_pattern()
+            }
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_pattern_parens(mark),
             _ => self.unexpected_pattern(),
         };
@@ -443,6 +446,18 @@ where
     fn unexpected_pattern(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedPattern, "expected a pattern");
+        if self.current().kind != TokenKind::Eof {
+            self.advance();
+        }
+        self.error_pattern(position)
+    }
+
+    fn unsupported_pattern(&mut self) -> TreeId<Untyped> {
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "this pattern form is not supported yet",
+        );
         if self.current().kind != TokenKind::Eof {
             self.advance();
         }
@@ -800,6 +815,28 @@ mod tests {
         assert_eq!(
             result.ast.get(body).position.unwrap().span().range(),
             TextRange::new(4, 10).unwrap()
+        );
+    }
+
+    #[test]
+    fn diagnoses_deferred_given_patterns_as_unsupported() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "given T",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
         );
     }
 }
