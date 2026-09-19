@@ -12,6 +12,11 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses an expression at the current operator-expression boundary.
+    pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
+        self.simple_expr()
+    }
+
     /// Parses one simple expression and all of its currently supported suffixes.
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
@@ -84,7 +89,8 @@ where
             TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
         ) {
             let checkpoint = self.cursor.checkpoint();
-            trees.push(self.simple_expr());
+            trees
+                .push(self.with_location(crate::Location::InBlock, |parser| parser.postfix_expr()));
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -402,7 +408,9 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(self.simple_expr());
+                args.push(
+                    self.with_location(crate::Location::InArgs, |parser| parser.postfix_expr()),
+                );
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -441,7 +449,7 @@ where
             );
         }
 
-        let first = self.simple_expr();
+        let first = self.with_location(crate::Location::InParens, |parser| parser.postfix_expr());
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             return self.alloc_from(
@@ -454,7 +462,9 @@ where
         while self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && self.current().kind != TokenKind::Eof
         {
-            elements.push(self.simple_expr());
+            elements.push(
+                self.with_location(crate::Location::InParens, |parser| parser.postfix_expr()),
+            );
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
@@ -522,6 +532,25 @@ mod tests {
             TextRange::new(0, 1).unwrap()
         );
         assert!(!ident.backquoted);
+    }
+
+    #[test]
+    fn postfix_expression_entry_preserves_simple_expression_behavior() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
