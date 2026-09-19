@@ -36,6 +36,15 @@
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
 //! | `APPLIEDtype`         | `Type Type*`              | `Applied { tycon, args }`          |
+//! | `ANDtype`             | `Type Type`               | `And { left, right }`              |
+//! | `ORtype`              | `Type Type`               | `Or { left, right }`               |
+//! | `SUPERtype`           | `Type Type`               | `SuperType { this_type, super_type }` |
+//! | `BYNAMEtype`          | `Type`                    | `ByName { result }`                |
+//!
+//! `And` and `Or` keep the operand order and nesting the compiler wrote: no
+//! commutative normalisation, no flattening. `BYNAMEtype` stays a wrapper; it
+//! is never lowered to its result. `SUPERtype` is the type node, not the
+//! term-level `SUPER`.
 //!
 //! Every child is decoded through the same entry point as a top-level type, so
 //! it is cached, shared and resolved like any other, and a child's error is
@@ -53,9 +62,9 @@ use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    APPLIEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, THIS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
-    TermValue,
+    ANDTYPE_TAG, APPLIEDTYPE_TAG, BYNAMETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG,
+    SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -181,10 +190,34 @@ impl TastyUnpickler<'_, '_, '_> {
                 class: self.this_class(ast, child, depth)?,
             },
             RawTree::LengthNode(node) if tag == APPLIEDTYPE_TAG => {
-                let applied = node.decode_applied_type()?;
-                let tycon = self.decode_type(ast, &applied.tycon, depth)?;
-                let args = self.decode_types(ast, &applied.arguments, depth)?;
-                Type::Applied { tycon, args }
+                let shape = node.decode_applied_type()?;
+                let ids = self.decode_children(ast, at, shape.arguments.len() + 1, depth)?;
+                Type::Applied {
+                    tycon: ids[0],
+                    args: ids[1..].to_vec(),
+                }
+            }
+            RawTree::LengthNode(node) if tag == ANDTYPE_TAG => {
+                node.decode_and_type()?;
+                let [left, right] = self.decode_binary(ast, at, depth)?;
+                Type::And { left, right }
+            }
+            RawTree::LengthNode(node) if tag == ORTYPE_TAG => {
+                node.decode_or_type()?;
+                let [left, right] = self.decode_binary(ast, at, depth)?;
+                Type::Or { left, right }
+            }
+            RawTree::LengthNode(node) if tag == SUPERTYPE_TAG => {
+                node.decode_super_type()?;
+                let [this_type, super_type] = self.decode_binary(ast, at, depth)?;
+                Type::SuperType {
+                    this_type,
+                    super_type,
+                }
+            }
+            RawTree::Ast { .. } if tag == BYNAMETYPE_TAG => {
+                let result = self.decode_type(ast, &tree.decode_by_name_type()?.child, depth)?;
+                Type::ByName { result }
             }
             _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
         };
@@ -194,18 +227,46 @@ impl TastyUnpickler<'_, '_, '_> {
         Ok(id)
     }
 
-    /// Decodes `trees` in wire order, each through [`decode_type`](Self::decode_type),
-    /// so a child is cached, shared and resolved like any other type.
-    fn decode_types(
+    /// Decodes the `count` child types of the length-prefixed node at `at`,
+    /// in wire order, each through [`type_at`](Self::type_at), so a child is
+    /// cached, shared and resolved like any other type.
+    ///
+    /// The children are taken from the AST index, not from the structural
+    /// decoders' trees: those are relative to the node's payload, while a
+    /// type is keyed by its absolute address. The structural decoder has
+    /// already checked the node's shape; `count` guards the two agreeing.
+    fn decode_children(
         &mut self,
         ast: &AstView<'_>,
-        trees: &[RawTree<'_>],
+        at: u32,
+        count: usize,
         depth: usize,
     ) -> Result<Vec<TypeId>, UnpickleError> {
-        trees
+        let children: Vec<u32> = ast
+            .children(at)
             .iter()
-            .map(|tree| self.decode_type(ast, tree, depth))
+            .map(|child| address(child.offset))
+            .collect();
+        if children.len() != count {
+            return Err(UnpickleError::InvalidReferenceTarget { from: at, to: at });
+        }
+        children
+            .into_iter()
+            .map(|child| self.type_at(ast, child, at, depth))
             .collect()
+    }
+
+    /// The two operands of a binary type node, left first. What they mean is
+    /// up to the caller: `And` and `Or` operands, or the `this` and `super`
+    /// parts of a `SuperType`.
+    fn decode_binary(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<[TypeId; 2], UnpickleError> {
+        let ids = self.decode_children(ast, at, 2, depth)?;
+        Ok([ids[0], ids[1]])
     }
 
     /// The member of `prefix` a name-based `TYPEREF` / `TERMREF` at `at`

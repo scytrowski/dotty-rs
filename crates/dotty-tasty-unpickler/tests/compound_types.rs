@@ -256,3 +256,96 @@ fn a_failure_after_several_children_decoded_leaves_no_trace() {
     fresh.enter_symbols().unwrap();
     assert_eq!(fresh.unpickle_type(SINGLE), Ok(after_failure));
 }
+
+#[test]
+fn an_intersection_keeps_its_operand_order() {
+    assert_eq!(decode_all(COMPOUND, &[AND]), ["(A & B)"]);
+}
+
+#[test]
+fn a_nested_intersection_is_neither_flattened_nor_reordered() {
+    assert_eq!(decode_all(COMPOUND, &[AND_CHAIN]), ["((A & B) & C)"]);
+    // The core type is a binary tree of type ids.
+    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let chain = unpickler.unpickle_type(AND_CHAIN).unwrap();
+    let Type::And { left, right } = session.store.types.get(chain) else {
+        panic!("not an intersection");
+    };
+    assert!(matches!(session.store.types.get(*left), Type::And { .. }));
+    assert_eq!(show(&session.store, *right), "C");
+}
+
+#[test]
+fn a_union_keeps_its_operand_order() {
+    assert_eq!(decode_all(COMPOUND, &[OR]), ["(A | B)"]);
+}
+
+#[test]
+fn a_nested_union_keeps_the_nesting_the_compiler_wrote() {
+    assert_eq!(
+        decode_all(COMPOUND, &[OR_DEEP, OR_DEEP_RIGHT]),
+        ["(A | (B | C))", "(B | C)"]
+    );
+}
+
+#[test]
+fn a_nested_union_operand_is_the_same_type_as_its_own_node() {
+    // The right operand of 940 is the node at 945: one address, one id.
+    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let deep = unpickler.unpickle_type(OR_DEEP).unwrap();
+    let index = unpickler.into_index();
+    let Type::Or { right, .. } = session.store.types.get(deep) else {
+        panic!("not a union");
+    };
+    let right = *right;
+    assert_eq!(index.type_at(OR_DEEP_RIGHT), Some(right));
+}
+
+#[test]
+fn intersections_and_unions_do_not_intern_by_shape() {
+    // `A & B` and `A | B` share operands but are different nodes and types.
+    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let and = unpickler.unpickle_type(AND).unwrap();
+    let or = unpickler.unpickle_type(OR).unwrap();
+    assert_ne!(and, or);
+    assert_eq!(unpickler.unpickle_type(AND), Ok(and));
+}
+
+#[test]
+fn a_failing_operand_is_reported_as_itself_and_rolls_back() {
+    // Make the right operand of `(A & B) & C` unsupported.
+    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
+    let right_operand = *children_of(&file, AND_CHAIN).last().unwrap();
+    drop(file);
+    let patched = retagged(COMPOUND, right_operand as usize, 61, 66);
+    let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let before = unpickler.index().type_count();
+    assert!(matches!(
+        unpickler.unpickle_type(AND_CHAIN),
+        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+    ));
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(AND_CHAIN), None);
+}
+
+/// The absolute addresses of the direct children of the node at `at`.
+fn children_of(file: &TastyFile<'_>, at: u32) -> Vec<u32> {
+    file.ast_address_index()
+        .unwrap()
+        .iter_tree_edges()
+        .filter(|edge| edge.parent.offset == at as usize)
+        .map(|edge| u32::try_from(edge.child.offset).unwrap())
+        .collect()
+}
