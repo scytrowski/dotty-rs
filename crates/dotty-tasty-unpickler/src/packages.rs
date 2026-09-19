@@ -19,7 +19,7 @@ use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 
 /// Package symbols entered so far, by path.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PackageRegistry {
     by_path: HashMap<Vec<String>, SymbolId>,
 }

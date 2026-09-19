@@ -21,6 +21,16 @@ impl SymbolTable {
         id
     }
 
+    /// The number of symbols allocated so far.
+    pub(crate) fn len(&self) -> usize {
+        self.symbols.len()
+    }
+
+    /// Drops every symbol allocated after the table held `len` symbols.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.symbols.truncate(len);
+    }
+
     /// Panics if `id` was not allocated by this table — see
     /// `docs/dotty-core-design.md`, "Error handling policy."
     pub fn get(&self, id: SymbolId) -> &Symbol {

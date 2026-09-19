@@ -2,4 +2,4 @@
 
 mod semantic_store;
 
-pub use semantic_store::SemanticStore;
+pub use semantic_store::{SemanticStore, StoreCheckpoint};

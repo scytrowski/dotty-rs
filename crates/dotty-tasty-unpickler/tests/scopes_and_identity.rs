@@ -333,3 +333,84 @@ fn entering_the_same_file_twice_is_rejected_without_duplicating_symbols() {
     );
     assert_eq!(unpickler.index().symbol_count(), before);
 }
+
+/// `Foo.tasty` with the name reference in the byte at 124 zeroed, which turns
+/// a definition late in the file into one whose name cannot be read
+/// (`UnsupportedName { reference: 13 }`). The enclosing packages, `Foo` and
+/// its parameters have been entered by then.
+fn late_failing_foo() -> Vec<u8> {
+    let mut bytes = FOO.to_vec();
+    bytes[124] = 0;
+    bytes
+}
+
+#[test]
+fn a_late_failure_leaves_the_store_exactly_as_it_was() {
+    let bytes = late_failing_foo();
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+    // Something allocated before the call must survive it.
+    let older = store.symbols.alloc(dotty_core::symbols::Symbol {
+        name: Name::new(store.names.intern("older"), Namespace::Term),
+        owner: None,
+        kind: SymbolKind::Value,
+        flags: dotty_core::symbols::SymbolFlags::EMPTY,
+        visibility: dotty_core::symbols::Visibility::Public,
+        info: dotty_core::symbols::SymbolInfo::Missing,
+        origin: dotty_core::symbols::SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::symbols::SymbolLinks::default(),
+    });
+    let before = store.checkpoint();
+
+    let mut unpickler = TastyUnpickler::new(&file, &mut store);
+    let result = unpickler.enter_symbols().map(|_| ());
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::UnsupportedName { reference: 13 })
+    );
+    assert_eq!(unpickler.index().symbol_count(), 0);
+    assert_eq!(unpickler.index().symbol_at(PACKAGE_ADDRESS), None);
+    drop(unpickler);
+    assert_eq!(store.checkpoint(), before);
+    assert_eq!(store.symbols.get(older).kind, SymbolKind::Value);
+}
+
+#[test]
+fn an_unpickler_that_failed_can_be_retried() {
+    let bytes = late_failing_foo();
+    let broken = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let mut unpickler = TastyUnpickler::new(&broken, &mut store);
+    assert!(unpickler.enter_symbols().is_err());
+    // The failed attempt left no package behind, so entering again fails the
+    // same way instead of tripping over half-entered state.
+    assert_eq!(
+        unpickler.enter_symbols().map(|_| ()),
+        Err(UnpickleError::UnsupportedName { reference: 13 })
+    );
+    assert_eq!(unpickler.index().symbol_count(), 0);
+}
+
+#[test]
+fn a_failure_in_a_later_unit_does_not_disturb_an_earlier_one() {
+    let good = TastyFile::parse_scala_3_9(FOO).unwrap();
+    let bytes = late_failing_foo();
+    let broken = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+
+    let mut first = TastyUnpickler::new(&good, &mut store);
+    first.enter_symbols().unwrap();
+    let index = first.into_index();
+    let after_first = store.checkpoint();
+
+    let mut second = TastyUnpickler::new(&broken, &mut store);
+    assert!(second.enter_symbols().is_err());
+    drop(second);
+
+    assert_eq!(store.checkpoint(), after_first);
+    let foo = index.symbol_at(4).unwrap();
+    assert_eq!(store.symbols.get(foo).kind, SymbolKind::Class);
+}

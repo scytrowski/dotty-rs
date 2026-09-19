@@ -139,6 +139,19 @@ before its members. Any other qualifier shape is
 entered symbol is `InvalidReferenceTarget`.
 `private[this]` is an unqualified `Private` (with `LOCAL`).
 
+### Failure is atomic
+
+`enter_symbols` either enters the whole unit or changes nothing. On any error
+the symbols, scopes, types and annotations it allocated are freed
+(`SemanticStore::checkpoint` / `rollback_to`, which truncate the append-only
+arenas), and the index and package registry are restored, so a failed unit
+leaves no orphan symbols or packages for later units to find. This is sound
+because one unpickler owns its package symbols and scopes: nothing it changes
+existed before the call. Interned names and the registered origin id are not
+undone; both are harmless. Once package symbols are shared between units (issue
+#12) the rollback must also undo entries made into pre-existing scopes, so
+that change has to extend this mechanism rather than bypass it.
+
 ### Packages
 
 `TastyUnpickler::enter_symbols` enters a package symbol for every segment of a

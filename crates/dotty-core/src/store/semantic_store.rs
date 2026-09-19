@@ -25,9 +25,51 @@ pub struct SemanticStore {
     pub origins: OriginTable,
 }
 
+/// The allocation state of a [`SemanticStore`], taken by
+/// [`SemanticStore::checkpoint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreCheckpoint {
+    symbols: usize,
+    types: usize,
+    scopes: usize,
+    annotations: usize,
+}
+
 impl SemanticStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records how much has been allocated, so that a failed multi-step
+    /// operation can undo its allocations with [`rollback_to`](Self::rollback_to).
+    pub fn checkpoint(&self) -> StoreCheckpoint {
+        StoreCheckpoint {
+            symbols: self.symbols.len(),
+            types: self.types.len(),
+            scopes: self.scopes.len(),
+            annotations: self.annotations.len(),
+        }
+    }
+
+    /// Frees every symbol, type, scope and annotation allocated since
+    /// `checkpoint`. Their ids become invalid and are handed out again by
+    /// later allocations.
+    ///
+    /// Only allocations are undone. Interned names stay (an interned name is
+    /// harmless and may be shared), registered origin ids stay (an unused id
+    /// is harmless), and changes made to values that existed at the
+    /// checkpoint, such as a name entered into an older scope or a completed
+    /// symbol, are the caller's to undo.
+    ///
+    /// The caller must hold the only way to allocate into the store since the
+    /// checkpoint (for example through one `&mut` borrow) and must drop every
+    /// id it obtained after the checkpoint. `checkpoint` must come from this
+    /// store and must not be older than an earlier rollback.
+    pub fn rollback_to(&mut self, checkpoint: StoreCheckpoint) {
+        self.symbols.truncate(checkpoint.symbols);
+        self.types.truncate(checkpoint.types);
+        self.scopes.truncate(checkpoint.scopes);
+        self.annotations.truncate(checkpoint.annotations);
     }
 }
 
@@ -38,7 +80,28 @@ mod tests {
     use crate::symbols::{
         Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
     };
-    use crate::types::Type;
+    use crate::types::{ErrorType, Type};
+
+    #[test]
+    fn rollback_frees_allocations_made_since_the_checkpoint() {
+        let mut store = SemanticStore::new();
+        let kept_scope = store.scopes.alloc(Scope::new(None));
+        let checkpoint = store.checkpoint();
+
+        let message = store.names.intern("x");
+        let dropped_type = store.types.alloc(Type::Error(ErrorType { message }));
+        let dropped_scope = store.scopes.alloc(Scope::new(None));
+        store.rollback_to(checkpoint);
+
+        assert_eq!(store.checkpoint(), checkpoint);
+        // The ids are free again, and the older scope is untouched.
+        assert_eq!(
+            store.types.alloc(Type::Error(ErrorType { message })),
+            dropped_type
+        );
+        assert_eq!(store.scopes.alloc(Scope::new(None)), dropped_scope);
+        assert_ne!(kept_scope, dropped_scope);
+    }
 
     #[test]
     fn a_fresh_store_has_no_allocations() {
