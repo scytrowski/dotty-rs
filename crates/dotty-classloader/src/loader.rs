@@ -5761,4 +5761,41 @@ mod tests {
             );
         }
     }
+
+    /// `tasty_visibility` (issue #16): a package qualifier that is the
+    /// class's own or an enclosing package keeps its qualifier; anything else
+    /// narrows to plain `Private`/`Protected`, never `Public`.
+    #[test]
+    fn tasty_visibility_keeps_an_enclosing_package_qualifier_and_narrows_the_rest() {
+        use tasty_symbol::{DeclaredQualifier, DeclaredVisibility};
+
+        let package = |path: &str| DeclaredQualifier::Package(path.to_owned());
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let class = BinaryName::from_internal("a/b/C");
+
+        let own =
+            loader.tasty_visibility(&class, &DeclaredVisibility::PrivateWithin(package("a/b")));
+        let outer =
+            loader.tasty_visibility(&class, &DeclaredVisibility::ProtectedWithin(package("a")));
+        let unrelated =
+            loader.tasty_visibility(&class, &DeclaredVisibility::PrivateWithin(package("x/y")));
+        // `a/bc` merely starts with the text of `a/b`; it does not enclose.
+        let prefix_only = loader.tasty_visibility(
+            &BinaryName::from_internal("a/bc/C"),
+            &DeclaredVisibility::ProtectedWithin(package("a/b")),
+        );
+        let other = loader.tasty_visibility(
+            &class,
+            &DeclaredVisibility::ProtectedWithin(DeclaredQualifier::Other),
+        );
+        let a_b = loader.session.packages.resolve_package(loader.store, "a/b");
+        let a = loader.session.packages.resolve_package(loader.store, "a");
+
+        assert_eq!(own, Visibility::PrivateWithin(a_b));
+        assert_eq!(outer, Visibility::ProtectedWithin(a));
+        assert_eq!(unrelated, Visibility::Private);
+        assert_eq!(prefix_only, Visibility::Protected);
+        assert_eq!(other, Visibility::Protected);
+    }
 }

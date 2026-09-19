@@ -9,3 +9,6 @@ private[me] class InOuterPackage
 private class PlainPrivate
 
 class Open
+
+object Holder:
+  protected[visibility] class InProtected

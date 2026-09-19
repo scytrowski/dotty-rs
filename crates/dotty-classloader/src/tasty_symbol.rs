@@ -1247,6 +1247,26 @@ mod tests {
         })]
     }
 
+    /// A real `protected[visibility]` (Scala only allows it on a member, so
+    /// the fixture nests the class in an object). `decode` finds nested
+    /// classes by simple name, which is how `Ordering.tasty`'s `Reverse` is
+    /// read too.
+    #[test]
+    fn decodes_a_real_protected_within_a_package_qualifier() {
+        let decoded = decode(
+            &visibility_fixture("Holder"),
+            &BinaryName::from_internal("InProtected"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            decoded.visibility,
+            Some(DeclaredVisibility::ProtectedWithin(
+                DeclaredQualifier::Package("me/cytrowski/tastyfixtures/visibility".to_owned())
+            ))
+        );
+    }
+
     #[test]
     fn decodes_a_protected_qualified_modifier() {
         with_a_file(|file| {
