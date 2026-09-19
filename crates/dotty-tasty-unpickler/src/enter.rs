@@ -20,10 +20,9 @@ use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;
 use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
 use dotty_tasty::tasty::{
-    AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefDefHeaderItem, DefinitionBody,
-    PACKAGE_TAG, PARAM_TAG, ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG,
-    StandardSection, StructuredNode, TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG,
-    TastyFile, TermValue, VALDEF_TAG,
+    AstAddressIndex, AstError, AstTreeNode, DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG,
+    ParameterNode, RawNode, RawTree, Reader, SHAREDTYPE_TAG, StandardSection, StructuredNode,
+    TEMPLATE_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFSYMBOL_TAG, TastyFile, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
@@ -180,11 +179,9 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
-                if let RawTree::LengthNode(template) = &type_or_template
-                    && template.tag == TEMPLATE_TAG
-                {
+                if has_template {
                     self.enter_class_scope(symbol)?;
-                    self.enter_template(ast, at, symbol, template)?;
+                    self.enter_template(ast, at, symbol)?;
                 }
             }
             StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) => {
@@ -218,15 +215,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
-                let parameters: Vec<&ParameterNode<'_>> = body
-                    .header_items
-                    .iter()
-                    .filter_map(|item| match item {
-                        DefDefHeaderItem::Parameter(parameter) => Some(parameter),
-                        DefDefHeaderItem::Clause(_) => None,
-                    })
-                    .collect();
-                self.enter_parameters(ast, at, method, &parameters)?;
+                self.enter_parameters(ast, at, method, false)?;
             }
             _ => return Err(UnpickleError::MissingDefinition { address: at }),
         }
@@ -241,7 +230,6 @@ impl TastyUnpickler<'_, '_, '_> {
         ast: &AstView<'_>,
         class_at: u32,
         class: SymbolId,
-        template: &RawNode<'_>,
     ) -> Result<(), UnpickleError> {
         let Some(template_node) = ast
             .children(class_at)
@@ -251,14 +239,7 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::MissingDefinition { address: class_at });
         };
         let template_at = address(template_node.offset);
-        let structure = template.decode_template_structure()?;
-        let parameters: Vec<&ParameterNode<'_>> = structure
-            .type_params
-            .iter()
-            .chain(structure.term_params.iter())
-            .collect();
-
-        self.enter_paired_parameters(ast, template_at, class, &parameters, true)?;
+        self.enter_parameters(ast, template_at, class, true)?;
         for child in ast.children(template_at) {
             if matches!(child.tag, TYPEDEF_TAG | VALDEF_TAG | DEFDEF_TAG) {
                 self.enter_definition(ast, address(child.offset), child.tag, class)?;
@@ -269,47 +250,22 @@ impl TastyUnpickler<'_, '_, '_> {
         Ok(())
     }
 
-    /// Enters the parameters of the method at `method_at`.
+    /// Enters the `TYPEPARAM`/`PARAM` nodes directly under `parent_at`, in
+    /// wire order, decoding each from its own index node.
     fn enter_parameters(
-        &mut self,
-        ast: &AstView<'_>,
-        method_at: u32,
-        method: SymbolId,
-        parameters: &[&ParameterNode<'_>],
-    ) -> Result<(), UnpickleError> {
-        self.enter_paired_parameters(ast, method_at, method, parameters, false)
-    }
-
-    /// Enters the `TYPEPARAM`/`PARAM` nodes directly under `parent_at`.
-    ///
-    /// The AST index knows each parameter's absolute address but its payload
-    /// for a parameter node omits the name, so the name and modifiers come
-    /// from the parent's structural decoding (`parameters`). The two are
-    /// paired in wire order, and a disagreement is an error rather than a
-    /// guess.
-    fn enter_paired_parameters(
         &mut self,
         ast: &AstView<'_>,
         parent_at: u32,
         owner: SymbolId,
-        parameters: &[&ParameterNode<'_>],
         in_class: bool,
     ) -> Result<(), UnpickleError> {
-        let nodes: Vec<&AstTreeNode> = ast
-            .children(parent_at)
-            .iter()
-            .filter(|child| matches!(child.tag, TYPEPARAM_TAG | PARAM_TAG))
-            .collect();
-        let mismatch = UnpickleError::ParameterMismatch { address: parent_at };
-        if nodes.len() != parameters.len() {
-            return Err(mismatch);
-        }
-
-        for (node, parameter) in nodes.into_iter().zip(parameters) {
-            if node.tag != parameter.tag() {
-                return Err(mismatch);
+        for child in ast.children(parent_at) {
+            if !matches!(child.tag, TYPEPARAM_TAG | PARAM_TAG) {
+                continue;
             }
-            self.enter_parameter(ast, address(node.offset), parameter, owner, in_class)?;
+            let at = address(child.offset);
+            let parameter = ast.node(at)?.decode_parameter()?;
+            self.enter_parameter(ast, at, &parameter, owner, in_class)?;
         }
         Ok(())
     }

@@ -195,3 +195,28 @@ fn the_template_stats_hold_the_constructor_and_the_method() {
     assert_eq!(parameter_names(&defs[0]), ["type A", "term x"]);
     assert_eq!(parameter_names(&defs[1]), ["type B", "term b"]);
 }
+
+/// Regression test for issue #13: the index payload of a parameter node used
+/// to omit the name, so decoding it from the index read the first body byte
+/// as the name.
+#[test]
+fn index_parameter_nodes_decode_like_definition_nodes() {
+    let file = TastyFile::parse_scala_3_9(FOO).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let template = foo_template(&file);
+
+    let type_param = index.get(9).unwrap().decode_parameter().unwrap();
+    assert_eq!(type_param.tag(), TYPEPARAM_TAG);
+    assert_eq!(name(&file, type_param.name()), "A");
+    assert!(type_param.decode_body().is_ok());
+
+    // Same node as seen through the parent's structural decoding.
+    let through_parent = &template.type_params[0];
+    assert_eq!(type_param.name(), through_parent.name());
+    assert_eq!(type_param.body(), through_parent.body());
+
+    let term_param = index.get(24).unwrap().decode_parameter().unwrap();
+    assert_eq!(term_param.tag(), PARAM_TAG);
+    assert_eq!(name(&file, term_param.name()), "x");
+    assert!(term_param.decode_body().is_ok());
+}
