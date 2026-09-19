@@ -407,7 +407,11 @@ where
             return None;
         }
         let spelling = self.current_text().ok()?;
-        if matches!(spelling, "|" | "@" | "=") {
+        // A colon following a numeric literal is lexed as `ColonOp` when the
+        // literal is prefixed with `-`.  It belongs to Pattern1's typed
+        // literal production, not to the infix-pattern layer.  Keep symbolic
+        // operators such as `::` available for right-associative patterns.
+        if matches!(spelling, "|" | "@" | "=" | ":") {
             return None;
         }
         self.pattern_operand_offset()?;
@@ -673,6 +677,29 @@ mod tests {
         assert!(matches!(
             result.ast.get(result.root).kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_negative_numeric_typed_pattern_as_typed() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "-42: Int",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::IntegerLiteral, 1, 3),
+                token(TokenKind::ColonOp, 3, 4),
+                token(TokenKind::Identifier, 5, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Typed(_)
         ));
         assert!(result.diagnostics.is_empty());
     }
