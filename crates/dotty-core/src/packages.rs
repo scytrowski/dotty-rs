@@ -48,6 +48,7 @@ pub struct EnteredPackage {
 #[derive(Debug, Default)]
 pub struct Packages {
     by_path: HashMap<Vec<String>, EnteredPackage>,
+    scopes: HashMap<SymbolId, ScopeId>,
     /// Paths in the order they were entered, the root first, so a rollback
     /// can forget the newest ones.
     order: Vec<Vec<String>>,
@@ -68,6 +69,11 @@ impl Packages {
     /// The symbol of the package named by `path`, if it has been entered.
     pub fn symbol<S: AsRef<str>>(&self, path: &[S]) -> Option<SymbolId> {
         self.get(path).map(|package| package.symbol)
+    }
+
+    /// The declaration scope of a package symbol this registry entered.
+    pub fn scope_of(&self, symbol: SymbolId) -> Option<ScopeId> {
+        self.scopes.get(&symbol).copied()
     }
 
     /// How many named packages have been entered; the root is not counted.
@@ -94,6 +100,7 @@ impl Packages {
             let Some(package) = self.by_path.remove(&path) else {
                 continue;
             };
+            self.scopes.remove(&package.symbol);
             if let Some(parent) = path
                 .split_last()
                 .and_then(|(_, parent)| self.by_path.get(parent))
@@ -158,6 +165,7 @@ impl Packages {
         }
         let entered = EnteredPackage { symbol, scope };
         let key: Vec<String> = path.iter().map(|s| (*s).to_owned()).collect();
+        self.scopes.insert(symbol, scope);
         self.by_path.insert(key.clone(), entered);
         self.order.push(key);
         entered
@@ -273,6 +281,16 @@ mod tests {
     }
 
     #[test]
+    fn the_scope_of_a_package_is_found_from_its_symbol() {
+        let (mut store, mut packages, origin) = setup();
+
+        let chain = packages.enter(&mut store, origin, &["a"]);
+
+        assert_eq!(packages.scope_of(chain[0].symbol), Some(chain[0].scope));
+        assert_eq!(packages.scope_of(SymbolId::new(999)), None);
+    }
+
+    #[test]
     fn rolling_back_forgets_new_packages_and_undeclares_them_from_surviving_owners() {
         let (mut store, mut packages, origin) = setup();
         let kept = packages.enter(&mut store, origin, &["a"]);
@@ -288,5 +306,6 @@ mod tests {
         assert_eq!(packages.symbol(&["a", "b"]), None);
         assert!(store.scopes.get(kept[0].scope).lookup_all(&name).is_empty());
         assert_eq!(packages.len(), 1);
+        assert_eq!(packages.scope_of(added[1].symbol), None);
     }
 }
