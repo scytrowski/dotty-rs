@@ -67,14 +67,14 @@ found by name. Symbols have no `children` field.
 ### Names
 
 Name references — in AST payloads and inside composite name-table entries —
-are **zero-based** indexes into the name table in Scala 3.9.0 compiler output
+are zero-based indexes into the name table in Scala 3.9.0 compiler output
 (`<init>` is entry 14 and the signed constructor entry says `original: 14`;
-`java.lang.Object` is `Qualified { 17, 18 }` over entries 15/16/18). The
-unpickler reads names itself (`names.rs`). `TastyFile::render_name` uses a
-one-based convention and renders composite names such as package paths
-incorrectly for real files, so it is not used here. A signed name reads as
-its original name: overloads are distinguished by definition address, not by
-signature text.
+`java.lang.Object` is `Qualified { 17, 18 }` over entries 15/16/18), which is
+what `dotty-tasty`'s `NameRef` means (it was one-based until issue #9 was
+fixed). The unpickler reads names itself (`names.rs`) because it spells them
+differently from `TastyFile::render_name`: a signed name reads as its original
+name (overloads are distinguished by definition address, not by signature
+text), where `render_name` reports it as unsupported.
 
 ### Definition shape
 
@@ -266,7 +266,7 @@ Deliberately not supported yet:
 - reconciling the package registry with the classloader's own (Milestone 6, issue #5).
 
 Known issues in neighbouring crates that this work found: #9 (`render_name`
-one-based), #10 (qualified visibility, fixed by `Visibility::PrivateWithin` /
+one-based, fixed: `NameRef` is now zero-based), #10 (qualified visibility, fixed by `Visibility::PrivateWithin` /
 `ProtectedWithin` in `dotty-core`), #11 (`.tasty` loading misses `val` constructor parameters), #13
 (index payload of parameter nodes omits the name).
 

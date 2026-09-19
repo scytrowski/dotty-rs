@@ -17,11 +17,10 @@ const FOO: &[u8] = include_bytes!("fixtures/semantic/Foo.tasty");
 /// Resolves a wire name reference to its text.
 ///
 /// Name references in AST payloads *and* inside composite name entries are
-/// zero-based indexes into the name table in this compiler output (for
-/// example `<init>` is entry 14 and `Signed { original: 14, .. }` refers to
-/// it as 14). `TastyFile::render_name` is one-based and therefore resolves
-/// composite names against the wrong entries, so the fixture tests resolve
-/// them here instead of relying on it.
+/// zero-based indexes into the name table (for example `<init>` is entry 14
+/// and `Signed { original: 14, .. }` refers to it as 14). This reads only the
+/// entry kinds these tests need and panics on any other, which is stricter
+/// than `TastyFile::render_name`.
 fn name(file: &TastyFile<'_>, reference: u32) -> String {
     match file.names().entries().get(reference as usize) {
         Some(RawName::Utf8(text)) => text.clone(),
@@ -92,6 +91,45 @@ fn the_package_path_is_a_direct_package_reference() {
         name(&file, path_name),
         "me.cytrowski.tastyfixtures.semantic"
     );
+}
+
+/// Regression test for issue #9: `render_name` treated references as
+/// one-based, so a qualified package path was built from the wrong entries
+/// (`tastyfixtures.cytrowski.ASTs.me` instead of the package).
+#[test]
+fn render_name_renders_the_package_path_of_the_fixture() {
+    let file = TastyFile::parse_scala_3_9(FOO).unwrap();
+    let package = file
+        .asts()
+        .unwrap()
+        .iter()
+        .find(|node| node.tag == PACKAGE_TAG)
+        .expect("the fixture has a package node")
+        .decode_package()
+        .unwrap();
+    let path_name = package.path_name().expect("a TERMREFpkg path");
+
+    assert_eq!(
+        file.render_name(path_name).as_deref(),
+        Ok("me.cytrowski.tastyfixtures.semantic")
+    );
+}
+
+/// The constructor's name is entry 14, and the signed entry that follows it
+/// says `original: 14`.
+#[test]
+fn a_signed_name_refers_to_its_original_by_index() {
+    let file = TastyFile::parse_scala_3_9(FOO).unwrap();
+    let init = file
+        .names()
+        .find_utf8("<init>")
+        .expect("a constructor name");
+
+    assert_eq!(init, 14);
+    assert!(file.names().iter().any(|(_, entry)| matches!(
+        entry,
+        RawName::Signed { original, .. } if *original == init
+    )));
 }
 
 #[test]

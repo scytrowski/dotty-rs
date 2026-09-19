@@ -164,7 +164,9 @@ NameRef = Nat
 Utf8Ref = Nat
 ```
 
-A reference is the ordinal of an entry in the name table, numbered from `1`. In Rust, a `Vec<Name>` with an empty entry at index `0` is convenient and avoids repeatedly subtracting `1`.
+A reference is the zero-based index of an entry in the name table: `0` is the first entry, which in emitted files is the name of the `ASTs` section. The same holds for every place a name is referenced: AST payloads, composite name entries, section names and the `SOURCEFILE` attribute. In Rust a reference indexes a `Vec<Name>` directly.
+
+The Scala compiler's own format comment describes a `NameRef` as "starting from 1", but Scala 3.9.0 output is zero-based throughout (issue #9). Two things show it: a `SIGNED` entry's `original` names the entry just before the name it decorates (`<init>` is entry 14 and the signed constructor entry says `original: 14`), and read one-based, qualified names such as package paths are assembled from the wrong entries (`tastyfixtures.cytrowski.ASTs.me` instead of `me.cytrowski.tastyfixtures.semantic`). Every unit of the `scala3-library` corpus renders its qualified names without section names under the zero-based reading.
 
 ### 4.2. Name table entries
 
@@ -207,7 +209,7 @@ ParamSig < 0  =>  -ParamSig is the length of a type-parameter section
 ParamSig > 0  =>  ParamSig is a NameRef for a fully qualified term parameter name
 ```
 
-Zero is not a valid `ParamSig`, and the minimum `i32` value is invalid because
+Zero is not a valid `ParamSig` (entry `0` is the `ASTs` section name, never a parameter name), and the minimum `i32` value is invalid because
 its negation cannot represent the length of a type-parameter section.
 The Rust API keeps the raw `ParamSig` value for lossless encoding and exposes
 `interpret_param_sig()` as a typed view returning `ParamSigValue`.
@@ -260,7 +262,7 @@ Comments
 Attributes
 ```
 
-The section name is an index into the `NameTable`, not inline text. The Scala 3.9.0 compiler emits this section index as zero-based (`ASTs` is `0`, followed by the later standard-section names). This is distinct from the one-based `NameRef` convention used by names referenced from AST nodes and composite name entries. Unknown sections can be skipped using their length, provided that bounds are validated correctly.
+The section name is an index into the `NameTable`, not inline text. The Scala 3.9.0 compiler emits this section index as zero-based (`ASTs` is `0`, followed by the later standard-section names). It is the same convention as every other `NameRef`. Unknown sections can be skipped using their length, provided that bounds are validated correctly.
 
 There may be at most one section for each standard name (`ASTs`, `Positions`,
 `Comments`, and `Attributes`). Low-level parsing retains duplicate sections in
@@ -609,8 +611,8 @@ signature references.
 same operations directly against a parsed file's name table, without requiring
 callers to extract that table first.
 `NameTable::iter()` visits entries in wire order and pairs each borrowed raw
-entry with its one-based `NameRef`, which is safer for callers than deriving
-references from zero-based slice indexes.
+entry with its `NameRef` (the entry's index), so that callers need not derive
+references from slice indexes themselves.
 `RawName::visit_references()` exposes their dependency edges in wire order
 without requiring a temporary allocation.
 `NameTable::dependency_order()` follows those edges transitively and returns
@@ -1108,7 +1110,7 @@ available for future compiler components.
 - file-level validation and reference collection;
 - global AST address indexing and tag queries;
 - resolved position entries and source changes;
-- file-level name rendering and one-based name-table iteration;
+- file-level name rendering and name-table iteration;
 - ordering-preserving parent/child navigation for nested ASTs;
 - source-position joins and half-open source-range queries;
 - known-tag classification while preserving unknown category-five nodes;

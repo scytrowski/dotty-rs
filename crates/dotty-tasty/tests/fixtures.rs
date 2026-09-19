@@ -934,7 +934,7 @@ fn all_tasty_fixture_signed_names_have_typed_views() {
             {
                 signed_name_count += 1;
                 parameter_signature_count += parameter_signatures.len();
-                let reference = index as u32 + 1;
+                let reference = index as u32;
                 assert!(
                     name.signed_name().is_some(),
                     "fixture {} has a malformed typed signature at name {}",
@@ -976,7 +976,7 @@ fn all_tasty_fixtures_preserve_name_dependency_order() {
             .unwrap_or_else(|error| panic!("failed to decode {}: {error}", path.display()));
         let names = file.names();
 
-        for root in 1..=names.len() as u32 {
+        for root in 0..names.len() as u32 {
             let order = names.dependency_order(root).unwrap_or_else(|| {
                 panic!(
                     "fixture {} has no dependency order for name {}",

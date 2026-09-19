@@ -1,13 +1,15 @@
 //! Reading names out of a TASTy name table.
 //!
 //! In Scala 3.9.0 compiler output, name references — in AST payloads and
-//! inside composite name entries alike — are **zero-based** indexes into the
-//! name table. For instance the constructor name is entry 14 and the signed
-//! constructor entry says `original: 14`. `dotty-tasty`'s
-//! `TastyFile::render_name` follows a one-based convention instead, so it
-//! resolves composite names (such as qualified package names) against the
-//! wrong entries. This module therefore reads the table directly and does not
-//! go through `render_name`.
+//! inside composite name entries alike — are zero-based indexes into the name
+//! table, which is what `dotty-tasty`'s `NameRef` means. For instance the
+//! constructor name is entry 14 and the signed constructor entry says
+//! `original: 14`.
+//!
+//! This module reads the table itself instead of using
+//! `TastyFile::render_name` because it spells names differently: a signed name
+//! reads as its original name (`render_name` reports it as unsupported), and
+//! composite nesting is bounded.
 
 use dotty_tasty::tasty::{NameTable, RawName};
 
@@ -128,8 +130,8 @@ mod tests {
     use super::*;
 
     /// Entry 0 is a placeholder standing for the leading section name every
-    /// real table has, so that references in these tables start at 1 and stay
-    /// valid under `dotty-tasty`'s own table validation.
+    /// real table has (`ASTs`), so that the references in these tables match
+    /// the positions they have in a real file.
     fn table(entries: Vec<RawName>) -> NameTable {
         let mut all = vec![RawName::Utf8("ASTs".to_owned())];
         all.extend(entries);
@@ -364,14 +366,21 @@ mod tests {
     }
 
     #[test]
-    fn a_self_referencing_name_stops_at_the_depth_limit() {
-        // Built directly: zero-based self-reference (entry 1 refers to 1)
-        // passes the one-based validation of `dotty-tasty`.
-        let names = table(vec![RawName::ObjectClass { underlying: 1 }]);
+    fn a_name_nested_deeper_than_the_depth_limit_is_rejected() {
+        // `dotty-tasty` rejects a cyclic table, but a long acyclic chain is a
+        // valid table that no real name is deep enough to need.
+        let mut entries = vec![utf8("Base")];
+        for depth in 0..MAX_NAME_DEPTH + 10 {
+            entries.push(RawName::ObjectClass {
+                underlying: depth as u32 + 1,
+            });
+        }
+        let top = entries.len() as u32;
+        let names = table(entries);
 
         assert_eq!(
-            wire_name(&names, 1),
-            Err(UnpickleError::InvalidNameReference { reference: 1 })
+            wire_name(&names, top),
+            Err(UnpickleError::InvalidNameReference { reference: top })
         );
     }
 
