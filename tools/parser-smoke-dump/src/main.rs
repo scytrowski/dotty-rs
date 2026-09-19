@@ -100,7 +100,7 @@ fn render_tree(
     }
     if let TreeKind::Super(super_tree) = &tree.kind
         && let Some(mix) = super_tree.mix
-        && let Some(span) = find_name_span(tree, names.resolve(mix.text()), source)
+        && let Some(span) = find_mix_span(tree, names.resolve(mix.text()), source)
     {
         rendered_children.push(render_synthetic_ident(names.resolve(mix.text()), span));
     }
@@ -211,6 +211,22 @@ fn find_this_qualifier_span(tree: &Tree<Untyped>, name: &str, source: &str) -> O
         end += 1;
     }
     Some((start, end))
+}
+
+fn find_mix_span(tree: &Tree<Untyped>, name: &str, source: &str) -> Option<(u32, u32)> {
+    let position = tree.position?;
+    let range = position.span().range();
+    let start = range.start() as usize;
+    let end = range.end() as usize;
+    let text = source.get(start..end)?;
+    let left_bracket = text.find('[')?;
+    let right_bracket = text[left_bracket + 1..].find(']')? + left_bracket + 1;
+    let mix_start = start.checked_add(left_bracket + 1)?;
+    let mix_end = start.checked_add(right_bracket)?;
+    let offset = source.get(mix_start..mix_end)?.find(name)?;
+    let name_start = mix_start.checked_add(offset)?;
+    let name_end = name_start.checked_add(name.len())?;
+    Some((name_start as u32, name_end as u32))
 }
 
 fn render_synthetic_ident(name: &str, span: (u32, u32)) -> String {
