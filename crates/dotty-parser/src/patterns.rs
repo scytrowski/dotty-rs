@@ -477,3 +477,155 @@ fn can_start_simple_pattern<S: TokenSource>(parser: &mut Parser<'_, '_, S>) -> b
             && parser.current_text().ok() == Some("-")
             && is_numeric_literal(parser.cursor.lookahead(1).kind))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::ast::{Alternative, Apply, Bind, Ident, Tuple, UntypedNode};
+    use dotty_core::{NameInterner, Punctuation, TextRange};
+
+    #[test]
+    fn parses_an_identifier_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Ident(Ident { .. })
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_a_wildcard_pattern_as_the_source_name() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "_",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::Ident(identifier) = result.ast.get(result.root).kind else {
+            panic!("expected wildcard identifier");
+        };
+        assert_eq!(names.resolve(identifier.name.text()), "_");
+    }
+
+    #[test]
+    fn parses_parenthesized_and_tuple_patterns_recursively() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "(a, b)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple { ref elements }))
+                if elements.len() == 2
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_extractor_patterns_as_source_level_apply_trees() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(x)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Apply(Apply { ref args, .. }) if args.len() == 1
+        ));
+        assert!(!matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::UnApply(_)
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_binder_and_preserves_its_body() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x @ Foo(y)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::Bind(Bind { name, body }) = result.ast.get(result.root).kind else {
+            panic!("expected bind pattern");
+        };
+        assert_eq!(names.resolve(name.text()), "x");
+        assert!(matches!(result.ast.get(body).kind, TreeKind::Apply(_)));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_alternatives_above_infix_patterns() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a | b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(Alternative { ref alternatives })
+                if alternatives.len() == 2
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+}
