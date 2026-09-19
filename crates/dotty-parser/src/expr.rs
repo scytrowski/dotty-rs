@@ -1,6 +1,10 @@
 use dotty_core::ast::New;
-use dotty_core::ast::{Apply, ApplyKind, Ident, Parens, Select, Super, This, Tuple, UntypedNode};
-use dotty_core::{Constant, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::ast::{
+    Apply, ApplyKind, Block, Ident, Parens, Select, Super, This, Tuple, UntypedNode,
+};
+use dotty_core::{
+    Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+};
 
 use crate::Parser;
 
@@ -64,8 +68,78 @@ where
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
+            TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
             _ => self.unexpected_expression(),
         }
+    }
+
+    fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let mut trees = Vec::new();
+        self.consume_block_separators();
+
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            trees.push(self.simple_expr());
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing a block",
+                );
+                let recovery_checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(recovery_checkpoint) {
+                    break;
+                }
+            }
+
+            if is_block_separator(self.current().kind) {
+                self.consume_block_separators();
+            } else if !matches!(
+                self.current().kind,
+                TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+            ) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "expected a block statement separator",
+                );
+                self.recover_until(crate::RecoverySet::Statement);
+                self.consume_block_separators();
+            }
+        }
+
+        let expr = match trees.pop() {
+            Some(expr) => expr,
+            None => self.synthetic_unit(),
+        };
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `}` to close block",
+            );
+        }
+        self.alloc_from(mark, TreeKind::Block(Block { stats: trees, expr }))
+    }
+
+    fn consume_block_separators(&mut self) {
+        while is_block_separator(self.current().kind) {
+            self.advance();
+        }
+    }
+
+    fn synthetic_unit(&mut self) -> TreeId<Untyped> {
+        let start = self.current().span.start();
+        let range = TextRange::new(start, start).expect("zero-width synthetic unit range");
+        self.alloc(
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Unit,
+            }),
+            Some(SourceSpan::new(self.source_id, Span::without_point(range))),
+        )
     }
 
     fn parse_qualified_super(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -324,6 +398,17 @@ where
         }
         self.error_expr(position)
     }
+}
+
+const fn is_block_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Punctuation(Punctuation::Semicolon)
+            | TokenKind::Indent
+            | TokenKind::Outdent
+    )
 }
 
 #[cfg(test)]
@@ -778,6 +863,128 @@ mod tests {
             panic!("expected new tree");
         };
         assert!(matches!(parser.ast().get(tpt).kind, TreeKind::TypeApply(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_empty_block_as_a_unit_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{}",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(id).kind else {
+            panic!("expected block tree");
+        };
+
+        assert!(stats.is_empty());
+        assert!(matches!(
+            parser.ast().get(expr).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Unit
+            })
+        ));
+        assert_eq!(
+            parser.ast().get(expr).position.unwrap().span().range(),
+            TextRange::new(1, 1).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 2).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_block_with_one_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ x }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(id).kind else {
+            panic!("expected block tree");
+        };
+
+        assert!(stats.is_empty());
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_block_statements_and_keeps_the_last_as_expr() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ x; y }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(id).kind else {
+            panic!("expected block tree");
+        };
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_multiline_block_statements() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{\n x\n y\n}",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(id).kind else {
+            panic!("expected block tree");
+        };
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
         assert!(parser.diagnostics().is_empty());
     }
 
