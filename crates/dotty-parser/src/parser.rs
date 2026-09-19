@@ -6,6 +6,7 @@ use dotty_core::{
 use dotty_core::ScannerEvent;
 use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
 
+use crate::ParserFeatures;
 use crate::{
     Cursor, KnownNames, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic,
     ParseDiagnosticKind, ParseKind, RecoverySet,
@@ -87,6 +88,17 @@ where
     /// Returns parser-known soft keyword names.
     pub const fn known_names(&self) -> &KnownNames {
         &self.known_names
+    }
+
+    /// Returns the dialect/feature policy for future contextual grammar.
+    pub const fn features(&self) -> &ParserFeatures {
+        &self.context.features
+    }
+
+    /// Configures feature-dependent grammar without changing tokenization.
+    pub fn with_features(mut self, features: ParserFeatures) -> Self {
+        self.context.features = features;
+        self
     }
 
     /// Checks the current source spelling against a parser-known name.
@@ -206,13 +218,12 @@ where
     /// Consumes input until a synchronization token or EOF is reached.
     pub fn recover_until(&mut self, set: RecoverySet) {
         while !set.contains(self.current().kind) {
-            let before = self.current() as *const Token;
+            let checkpoint = self.cursor.checkpoint();
             self.advance();
-            let after = self.current() as *const Token;
 
             // A broken TokenSource may fail to advance. Returning here keeps
             // malformed external input from turning recovery into a hang.
-            if std::ptr::eq(before, after) {
+            if !self.cursor.progressed_since(checkpoint) {
                 return;
             }
         }
@@ -347,6 +358,10 @@ mod tests {
             &self.token
         }
 
+        fn position(&self) -> usize {
+            0
+        }
+
         fn advance(&mut self) {}
 
         fn lookahead(&mut self, _n: usize) -> &Token {
@@ -359,6 +374,10 @@ mod tests {
     impl TokenSource for SequenceTokenSource {
         fn current(&self) -> &Token {
             &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
         }
 
         fn advance(&mut self) {
@@ -381,6 +400,10 @@ mod tests {
     impl TokenSource for RecordingTokenSource {
         fn current(&self) -> &Token {
             &self.token
+        }
+
+        fn position(&self) -> usize {
+            0
         }
 
         fn advance(&mut self) {}
@@ -502,6 +525,26 @@ mod tests {
         let expected = parser.known_names().using;
 
         assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert!(
+            parser
+                .current_is_known_name(expected)
+                .expect("valid token span")
+        );
+    }
+
+    #[test]
+    fn feature_dependent_names_remain_identifiers_until_grammar_uses_policy() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("into", TextRange::new(0, 4).unwrap(), &mut names)
+            .with_features(ParserFeatures {
+                capture_checking: false,
+                erased_definitions: false,
+                into: true,
+            });
+        let expected = parser.known_names().into;
+
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert!(parser.features().into);
         assert!(
             parser
                 .current_is_known_name(expected)

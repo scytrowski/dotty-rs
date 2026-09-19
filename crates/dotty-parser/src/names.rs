@@ -16,6 +16,14 @@ pub struct KnownNames {
     pub open: TermName,
     pub transparent: TermName,
     pub using: TermName,
+    /// Feature-dependent contextual name; its syntax is controlled by
+    /// [`crate::ParserFeatures::into`].
+    pub into: TermName,
+    /// Feature-dependent contextual name; its syntax is controlled by
+    /// [`crate::ParserFeatures::erased_definitions`].
+    pub erased: TermName,
+    /// Name reserved for future capture-checking grammar.
+    pub tracked: TermName,
 }
 
 impl KnownNames {
@@ -31,6 +39,9 @@ impl KnownNames {
             open: term_name(names, "open"),
             transparent: term_name(names, "transparent"),
             using: term_name(names, "using"),
+            into: term_name(names, "into"),
+            erased: term_name(names, "erased"),
+            tracked: term_name(names, "tracked"),
         }
     }
 }
@@ -57,6 +68,9 @@ mod tests {
             (known.open, "open"),
             (known.transparent, "transparent"),
             (known.using, "using"),
+            (known.into, "into"),
+            (known.erased, "erased"),
+            (known.tracked, "tracked"),
         ];
 
         for (name, expected) in entries {
