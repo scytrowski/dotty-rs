@@ -1,5 +1,5 @@
 use dotty_core::ast::{Literal, NumberKind, NumberLiteral, UntypedNode};
-use dotty_core::{Constant, TextRange, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{Constant, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
 
@@ -19,13 +19,12 @@ where
 
     pub(crate) fn parse_negative_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let token_kind = self.current().kind;
-        let range = TextRange::new(mark.start(), self.current().span.end())
-            .expect("negative literal span endpoints are ordered");
-        let spelling = match self.source.slice(range) {
+        let token_spelling = match self.current_text() {
             Ok(spelling) => spelling,
             Err(_) => return self.unexpected_expression(),
         };
-        self.parse_number_with_spelling(mark, token_kind, spelling)
+        let spelling = format!("-{token_spelling}");
+        self.parse_number_with_spelling(mark, token_kind, &spelling)
     }
 
     fn parse_number_with_spelling(

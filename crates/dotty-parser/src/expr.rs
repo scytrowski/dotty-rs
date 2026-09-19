@@ -1146,6 +1146,81 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_spaced_negated_long_literal() {
+        let mut names = NameInterner::new();
+        let source = "- 1L";
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::LongLiteral, 2, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(value)
+            }) if value == -1
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_a_spaced_negated_float_literal() {
+        let mut names = NameInterner::new();
+        let source = "- 1.0f";
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::FloatLiteral, 2, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Float(value)
+            }) if value == -1.0
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_a_spaced_negated_double_literal() {
+        let mut names = NameInterner::new();
+        let source = "- 1.0d";
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::DoubleLiteral, 2, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.postfix_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Double(value)
+            }) if value == -1.0
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_simple_infix_expression() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
