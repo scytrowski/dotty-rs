@@ -832,21 +832,14 @@ fn resolve_applied_type_name(
     resolve_parent_name(file, &tycon, package)
 }
 
-/// Reads a raw AST name-table reference directly rather than through
-/// [`TastyFile::render_name`]: AST fields such as [`RawTree::name_refs`]
-/// and a definition's own `name()` are zero-based direct indices into
-/// the wire name table, not the one-based [`dotty_tasty::tasty::NameRef`]
-/// convention `render_name`/`NameTable::get` expect (matching how
-/// `dotty-tasty`'s own fixture tests read these same fields). Returns
-/// `None` for anything other than a direct UTF-8 entry (a signature- or
-/// symbol-shaped name-table entry, which this decoder does not need to
+/// Reads a raw AST name-table reference: AST fields such as
+/// [`RawTree::name_refs`] and a definition's own `name()` are
+/// [`dotty_tasty::tasty::NameRef`]s, zero-based indexes into the name table.
+/// Returns `None` for anything other than a direct UTF-8 entry (a signature-
+/// or symbol-shaped name-table entry, which this decoder does not need to
 /// render).
 fn wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
-    file.names()
-        .entries()
-        .get(reference as usize)
-        .and_then(RawName::as_utf8)
-        .map(str::to_owned)
+    file.names().get_utf8(reference).map(str::to_owned)
 }
 
 #[cfg(test)]

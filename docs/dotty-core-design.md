@@ -1344,7 +1344,7 @@ pub struct TypingContext<'a> {
 This is the part that most needs to be explicit, since it's where the design
 touches code that already exists.
 
-- **`dotty-tasty`** keeps its own `NameRef` (a one-based wire-table index)
+- **`dotty-tasty`** keeps its own `NameRef` (a zero-based wire-table index)
   and `SignedName`/`NameSignature` types exactly as they are. These are wire
   concepts — they describe *where a name's bytes live in a `.tasty` file*,
   not what the name means. A future TASTy semantic adapter, living in the

@@ -714,7 +714,7 @@ impl<'a> Section<'a> {
 
     /// Resolves this section's zero-based name index to a standard section.
     pub fn standard_kind(&self, names: &crate::name_table::NameTable) -> Option<StandardSection> {
-        let name = match names.get_zero_based(self.name)? {
+        let name = match names.get(self.name)? {
             crate::name_table::RawName::Utf8(name) => name.as_str(),
             _ => return None,
         };
@@ -1080,9 +1080,8 @@ impl<'a> SectionTable<'a> {
         while !reader.is_at_end() {
             let name_offset = reader.position();
             let name = reader.read_nat()?;
-            // Section names are encoded as zero-based indexes in emitted
-            // Scala 3.9.0 files. This differs from the one-based NameRef
-            // convention used by names referenced from AST nodes.
+            // Like every other name reference in emitted Scala 3.9.0 files,
+            // a section name is the zero-based index of a name-table entry.
             if name as usize >= name_count {
                 return Err(SectionError::InvalidNameReference {
                     reference: name,

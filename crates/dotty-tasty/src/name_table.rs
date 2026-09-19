@@ -133,7 +133,8 @@ pub enum RawNameKind {
 
 /// Lossless name-table entry.
 ///
-/// References use the TASTy one-based [`NameRef`] convention. Unknown entries
+/// References are [`NameRef`]s: the zero-based index of an entry in the name
+/// table, as in Scala 3.9.0 compiler output. Unknown entries
 /// retain their tag and bounded payload for forward-compatible round-trips.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawName {
@@ -225,7 +226,7 @@ pub enum RawName {
     },
 }
 
-/// Decoded one-based TASTy name table.
+/// Decoded TASTy name table. A [`NameRef`] is the zero-based index of an entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTable {
     entries: Vec<RawName>,
@@ -244,7 +245,7 @@ pub enum NameTableError {
     Read(ReadError),
     /// A composite entry references a missing name.
     InvalidReference {
-        /// Invalid one-based reference.
+        /// Invalid reference.
         reference: NameRef,
         /// Zero-based entry containing the reference.
         entry_index: usize,
@@ -277,7 +278,7 @@ pub enum NameTableError {
         /// Number of unconsumed payload bytes.
         remaining: usize,
     },
-    /// The table exceeded the one-based `NameRef` range.
+    /// The table exceeded the `NameRef` range.
     EntryOverflow {
         /// Number of entries already present.
         entry_count: usize,
@@ -314,7 +315,7 @@ impl fmt::Display for NameTableError {
             ),
             Self::EntryOverflow { entry_count } => write!(
                 formatter,
-                "cannot assign a 1-based NameRef after {entry_count} name entries"
+                "cannot assign a NameRef after {entry_count} name entries"
             ),
         }
     }
@@ -331,7 +332,7 @@ impl From<ReadError> for NameTableError {
 /// Errors returned when rendering a name reference as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameRenderError {
-    /// The requested one-based reference does not exist.
+    /// The requested reference does not exist.
     InvalidReference {
         /// Missing name reference.
         reference: NameRef,
@@ -417,11 +418,9 @@ impl NameTable {
         self.entries.is_empty()
     }
 
-    /// Resolves a one-based name reference.
+    /// Resolves a name reference, the zero-based index of an entry.
     pub fn get(&self, reference: NameRef) -> Option<&RawName> {
-        reference
-            .checked_sub(1)
-            .and_then(|index| self.entries.get(index as usize))
+        self.entries.get(reference as usize)
     }
 
     /// Returns the UTF-8 text stored directly at a name-table reference.
@@ -433,7 +432,7 @@ impl NameTable {
         self.get(reference).and_then(RawName::as_utf8)
     }
 
-    /// Returns the first one-based [`NameRef`] whose entry stores `value`
+    /// Returns the first [`NameRef`] whose entry stores `value`
     /// directly as UTF-8.
     ///
     /// Composite names are deliberately not matched by their rendered form.
@@ -443,7 +442,7 @@ impl NameTable {
         self.entries
             .iter()
             .position(|entry| entry.as_utf8() == Some(value))
-            .and_then(|index| NameRef::try_from(index + 1).ok())
+            .and_then(|index| NameRef::try_from(index).ok())
     }
 
     /// Returns the root name and all of its transitive dependencies in
@@ -456,7 +455,7 @@ impl NameTable {
     /// Traversal is iterative so a valid but deeply chained name table cannot
     /// overflow the process stack.
     pub fn dependency_order(&self, reference: NameRef) -> Option<Vec<NameRef>> {
-        let root = reference.checked_sub(1)? as usize;
+        let root = reference as usize;
         self.entries.get(root)?;
 
         let mut visited = vec![false; self.entries.len()];
@@ -464,7 +463,7 @@ impl NameTable {
         let mut stack = vec![(reference, false)];
 
         while let Some((current, expanded)) = stack.pop() {
-            let index = (current - 1) as usize;
+            let index = current as usize;
             if expanded {
                 order.push(current);
                 continue;
@@ -479,7 +478,7 @@ impl NameTable {
             let mut references = Vec::new();
             self.entries[index].visit_references(&mut |dependency| references.push(dependency));
             for dependency in references.into_iter().rev() {
-                let dependency_index = (dependency - 1) as usize;
+                let dependency_index = dependency as usize;
                 if !visited[dependency_index] {
                     stack.push((dependency, false));
                 }
@@ -505,9 +504,8 @@ impl NameTable {
         reference: NameRef,
         include_signature_entries: bool,
     ) -> Result<String, NameRenderError> {
-        let root_index = reference
-            .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
+        let root_index = usize::try_from(reference)
+            .ok()
             .filter(|index| *index < self.entries.len())
             .ok_or(NameRenderError::InvalidReference { reference })?;
         let order = self
@@ -516,7 +514,7 @@ impl NameTable {
         let mut rendered = vec![None; self.entries.len()];
 
         for current in order {
-            let index = (current - 1) as usize;
+            let index = current as usize;
             let kind = self.entries[index].kind();
             let value = match &self.entries[index] {
                 RawName::Utf8(value) => value.clone(),
@@ -679,27 +677,22 @@ impl NameTable {
         })
     }
 
-    pub(crate) fn get_zero_based(&self, index: NameRef) -> Option<&RawName> {
-        self.entries.get(index as usize)
-    }
-
     /// Returns the number of entries in wire order.
     pub fn entries(&self) -> &[RawName] {
         &self.entries
     }
 
-    /// Iterates over name entries together with their one-based references.
+    /// Iterates over name entries together with their references.
     ///
-    /// The order is the original wire order. This avoids requiring callers
-    /// to derive a `NameRef` from a zero-based slice index themselves.
+    /// The order is the original wire order, and a reference is the entry's
+    /// index in it.
     pub fn iter(&self) -> impl Iterator<Item = (NameRef, &RawName)> {
         self.entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                index
-                    .checked_add(1)
-                    .and_then(|value| NameRef::try_from(value).ok())
+                NameRef::try_from(index)
+                    .ok()
                     .map(|reference| (reference, entry))
             })
     }
@@ -808,7 +801,7 @@ impl NameTable {
 
             let references = entry.references();
             for reference in references {
-                if reference == 0 || reference as usize > self.entries.len() {
+                if reference as usize >= self.entries.len() {
                     return Err(NameTableError::InvalidReference {
                         reference,
                         entry_index,
@@ -837,10 +830,8 @@ fn rendered_dependency(
     owner: NameRef,
     owner_kind: RawNameKind,
 ) -> Result<String, NameRenderError> {
-    let index = reference
-        .checked_sub(1)
-        .and_then(|index| usize::try_from(index).ok())
-        .ok_or(NameRenderError::InvalidReference { reference })?;
+    let index =
+        usize::try_from(reference).map_err(|_| NameRenderError::InvalidReference { reference })?;
     rendered
         .get(index)
         .and_then(Clone::clone)
@@ -908,7 +899,7 @@ fn detect_name_cycle(entries: &[RawName], entry_index: usize, states: &mut [u8])
             continue;
         }
 
-        let target_index = (references[*next_reference] - 1) as usize;
+        let target_index = references[*next_reference] as usize;
         *next_reference += 1;
         match states[target_index] {
             0 => {
@@ -934,7 +925,7 @@ impl NameTableBuilder {
         Self::default()
     }
 
-    /// Interns an entry and returns its one-based reference.
+    /// Interns an entry and returns its reference, the entry's index.
     ///
     /// An entry equal to an existing entry reuses that entry's reference.
     pub fn intern(&mut self, entry: RawName) -> Result<NameRef, NameTableError> {
@@ -943,16 +934,15 @@ impl NameTableBuilder {
             .iter()
             .position(|candidate| candidate == &entry)
         {
-            return NameRef::try_from(index + 1).map_err(|_| NameTableError::EntryOverflow {
+            return NameRef::try_from(index).map_err(|_| NameTableError::EntryOverflow {
                 entry_count: self.entries.len(),
             });
         }
 
-        let reference = NameRef::try_from(self.entries.len() + 1).map_err(|_| {
-            NameTableError::EntryOverflow {
+        let reference =
+            NameRef::try_from(self.entries.len()).map_err(|_| NameTableError::EntryOverflow {
                 entry_count: self.entries.len(),
-            }
-        })?;
+            })?;
         self.entries.push(entry);
         Ok(reference)
     }
@@ -1310,7 +1300,7 @@ mod tests {
 
         let names = NameTable::decode(&mut reader).unwrap();
 
-        assert_eq!(names.get_utf8(1), Some("zażółć"));
+        assert_eq!(names.get_utf8(0), Some("zażółć"));
         assert_eq!(reader.position(), 13);
         assert_eq!(reader.read_u8().unwrap(), 0xa5);
         assert!(reader.is_at_end());
@@ -1585,15 +1575,15 @@ mod tests {
             RawName::Utf8("result".to_owned()),
             RawName::Utf8("parameter".to_owned()),
             RawName::Signed {
-                original: 1,
-                result_signature: 2,
-                parameter_signatures: vec![-2, 3],
+                original: 0,
+                result_signature: 1,
+                parameter_signatures: vec![-2, 2],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render_signed_name(4),
+            table.render_signed_name(3),
             Ok(Some(RenderedSignedName::Signed {
                 original: "method".to_owned(),
                 signature: RenderedNameSignature {
@@ -1614,16 +1604,16 @@ mod tests {
             RawName::Utf8("target".to_owned()),
             RawName::Utf8("result".to_owned()),
             RawName::TargetSigned {
-                original: 1,
-                target: 2,
-                result_signature: 3,
+                original: 0,
+                target: 1,
+                result_signature: 2,
                 parameter_signatures: vec![],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render_signed_name(4),
+            table.render_signed_name(3),
             Ok(Some(RenderedSignedName::TargetSigned {
                 original: "method".to_owned(),
                 target: "target".to_owned(),
@@ -1641,20 +1631,20 @@ mod tests {
             RawName::Utf8("method".to_owned()),
             RawName::Utf8("result".to_owned()),
             RawName::Signed {
-                original: 1,
-                result_signature: 2,
+                original: 0,
+                result_signature: 1,
                 parameter_signatures: vec![],
             },
             RawName::Signed {
-                original: 3,
-                result_signature: 2,
+                original: 2,
+                result_signature: 1,
                 parameter_signatures: vec![],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render_signed_name(4),
+            table.render_signed_name(3),
             Ok(Some(RenderedSignedName::Signed {
                 original: "method[with sig result()]".to_owned(),
                 signature: RenderedNameSignature {
@@ -1672,21 +1662,21 @@ mod tests {
             RawName::Utf8("target".to_owned()),
             RawName::Utf8("result".to_owned()),
             RawName::Signed {
-                original: 1,
-                result_signature: 3,
+                original: 0,
+                result_signature: 2,
                 parameter_signatures: vec![],
             },
             RawName::TargetSigned {
-                original: 1,
-                target: 4,
-                result_signature: 3,
+                original: 0,
+                target: 3,
+                result_signature: 2,
                 parameter_signatures: vec![],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render_signed_name(5),
+            table.render_signed_name(4),
             Ok(Some(RenderedSignedName::TargetSigned {
                 original: "method".to_owned(),
                 target: "method[with sig result()]".to_owned(),
@@ -1706,12 +1696,12 @@ mod tests {
             RawName::Utf8("result".to_owned()),
         ];
 
-        let mut root = 1;
+        let mut root = 0;
         for _ in 0..depth {
-            let reference = entries.len() as u32 + 1;
+            let reference = entries.len() as u32;
             entries.push(RawName::Signed {
                 original: root,
-                result_signature: 2,
+                result_signature: 1,
                 parameter_signatures: vec![],
             });
             root = reference;
@@ -1730,14 +1720,14 @@ mod tests {
     fn returns_no_rendered_signature_for_a_non_signature_name() {
         let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
 
-        assert_eq!(table.render_signed_name(1), Ok(None));
+        assert_eq!(table.render_signed_name(0), Ok(None));
     }
 
     #[test]
     fn renders_a_direct_utf8_name() {
         let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
 
-        assert_eq!(table.render(1), Ok("name".to_owned()));
+        assert_eq!(table.render(0), Ok("name".to_owned()));
     }
 
     #[test]
@@ -1746,13 +1736,13 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
             RawName::Qualified {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(3), Ok("owner.member".to_owned()));
+        assert_eq!(table.render(2), Ok("owner.member".to_owned()));
     }
 
     #[test]
@@ -1761,13 +1751,13 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
             RawName::Expanded {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(3), Ok("owner$$member".to_owned()));
+        assert_eq!(table.render(2), Ok("owner$$member".to_owned()));
     }
 
     #[test]
@@ -1776,13 +1766,13 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
             RawName::ExpandPrefix {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(3), Ok("owner$member".to_owned()));
+        assert_eq!(table.render(2), Ok("owner$member".to_owned()));
     }
 
     #[test]
@@ -1791,14 +1781,14 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("$".to_owned()),
             RawName::Unique {
-                separator: 2,
+                separator: 1,
                 uniqid: 7,
-                underlying: Some(1),
+                underlying: Some(0),
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(3), Ok("owner$7".to_owned()));
+        assert_eq!(table.render(2), Ok("owner$7".to_owned()));
     }
 
     #[test]
@@ -1806,14 +1796,14 @@ mod tests {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("$".to_owned()),
             RawName::Unique {
-                separator: 1,
+                separator: 0,
                 uniqid: 7,
                 underlying: None,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("$7$".to_owned()));
+        assert_eq!(table.render(1), Ok("$7$".to_owned()));
     }
 
     #[test]
@@ -1821,57 +1811,57 @@ mod tests {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
             RawName::DefaultGetter {
-                underlying: 1,
+                underlying: 0,
                 index: 0,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("method$default$1".to_owned()));
+        assert_eq!(table.render(1), Ok("method$default$1".to_owned()));
     }
 
     #[test]
     fn renders_a_super_accessor_name() {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
-            RawName::SuperAccessor { underlying: 1 },
+            RawName::SuperAccessor { underlying: 0 },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("super$method".to_owned()));
+        assert_eq!(table.render(1), Ok("super$method".to_owned()));
     }
 
     #[test]
     fn renders_an_inline_accessor_name() {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
-            RawName::InlineAccessor { underlying: 1 },
+            RawName::InlineAccessor { underlying: 0 },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("inline$method".to_owned()));
+        assert_eq!(table.render(1), Ok("inline$method".to_owned()));
     }
 
     #[test]
     fn renders_a_body_retainer_name() {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
-            RawName::BodyRetainer { underlying: 1 },
+            RawName::BodyRetainer { underlying: 0 },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("method$retainedBody".to_owned()));
+        assert_eq!(table.render(1), Ok("method$retainedBody".to_owned()));
     }
 
     #[test]
     fn renders_an_object_class_name() {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("module".to_owned()),
-            RawName::ObjectClass { underlying: 1 },
+            RawName::ObjectClass { underlying: 0 },
         ])
         .unwrap();
 
-        assert_eq!(table.render(2), Ok("module$".to_owned()));
+        assert_eq!(table.render(1), Ok("module$".to_owned()));
     }
 
     #[test]
@@ -1879,17 +1869,17 @@ mod tests {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
             RawName::Signed {
-                original: 1,
-                result_signature: 1,
+                original: 0,
+                result_signature: 0,
                 parameter_signatures: vec![],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render(2),
+            table.render(1),
             Err(NameRenderError::Unsupported {
-                reference: 2,
+                reference: 1,
                 kind: RawNameKind::Signed,
             })
         );
@@ -1900,18 +1890,18 @@ mod tests {
         let table = NameTable::from_entries(vec![
             RawName::Utf8("method".to_owned()),
             RawName::TargetSigned {
-                original: 1,
-                target: 1,
-                result_signature: 1,
+                original: 0,
+                target: 0,
+                result_signature: 0,
                 parameter_signatures: vec![],
             },
         ])
         .unwrap();
 
         assert_eq!(
-            table.render(2),
+            table.render(1),
             Err(NameRenderError::Unsupported {
-                reference: 2,
+                reference: 1,
                 kind: RawNameKind::TargetSigned,
             })
         );
@@ -1926,9 +1916,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            table.render(1),
+            table.render(0),
             Err(NameRenderError::Unsupported {
-                reference: 1,
+                reference: 0,
                 kind: RawNameKind::Unknown,
             })
         );
@@ -1939,21 +1929,22 @@ mod tests {
         let table = NameTable::from_entries(vec![RawName::Utf8("name".to_owned())]).unwrap();
 
         assert_eq!(
-            table.render(0),
-            Err(NameRenderError::InvalidReference { reference: 0 })
+            table.render(1),
+            Err(NameRenderError::InvalidReference { reference: 1 })
         );
     }
 
     #[test]
     fn rejects_a_reference_outside_the_name_table() {
-        // name table length = 4, entry = QUALIFIED with refs 1 and 2
-        let bytes = [0x84, 0x02, 0x82, 0x81, 0x82];
+        // name table length = 4, entry = QUALIFIED with refs 0 and 1, in a
+        // table of one entry
+        let bytes = [0x84, 0x02, 0x82, 0x80, 0x81];
         let mut reader = Reader::new(&bytes);
 
         assert_eq!(
             NameTable::decode(&mut reader),
             Err(NameTableError::InvalidReference {
-                reference: 2,
+                reference: 1,
                 entry_index: 0,
                 entry_count: 1,
             })
@@ -1988,31 +1979,31 @@ mod tests {
     #[test]
     fn rejects_a_truncated_qualified_name_payload() {
         assert_rejects_truncated_entry(RawName::Qualified {
-            prefix: 1,
-            selector: 2,
+            prefix: 0,
+            selector: 1,
         });
     }
 
     #[test]
     fn rejects_a_truncated_expanded_name_payload() {
         assert_rejects_truncated_entry(RawName::Expanded {
-            prefix: 1,
-            selector: 2,
+            prefix: 0,
+            selector: 1,
         });
     }
 
     #[test]
     fn rejects_a_truncated_expand_prefix_name_payload() {
         assert_rejects_truncated_entry(RawName::ExpandPrefix {
-            prefix: 1,
-            selector: 2,
+            prefix: 0,
+            selector: 1,
         });
     }
 
     #[test]
     fn rejects_a_truncated_unique_name_payload() {
         assert_rejects_truncated_entry(RawName::Unique {
-            separator: 2,
+            separator: 1,
             uniqid: 7,
             underlying: None,
         });
@@ -2049,19 +2040,19 @@ mod tests {
     #[test]
     fn rejects_a_truncated_signed_name_payload() {
         assert_rejects_truncated_entry(RawName::Signed {
-            original: 1,
-            result_signature: 1,
-            parameter_signatures: vec![2],
+            original: 0,
+            result_signature: 0,
+            parameter_signatures: vec![1],
         });
     }
 
     #[test]
     fn rejects_a_truncated_target_signed_name_payload() {
         assert_rejects_truncated_entry(RawName::TargetSigned {
-            original: 1,
-            target: 1,
-            result_signature: 1,
-            parameter_signatures: vec![2],
+            original: 0,
+            target: 0,
+            result_signature: 0,
+            parameter_signatures: vec![1],
         });
     }
 
@@ -2092,18 +2083,18 @@ mod tests {
         let names = NameTable::from_entries(vec![
             RawName::Utf8("owner".to_owned()),
             RawName::Qualified {
-                prefix: 1,
-                selector: 1,
+                prefix: 0,
+                selector: 0,
             },
         ])
         .unwrap();
 
         assert_eq!(names.len(), 2);
-        assert_eq!(names.get(2), Some(&names.entries()[1]));
+        assert_eq!(names.get(1), Some(&names.entries()[1]));
     }
 
     #[test]
-    fn iterates_name_entries_with_one_based_references() {
+    fn iterates_name_entries_with_their_indexes_as_references() {
         let names = NameTable::from_entries(vec![
             RawName::Utf8("foo".to_owned()),
             RawName::Utf8("bar".to_owned()),
@@ -2115,7 +2106,7 @@ mod tests {
                 .iter()
                 .map(|(reference, entry)| (reference, entry.as_utf8().unwrap()))
                 .collect::<Vec<_>>(),
-            vec![(1, "foo"), (2, "bar")]
+            vec![(0, "foo"), (1, "bar")]
         );
     }
 
@@ -2130,9 +2121,9 @@ mod tests {
     fn resolves_direct_utf8_name_references() {
         let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
 
-        assert_eq!(table.get_utf8(1), Some("member"));
-        assert_eq!(table.get_utf8(0), None);
-        assert_eq!(table.get_utf8(2), None);
+        assert_eq!(table.get_utf8(0), Some("member"));
+        assert_eq!(table.get_utf8(1), None);
+        assert_eq!(table.get_utf8(u32::MAX), None);
     }
 
     #[test]
@@ -2143,7 +2134,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(table.find_utf8("member"), Some(2));
+        assert_eq!(table.find_utf8("member"), Some(1));
     }
 
     #[test]
@@ -2161,7 +2152,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(table.find_utf8("member"), Some(1));
+        assert_eq!(table.find_utf8("member"), Some(0));
     }
 
     #[test]
@@ -2170,8 +2161,8 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
             RawName::Qualified {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             },
         ])
         .unwrap();
@@ -2357,59 +2348,59 @@ mod tests {
             RawName::Utf8("owner".to_owned()),
             RawName::Utf8("member".to_owned()),
             RawName::Qualified {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             },
         ])
         .unwrap();
 
-        assert_eq!(table.get_utf8(3), None);
-        assert_eq!(table.get(3).and_then(RawName::as_utf8), None);
+        assert_eq!(table.get_utf8(2), None);
+        assert_eq!(table.get(2).and_then(RawName::as_utf8), None);
     }
 
     #[test]
     fn returns_the_root_for_a_direct_name_dependency_order() {
         let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
 
-        assert_eq!(table.dependency_order(1), Some(vec![1]));
+        assert_eq!(table.dependency_order(0), Some(vec![0]));
     }
 
     #[test]
     fn returns_unique_name_dependencies_before_the_root() {
         let table = NameTable::from_entries(vec![
             RawName::Qualified {
-                prefix: 2,
-                selector: 3,
+                prefix: 1,
+                selector: 2,
             },
             RawName::Qualified {
-                prefix: 4,
-                selector: 4,
+                prefix: 3,
+                selector: 3,
             },
             RawName::Utf8("member".to_owned()),
             RawName::Utf8("owner".to_owned()),
         ])
         .unwrap();
 
-        assert_eq!(table.dependency_order(1), Some(vec![4, 2, 3, 1]));
+        assert_eq!(table.dependency_order(0), Some(vec![3, 1, 2, 0]));
     }
 
     #[test]
     fn returns_none_for_an_unknown_name_dependency_order_root() {
         let table = NameTable::from_entries(vec![RawName::Utf8("member".to_owned())]).unwrap();
 
-        assert_eq!(table.dependency_order(0), None);
-        assert_eq!(table.dependency_order(2), None);
+        assert_eq!(table.dependency_order(1), None);
+        assert_eq!(table.dependency_order(u32::MAX), None);
     }
 
     #[test]
     fn rejects_invalid_references_when_constructing_name_entries() {
         assert_eq!(
             NameTable::from_entries(vec![RawName::Qualified {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             }]),
             Err(NameTableError::InvalidReference {
-                reference: 2,
+                reference: 1,
                 entry_index: 0,
                 entry_count: 1,
             })
@@ -2420,8 +2411,8 @@ mod tests {
     fn rejects_cyclic_name_references_when_constructing_name_entries() {
         assert_eq!(
             NameTable::from_entries(vec![RawName::Qualified {
-                prefix: 1,
-                selector: 1,
+                prefix: 0,
+                selector: 0,
             }]),
             Err(NameTableError::CyclicReference { entry_index: 0 })
         );
@@ -2429,7 +2420,7 @@ mod tests {
 
     #[test]
     fn rejects_cyclic_name_references_when_decoding() {
-        let mut reader = Reader::new(&[0x84, 2, 0x82, 0x81, 0x81]);
+        let mut reader = Reader::new(&[0x84, 2, 0x82, 0x80, 0x80]);
 
         assert_eq!(
             NameTable::decode(&mut reader),
@@ -2439,7 +2430,7 @@ mod tests {
 
     #[test]
     fn rejects_a_multi_entry_name_cycle_when_decoding() {
-        let mut reader = Reader::new(&[0x88, 2, 0x82, 0x82, 0x81, 2, 0x82, 0x81, 0x82]);
+        let mut reader = Reader::new(&[0x88, 2, 0x82, 0x81, 0x80, 2, 0x82, 0x80, 0x81]);
 
         assert_eq!(
             NameTable::decode(&mut reader),
@@ -2453,13 +2444,13 @@ mod tests {
             NameTable::from_entries(vec![
                 RawName::Utf8("owner".to_owned()),
                 RawName::Signed {
-                    original: 1,
-                    result_signature: 1,
-                    parameter_signatures: vec![3],
+                    original: 0,
+                    result_signature: 0,
+                    parameter_signatures: vec![2],
                 },
                 RawName::Qualified {
-                    prefix: 2,
-                    selector: 2,
+                    prefix: 1,
+                    selector: 1,
                 },
             ]),
             Err(NameTableError::CyclicReference { entry_index: 1 })
@@ -2470,8 +2461,8 @@ mod tests {
     fn accepts_an_acyclic_forward_name_reference() {
         let names = NameTable::from_entries(vec![
             RawName::Qualified {
-                prefix: 2,
-                selector: 2,
+                prefix: 1,
+                selector: 1,
             },
             RawName::Utf8("later".to_owned()),
         ])
@@ -2486,7 +2477,7 @@ mod tests {
         let mut entries = Vec::with_capacity(CHAIN_LENGTH);
 
         for index in 0..CHAIN_LENGTH - 1 {
-            let next = u32::try_from(index + 2).unwrap();
+            let next = u32::try_from(index + 1).unwrap();
             entries.push(RawName::Qualified {
                 prefix: next,
                 selector: next,
@@ -2497,7 +2488,7 @@ mod tests {
         let names = NameTable::from_entries(entries).unwrap();
 
         assert_eq!(names.len(), CHAIN_LENGTH);
-        assert_eq!(names.get_utf8(CHAIN_LENGTH as u32), Some("end"));
+        assert_eq!(names.get_utf8(CHAIN_LENGTH as u32 - 1), Some("end"));
     }
 
     #[test]
@@ -2561,9 +2552,9 @@ mod tests {
     fn builder_interns_duplicates_and_preserves_first_seen_order() {
         let mut builder = NameTable::builder();
         assert!(builder.is_empty());
-        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
-        assert_eq!(builder.intern(RawName::Utf8("member".to_owned())), Ok(2));
-        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(1));
+        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(0));
+        assert_eq!(builder.intern(RawName::Utf8("member".to_owned())), Ok(1));
+        assert_eq!(builder.intern(RawName::Utf8("owner".to_owned())), Ok(0));
         assert_eq!(builder.len(), 2);
         assert!(!builder.is_empty());
 
@@ -2582,15 +2573,15 @@ mod tests {
         let mut builder = NameTable::builder();
         builder
             .intern(RawName::Qualified {
-                prefix: 1,
-                selector: 2,
+                prefix: 0,
+                selector: 1,
             })
             .unwrap();
 
         assert_eq!(
             builder.finish(),
             Err(NameTableError::InvalidReference {
-                reference: 2,
+                reference: 1,
                 entry_index: 0,
                 entry_count: 1,
             })
@@ -2643,33 +2634,33 @@ mod tests {
     #[test]
     fn round_trips_a_qualified_name_entry() {
         assert_round_trips_name_entry(RawName::Qualified {
-            prefix: 1,
-            selector: 2,
+            prefix: 0,
+            selector: 1,
         });
     }
 
     #[test]
     fn round_trips_an_expanded_name_entry() {
         assert_round_trips_name_entry(RawName::Expanded {
-            prefix: 1,
-            selector: 2,
+            prefix: 0,
+            selector: 1,
         });
     }
 
     #[test]
     fn round_trips_an_expand_prefix_name_entry() {
         assert_round_trips_name_entry(RawName::ExpandPrefix {
-            prefix: 2,
-            selector: 1,
+            prefix: 1,
+            selector: 0,
         });
     }
 
     #[test]
     fn round_trips_a_unique_name_entry() {
         assert_round_trips_name_entry(RawName::Unique {
-            separator: 1,
+            separator: 0,
             uniqid: 7,
-            underlying: Some(2),
+            underlying: Some(1),
         });
     }
 
@@ -2713,8 +2704,8 @@ mod tests {
     #[test]
     fn round_trips_a_signed_name_entry() {
         assert_round_trips_name_entry(RawName::Signed {
-            original: 1,
-            result_signature: 2,
+            original: 0,
+            result_signature: 1,
             parameter_signatures: vec![1, -1],
         });
     }
@@ -2722,10 +2713,10 @@ mod tests {
     #[test]
     fn round_trips_a_target_signed_name_entry() {
         assert_round_trips_name_entry(RawName::TargetSigned {
-            original: 1,
-            target: 2,
-            result_signature: 1,
-            parameter_signatures: vec![2, -2],
+            original: 0,
+            target: 1,
+            result_signature: 0,
+            parameter_signatures: vec![1, -2],
         });
     }
 

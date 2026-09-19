@@ -93,7 +93,7 @@ pub enum TastyFileError {
     Write(WriteError),
     /// A required standard section is absent.
     MissingSection(StandardSection),
-    /// A payload contains an invalid one-based name reference.
+    /// A payload contains an invalid name reference.
     InvalidNameReference {
         /// Description of the payload containing the reference.
         context: &'static str,
@@ -708,7 +708,8 @@ impl<'a> TastyFile<'a> {
             .find(|section| section.standard_kind(&self.names) == Some(kind))
     }
 
-    /// Resolves a one-based AST/name reference against the file's name table.
+    /// Resolves an AST/name reference (the zero-based index of a name-table
+    /// entry) against the file's name table.
     pub fn name(&self, reference: NameRef) -> Option<&RawName> {
         self.names.get(reference)
     }
@@ -1254,7 +1255,7 @@ impl<'a> TastyFile<'a> {
     }
 
     fn resolve_source_file(&self, reference: NameRef) -> Result<&str, TastyFileError> {
-        match self.names.get_zero_based(reference) {
+        match self.names.get(reference) {
             Some(RawName::Utf8(name)) => Ok(name),
             Some(name) => Err(TastyFileError::InvalidSourceFileName {
                 reference,
@@ -1337,7 +1338,7 @@ mod tests {
             ])
             .unwrap(),
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]))
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]))
         .encode()
         .unwrap()
     }
@@ -1443,8 +1444,8 @@ mod tests {
         let names = NameTable::from_entries(vec![
             crate::RawName::Utf8("Attributes".to_owned()),
             crate::RawName::Qualified {
-                prefix: 1,
-                selector: 1,
+                prefix: 0,
+                selector: 0,
             },
         ])
         .unwrap();
@@ -1563,8 +1564,10 @@ mod tests {
         let file = TastyFile::parse_scala_3_9(bytes).unwrap();
 
         assert_eq!(
-            file.render_name(0),
-            Err(crate::NameRenderError::InvalidReference { reference: 0 })
+            file.render_name(u32::MAX),
+            Err(crate::NameRenderError::InvalidReference {
+                reference: u32::MAX
+            })
         );
     }
 
@@ -1933,7 +1936,7 @@ mod tests {
             ])
             .unwrap(),
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         assert!(matches!(
             builder.encode_validated_with_max_ast_index_depth(0),
@@ -1997,7 +2000,7 @@ mod tests {
         .unwrap();
         let sections = crate::SectionTable::from_sections(vec![crate::Section::new(
             0,
-            &[crate::VALDEF_TAG, 0x82, 0x82, 3],
+            &[crate::VALDEF_TAG, 0x82, 0x81, 3],
         )]);
         let file = TastyFile::from_parts(
             crate::Header {
@@ -2031,7 +2034,7 @@ mod tests {
             ])
             .unwrap(),
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         assert!(matches!(
             builder.validate_with_max_ast_index_depth(0),
@@ -2058,7 +2061,7 @@ mod tests {
             ])
             .unwrap(),
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         assert!(matches!(
             builder.validate_compatible_with_max_ast_index_depth(28, 10, 0, 0),
@@ -2117,7 +2120,7 @@ mod tests {
         let mut positions = crate::Writer::new();
         crate::PositionSection {
             line_sizes: vec![7],
-            entries: vec![crate::PositionEntry::Source(5)],
+            entries: vec![crate::PositionEntry::Source(4)],
         }
         .encode(&mut positions)
         .unwrap();
@@ -2170,7 +2173,7 @@ mod tests {
             },
             names,
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]))
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]))
         .with_section(EncodedSection::attributes(1, &[crate::Attribute::SourceFile(4)]).unwrap())
         .with_section(
             EncodedSection::comments(
@@ -2188,7 +2191,7 @@ mod tests {
                 3,
                 &PositionSection {
                     line_sizes: vec![7],
-                    entries: vec![PositionEntry::Source(5)],
+                    entries: vec![PositionEntry::Source(4)],
                 },
             )
             .unwrap(),
@@ -2233,7 +2236,7 @@ mod tests {
             },
             names,
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         assert_eq!(builder.validate_compatible_with(28, 9, 0), Ok(()));
         assert_eq!(
@@ -2259,7 +2262,7 @@ mod tests {
             },
             names,
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         let encoded = builder.encode_validated_with_ast_addresses().unwrap();
 
@@ -2316,7 +2319,7 @@ mod tests {
             ])
             .unwrap(),
         )
-        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x82, 3]));
+        .with_section(EncodedSection::raw(0, [crate::VALDEF_TAG, 0x82, 0x81, 3]));
 
         assert_eq!(
             builder.validate_scala_3_9(),

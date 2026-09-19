@@ -411,3 +411,56 @@ fn all_scala3_library_structured_relocated_files_validate() {
         });
     }
 }
+
+/// Regression test for issue #9. A name reference is the zero-based index of a
+/// name-table entry, in composite entries as much as in AST payloads. Read
+/// one-based, a qualified name would be built from the entry after each of its
+/// parts, and would pick up the section names at the start of the table
+/// (`ASTs`, `Positions`, `Comments`). Every corpus unit must therefore render its
+/// qualified names without them, and a signed name must have a renderable
+/// original.
+#[test]
+fn name_references_are_zero_based_in_every_scala3_library_unit() {
+    use dotty_tasty::tasty::RawName;
+
+    // Not `Attributes`: `java.util.jar.Attributes` is a real class.
+    const SECTION_NAMES: [&str; 3] = ["ASTs", "Positions", "Comments"];
+    let mut qualified = 0usize;
+    let mut signed = 0usize;
+
+    for fixture in scala3_library_fixtures() {
+        let names = fixture.file.names();
+        for (reference, entry) in names.iter() {
+            match entry {
+                RawName::Qualified { .. } => {
+                    qualified += 1;
+                    let text = names.render(reference).unwrap_or_else(|error| {
+                        panic!(
+                            "{} cannot render qualified name {reference}: {error}",
+                            fixture.path.display()
+                        )
+                    });
+                    assert!(
+                        !text.split('.').any(|part| SECTION_NAMES.contains(&part)),
+                        "{} renders qualified name {reference} as {text:?}",
+                        fixture.path.display()
+                    );
+                }
+                RawName::Signed { original, .. } | RawName::TargetSigned { original, .. } => {
+                    signed += 1;
+                    assert!(
+                        names.render(*original).is_ok(),
+                        "{} has a signed name {reference} whose original {original} does not render",
+                        fixture.path.display()
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        qualified > 0 && signed > 0,
+        "the corpus has no composite names"
+    );
+}
