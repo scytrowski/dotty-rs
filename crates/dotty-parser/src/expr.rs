@@ -100,7 +100,16 @@ where
                 "expected an outdent to close an indented block",
             );
         }
-        self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        let is_single_expression = stats.is_empty()
+            && self.ast.get(expr).position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() != range.end()
+            });
+        if is_single_expression {
+            expr
+        } else {
+            self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        }
     }
 
     fn parse_control_condition(&mut self, terminator: dotty_core::HardKeyword) -> TreeId<Untyped> {
@@ -1308,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_an_indented_if_branch_as_a_block() {
+    fn parses_a_single_indented_if_branch_as_its_expression() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "if c then\n  yes\nelse\n  no",
@@ -1335,11 +1344,11 @@ mod tests {
 
         assert!(matches!(
             parser.ast().get(if_tree.then_branch).kind,
-            TreeKind::Block(_)
+            TreeKind::Ident(_)
         ));
         assert!(matches!(
             parser.ast().get(if_tree.else_branch).kind,
-            TreeKind::Block(_)
+            TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }
