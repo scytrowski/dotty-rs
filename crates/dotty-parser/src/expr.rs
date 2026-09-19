@@ -745,7 +745,7 @@ where
         let position = self.current_span();
         self.report(
             crate::ParseDiagnosticKind::ExpectedExpression,
-            "expected a supported smoke expression",
+            "expected an expression",
         );
         if self.current().kind != TokenKind::Eof {
             self.advance();

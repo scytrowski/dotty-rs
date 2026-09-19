@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the normalized Scala and Rust smoke-parser trees."""
+"""Compare normalized Scala and Rust parser trees."""
 
 from __future__ import annotations
 

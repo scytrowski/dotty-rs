@@ -98,10 +98,10 @@ dotty-tasty    (no deps; raw + structured wire-format codec)
 dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
 ```
 
-`dotty-parser` now exists as an infrastructure crate with a deliberately small
-Scala 3.9.0 smoke grammar. Full grammar coverage, namer, typer, and compiler
-orchestration remain future work; the parser boundary and `AstArena<Untyped>`
-ownership are no longer speculative. See
+`dotty-parser` is an incremental Scala 3.9.0 source parser with a deliberately
+scoped simple- and operator-expression pipeline. Full grammar coverage, namer,
+typer, and compiler orchestration remain future work; the parser boundary and
+`AstArena<Untyped>` ownership are established. See
 [`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md) for its current scope.
 
 `[MAJOR 6]` The prior draft left it open whether classfile/TASTy semantic
@@ -413,7 +413,7 @@ document is authoritative for the distinction between parser-owned syntax,
 lowered forms, and explicitly feature-gated Scala 3.9 constructs. The AST
 model in this section is the current foundation baseline, not a claim that
 every Dotty `untpd` helper has already been mirrored. The implemented parser
-infrastructure and its smoke grammar are documented in
+boundary and its incremental expression grammar are documented in
 [`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md).
 
 ### `ast/phase.rs`
