@@ -84,10 +84,28 @@ where
     }
 
     fn parse_control_body(&mut self) -> TreeId<Untyped> {
+        self.consume_control_newlines();
         if self.current().kind == TokenKind::Indent {
             return self.parse_indented_block();
         }
         self.expr()
+    }
+
+    fn consume_control_newlines(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while consuming control-flow newlines",
+                );
+                break;
+            }
+        }
     }
 
     fn parse_indented_block(&mut self) -> TreeId<Untyped> {
