@@ -439,8 +439,9 @@ fn decode_string_literal(text: &str) -> Option<String> {
             '\\' => value.push('\\'),
             '"' => value.push('"'),
             '\'' => value.push('\''),
-            'u' => {
-                while characters.get(index) == Some(&'u') {
+            'u' | 'U' => {
+                let prefix = escaped;
+                while characters.get(index) == Some(&prefix) {
                     index += 1;
                 }
                 let digits: String = characters.get(index..index + 4)?.iter().collect();
@@ -791,6 +792,56 @@ mod tests {
         drop(parser);
 
         assert_eq!(names.resolve(value), "a\n");
+    }
+
+    #[test]
+    fn decodes_an_uppercase_unicode_escape_in_a_string_literal() {
+        let source = r#""\U0041""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "A");
+    }
+
+    #[test]
+    fn decodes_repeated_uppercase_unicode_escape_prefixes() {
+        let source = r#""\UU0041""#;
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::StringLiteral, 0, source.len() as u32),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_smoke_expr();
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected string literal tree");
+        };
+        drop(parser);
+
+        assert_eq!(names.resolve(value), "A");
     }
 
     #[test]
