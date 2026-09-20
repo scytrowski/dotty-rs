@@ -9,6 +9,7 @@ pub enum ParseDiagnosticKind {
     ExpectedType,
     ExpectedPattern,
     UnsupportedSyntax,
+    UnboundPlaceholderParameter,
 }
 
 /// A parser diagnostic that retains the shared diagnostic payload and source identity.
