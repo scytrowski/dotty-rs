@@ -933,6 +933,15 @@ pub enum Type {
 `TermRef`/`TypeRef` use `SymbolId`, not the symbol's `Name`, so a symbol
 rename doesn't require walking every type that references it.
 
+`Bounds` is a genuine `>: low <: high` range; `AliasingBounds` is the info of
+an alias (`= alias`) and is deliberately not `Bounds { low: alias, high: alias }`,
+matching Dotty's `AliasingBounds`. It is not named `Alias`, which would collide
+with `SymbolKind::TypeAlias`. `Flexible` is a real wrapper (Dotty's
+`FlexibleType`) that model code must not strip; only member lookup sees through
+it. Variance markers that TASTy writes after `TYPEBOUNDS` belong to a
+`TypeLambda` bound, not to the bounds, so the model has no bounds-level
+variance.
+
 ### `[BLOCKER 1]` Binder identity is `TypeId`, not a separate `BinderId`
 
 The first draft had `BinderArena`/`Binder { id: BinderId, kind: BinderKind }`

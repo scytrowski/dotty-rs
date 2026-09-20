@@ -9,8 +9,11 @@ Status (`crates/dotty-tasty-unpickler`):
   package contract, the resolver boundary, name-based `TYPEREF`/`TERMREF`):
   implemented (§4, "Name-based references").
 - Milestone 2c1, compositional non-binder types (`Applied`, `And`, `Or`,
-  `SuperType`, `ByName`): implemented (§4, "Types"). Milestone 2c2 (the
-  remaining core-model gaps: alias bounds, flexible types, constants) is next.
+  `SuperType`, `ByName`): implemented (§4, "Types").
+- Milestone 2c2, the non-binder core-model gaps (`TYPEBOUNDS` as `Bounds` or
+  `AliasingBounds`, `Flexible`, lossless constants and `CLASSconst`):
+  implemented (§4, "Bounds, flexible and constant types"). Binder types
+  (Milestone 3) are next; they also close variance-bearing `TYPEBOUNDS`.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -55,7 +58,7 @@ function. It follows an enter-before-complete model:
 | 2a. Type identity | address-keyed `TypeId`s; references, `THIS`, `SHAREDtype` | 2a |
 | 2b. Name resolution | name-based `TYPEREF`/`TERMREF` through the prefix scope and the `SymbolResolver` port | 2b |
 | 2c1. Compound types | `Applied`, `And`, `Or`, `SuperType`, `ByName` | 2c1 |
-| 2c2. Core-model gaps | bounds and alias bounds, `Flexible`, constants | 2c2 |
+| 2c2. Core-model gaps | `Bounds`, `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst` | 2c2 |
 | 2d. Binders and advanced types | `TypeLambda`, `Method`, `Poly`, refinements, ..., with `TypeArena::reserve`/`fill` | 3–4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
@@ -355,10 +358,50 @@ Compound forms (Milestone 2c1):
   written only as a tree-level `BYNAMEtpt`, so their tests retag nodes of the
   same wire shape.
 
+Bounds, flexible and constant types (Milestone 2c2):
+
+| TASTy | wire shape | semantic type |
+|-------|------------|---------------|
+| `TYPEBOUNDS` | `Type Type` | `Bounds { low, high }` |
+| `TYPEBOUNDS` | `Type` (no upper bound) | `AliasingBounds { alias }` |
+| `FLEXIBLEtype` | `Type` | `Flexible { underlying }` |
+| `UNITconst` .. `STRINGconst` | the constant | `Constant(..)` |
+| `CLASSconst` | `Type` | `Constant(Class(type))` |
+
+- **Aliasing bounds.** The alias-only form is `Type::AliasingBounds`, not
+  `Bounds { low: alias, high: alias }`: Dotty keeps `AliasingBounds` distinct
+  and the distinction stays recoverable. The variant is not called `Alias`,
+  which would collide with `SymbolKind::TypeAlias` (a symbol kind).
+- **Variance markers.** Dotty does not attach the trailing variance markers to
+  the bounds: it rewrites the parameter variances of an `HKTypeLambda` bound,
+  then wraps it. There is no `TypeLambda` decoder yet, and inventing a
+  bounds-level variance field would be wrong, so a `TYPEBOUNDS` with markers is
+  `UnsupportedBoundsVariance` (refused before any child is decoded). It closes
+  with the binder milestone.
+- **Flexible types.** `Flexible` is a preserved wrapper; the model never
+  strips it. Only local member lookup looks through it (`lookup_owner`
+  follows any chain of `Flexible` to a searchable prefix); a resolver still
+  receives the original prefix. The real fixture is compiled with
+  `-Yexplicit-nulls` (`tests/fixtures/semantic/explicit_nulls/`), the only
+  setting under which the compiler writes the node.
+- **Constants.** A constant type and a literal term are the same wire node, so
+  every constant node decodes as a type. They come from `dotty-tasty`'s typed
+  `ConstantValue` and are lossless: `Constant::Char(u16)`,
+  `FloatBits(u32)`, `DoubleBits(u64)` keep every code unit, NaN payload and
+  signed zero, and equality is bitwise. A string is read from the UTF-8 name
+  entry itself (`string_value`), not through the name-spelling rules. Known
+  limit: `dotty-tasty` rejects a name table that is not valid UTF-8, so a
+  string with an unpaired surrogate cannot reach the unpickler and
+  `Constant::StringUtf16` is not produced from TASTy yet. `CLASSconst` stores
+  the decoded child type; it is not a class-symbol reference.
+- A `SHAREDtype` to any of these returns the target's exact `TypeId`, and
+  nothing is interned structurally: equal constants at different addresses
+  keep different ids.
+
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
 `NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
-`TYPEBOUNDS` (alias-only and two-sided), `ANNOTATEDtype`, `TYPELAMBDAtype`,
-`FLEXIBLEtype` and constants.
+`ANNOTATEDtype`, `TYPELAMBDAtype`, method/poly/param types, refinements,
+recursive and match types.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -467,9 +510,11 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      than classloader *integration*, which stays in Milestone 6;
    - 2c1: compositional non-binder types (`Applied`, `And`, `Or`,
      `SuperType`, `ByName`) — complete;
-   - 2c2: the core-model gaps the 2c1 measurement exposes (bounds and alias
-     bounds, `Flexible`, constants) — next.
-3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`).
+   - 2c2: the core-model gaps the 2c1 measurement exposed (`Bounds`,
+     `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst`) —
+     complete.
+3. Binder types (`Method`, `Poly`, `TypeLambda`, `ParamRef`), including the
+   variance-bearing `TYPEBOUNDS` that need a `TypeLambda`.
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -509,7 +554,8 @@ Deliberately not supported yet:
   aliases;
 - companion links (`SymbolLinks::companion`);
 - `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
-  `UnsupportedType`;
+  `UnsupportedType`; `TYPEBOUNDS` with variance markers —
+  `UnsupportedBoundsVariance` until `TypeLambda` exists;
 - signed term references, cross-unit class members and
   inherited members (§4, "Name-based references");
 - packages and members outside the entered state with no resolver that knows
@@ -597,34 +643,37 @@ fail on an external constructor or argument, which a classpath resolver
 (Milestone 6) is expected to turn into decodes. The real `SUPERtype` does not
 occur in either corpus, so the decoder is covered by a retagged node.
 
-Nodes with no decoder yet (instances in the corpus, not the repeated failures
-the 2b table counted):
+### Bounds, flexible and constant types after 2c2 (library / compiler)
+
+Same method: each node decoded as its own root, with `NoResolver`.
+
+| node | nodes | decoded | external | local | unsupported form | deferred variance |
+|------|-------|---------|----------|-------|------------------|-------------------|
+| `TYPEBOUNDS` | 853 / 922 | 35 / 584 | 721 / 327 | 0 / 8 | 7 / 3 | 90 / 0 |
+| `FLEXIBLEtype` | 238 / 552 | 66 / 17 | 166 / 531 | 0 | 6 / 4 | |
+| constant nodes (12 primitive kinds) | 18,480 / 56,500 | all | 0 | 0 | 0 | |
+| `CLASSconst` | 998 / 1,895 | 971 / 1,657 | 27 / 238 | 0 | 0 | |
+
+The decoded `TYPEBOUNDS` are 34 alias-only and 1 two-sided in the library, 584
+alias-only and 0 two-sided in the compiler. Most of the rest fail on a bound that
+names a type outside the entered state (external), which the resolver
+milestone is expected to unlock. Every
+primitive and string constant decodes. Order dependence still applies: the
+counts are a lower bound, since a unit decodes against the types earlier units
+entered. There were 0 unexpected errors in either corpus.
+
+Nodes with no decoder yet (instances in the corpus):
 
 | node | library | compiler |
 |------|---------|----------|
-| `TYPEBOUNDS` | 853 | 922 |
 | `ANNOTATEDtype` | 2,014 | 5,409 |
 | `TYPELAMBDAtype` | 739 | 148 |
-| `FLEXIBLEtype` | 238 | 552 |
 
-`TYPEBOUNDS` by wire shape:
-
-| shape | library | compiler |
-|-------|---------|----------|
-| two-sided (`low`, `high`) | 806 (94%) | 223 (24%) |
-| alias-only (one type) | 47 (6%) | 699 (76%) |
-| with a variance marker | 90 | 0 |
-
-The two corpora disagree about which form dominates, and the alias form is
-not a two-sided range with equal ends (upstream keeps a distinct
-`TypeAlias`). Milestone 2c2 therefore cannot fold aliases into `Bounds`: it
-needs either an alias representation in `dotty-core` or an explicit rule for
-what the alias form means for the consumer. `FLEXIBLEtype` (Kotlin-style
-nullability marks) has no `dotty-core` variant, and constants still need a
-lossless representation (float and double bits, unpaired UTF-16 chars), so
-those three are the 2c2 agenda, ahead of binders. The earlier 2b table
-counted failing roots (`TYPEBOUNDS` 11,599 / 587, ...); the counts above are
-nodes, which is what a design decision needs.
+The 2c1 measurement counted `TYPEBOUNDS` 853 / 922 (two-sided 806 / 223,
+alias-only 47 / 699, with variance 90 / 0) and `FLEXIBLEtype` 238 / 552 as
+undecoded; the first two are now decoded (or explicitly deferred) as above.
+`ANNOTATEDtype` belongs to the annotation work and `TYPELAMBDAtype` to the
+binder milestone.
 
 ## 9. Review of Milestone 1
 
