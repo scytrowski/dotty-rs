@@ -1053,11 +1053,11 @@ pub enum Constant {
     Boolean(bool),
     Byte(i8),
     Short(i16),
-    Char(char),
+    Char(u16),        // one UTF-16 code unit
     Int(i32),
     Long(i64),
-    Float(f32),
-    Double(f64),
+    FloatBits(u32),   // IEEE-754 bit pattern
+    DoubleBits(u64),  // IEEE-754 bit pattern
     String(NameId),
     StringUtf16(Vec<u16>),
     Class(TypeId),
@@ -1070,6 +1070,13 @@ string table instead of allocating separately. `StringUtf16` is the
 lossless representation for Scala string values containing an unpaired
 UTF-16 surrogate; well-formed surrogate pairs are normalized to scalar
 values in `Constant::String`.
+
+Constants are lossless: every constant TASTy can write is representable
+exactly. `Char` is a 16-bit code unit (a Scala `Char` can be a lone
+surrogate), and floating-point constants hold their bit patterns, so NaN
+payloads and negative zero survive; equality is bitwise. Use
+`Constant::float`/`double` and `as_float`/`as_double` (and `char`/`as_char`)
+instead of matching the bit variants when the numeric value is what matters.
 
 ```rust
 pub struct ClassInfo {
