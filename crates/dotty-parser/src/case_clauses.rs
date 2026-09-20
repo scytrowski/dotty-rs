@@ -92,7 +92,7 @@ where
             return None;
         }
         self.advance();
-        if !crate::expr::can_start_expr(self.current().kind) {
+        if !crate::expr::can_start_prefix_expr(self.current().kind) {
             let position = self.current_span();
             self.report(
                 ParseDiagnosticKind::ExpectedExpression,

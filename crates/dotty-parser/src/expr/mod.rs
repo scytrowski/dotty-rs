@@ -141,7 +141,7 @@ const fn is_numeric_literal(kind: TokenKind) -> bool {
     )
 }
 
-const fn can_start_prefix_expr(kind: TokenKind) -> bool {
+pub(crate) const fn can_start_prefix_expr(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Identifier
