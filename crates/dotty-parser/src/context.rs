@@ -48,6 +48,8 @@ pub struct ParserFeatures {
     pub into: bool,
     /// Enables legacy postfix operator syntax.
     pub postfix_ops: bool,
+    /// Enables Scala's experimental single-case `match case` syntax.
+    pub sub_cases: bool,
 }
 
 /// Explicit parser context carried through nested grammar calls.
@@ -143,6 +145,7 @@ mod tests {
                 erased_definitions: false,
                 into: false,
                 postfix_ops: false,
+                sub_cases: false,
             }
         );
     }
@@ -154,11 +157,13 @@ mod tests {
             erased_definitions: false,
             into: true,
             postfix_ops: false,
+            sub_cases: false,
         };
 
         assert!(features.capture_checking);
         assert!(!features.erased_definitions);
         assert!(features.into);
         assert!(!features.postfix_ops);
+        assert!(!features.sub_cases);
     }
 }

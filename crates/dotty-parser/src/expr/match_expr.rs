@@ -27,7 +27,9 @@ where
                 );
             }
             cases
-        } else if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+        } else if self.features().sub_cases
+            && self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+        {
             vec![self.case_clause(true)]
         } else {
             self.consume_match_newlines();
@@ -198,7 +200,11 @@ mod tests {
                 token(TokenKind::Eof, 23, 23),
             ],
             &mut names,
-        );
+        )
+        .with_features(crate::ParserFeatures {
+            sub_cases: true,
+            ..crate::ParserFeatures::default()
+        });
 
         let tree = parser.expr();
         let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(tree).kind else {
@@ -224,6 +230,29 @@ mod tests {
             TextRange::new(22, 23).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_single_case_without_braces_or_indentation_by_default() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value match case x => x",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Case), 12, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]

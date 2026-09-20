@@ -605,6 +605,7 @@ mod tests {
                 erased_definitions: false,
                 into: true,
                 postfix_ops: false,
+                sub_cases: false,
             });
         let expected = parser.known_names().into;
 

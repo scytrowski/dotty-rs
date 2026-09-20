@@ -90,7 +90,8 @@ and `using`. It also interns the future feature-dependent names `into`,
 `erased`, and `tracked`. The lexer still emits all of these as identifiers;
 parser context gives them grammar meaning only in the appropriate production.
 `ParserFeatures` currently exposes independent switches for capture checking,
-erased definitions, `into`, and legacy `postfix_ops`, all disabled by default.
+erased definitions, `into`, legacy `postfix_ops`, and experimental single-case
+`match case` syntax (`sub_cases`), all disabled by default.
 The switches are a boundary for future grammar work, not an implementation of
 those features.
 
