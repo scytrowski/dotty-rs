@@ -105,10 +105,10 @@ Parser diagnostics use the small categories `ExpectedToken`,
 `UnexpectedToken`, `ExpectedExpression`, `ExpectedType`, `ExpectedPattern`,
 and `UnsupportedSyntax`, with a source ID and source span.
 
-Reusable recovery sets cover statements, arguments, type arguments, and case
-clauses. Every recovery loop checks that the token source advances; a broken
-external source cannot turn recovery into an infinite loop. Valid but not yet
-implemented constructs such as `class`, `def`, and `for`
+Reusable recovery sets cover statements, arguments, type arguments, case
+clauses, and for enumerators. Every recovery loop checks that the token source
+advances; a broken external source cannot turn recovery into an infinite loop.
+Valid but not yet implemented constructs such as `class` and `def`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -155,6 +155,8 @@ the initial `if` and `while` expression forms
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
+for-comprehensions with generators, case generators, aliases, guards, and
+`yield`/`do` bodies
 ```
 
 The implemented selections and applications are only the simple-expression
@@ -176,8 +178,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, definitions, remaining control flow (`for` and `do`/`while`),
-templates, interpolation, quotes, and macros remain follow-up increments.
+`RefinedType`, definitions, remaining control flow (`do`/`while`), templates,
+interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards, and expression bodies. Case bodies are represented
@@ -200,8 +202,32 @@ left/right associativity, and mixed-associativity diagnostics. Operators
 ending in `:` are right-associative. Legacy postfix syntax is represented by
 `PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
 the initial `if`/`while`, `throw`, `return`, `try`/`catch`/`finally`, and match
-clauses are implemented above this layer; ascription, colon arguments, and
-the remaining higher-level expression grammar are not implemented yet.
+clauses and for-comprehensions are implemented above this layer; ascription,
+colon arguments, and the remaining higher-level expression grammar are not
+implemented yet.
+
+## For-comprehensions
+
+The parser implements the Scala 3.9 source-level for-comprehension subset:
+
+```text
+ForExpr -> Enumerators ('yield' | 'do') Expr
+Enumerators -> Generator | Guard | Pattern1 '=' Expr
+Generator -> ['case'] Pattern1 '<-' Expr
+```
+
+Generators deliberately use `Pattern1`, not the full alternative-pattern
+production. Ordinary generators use `GenCheckMode::Check`; `case` generators
+use `GenCheckMode::FilterAlways`. Better Fors is active for the pinned Scala
+3.9 target, so leading aliases are accepted before the first generator, while
+the parser still requires a generator eventually. Aliases are represented as
+`GenAlias`, never as ordinary assignment trees, and guards remain ordinary
+expression trees in their exact enumerator order.
+
+Parenthesized, braced, and indentation-based enumerator regions are supported,
+including the wrapped legacy form whose body has no explicit `do`. The parser
+emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
+`map`, `flatMap`, or `withFilter`; that belongs to a later lowering phase.
 
 ## Scala parser oracle
 
@@ -228,8 +254,8 @@ Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
 purpose and cover the implemented simple-, operator-, initial `Expr1`, and
 source-pattern subsets, including `super`, `new`, type applications, suffix
 chains, brace blocks, prefix operators, negative literals, infix
-precedence/associativity, assignment, named arguments, `if`/`while`, match and
-case clauses, binders,
+precedence/associativity, assignment, named arguments, `if`/`while`,
+for-comprehensions, match and case clauses, binders,
 typed patterns, extractor applications, infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
 `tools/scala-parser-oracle/fixtures/patterns/`; `compare.sh` runs both modes.
