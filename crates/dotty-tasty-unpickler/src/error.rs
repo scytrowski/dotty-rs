@@ -3,6 +3,7 @@ use std::fmt;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::Namespace;
 use dotty_core::resolution::ResolutionError;
+use dotty_core::types::TypeRebindError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
 
 /// Why semantic unpickling of a TASTy file failed.
@@ -91,10 +92,24 @@ pub enum UnpickleError {
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
     MalformedType { address: u32, reason: &'static str },
-    /// The `TYPEBOUNDS` node at `address` carries variance markers. Dotty
-    /// applies them to a `TypeLambda` bound, which is not decoded until the
-    /// binder milestone, so the node is refused rather than losing them.
-    UnsupportedBoundsVariance { address: u32 },
+    /// The `TYPEBOUNDS` node at `address` carries variance markers, but the
+    /// bound they apply to, `target`, is not a `TypeLambda`. Dotty applies
+    /// markers only to an `HKTypeLambda`; they are never dropped or attached
+    /// to anything else.
+    InvalidBoundsVarianceTarget { address: u32, target: TypeId },
+    /// The `TYPEBOUNDS` node at `address` carries `actual` variance markers,
+    /// but the lambda `lambda` it applies to has `expected` parameters.
+    BoundsVarianceArityMismatch {
+        address: u32,
+        lambda: TypeId,
+        expected: usize,
+        actual: usize,
+    },
+    /// Rebinding the lambda under the `TYPEBOUNDS` at `address` failed.
+    RebindFailed {
+        address: u32,
+        error: TypeRebindError,
+    },
     /// The `METHODtype` at `address` ends with a modifier, `tag`, that a method
     /// type does not use (only `IMPLICIT` and `GIVEN` do).
     InvalidMethodModifier { address: u32, tag: u8 },
@@ -211,9 +226,22 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the type at address {address} is malformed: {reason}"
             ),
-            Self::UnsupportedBoundsVariance { address } => write!(
+            Self::InvalidBoundsVarianceTarget { address, .. } => write!(
                 formatter,
-                "the bounds at address {address} carry variance markers, which need type lambdas"
+                "the bounds at address {address} carry variance markers, but the bound is not a type lambda"
+            ),
+            Self::BoundsVarianceArityMismatch {
+                address,
+                expected,
+                actual,
+                ..
+            } => write!(
+                formatter,
+                "the bounds at address {address} carry {actual} variance markers for a lambda with {expected} parameters"
+            ),
+            Self::RebindFailed { address, error } => write!(
+                formatter,
+                "the variances of the bounds at address {address} could not be applied: {error}"
             ),
             Self::InvalidMethodModifier { address, tag } => write!(
                 formatter,
@@ -262,6 +290,7 @@ impl std::error::Error for UnpickleError {
         match self {
             Self::Tasty(error) => Some(error),
             Self::Ast(error) => Some(error),
+            Self::RebindFailed { error, .. } => Some(error),
             Self::DuplicateDefinition { .. }
             | Self::DuplicateScope { .. }
             | Self::InvalidNameReference { .. }
@@ -280,7 +309,8 @@ impl std::error::Error for UnpickleError {
             | Self::AmbiguousMember { .. }
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
-            | Self::UnsupportedBoundsVariance { .. }
+            | Self::InvalidBoundsVarianceTarget { .. }
+            | Self::BoundsVarianceArityMismatch { .. }
             | Self::InvalidMethodModifier { .. }
             | Self::InvalidBinderReference { .. }
             | Self::InvalidBinderKind { .. }

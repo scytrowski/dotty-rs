@@ -107,8 +107,6 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
-    /// `TYPEBOUNDS` with variance markers, deferred to Milestone 3b.
-    deferred_variance: usize,
     /// A binder reference or parameter that is malformed: an invalid binder
     /// address, kind, parameter index, or a parameter info that is not bounds.
     binder_errors: usize,
@@ -313,14 +311,14 @@ fn run(
                         outcomes.needs_external += 1;
                         tally.unresolved_members += 1;
                     }
-                    UnpickleError::UnsupportedBoundsVariance { .. } => {
-                        outcomes.deferred_variance += 1;
-                    }
                     UnpickleError::InvalidBinderReference { .. }
                     | UnpickleError::InvalidBinderKind { .. }
                     | UnpickleError::InvalidParameterIndex { .. }
                     | UnpickleError::InvalidTypeParameterBounds { .. }
-                    | UnpickleError::InvalidMethodModifier { .. } => {
+                    | UnpickleError::InvalidMethodModifier { .. }
+                    | UnpickleError::InvalidBoundsVarianceTarget { .. }
+                    | UnpickleError::BoundsVarianceArityMismatch { .. }
+                    | UnpickleError::RebindFailed { .. } => {
                         outcomes.binder_errors += 1;
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
@@ -488,7 +486,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 let none = Outcomes::default();
                 let o = tally.compound.get(tag).unwrap_or(&none);
                 println!(
-                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, deferred variance {}, binder errors {}; binder decoded on demand {}; unexpected {}",
+                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, binder errors {}; binder decoded on demand {}; unexpected {}",
                     o.nodes,
                     o.decoded,
                     o.needs_external,
@@ -497,7 +495,6 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                     o.unsupported_prefix,
                     o.missing_local,
                     o.unsupported_child,
-                    o.deferred_variance,
                     o.binder_errors,
                     o.binder_on_demand,
                     o.unexpected,
