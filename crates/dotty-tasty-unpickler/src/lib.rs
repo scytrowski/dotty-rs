@@ -25,6 +25,7 @@ mod lookup;
 mod mapping;
 mod names;
 mod packages;
+mod recursive;
 mod types;
 mod unpickler;
 
