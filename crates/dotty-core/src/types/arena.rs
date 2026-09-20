@@ -65,6 +65,14 @@ impl TypeArena {
         self.filled.truncate(len);
     }
 
+    /// Whether the slot `id` holds a real value, as opposed to a `reserve`-d
+    /// slot that has not been `fill`-ed yet (which [`TypeArena::get`] refuses).
+    ///
+    /// Panics if `id` was not allocated by this arena.
+    pub fn is_filled(&self, id: TypeId) -> bool {
+        self.filled[id.index() as usize]
+    }
+
     /// Panics if `id` was not allocated by this arena, or was `reserve`-d but
     /// never `fill`-ed.
     pub fn get(&self, id: TypeId) -> &Type {
