@@ -17,6 +17,7 @@
 //! `UnpickleError::UnsupportedType`.
 
 mod ast_view;
+mod binders;
 mod enter;
 mod error;
 mod index;

@@ -1031,6 +1031,24 @@ out-of-range arena index.
 `types/binder.rs` is kept only for this `reserve`/`fill` API; it no longer
 defines a `Binder` type.
 
+**How an adapter uses it (TASTy, Milestone 3a).** An adapter that reads a
+format where a parameter reference names its binder by a stable key (TASTy: the
+binder's AST address) ties the knot like this: reserve the `TypeId`, publish
+`key -> id` in its own address index, decode the children (a `ParamRef` now
+resolves the key to the id), then `fill`. Between publishing and `fill` the
+address entry refers to an unfilled slot, so during that window the adapter must
+not read the slot, and it keeps the binder's kind and arity itself to validate a
+reference to it. That state is the adapter's decoding state: it is not stored in
+`dotty-core`. A failed decode discards the reservation with the rest of the
+transaction (`SemanticStore::rollback_to` truncates reserved slots).
+
+**Rebinding, not copying.** A binder's identity is its `TypeId`, so changing a
+binder (for example applying declared variances to a `TypeLambda`, as Dotty's
+`withVariances` does) is not a copy with one field changed: every `ParamRef`
+inside the copy still names the old id. It requires a new binder and a
+substitution of the old binder's references (Dotty's `subst`), or a decoding
+rule that avoids the copy. No such operation exists yet (TASTy Milestone 3b).
+
 ### `types/method.rs`, `types/constant.rs`, `types/class_info.rs`, `types/annotation.rs`
 
 ```rust
