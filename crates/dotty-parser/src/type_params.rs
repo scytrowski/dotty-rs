@@ -90,7 +90,7 @@ where
             );
         }
 
-        let bounds_start = self.current().span.start();
+        let bounds_start = mark.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
         } else {
@@ -243,7 +243,7 @@ mod tests {
         assert!(low.is_none() && high.is_none() && alias.is_none());
         assert_eq!(
             parser.ast().get(rhs).position.unwrap().span().range(),
-            TextRange::new(2, 2).unwrap()
+            TextRange::new(1, 1).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
