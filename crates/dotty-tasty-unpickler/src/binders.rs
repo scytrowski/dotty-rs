@@ -47,7 +47,6 @@ use crate::unpickler::TastyUnpickler;
 pub(crate) enum BinderKind {
     TypeLambda,
     Poly,
-    #[allow(dead_code)]
     Method,
 }
 
@@ -104,7 +103,7 @@ impl TastyUnpickler<'_, '_, '_> {
     ///
     /// The binder is, in this order: a pending one (validated from its
     /// recorded arity, never from the arena), one already decoded (checked to
-    /// be a `TypeLambda`), or one not yet decoded, which is decoded now. That
+    /// be a `TypeLambda`, `Poly` or `Method`), or one not yet decoded, which is decoded now. That
     /// last decode can reach this very node through the binder's own
     /// children, so the address is looked up again afterwards instead of
     /// allocating a second `ParamRef`.

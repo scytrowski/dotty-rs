@@ -495,9 +495,16 @@ owns an id. The modifier tail is the clause kind, as Dotty's
 
 Implicit and contextual (`using`) clauses are different kinds in `dotty-core`
 and are never merged; a repeated modifier is harmless, as in Dotty's flag set.
+Dotty's reader fails on any other modifier byte (`readParamNamesAndMods`) and,
+if both were present, would let `IMPLICIT` win; its pickler writes `GIVEN` or
+`IMPLICIT`, never both (`TreePickler`), so the pair is refused as malformed
+rather than silently resolved.
 A `PARAMtype` to a method is a reference to one of its *term* parameters, so a
 dependent result (`(x: Box): x.Out`) is a `TypeRef` whose prefix is
-`ParamRef { binder: <that method's id>, index: 0 }`. A later clause may name an
+`ParamRef { binder: <that method's id>, index: 0 }`. Selecting a member *by name* from
+a `ParamRef` prefix would need the parameter's type to be looked through, so it
+is `UnsupportedResolutionPrefix`, as for any prefix this pass cannot search (a
+reference written by symbol, as in the fixture, needs no lookup). A later clause may name an
 earlier one, `(x: Box)(y: x.Out)`: the inner method is the outer's result, and
 its `PARAMtype` resolves by address to the OUTER binder while the inner one is
 also pending. The same holds for `Poly -> Method -> Method`, where three

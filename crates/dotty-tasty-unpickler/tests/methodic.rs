@@ -564,6 +564,24 @@ fn a_parameter_type_may_not_name_a_node_that_is_not_a_binder() {
 }
 
 #[test]
+fn a_named_member_of_a_parameter_reference_is_an_unsupported_prefix_not_a_panic() {
+    // `(p: T): x.Member`, selected by NAME from a `PARAMtype` prefix: the
+    // parameter's type is not looked through, so the member cannot be found.
+    let mut result = vec![117, nat(1)];
+    result.extend(param_type(2, 0));
+    let bytes = file_with(&method_node(&result, &[package_ref()], &[]));
+    let (_, outcome) = decode_method(&bytes);
+
+    assert!(
+        matches!(
+            outcome,
+            Err(UnpickleError::UnsupportedResolutionPrefix { .. })
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[test]
 fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
     // The second parameter's type is an unsupported form (`66`): the method is
     // reserved, published, and one parameter decoded before it fails.
