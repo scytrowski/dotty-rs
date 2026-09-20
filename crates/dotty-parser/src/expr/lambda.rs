@@ -275,14 +275,10 @@ where
     fn parse_lambda_block_body(&mut self, end: TokenKind) -> TreeId<Untyped> {
         let mark = self.mark();
         let (stats, expr) = self.parse_expression_block_body(end);
-        if stats.is_empty() {
-            expr
-        } else {
-            self.alloc_from(
-                mark,
-                TreeKind::Block(dotty_core::ast::Block { stats, expr }),
-            )
-        }
+        self.alloc_from(
+            mark,
+            TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+        )
     }
 
     fn consume_lambda_newlines(&mut self) {
