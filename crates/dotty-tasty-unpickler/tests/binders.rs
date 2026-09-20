@@ -603,7 +603,7 @@ const TWO_SECOND_BOUNDS: usize = 643;
 fn a_failure_after_the_binder_is_published_leaves_nothing_behind() {
     // `[A, B] =>> (A, B)`: retag the second parameter's bounds so the first
     // decodes, the binder is reserved and published, and then the second fails.
-    let patched = retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 66);
+    let patched = retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let (mut session, packages) = session_with_scala();
     let mut unpickler =
@@ -613,7 +613,7 @@ fn a_failure_after_the_binder_is_published_leaves_nothing_behind() {
 
     let result = unpickler.unpickle_type(TWO);
     assert!(
-        matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+        matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
         "{result:?}"
     );
     assert_eq!(unpickler.index().type_count(), before);
@@ -624,14 +624,14 @@ fn a_failure_after_the_binder_is_published_leaves_nothing_behind() {
     // resolved against a stale one, it decodes the binder again and fails again.
     assert!(matches!(
         unpickler.unpickle_type(TWO_FIRST),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
 }
 
 #[test]
 fn the_unpickler_stays_usable_after_a_failed_binder() {
-    let patched = retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 66);
+    let patched = retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let (mut session, packages) = session_with_scala();
     let mut unpickler =
@@ -659,7 +659,7 @@ fn a_failed_nested_binder_fails_the_whole_call_and_forgets_the_outer_one() {
     // `[A] =>> [B] =>> A`: break the inner lambda's parameter bounds (365 is
     // the outer's, 362 the inner's). The outer binder is pending when the inner
     // one fails; both are forgotten.
-    let patched = retagged(BINDERS, 362, 61, 66);
+    let patched = retagged(BINDERS, 362, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let (mut session, packages) = session_with_scala();
     let mut unpickler =
@@ -704,7 +704,7 @@ fn a_failed_binder_gives_its_reserved_slots_back_to_the_arena() {
     // got had the call never happened: reserved slots are truncated too.
     let next_id_after = |fail: bool| {
         let patched = if fail {
-            retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 66)
+            retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 75)
         } else {
             BINDERS.to_vec()
         };

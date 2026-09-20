@@ -311,7 +311,7 @@ fn a_failure_after_one_bound_is_decoded_leaves_nothing_behind() {
     // poly is reserved, published, and one bound decoded before it fails.
     let mut payload = package_ref();
     payload.extend(alias_param());
-    payload.extend([66, nat(1), nat(2)]);
+    payload.extend([75, nat(1), nat(2)]);
     let bytes = file_with(&length_node(POLY, &payload));
     let next_id_after = |fail: bool| {
         let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
@@ -321,7 +321,7 @@ fn a_failure_after_one_bound_is_decoded_leaves_nothing_behind() {
             let before = unpickler.index().type_count();
             let result = unpickler.unpickle_type(POLY_AT);
             assert!(
-                matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+                matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
                 "{result:?}"
             );
             assert_eq!(unpickler.index().type_count(), before);
@@ -579,7 +579,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
     // reserved, published, and one parameter decoded before it fails.
     let bytes = file_with(&method_node(
         &package_ref(),
-        &[package_ref(), vec![66, nat(1)]],
+        &[package_ref(), vec![75, nat(1)]],
         &[],
     ));
     let next_id_after = |fail: bool| {
@@ -590,7 +590,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
             let before = unpickler.index().type_count();
             let result = unpickler.unpickle_type(POLY_AT);
             assert!(
-                matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+                matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
                 "{result:?}"
             );
             assert_eq!(unpickler.index().type_count(), before);
@@ -606,7 +606,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
 #[test]
 fn a_failed_method_inside_a_poly_fails_the_whole_call_and_forgets_both() {
     // Poly (pending) -> Method (pending) -> an unsupported parameter type.
-    let inner = method_node(&package_ref(), &[vec![66, nat(1)]], &[]);
+    let inner = method_node(&package_ref(), &[vec![75, nat(1)]], &[]);
     let bad = poly_node(&inner, 1);
     // A good method follows in the same file, at a known address, naming itself.
     let good_at = 2 + u8::try_from(bad.len()).unwrap();
@@ -624,7 +624,7 @@ fn a_failed_method_inside_a_poly_fails_the_whole_call_and_forgets_both() {
         // Twice: a stale pending binder or index entry would change the second.
         let result = unpickler.unpickle_type(POLY_AT);
         assert!(
-            matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+            matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
             "{result:?}"
         );
         assert_eq!(unpickler.index().type_count(), before);
