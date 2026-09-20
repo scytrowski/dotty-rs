@@ -15,6 +15,48 @@ use dotty_tasty::tasty::{NameTable, RawName};
 
 use crate::error::UnpickleError;
 
+/// The separators of the unique-name kinds Scala 3.9.0 registers
+/// (`NameKinds.uniqueNameKinds`, plus `$jsclass` from `ExplicitJSClasses`).
+/// Dotty's reader looks the separator up in that map and throws for any other,
+/// so an unregistered separator is not a name it reads.
+const UNIQUE_SEPARATORS: &[&str] = &[
+    "$",
+    "evidence$",
+    "contextual$",
+    "canThrow$",
+    "try$",
+    "ev$",
+    "(param)",
+    "$_lazy_implicit_$",
+    "$lzy",
+    "$lzyINIT",
+    "$OFFSET",
+    "bitmap$",
+    "nonLocalReturnKey",
+    "_$",
+    "tailLabel",
+    "$tailLocal",
+    "$tmp",
+    "ex",
+    "ex$",
+    "?",
+    "'s",
+    "$superArg$",
+    "$doc",
+    "$i",
+    "$scrutinee",
+    "$proxy",
+    "$macro$",
+    "$extension",
+    "x",
+    "matchAlts",
+    "matchResult",
+    "$given",
+    "ilo",
+    "boundary",
+    "$jsclass",
+];
+
 /// Composite names nest a handful of levels at most; anything deeper is a
 /// malformed (or cyclic) table rather than a real name.
 const MAX_NAME_DEPTH: usize = 64;
@@ -151,6 +193,9 @@ fn resolve(
             underlying,
         } => {
             let separator = inner(*separator)?;
+            if !UNIQUE_SEPARATORS.contains(&separator.as_str()) {
+                return Err(UnpickleError::UnsupportedName { reference });
+            }
             let underlying = match underlying {
                 Some(underlying) => inner(*underlying)?,
                 None => String::new(),
@@ -373,6 +418,25 @@ mod tests {
         // `contextual$` keeps a non-empty original alone, else `contextual$1`.
         assert_eq!(wire_name(&names, 5).unwrap(), "$init$");
         assert_eq!(wire_name(&names, 6).unwrap(), "contextual$1");
+    }
+
+    #[test]
+    fn a_unique_name_with_an_unregistered_separator_is_unsupported() {
+        // Dotty looks the separator up in `uniqueNameKinds` and throws.
+        let names = table(vec![
+            utf8("#"),
+            utf8("a"),
+            RawName::Unique {
+                separator: 1,
+                uniqid: 1,
+                underlying: Some(2),
+            },
+        ]);
+
+        assert_eq!(
+            wire_name(&names, 3),
+            Err(UnpickleError::UnsupportedName { reference: 3 })
+        );
     }
 
     #[test]
