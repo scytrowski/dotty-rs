@@ -942,7 +942,7 @@ with `SymbolKind::TypeAlias`. `Flexible` is a real wrapper (Dotty's
 `FlexibleType`) that model code must not strip; only member lookup sees through
 it. Variance markers that TASTy writes after `TYPEBOUNDS` belong to a
 `TypeLambda` bound, not to the bounds, so the model has no bounds-level
-variance.
+variance: they become the `declared_variance` of a rebound `TypeLambda`.
 
 ### `[BLOCKER 1]` Binder identity is `TypeId`, not a separate `BinderId`
 
@@ -1069,7 +1069,7 @@ pub enum MethodKind {
 pub struct TypeParam {
     pub name: TypeName,
     pub bounds: TypeId,
-    pub variance: Variance,
+    pub declared_variance: Option<Variance>,
 }
 
 pub enum Variance {
@@ -1094,6 +1094,15 @@ pub enum Constant {
     Class(TypeId),
 }
 ```
+
+`declared_variance` is `None` when nothing was declared (a standalone
+`[A] =>> A`, a `PolyType`, a classfile generic method) and
+`Some(Variance::Invariant)` for an explicit invariant declaration (TASTy's
+`STABLE` marker). Dotty keeps the same two states: `HKTypeLambda`'s
+`isDeclaredVarianceLambda` is `variances.nonEmpty`, and the list may hold
+`Invariant`. Absence is deliberately not a `Variance` member (an "unspecified"
+member would let code treat it as a variance). The field is *declared*
+variance only; structural or inferred variance belongs to a later typer.
 
 `varargs` is the JVM `ACC_VARARGS` distinction only. A TASTy `METHODtype` does not
 encode it (a Scala repeated parameter is part of the parameter's *type*), so the

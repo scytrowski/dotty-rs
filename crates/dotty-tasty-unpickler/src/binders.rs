@@ -33,7 +33,7 @@
 use dotty_core::ids::TypeId;
 use dotty_core::names::{TermName, TypeName};
 use dotty_core::types::{
-    MethodKind, MethodParam, MethodType, PolyType, Type, TypeLambda, TypeParam, Variance,
+    MethodKind, MethodParam, MethodType, PolyType, Type, TypeLambda, TypeParam,
 };
 use dotty_tasty::tasty::{GIVEN_TAG, IMPLICIT_TAG, RawNode};
 
@@ -178,8 +178,8 @@ impl TastyUnpickler<'_, '_, '_> {
     /// `TYPELAMBDAtype Length result_Type (paramBounds_Type paramName_NameRef)*`
     /// at `at`, as a `TypeLambda` stored under its own address's `TypeId`.
     ///
-    /// A `TYPELAMBDAtype` carries no variance of its own, so the parameters are
-    /// invariant. Variance markers belong to an enclosing `TYPEBOUNDS`, which
+    /// A `TYPELAMBDAtype` carries no declared variance of its own (`None`, not an
+    /// explicit invariant). Variance markers belong to an enclosing `TYPEBOUNDS`, which
     /// is deferred (see the module documentation of `types`).
     pub(crate) fn decode_type_lambda(
         &mut self,
@@ -195,7 +195,7 @@ impl TastyUnpickler<'_, '_, '_> {
 
     /// `POLYtype Length result_Type (paramBounds_Type paramName_NameRef)*` at
     /// `at`, as a `Poly` stored under its own address's `TypeId`. Its
-    /// parameters are invariant: a `PolyType` has no variance markers.
+    /// parameters have no declared variance: a `PolyType` has no variance markers.
     pub(crate) fn decode_poly_type(
         &mut self,
         ast: &AstView<'_>,
@@ -301,7 +301,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 .map(|(name, info)| TypeParam {
                     name: TypeName::new(*name),
                     bounds: *info,
-                    variance: Variance::Invariant,
+                    declared_variance: None,
                 })
                 .collect()
         };

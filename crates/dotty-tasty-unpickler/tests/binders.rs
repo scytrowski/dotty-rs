@@ -10,7 +10,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
     Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
 };
-use dotty_core::types::{Type, TypeLambda, Variance};
+use dotty_core::types::{Type, TypeLambda};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -250,7 +250,7 @@ fn a_type_lambda_owns_its_id_and_its_result_names_that_exact_id() {
 
     let lambda = lambda(&session.store, id);
     assert_eq!(param_name(&session.store, lambda, 0), "A");
-    assert_eq!(lambda.params[0].variance, Variance::Invariant);
+    assert_eq!(lambda.params[0].declared_variance, None);
     // The point of the whole design: the result's binder is this very id.
     assert_eq!(
         session.store.types.get(lambda.result),

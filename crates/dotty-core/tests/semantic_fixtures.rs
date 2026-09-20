@@ -18,7 +18,7 @@
 use dotty_core::{
     Annotation, ClassInfo, MatchType, MethodKind, MethodParam, MethodType, PolyType, Scope,
     SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
-    TermName, Type, TypeLambda, TypeName, TypeParam, Variance, Visibility,
+    TermName, Type, TypeLambda, TypeName, TypeParam, Visibility,
 };
 
 /// Allocates a fresh, semantically-opaque placeholder type (standing in for
@@ -74,7 +74,7 @@ fn generic_identity_method() {
     let type_param_a = TypeParam {
         name: a_name,
         bounds,
-        variance: Variance::Invariant,
+        declared_variance: None,
     };
     let poly = store.types.fill(
         poly_binder,
@@ -249,7 +249,7 @@ fn higher_kinded_type_parameter() {
     let wildcard_param = TypeParam {
         name: underscore_name,
         bounds: wildcard_bounds,
-        variance: Variance::Invariant,
+        declared_variance: None,
     };
     let hk_body = placeholder(&mut store);
     let hk_kind = store.types.fill(
@@ -264,7 +264,7 @@ fn higher_kinded_type_parameter() {
     let f_type_param = TypeParam {
         name: f_name,
         bounds: hk_kind,
-        variance: Variance::Invariant,
+        declared_variance: None,
     };
     let functor_body = placeholder(&mut store);
     let functor_poly = store.types.fill(
@@ -343,7 +343,7 @@ fn contextual_parameter() {
             params: vec![TypeParam {
                 name: a_name,
                 bounds,
-                variance: Variance::Invariant,
+                declared_variance: None,
             }],
             result: plain_method,
         }),
@@ -400,7 +400,7 @@ fn type_lambda() {
             params: vec![TypeParam {
                 name: x_name,
                 bounds: x_bounds,
-                variance: Variance::Invariant,
+                declared_variance: None,
             }],
             result: either_applied,
         }),
@@ -470,7 +470,7 @@ fn match_type() {
             params: vec![TypeParam {
                 name: x_name,
                 bounds: x_bounds,
-                variance: Variance::Invariant,
+                declared_variance: None,
             }],
             result: match_type,
         }),
