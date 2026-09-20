@@ -515,4 +515,87 @@ mod tests {
                 .contains("at least one formal parameter")
         }));
     }
+
+    #[test]
+    fn lambda_in_a_braced_block_owns_the_remaining_block_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ x => first\n second }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(4, 6).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Newline, 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        let TreeKind::Block(ref outer) = parser.ast().get(tree).kind else {
+            panic!("expected an outer block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(outer.expr).kind
+        else {
+            panic!("expected a function literal as the block result");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(function.body).kind else {
+            panic!("expected the lambda to own a block body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lambda_with_an_indented_body_consumes_the_layout_region() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  first\n  second",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Indent, 5, 5),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Newline, 12, 13),
+                token(TokenKind::Identifier, 15, 21),
+                token(TokenKind::Outdent, 21, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Block(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
 }
