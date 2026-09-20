@@ -59,6 +59,7 @@ where
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
+        self.consume_deferred_sequence_marker();
         if !self.current_text_is("|") {
             return first;
         }
@@ -74,7 +75,9 @@ where
                 alternatives.push(self.error_pattern(self.current_span()));
                 break;
             }
-            alternatives.push(self.pattern1());
+            let alternative = self.pattern1();
+            self.consume_deferred_sequence_marker();
+            alternatives.push(alternative);
         }
 
         self.alloc_from(mark, TreeKind::Alternative(Alternative { alternatives }))
@@ -133,13 +136,20 @@ where
 
     fn pattern3(&mut self) -> TreeId<Untyped> {
         let pattern = self.infix_pattern();
-        if self.current_text_is("*") {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "sequence patterns are not supported yet",
-            );
-        }
+        self.consume_deferred_sequence_marker();
         pattern
+    }
+
+    fn consume_deferred_sequence_marker(&mut self) {
+        if self.current().kind != TokenKind::Operator || !self.current_text_is("*") {
+            return;
+        }
+
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "sequence patterns are not supported yet",
+        );
+        self.advance();
     }
 
     fn infix_pattern(&mut self) -> TreeId<Untyped> {
@@ -984,6 +994,100 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_top_level_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x*",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_bound_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x @ _*",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_an_extractor_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(xs*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_sequence_pattern_after_a_comma() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(head, tail*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
         );
     }
 }
