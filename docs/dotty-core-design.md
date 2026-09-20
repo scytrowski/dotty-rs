@@ -58,8 +58,8 @@ drift apart.
           │                            │                            │
           ▼                            ▼                            ▼
    source frontend              classfile loader             TASTy adapter
-   (dotty-lexer today,          (dotty-classfile               (dotty-tasty
-    future dotty-parser)         today: raw only)               today: raw only)
+   (dotty-lexer + parser)       (dotty-classfile               (dotty-tasty
+                               today: raw only)               today: raw only)
           │                            │                            │
           └────────────────────────────┼────────────────────────────┘
                                        │
@@ -98,9 +98,11 @@ dotty-tasty    (no deps; raw + structured wire-format codec)
 dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `classfile`)
 ```
 
-`dotty-parser` is an incremental Scala 3.9.0 source parser with a deliberately
-scoped simple- and operator-expression pipeline. Full grammar coverage, namer,
-typer, and compiler orchestration remain future work; the parser boundary and
+`dotty-parser` is an incremental Scala 3.9.0 source parser with an expression
+pipeline from `Expr1` through operator/simple expressions and an initial
+source-level pattern grammar. Case/match clauses and the rest of the Scala
+grammar are added incrementally; full grammar coverage, namer, typer, and
+compiler orchestration remain future work. The parser boundary and
 `AstArena<Untyped>` ownership are established. See
 [`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md) for its current scope.
 

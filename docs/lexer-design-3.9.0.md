@@ -196,32 +196,31 @@ crates/dotty-lexer/src/
     └── infix.rs
 ```
 
-The future parser must depend on the shared `dotty-core::source` and
+The parser depends on the shared `dotty-core::source` and
 `dotty-core::token` contracts, never on the concrete `lexer` module. In
 particular, the parser must not import
 `RawLexer`, `RawToken`, `RawTokenKind`, trivia implementation details, or the
 scanner's region stack.
 
-The intended dependency direction, including future consumers, is:
+The dependency direction is:
 
 ```text
 dotty-core::source ───────┐
 dotty-core::diagnostics ──┼────► dotty-lexer
 dotty-core::token ────────┘
 
-future dotty-parser ─────► dotty-core
+dotty-parser ─────────────► dotty-core
 ```
 
 `RawToken` and `RawTokenKind` are lexer-internal to `dotty-lexer`. `Token`,
 `TokenKind`, `TokenValue`, and `ScannerEvent` belong to `dotty-core::token`;
-they are the future parser-facing contract shared by the scanner and a future
-parser.
+they are the parser-facing contract shared by the scanner and parser.
 
 `dotty-lexer` depends on `dotty-core`. No current crate depends on a parser or
 AST crate.
 
-When parser work begins, `dotty-parser` will depend on `dotty-core`, but not
-on `dotty-lexer`.
+`dotty-parser` depends on `dotty-core`, but not on `dotty-lexer` in
+production. The concrete scanner remains an integration/tooling dependency.
 
 ## 4. Source model
 
@@ -393,9 +392,10 @@ enum ScannerEvent {
 }
 ```
 
-When parser work begins, parser tests will use an in-memory token source,
-allowing parser grammar tests to run without lexical analysis. Current scanner
-tests construct the scanner directly, without constructing a parser.
+Parser tests use an in-memory token source, allowing grammar tests to run
+without lexical analysis. Scanner tests continue to construct the scanner
+directly, while integration tests may connect it to the parser through the
+shared `dotty-core` token and event contracts.
 
 ## 9. Compatibility decisions and watch points
 
