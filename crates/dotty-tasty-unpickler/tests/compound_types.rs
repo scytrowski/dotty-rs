@@ -475,11 +475,12 @@ fn nat(n: usize) -> Vec<u8> {
 /// A file whose only AST node is `depth` nested `ANDtype`s over a leaf the
 /// decoder does not support, written from the inside out.
 fn nested_intersections(depth: usize) -> Vec<u8> {
-    const LEAF: u8 = 2;
-    let mut node = vec![LEAF];
+    // `RECthis`: a tag with a `Nat` the type pass does not decode.
+    const LEAF: [u8; 2] = [66, 0x80];
+    let mut node = LEAF.to_vec();
     for _ in 0..depth {
         let mut payload = node;
-        payload.push(LEAF);
+        payload.extend(LEAF);
         let mut outer = vec![165];
         outer.extend(nat(payload.len()));
         outer.extend(payload);
@@ -525,7 +526,7 @@ fn a_deeply_nested_compound_type_is_an_error_not_a_stack_overflow() {
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
     assert!(matches!(
         unpickler.unpickle_type(0),
-        Err(UnpickleError::UnsupportedType { tag: 2, .. })
+        Err(UnpickleError::UnsupportedType { tag: 66, .. })
     ));
 }
 
