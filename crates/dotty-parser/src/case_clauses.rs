@@ -91,6 +91,10 @@ where
             result
         } else {
             let expr = self.with_location(Location::InBlock, |parser| parser.expr());
+            if self.accept(TokenKind::Punctuation(Punctuation::Semicolon)) {
+                // Dotty keeps the separator in the source-level case-body
+                // block span. The next case still starts after it.
+            }
             (Vec::new(), expr)
         };
 
