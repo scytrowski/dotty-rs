@@ -388,8 +388,10 @@ Bounds, flexible and constant types (Milestone 2c2):
   every constant node decodes as a type. They come from `dotty-tasty`'s typed
   `ConstantValue` and are lossless: `Constant::Char(u16)`,
   `FloatBits(u32)`, `DoubleBits(u64)` keep every code unit, NaN payload and
-  signed zero, and equality is bitwise. A string is read from the UTF-8 name
-  entry itself (`string_value`), not through the name-spelling rules. Known
+  signed zero, and equality is bitwise. `STRINGconst` carries a `NameRef` and Dotty reads it as
+  `readName().toString`, so any valid name entry is a string: a UTF-8 entry
+  is its text and a derived entry (qualified, expanded, ...) is its rendered
+  spelling (`string_value`). Known
   limit: `dotty-tasty` rejects a name table that is not valid UTF-8, so a
   string with an unpaired surrogate cannot reach the unpickler and
   `Constant::StringUtf16` is not produced from TASTy yet. `CLASSconst` stores

@@ -392,13 +392,60 @@ fn a_failure_after_a_constant_decoded_forgets_the_constant() {
     assert_eq!(unpickler.index().type_at(2), None);
 }
 
+/// A file over the names `ASTs`, `a`, `b`, `a.b` (qualified, entry 3).
+fn file_with_qualified_name(ast: &[u8]) -> Vec<u8> {
+    use dotty_tasty::tasty::{Header, NameTable, RawName, Section, SectionTable};
+    let names = NameTable::from_entries(vec![
+        RawName::Utf8("ASTs".to_owned()),
+        RawName::Utf8("a".to_owned()),
+        RawName::Utf8("b".to_owned()),
+        RawName::Qualified {
+            prefix: 1,
+            selector: 2,
+        },
+    ])
+    .unwrap();
+    TastyFile::from_parts(
+        Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 0,
+            tooling_version: "Scala 3.9.0".to_owned(),
+            uuid: [0; 16],
+        },
+        names,
+        SectionTable::from_sections(vec![Section::new(0, ast)]),
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+fn string_constant_over(name_ref: u8) -> Result<String, UnpickleError> {
+    let bytes = file_with_qualified_name(&length_node(193, &[74, 0x80 | name_ref]));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    let id = unpickler.unpickle_type(2)?;
+    drop(unpickler);
+    let Type::Constant(Constant::String(name)) = session.store.types.get(id) else {
+        panic!("expected a string constant");
+    };
+    Ok(session.store.names.resolve(*name).to_string())
+}
+
 #[test]
-fn a_string_constant_must_name_plain_text() {
-    // Name entry 1 is `p`; entry 9 does not exist.
-    assert!(matches!(
-        decode_single(&[74, 0x80 | 9]),
+fn a_string_constant_may_name_any_valid_name_entry() {
+    // `STRINGconst` carries a `NameRef`, which Dotty reads as
+    // `readName().toString`: a qualified entry is a string, spelled `a.b`.
+    assert_eq!(string_constant_over(1).as_deref(), Ok("a"));
+    assert_eq!(string_constant_over(3).as_deref(), Ok("a.b"));
+}
+
+#[test]
+fn a_string_constant_with_a_missing_name_is_an_error() {
+    assert_eq!(
+        string_constant_over(9),
         Err(UnpickleError::InvalidNameReference { reference: 9 })
-    ));
-    let single: Result<Type, UnpickleError> = decode_single(&[74, 0x81]);
-    assert!(matches!(single, Ok(Type::Constant(Constant::String(_)))));
+    );
 }

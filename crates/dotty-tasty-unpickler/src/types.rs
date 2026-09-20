@@ -291,7 +291,7 @@ impl TastyUnpickler<'_, '_, '_> {
             ConstantValue::DoubleBits(bits) => Constant::DoubleBits(bits),
             ConstantValue::String(reference) => {
                 let text = string_value(self.file.names(), reference)?;
-                Constant::String(self.store.names.intern(text))
+                Constant::String(self.store.names.intern(&text))
             }
         })
     }

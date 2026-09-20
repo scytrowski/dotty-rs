@@ -19,18 +19,12 @@ use crate::error::UnpickleError;
 /// malformed (or cyclic) table rather than a real name.
 const MAX_NAME_DEPTH: usize = 64;
 
-/// The text of a string constant: the UTF-8 entry at `reference`, exactly as
-/// written. A string is a value, not a name, so none of the spelling rules of
-/// [`wire_name`] apply, and an entry that is not plain UTF-8 text (a
-/// qualified, signed or unique name) is not a string.
-pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<&str, UnpickleError> {
-    match usize::try_from(reference)
-        .ok()
-        .and_then(|index| names.entries().get(index))
-    {
-        Some(RawName::Utf8(text)) => Ok(text),
-        _ => Err(UnpickleError::InvalidNameReference { reference }),
-    }
+/// The text of a string constant. `STRINGconst` carries a `NameRef`, and Dotty
+/// reads it as `readName().toString`, so any valid name entry is a string: a
+/// plain UTF-8 entry is its text, and a derived entry (qualified, expanded,
+/// unique, ...) is its rendered spelling, exactly as [`wire_name`] renders it.
+pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
+    wire_name(names, reference)
 }
 
 /// Renders the name at the zero-based wire `reference` to its Scala spelling.
@@ -196,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn a_string_value_is_the_utf8_text_and_nothing_else() {
+    fn a_string_value_is_any_valid_name_rendered_as_dotty_does() {
         let names = table(vec![
             utf8("a.b"),
             utf8("b"),
@@ -206,12 +200,10 @@ mod tests {
             },
         ]);
 
-        // Not split, not rendered: the text as written.
+        // A plain entry is its text, not split.
         assert_eq!(string_value(&names, 1).unwrap(), "a.b");
-        assert_eq!(
-            string_value(&names, 3),
-            Err(UnpickleError::InvalidNameReference { reference: 3 })
-        );
+        // A derived entry is its rendered name.
+        assert_eq!(string_value(&names, 3).unwrap(), "a.b.b");
         assert_eq!(
             string_value(&names, 9),
             Err(UnpickleError::InvalidNameReference { reference: 9 })
