@@ -1,7 +1,7 @@
 //! Binder identity: the state that lets a `PARAMtype` refer to a binder that
 //! is still being decoded.
 //!
-//! A binder is the `TypeId` its `Type::TypeLambda` (later `Method`/`Poly`) is
+//! A binder is the `TypeId` its `Type::TypeLambda` (or `Poly`/`Method`) is
 //! stored under, and a `ParamRef` names that id. The id must therefore exist
 //! before the binder's children are decoded, since they may contain the
 //! `ParamRef`s. The sequence for a `TYPELAMBDAtype` at address `B` is:
@@ -43,6 +43,21 @@ use crate::unpickler::TastyUnpickler;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BinderKind {
     TypeLambda,
+    #[allow(dead_code)]
+    Poly,
+    #[allow(dead_code)]
+    Method,
+}
+
+/// The number of parameters of a completed binder type, or `None` if `ty` is
+/// not one of the three binder forms a `PARAMtype` can name.
+fn completed_arity(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::TypeLambda(lambda) => Some(lambda.params.len()),
+        Type::Poly(poly) => Some(poly.params.len()),
+        Type::Method(method) => Some(method.params.len()),
+        _ => None,
+    }
 }
 
 /// A binder whose `TypeId` is reserved and published but not yet filled.
@@ -135,13 +150,15 @@ impl TastyUnpickler<'_, '_, '_> {
                 // still being decoded.
                 Some(pending) => (pending.id, pending.arity),
                 None => match self.store.types.get(id) {
-                    Type::TypeLambda(lambda) => (id, lambda.params.len()),
-                    _ => {
-                        return Err(UnpickleError::InvalidBinderKind {
-                            from: at,
-                            binder: id,
-                        });
-                    }
+                    ty => match completed_arity(ty) {
+                        Some(arity) => (id, arity),
+                        None => {
+                            return Err(UnpickleError::InvalidBinderKind {
+                                from: at,
+                                binder: id,
+                            });
+                        }
+                    },
                 },
             }
         };
@@ -192,6 +209,13 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::MalformedType {
                 address: at,
                 reason: "the type lambda's children disagree with its parameters",
+            });
+        }
+        if shape.type_names.is_empty() {
+            // Dotty's `HKTypeLambda` requires at least one parameter.
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the type lambda has no parameters",
             });
         }
         let mut names = Vec::with_capacity(shape.type_names.len());

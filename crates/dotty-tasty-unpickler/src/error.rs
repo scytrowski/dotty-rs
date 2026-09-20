@@ -99,7 +99,7 @@ pub enum UnpickleError {
     /// visible AST node.
     InvalidBinderReference { from: u32, binder: u32 },
     /// The `PARAMtype` at `from` names a node whose type, `binder`, is not a
-    /// binder this pass supports (a `TypeLambda`).
+    /// binder (a `TypeLambda`, `Poly` or `Method`).
     InvalidBinderKind { from: u32, binder: TypeId },
     /// The `PARAMtype` at `address` names parameter `index` of `binder`, which
     /// has only `arity` parameters.
