@@ -79,5 +79,5 @@ pub use token::{
 pub use types::{
     Annotation, AnnotationArena, ClassInfo, Constant, ErrorType, MatchType, MethodKind,
     MethodParam, MethodType, PolyType, ReservedTypeId, Type, TypeArena, TypeLambda, TypeParam,
-    Variance,
+    TypeRebindError, Variance, rebind_type_lambda,
 };

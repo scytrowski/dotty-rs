@@ -9,7 +9,7 @@ use dotty_core::Packages;
 use dotty_core::ids::TypeId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
-use dotty_core::types::{MethodKind, MethodType, PolyType, Type, Variance};
+use dotty_core::types::{MethodKind, MethodType, PolyType, Type};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -166,7 +166,7 @@ fn a_poly_parameter_has_its_name_bounds_and_is_invariant() {
     let poly = poly(&session.store, id);
     let name = poly.params[0].name.as_name();
     assert_eq!(session.store.names.resolve(name.text()), "p");
-    assert_eq!(poly.params[0].variance, Variance::Invariant);
+    assert_eq!(poly.params[0].declared_variance, None);
     assert!(matches!(
         session.store.types.get(poly.params[0].bounds),
         Type::AliasingBounds { .. }
@@ -833,7 +833,7 @@ fn a_real_poly_binds_its_parameter_for_the_method_inside_it() {
 
     let poly = poly(&session.store, poly_id);
     assert_eq!(poly.params.len(), 1);
-    assert_eq!(poly.params[0].variance, Variance::Invariant);
+    assert_eq!(poly.params[0].declared_variance, None);
     assert_eq!(
         session
             .store

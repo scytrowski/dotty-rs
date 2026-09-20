@@ -46,13 +46,28 @@
 //! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
 //! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
 //!
-//! `TYPEBOUNDS` with trailing variance markers is
-//! [`UnsupportedBoundsVariance`](UnpickleError::UnsupportedBoundsVariance):
-//! Dotty applies the markers to a `TypeLambda` bound by building a *new*
-//! lambda that substitutes the old binder's parameter references. Even though
-//! `TypeLambda` now exists (see below), that rebinding is not implemented, so
-//! the markers are still refused rather than dropped or applied by mutating
-//! or cloning the cached lambda (Milestone 3c).
+//! ## Variance-bearing `TYPEBOUNDS` (Milestone 3c)
+//!
+//! `TYPEBOUNDS` may end in variance markers (`STABLE`, `COVARIANT`,
+//! `CONTRAVARIANT`), as Dotty's `readVariances` reads them: on an alias-only
+//! node they apply to the one child (`AliasingBounds(readVariances(lo))`), on
+//! a two-sided node to the *upper* bound only (`hi = readVariances(readType())`),
+//! never to `low`. They only mean something on a `TypeLambda`: for any other
+//! target Dotty's `readVariances` returns the type as it is (`case _ => tp`), and
+//! so does this pass. For a lambda, a count different from its parameters is
+//! [`BoundsVarianceArityMismatch`](UnpickleError::BoundsVarianceArityMismatch)
+//! (nothing is dropped, padded or truncated), and a lambda still being decoded
+//! is [`BoundsVarianceTargetPending`](UnpickleError::BoundsVarianceTargetPending).
+//!
+//! Dotty's `withVariances` does not change the lambda: it builds a *new* one
+//! (`newLikeThis`) and substitutes the old binder in it. So does this pass,
+//! through the format-agnostic `dotty_core::rebind_type_lambda`. The child
+//! `TYPELAMBDAtype` is decoded normally first and stays the type cached at its
+//! own AST address (and what a `SHAREDtype` to it returns), with no declared
+//! variance; the bounds hold a fresh derived lambda, with
+//! `declared_variance: Some(..)` per parameter (`STABLE` is
+//! `Some(Invariant)`), no AST address, and its own `ParamRef`s. Decoding the
+//! bounds again returns the cached bounds, so no second derived lambda is made.
 //!
 //! ## Binders (Milestones 3a and 3b)
 //!
@@ -74,8 +89,8 @@
 //!
 //! Each parameter's info must be `Bounds` or `AliasingBounds`, or the node is
 //! [`InvalidTypeParameterBounds`](UnpickleError::InvalidTypeParameterBounds);
-//! a standalone `TYPELAMBDAtype` or `POLYtype` has no variance of its own, so
-//! parameters are `Invariant`. A `POLYtype` and a `TYPELAMBDAtype` need at least
+//! a standalone `TYPELAMBDAtype` or `POLYtype` has no declared variance of its
+//! own (`declared_variance: None`, which is not the same as `Some(Invariant)`). A `POLYtype` and a `TYPELAMBDAtype` need at least
 //! one parameter (as Dotty's `PolyType` and `HKTypeLambda` do), or the node is
 //! [`MalformedType`](UnpickleError::MalformedType).
 //!
@@ -124,6 +139,7 @@ use dotty_tasty::tasty::{
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
+use crate::binders::declared_variances;
 use crate::error::UnpickleError;
 use crate::lookup::{LocalLookup, lookup_member};
 use crate::names::{is_signed, package_segments, string_value, wire_name};
@@ -284,17 +300,18 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             RawTree::LengthNode(node) if tag == TYPEBOUNDS_TAG => {
                 let shape = node.decode_type_bounds()?;
-                if !shape.variances.is_empty() {
-                    // Dotty applies the markers to an `HKTypeLambda` bound,
-                    // which is not decoded yet: never drop them.
-                    return Err(UnpickleError::UnsupportedBoundsVariance { address: at });
-                }
+                let variances = declared_variances(at, &shape.variances)?;
                 if shape.high.is_some() {
+                    // Dotty: `hi = readVariances(readType())`. The markers go
+                    // to the upper bound, never to `low`.
                     let [low, high] = self.decode_binary(ast, at, depth)?;
+                    let high = self.apply_declared_variances(at, high, &variances)?;
                     Type::Bounds { low, high }
                 } else {
+                    // Dotty: `AliasingBounds(readVariances(lo))`.
                     let ids = self.decode_children(ast, at, 1, depth)?;
-                    Type::AliasingBounds { alias: ids[0] }
+                    let alias = self.apply_declared_variances(at, ids[0], &variances)?;
+                    Type::AliasingBounds { alias }
                 }
             }
             RawTree::Ast { .. } if tag == CLASSCONST_TAG => {

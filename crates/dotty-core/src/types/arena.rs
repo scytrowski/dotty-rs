@@ -65,6 +65,14 @@ impl TypeArena {
         self.filled.truncate(len);
     }
 
+    /// Whether the slot `id` holds a real value, as opposed to a `reserve`-d
+    /// slot that has not been `fill`-ed yet (which [`TypeArena::get`] refuses).
+    ///
+    /// Panics if `id` was not allocated by this arena.
+    pub fn is_filled(&self, id: TypeId) -> bool {
+        self.filled[id.index() as usize]
+    }
+
     /// Panics if `id` was not allocated by this arena, or was `reserve`-d but
     /// never `fill`-ed.
     pub fn get(&self, id: TypeId) -> &Type {
@@ -125,9 +133,7 @@ mod tests {
     use super::*;
     use crate::ids::{NameId, SymbolId};
     use crate::names::{TermName, TypeName};
-    use crate::types::method::{
-        MethodKind, MethodParam, MethodType, PolyType, TypeParam, Variance,
-    };
+    use crate::types::method::{MethodKind, MethodParam, MethodType, PolyType, TypeParam};
 
     #[test]
     fn alloc_and_get_round_trip_a_type() {
@@ -221,7 +227,7 @@ mod tests {
         let type_param_a = TypeParam {
             name: TypeName::new(NameId::new(2)),
             bounds: arena.alloc(Type::NoPrefix),
-            variance: Variance::Invariant,
+            declared_variance: None,
         };
         let poly = arena.fill(
             poly_binder,
