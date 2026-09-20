@@ -65,9 +65,18 @@ pub enum Type {
         tycon: TypeId,
         args: Vec<TypeId>,
     },
+    /// Genuine lower/upper bounds (`>: low <: high`).
     Bounds {
         low: TypeId,
         high: TypeId,
+    },
+    /// The info of a type alias or opaque-free alias member (`= alias`).
+    ///
+    /// Dotty's `AliasingBounds` is bounds-like internally, but the semantic
+    /// distinction survives: this is not `Bounds { low: alias, high: alias }`.
+    /// It is unrelated to `SymbolKind::TypeAlias`, which classifies a symbol.
+    AliasingBounds {
+        alias: TypeId,
     },
     ByName {
         result: TypeId,
@@ -218,6 +227,19 @@ mod tests {
         };
 
         assert_ne!(bounds, by_name);
+    }
+
+    #[test]
+    fn aliasing_bounds_is_not_two_sided_bounds_with_equal_ends() {
+        let alias = TypeId::new(1);
+
+        assert_ne!(
+            Type::AliasingBounds { alias },
+            Type::Bounds {
+                low: alias,
+                high: alias,
+            }
+        );
     }
 
     #[test]

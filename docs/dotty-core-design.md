@@ -893,7 +893,8 @@ pub enum Type {
     Constant(Constant),
 
     Applied { tycon: TypeId, args: Vec<TypeId> },
-    Bounds { low: TypeId, high: TypeId },
+    Bounds { low: TypeId, high: TypeId },       // genuine `>: low <: high`
+    AliasingBounds { alias: TypeId },           // `= alias`; not Bounds{alias, alias}
     ByName { result: TypeId },
 
     And { left: TypeId, right: TypeId },
