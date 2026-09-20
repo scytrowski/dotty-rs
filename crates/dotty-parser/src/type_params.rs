@@ -94,7 +94,7 @@ where
             );
         }
 
-        let bounds_start = mark.start();
+        let explicit_bounds_start = self.current().span.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
         } else {
@@ -108,7 +108,7 @@ where
         let bounds = if low.is_some() || high.is_some() {
             self.alloc_from(
                 crate::Mark {
-                    start: bounds_start,
+                    start: explicit_bounds_start,
                 },
                 TreeKind::TypeBoundsTree(TypeBoundsTree {
                     low,
@@ -117,7 +117,7 @@ where
                 }),
             )
         } else {
-            self.synthetic_type_bounds(bounds_start)
+            self.synthetic_type_bounds(mark.start())
         };
 
         self.alloc_from(
@@ -325,6 +325,10 @@ mod tests {
             panic!("expected type bounds");
         };
         assert!(low.is_some() && high.is_some());
+        assert_eq!(
+            parser.ast().get(rhs).position.unwrap().span().range(),
+            TextRange::new(3, 20).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
