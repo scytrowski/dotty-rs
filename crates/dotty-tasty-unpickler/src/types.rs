@@ -52,17 +52,19 @@
 //! lambda that substitutes the old binder's parameter references. Even though
 //! `TypeLambda` now exists (see below), that rebinding is not implemented, so
 //! the markers are still refused rather than dropped or applied by mutating
-//! or cloning the cached lambda (Milestone 3b).
+//! or cloning the cached lambda (Milestone 3c).
 //!
-//! ## Binders (Milestone 3a)
+//! ## Binders (Milestones 3a and 3b)
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
 //! | `TYPELAMBDAtype`      | `Type (Type NameRef)*`    | `TypeLambda { params, result }`    |
+//! | `POLYtype`            | `Type (Type NameRef)*`    | `Poly { params, result }`          |
+//! | `METHODtype`          | `Type (Type NameRef)* Modifier*` | `Method { params, result, kind }` |
 //! | `PARAMtype`           | `ASTRef Nat`              | `ParamRef { binder, index }`       |
 //!
-//! A binder is the `TypeId` of its `TypeLambda`, and a `ParamRef` carries that
-//! exact id, found through the binder's AST address, never a name. The id is
+//! A binder is the `TypeId` of its `TypeLambda`, `Poly` or `Method`, and a
+//! `ParamRef` carries that exact id, found through the binder's AST address, never a name. The id is
 //! reserved and its address published before the children are decoded, so a
 //! `ParamRef` in a parameter's bounds, in the result or in a nested type
 //! resolves to the binder under construction; the slot is filled last. See
@@ -72,8 +74,27 @@
 //!
 //! Each parameter's info must be `Bounds` or `AliasingBounds`, or the node is
 //! [`InvalidTypeParameterBounds`](UnpickleError::InvalidTypeParameterBounds);
-//! a standalone `TYPELAMBDAtype` has no variance of its own, so parameters are
-//! `Invariant`.
+//! a standalone `TYPELAMBDAtype` or `POLYtype` has no variance of its own, so
+//! parameters are `Invariant`. A `POLYtype` and a `TYPELAMBDAtype` need at least
+//! one parameter (as Dotty's `PolyType` and `HKTypeLambda` do), or the node is
+//! [`MalformedType`](UnpickleError::MalformedType).
+//!
+//! A `METHODtype` parameter is a term parameter: its name is a `TermName`
+//! and its type is any type, not bounds. `()` is a valid clause, so an empty
+//! method is accepted. The modifier tail is the clause kind, as Dotty's
+//! `methodTypeCompanion` reads it: none is `Plain`, `IMPLICIT` is `Implicit`,
+//! `GIVEN` is `Contextual`. Both together are `Implicit`, as in Dotty, and any
+//! other modifier is [`InvalidMethodModifier`](UnpickleError::InvalidMethodModifier).
+//! A `PARAMtype` to a method is a reference to one of its term parameters,
+//! which is how a dependent result (`(x: Box): x.Out`) names its own clause.
+//!
+//! `MethodParam.erased` and `MethodParam.varargs` are both `false`. Dotty
+//! derives erasure from an `ErasedParamAnnot` on the parameter's *type*, which
+//! is an `ANNOTATEDtype` this pass does not decode yet, so no decodable method
+//! has an erased parameter; Milestone 4 must derive `erased` from the decoded
+//! annotation. `varargs` is the JVM `ACC_VARARGS` distinction, which a
+//! `METHODtype` does not carry (a repeated parameter is a `Seq`-like *type*),
+//! so it is never inferred from position or name.
 //!
 //! `And` and `Or` keep the operand order and nesting the compiler wrote: no
 //! commutative normalisation, no flattening. `BYNAMEtype` stays a wrapper; it
@@ -85,8 +106,7 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, `METHODtype`,
-//! `POLYtype`, refinements, recursive and match types, and
+//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, refinements, recursive and match types, and
 //! `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
@@ -97,10 +117,10 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
-    TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
-    TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
-    TermValue,
+    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RawTree,
+    SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
+    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -287,6 +307,12 @@ impl TastyUnpickler<'_, '_, '_> {
             // address, possibly before its children are decoded.
             RawTree::LengthNode(node) if tag == TYPELAMBDATYPE_TAG => {
                 return self.decode_type_lambda(ast, node, at, depth);
+            }
+            RawTree::LengthNode(node) if tag == POLYTYPE_TAG => {
+                return self.decode_poly_type(ast, node, at, depth);
+            }
+            RawTree::LengthNode(node) if tag == METHODTYPE_TAG => {
+                return self.decode_method_type(ast, node, at, depth);
             }
             RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
                 return self.decode_param_type(ast, node, at, depth);

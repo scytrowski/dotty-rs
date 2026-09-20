@@ -722,3 +722,25 @@ fn a_failed_binder_gives_its_reserved_slots_back_to_the_arena() {
 
     assert_eq!(next_id_after(true), next_id_after(false));
 }
+
+#[test]
+fn a_type_lambda_without_parameters_is_malformed() {
+    // Dotty's `HKTypeLambda` needs at least one parameter; the wire grammar
+    // (`Type NameRef*`) does not, so the semantic decoder must.
+    let bytes = file_with_lambda(&lambda_node(&[65, nat(1)], 0));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    packages.enter(&mut session.store, SymbolOrigin::Synthetic, &["p"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    let before = unpickler.index().type_count();
+
+    assert!(matches!(
+        unpickler.unpickle_type(2),
+        Err(UnpickleError::MalformedType { address: 2, .. })
+    ));
+    // Rejected before reserving: nothing was published.
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(2), None);
+}

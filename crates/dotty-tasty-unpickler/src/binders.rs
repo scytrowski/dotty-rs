@@ -1,10 +1,11 @@
 //! Binder identity: the state that lets a `PARAMtype` refer to a binder that
 //! is still being decoded.
 //!
-//! A binder is the `TypeId` its `Type::TypeLambda` (later `Method`/`Poly`) is
-//! stored under, and a `ParamRef` names that id. The id must therefore exist
-//! before the binder's children are decoded, since they may contain the
-//! `ParamRef`s. The sequence for a `TYPELAMBDAtype` at address `B` is:
+//! A binder is the `TypeId` its `Type::TypeLambda`, `Type::Poly` or
+//! `Type::Method` is stored under, and a `ParamRef` names that id. The id must
+//! therefore exist before the binder's children are decoded, since they may
+//! contain the `ParamRef`s. All three forms share one sequence (Dotty's
+//! `readMethodic`); for a binder at address `B` it is:
 //!
 //! ```text
 //! validate the envelope and parameter names
@@ -30,9 +31,11 @@
 //! `unpickle_type` returns.
 
 use dotty_core::ids::TypeId;
-use dotty_core::names::TypeName;
-use dotty_core::types::{Type, TypeLambda, TypeParam, Variance};
-use dotty_tasty::tasty::RawNode;
+use dotty_core::names::{TermName, TypeName};
+use dotty_core::types::{
+    MethodKind, MethodParam, MethodType, PolyType, Type, TypeLambda, TypeParam, Variance,
+};
+use dotty_tasty::tasty::{GIVEN_TAG, IMPLICIT_TAG, RawNode};
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
@@ -43,6 +46,19 @@ use crate::unpickler::TastyUnpickler;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BinderKind {
     TypeLambda,
+    Poly,
+    Method,
+}
+
+/// The number of parameters of a completed binder type, or `None` if `ty` is
+/// not one of the three binder forms a `PARAMtype` can name.
+fn completed_arity(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::TypeLambda(lambda) => Some(lambda.params.len()),
+        Type::Poly(poly) => Some(poly.params.len()),
+        Type::Method(method) => Some(method.params.len()),
+        _ => None,
+    }
 }
 
 /// A binder whose `TypeId` is reserved and published but not yet filled.
@@ -87,7 +103,7 @@ impl TastyUnpickler<'_, '_, '_> {
     ///
     /// The binder is, in this order: a pending one (validated from its
     /// recorded arity, never from the arena), one already decoded (checked to
-    /// be a `TypeLambda`), or one not yet decoded, which is decoded now. That
+    /// be a `TypeLambda`, `Poly` or `Method`), or one not yet decoded, which is decoded now. That
     /// last decode can reach this very node through the binder's own
     /// children, so the address is looked up again afterwards instead of
     /// allocating a second `ParamRef`.
@@ -134,9 +150,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 // The address is a `SHAREDtype` link to a binder that is
                 // still being decoded.
                 Some(pending) => (pending.id, pending.arity),
-                None => match self.store.types.get(id) {
-                    Type::TypeLambda(lambda) => (id, lambda.params.len()),
-                    _ => {
+                None => match completed_arity(self.store.types.get(id)) {
+                    Some(arity) => (id, arity),
+                    None => {
                         return Err(UnpickleError::InvalidBinderKind {
                             from: at,
                             binder: id,
@@ -162,16 +178,6 @@ impl TastyUnpickler<'_, '_, '_> {
     /// `TYPELAMBDAtype Length result_Type (paramBounds_Type paramName_NameRef)*`
     /// at `at`, as a `TypeLambda` stored under its own address's `TypeId`.
     ///
-    /// The envelope and the parameter names are validated first. Then the id is
-    /// reserved and published, and only then are the children decoded, so a
-    /// `ParamRef` inside them (in a parameter's bounds, in the result, or in a
-    /// nested type) resolves to the id under construction. The parameter
-    /// bounds are decoded before the result: either order works once the
-    /// binder is published, and this one lets a bound that is not a bounds
-    /// type fail before the result is read. Every child comes from the AST
-    /// index by absolute address; the structural decoder's trees are relative
-    /// to the payload and only validate the shape.
-    ///
     /// A `TYPELAMBDAtype` carries no variance of its own, so the parameters are
     /// invariant. Variance markers belong to an enclosing `TYPEBOUNDS`, which
     /// is deferred (see the module documentation of `types`).
@@ -183,21 +189,88 @@ impl TastyUnpickler<'_, '_, '_> {
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
         let shape = node.decode_poly_type()?;
+        let names = shape.type_names.iter().map(|entry| entry.name).collect();
+        self.decode_methodic(ast, at, depth, Methodic::TypeLambda, names)
+    }
+
+    /// `POLYtype Length result_Type (paramBounds_Type paramName_NameRef)*` at
+    /// `at`, as a `Poly` stored under its own address's `TypeId`. Its
+    /// parameters are invariant: a `PolyType` has no variance markers.
+    pub(crate) fn decode_poly_type(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        let shape = node.decode_poly_type()?;
+        let names = shape.type_names.iter().map(|entry| entry.name).collect();
+        self.decode_methodic(ast, at, depth, Methodic::Poly, names)
+    }
+
+    /// `METHODtype Length result_Type (paramType_Type paramName_NameRef)*
+    /// Modifier*` at `at`, as a `Method` stored under its own address's
+    /// `TypeId`. Zero parameters is a valid clause, `(): R`.
+    ///
+    /// A `ParamRef` to this binder is a *term* parameter reference, which is
+    /// how a dependent result (`(x: Box): x.Out`) names the clause it is in.
+    pub(crate) fn decode_method_type(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        let shape = node.decode_method_type()?;
+        let kind = method_kind(at, &shape.modifiers)?;
+        let names = shape.type_names.iter().map(|entry| entry.name).collect();
+        self.decode_methodic(ast, at, depth, Methodic::Method(kind), names)
+    }
+
+    /// The shared body of every binder form (Dotty's `readMethodic`): the
+    /// envelope and the parameter names are validated first. Then the id is
+    /// reserved and published, and only then are the children decoded, so a
+    /// `ParamRef` inside them (in a parameter's info, in the result, or in a
+    /// nested type) resolves to the id under construction. The parameter
+    /// infos are decoded before the result: either order works once the
+    /// binder is published, and this one lets an info that is not a bounds
+    /// type fail before the result is read. Every child comes from the AST
+    /// index by absolute address (`children[0]` is the result, then one info
+    /// per parameter); the structural decoder's trees are relative to the
+    /// payload and only validate the shape.
+    ///
+    /// `names` are the wire `NameRef`s of the parameters, in order.
+    fn decode_methodic(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        depth: usize,
+        form: Methodic,
+        names: Vec<u32>,
+    ) -> Result<TypeId, UnpickleError> {
         let children: Vec<u32> = ast
             .children(at)
             .iter()
             .map(|child| address(child.offset))
             .collect();
-        if children.len() != shape.type_names.len() + 1 {
+        if children.len() != names.len() + 1 {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the type lambda's children disagree with its parameters",
+                reason: "the binder's children disagree with its parameters",
             });
         }
-        let mut names = Vec::with_capacity(shape.type_names.len());
-        for parameter in &shape.type_names {
-            let text = wire_name(self.file.names(), parameter.name)?;
-            names.push(TypeName::new(self.store.names.intern(&text)));
+        if names.is_empty() && form.requires_parameters() {
+            // Dotty's `PolyType` and `HKTypeLambda` require at least one
+            // parameter (unlike a `MethodType`, where `()` is a clause).
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the binder has no parameters",
+            });
+        }
+        let mut interned = Vec::with_capacity(names.len());
+        for reference in &names {
+            let text = wire_name(self.file.names(), *reference)?;
+            interned.push(self.store.names.intern(&text));
         }
 
         let reserved = self.store.types.reserve();
@@ -206,27 +279,58 @@ impl TastyUnpickler<'_, '_, '_> {
         let binder = PendingBinder {
             address: at,
             id,
-            kind: BinderKind::TypeLambda,
-            arity: names.len(),
+            kind: form.kind(),
+            arity: interned.len(),
         };
         let (params, result) = self.with_pending_binder(binder, |this| {
-            let mut params = Vec::with_capacity(names.len());
-            for (position, name) in names.iter().enumerate() {
-                let bounds = this.type_at(ast, children[position + 1], at, depth)?;
-                this.check_parameter_bounds(id, position, bounds)?;
-                params.push(TypeParam {
-                    name: *name,
-                    bounds,
-                    variance: Variance::Invariant,
-                });
+            let mut params = Vec::with_capacity(interned.len());
+            for (position, name) in interned.iter().enumerate() {
+                let info = this.type_at(ast, children[position + 1], at, depth)?;
+                if form.has_type_parameters() {
+                    this.check_parameter_bounds(id, position, info)?;
+                }
+                params.push((*name, info));
             }
             let result = this.type_at(ast, children[0], at, depth)?;
             Ok::<_, UnpickleError>((params, result))
         })?;
 
-        self.store
-            .types
-            .fill(reserved, Type::TypeLambda(TypeLambda { params, result }));
+        let type_params = || {
+            params
+                .iter()
+                .map(|(name, info)| TypeParam {
+                    name: TypeName::new(*name),
+                    bounds: *info,
+                    variance: Variance::Invariant,
+                })
+                .collect()
+        };
+        let ty = match form {
+            Methodic::TypeLambda => Type::TypeLambda(TypeLambda {
+                params: type_params(),
+                result,
+            }),
+            Methodic::Poly => Type::Poly(PolyType {
+                params: type_params(),
+                result,
+            }),
+            // `erased` and `varargs` are not on the wire of a `METHODtype`:
+            // see the module documentation.
+            Methodic::Method(kind) => Type::Method(MethodType {
+                params: params
+                    .iter()
+                    .map(|(name, info)| MethodParam {
+                        name: TermName::new(*name),
+                        ty: *info,
+                        erased: false,
+                        varargs: false,
+                    })
+                    .collect(),
+                result,
+                kind,
+            }),
+        };
+        self.store.types.fill(reserved, ty);
         Ok(id)
     }
 
@@ -268,6 +372,60 @@ impl TastyUnpickler<'_, '_, '_> {
         self.pending_binders.truncate(depth);
         result
     }
+}
+
+/// The binder forms that share the reserve/publish/fill sequence.
+#[derive(Clone, Copy)]
+enum Methodic {
+    TypeLambda,
+    Poly,
+    Method(MethodKind),
+}
+
+impl Methodic {
+    fn kind(self) -> BinderKind {
+        match self {
+            Self::TypeLambda => BinderKind::TypeLambda,
+            Self::Poly => BinderKind::Poly,
+            Self::Method(_) => BinderKind::Method,
+        }
+    }
+
+    /// Whether the parameters are type parameters (with bounds infos) rather
+    /// than term parameters.
+    fn has_type_parameters(self) -> bool {
+        !matches!(self, Self::Method(_))
+    }
+
+    /// Whether an empty parameter list is malformed for this form. Only a
+    /// method clause may be empty, `()`.
+    fn requires_parameters(self) -> bool {
+        self.has_type_parameters()
+    }
+}
+
+/// The clause kind of a `METHODtype` from its modifier tail, as Dotty reads
+/// it: `readParamNamesAndMods` accumulates the tail into a flag set (any
+/// modifier other than `IMPLICIT` or `GIVEN` fails there, so it is refused
+/// here rather than ignored) and `methodTypeCompanion` tests `IMPLICIT` first,
+/// then `GIVEN`. So `IMPLICIT` wins when both are present, in either order,
+/// and a repeated modifier changes nothing. Dotty's pickler never writes both.
+fn method_kind(at: u32, modifiers: &[u8]) -> Result<MethodKind, UnpickleError> {
+    let (mut implicit, mut given) = (false, false);
+    for &modifier in modifiers {
+        match modifier {
+            IMPLICIT_TAG => implicit = true,
+            GIVEN_TAG => given = true,
+            tag => return Err(UnpickleError::InvalidMethodModifier { address: at, tag }),
+        }
+    }
+    Ok(if implicit {
+        MethodKind::Implicit
+    } else if given {
+        MethodKind::Contextual
+    } else {
+        MethodKind::Plain
+    })
 }
 
 #[cfg(test)]
