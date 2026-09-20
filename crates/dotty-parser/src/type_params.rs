@@ -22,6 +22,13 @@ where
         self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
         let mut params = Vec::new();
 
+        if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket) {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a type parameter between `[` and `]`",
+            );
+        }
+
         while self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Punctuation(Punctuation::RightBracket)
         {
@@ -334,5 +341,28 @@ mod tests {
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn empty_type_parameter_clause_reports_a_missing_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        assert!(params.is_empty());
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.message().contains("expected a type parameter") })
+        );
     }
 }
