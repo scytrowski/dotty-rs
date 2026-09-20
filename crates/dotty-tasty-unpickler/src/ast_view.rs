@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 
 use dotty_tasty::tasty::{
-    AstAddressIndex, AstError, AstTreeNode, RawNode, RawTree, Reader, StandardSection, TastyFile,
+    AstAddressIndex, AstError, AstTreeNode, RawNode, RawTree, Reader, SHAREDTERM_TAG,
+    SHAREDTYPE_TAG, StandardSection, TastyFile, TermValue,
 };
 
 use crate::error::UnpickleError;
@@ -25,6 +26,15 @@ pub(crate) const MAX_SHARED_DEPTH: usize = 16;
 /// larger offset cannot name a node.
 pub(crate) fn address(offset: usize) -> u32 {
     u32::try_from(offset).unwrap_or(u32::MAX)
+}
+
+#[allow(dead_code)]
+fn tree_tag(tree: &RawTree<'_>) -> u8 {
+    match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    }
 }
 
 /// The file's AST: nodes by absolute address, and each node's direct children
@@ -75,6 +85,33 @@ impl<'bytes> AstView<'bytes> {
     /// Whether `at` is the start of a visible AST node.
     pub(crate) fn is_node(&self, at: u32) -> bool {
         self.index.get_node(at).is_some()
+    }
+
+    /// The tag of the node at `at`, if `at` is the start of a visible node.
+    pub(crate) fn tag_at(&self, at: u32) -> Option<u8> {
+        self.index.get_node(at).map(|node| node.tag)
+    }
+
+    /// The tag of the first node at or after `at` that is not a shared link:
+    /// Dotty's `nextUnsharedTag`. A `SHAREDtype` (or `SHAREDterm`) is followed
+    /// to its target, however many are chained, up to the same bound as any
+    /// other chain of links, and every target must be a visible node. `from`
+    /// is the referring node, for the error.
+    #[allow(dead_code)]
+    pub(crate) fn next_unshared_tag(&self, at: u32, from: u32) -> Result<u8, UnpickleError> {
+        let mut current = at;
+        for _ in 0..=MAX_SHARED_DEPTH {
+            match self.tree_at(current, from)? {
+                RawTree::Leaf(term) if matches!(term.tag, SHAREDTYPE_TAG | SHAREDTERM_TAG) => {
+                    match term.value {
+                        TermValue::AstRef(target) => current = target,
+                        _ => return Ok(term.tag),
+                    }
+                }
+                tree => return Ok(tree_tag(&tree)),
+            }
+        }
+        Err(UnpickleError::InvalidReferenceTarget { from, to: current })
     }
 
     pub(crate) fn node(&self, at: u32) -> Result<&RawNode<'bytes>, UnpickleError> {

@@ -132,9 +132,9 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RECTYPE_TAG,
-    RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
+    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG,
+    RECTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG,
+    TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
     TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
@@ -206,6 +206,9 @@ impl TastyUnpickler<'_, '_, '_> {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
                     let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
+                }
+                (RECTHIS_TAG, TermValue::AstRef(target)) => {
+                    return self.decode_rec_this(ast, at, *target, depth);
                 }
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;

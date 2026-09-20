@@ -286,3 +286,321 @@ fn a_member_lookup_through_a_recursive_type_still_being_decoded_is_an_error_not_
     );
     assert_eq!(unpickler.index().type_at(REC_AT), None);
 }
+
+// RECthis
+
+const RECTHIS: u8 = 66;
+const LAMBDA: u8 = 170;
+
+/// `RECthis ASTRef`.
+fn rec_this(binder: u8) -> Vec<u8> {
+    vec![RECTHIS, nat(binder)]
+}
+
+fn rec_this_binder(store: &SemanticStore, id: TypeId) -> TypeId {
+    match store.types.get(id) {
+        Type::RecThis { binder } => *binder,
+        other => panic!("not a RecThis: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rec_this_in_the_parent_names_the_pending_recursive_type() {
+    // `RECtype` at 2 whose parent is a `RECthis` (at 3) naming it.
+    let bytes = file_with(&rec_type(&rec_this(2)));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(REC_AT).unwrap();
+    let this = unpickler.index().type_at(3).unwrap();
+    drop(unpickler);
+
+    // The parent is the canonical `RecThis`, whose binder is the exact id.
+    assert_eq!(recursive_parent(&session.store, id), this);
+    assert_eq!(rec_this_binder(&session.store, this), id);
+}
+
+#[test]
+fn a_rec_this_decoded_first_builds_its_recursive_type_once() {
+    let bytes = file_with(&rec_type(&rec_this(2)));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    assert_eq!(unpickler.index().type_at(REC_AT), None);
+
+    // The `RECthis` is the root; its binder has no type yet, so it is decoded
+    // on demand, and that decode reaches this very `RECthis` again.
+    let this = unpickler.unpickle_type(3).unwrap();
+    let binder = unpickler.index().type_at(REC_AT).unwrap();
+    let count = unpickler.index().type_count();
+
+    assert_eq!(unpickler.unpickle_type(REC_AT), Ok(binder));
+    assert_eq!(unpickler.unpickle_type(3), Ok(this));
+    assert_eq!(unpickler.index().type_count(), count);
+    drop(unpickler);
+    assert_eq!(rec_this_binder(&session.store, this), binder);
+    assert_eq!(recursive_parent(&session.store, binder), this);
+}
+
+#[test]
+fn two_rec_this_addresses_for_one_binder_share_one_type_id() {
+    // `RECtype` at 2 over `ANDtype` at 3 over two `RECthis` (at 5 and 7).
+    let mut both = rec_this(2);
+    both.extend(rec_this(2));
+    let bytes = file_with(&rec_type(&length_node(AND, &both)));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(REC_AT).unwrap();
+    let (first, second) = (
+        unpickler.index().type_at(5).unwrap(),
+        unpickler.index().type_at(7).unwrap(),
+    );
+    drop(unpickler);
+
+    // Two addresses, one semantic `RecThis`, as Dotty's one `recThis`.
+    assert_eq!(first, second);
+    assert_eq!(rec_this_binder(&session.store, first), id);
+    let parent = recursive_parent(&session.store, id);
+    assert_eq!(
+        session.store.types.get(parent),
+        &Type::And {
+            left: first,
+            right: first
+        }
+    );
+}
+
+#[test]
+fn rec_this_values_of_different_recursive_binders_are_never_shared() {
+    // Outer `RECtype` at 2, inner at 3, whose parent is an `ANDtype` (at 4) of
+    // a `RECthis` to the outer (at 6) and one to the inner (at 8).
+    let mut both = rec_this(2);
+    both.extend(rec_this(3));
+    let bytes = file_with(&rec_type(&rec_type(&length_node(AND, &both))));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let outer = unpickler.unpickle_type(REC_AT).unwrap();
+    let inner = unpickler.index().type_at(3).unwrap();
+    let to_outer = unpickler.index().type_at(6).unwrap();
+    let to_inner = unpickler.index().type_at(8).unwrap();
+    drop(unpickler);
+
+    assert_ne!(to_outer, to_inner);
+    assert_eq!(rec_this_binder(&session.store, to_outer), outer);
+    assert_eq!(rec_this_binder(&session.store, to_inner), inner);
+}
+
+#[test]
+fn a_shared_link_to_a_rec_this_returns_the_exact_rec_this() {
+    // `ANDtype` over a `RECtype` (at 2, with a `RECthis` at 3) and a
+    // `SHAREDtype` link to that `RECthis`.
+    let rec = rec_type(&rec_this(2));
+    let bytes = file_with_two(&rec, &[SHARED, nat(3)]);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let link = 2 + u32::try_from(rec.len()).unwrap();
+
+    let this = unpickler.unpickle_type(3).unwrap();
+    assert_eq!(unpickler.unpickle_type(link), Ok(this));
+}
+
+#[test]
+fn a_rec_this_naming_no_node_is_an_invalid_reference() {
+    // Address 1 is the length byte of the wrapper, not the start of a node.
+    for target in [1u8, 100] {
+        let bytes = file_with(&rec_this(target));
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let mut session = Session::new();
+        let mut unpickler = unpickler_for(&file, &mut session);
+
+        assert_eq!(
+            unpickler.unpickle_type(REC_AT),
+            Err(UnpickleError::InvalidReferenceTarget {
+                from: 2,
+                to: u32::from(target)
+            })
+        );
+    }
+}
+
+#[test]
+fn a_rec_this_naming_a_node_that_is_not_a_recursive_type_is_an_invalid_reference() {
+    // The `RECthis` (at 4) names the `TYPEREFpkg` at 2, never decoded.
+    let mut both = package_ref();
+    both.extend(rec_this(2));
+    let bytes = file_with_ast(&length_node(AND, &both));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let before = unpickler.index().type_count();
+
+    assert_eq!(
+        unpickler.unpickle_type(4),
+        Err(UnpickleError::InvalidReferenceTarget { from: 4, to: 2 })
+    );
+    assert_eq!(unpickler.index().type_count(), before);
+}
+
+#[test]
+fn a_rec_this_naming_an_already_decoded_type_that_is_not_recursive_is_refused() {
+    let mut both = package_ref();
+    both.extend(rec_this(2));
+    let bytes = file_with_ast(&length_node(AND, &both));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    unpickler.unpickle_type(2).unwrap();
+
+    assert_eq!(
+        unpickler.unpickle_type(4),
+        Err(UnpickleError::InvalidReferenceTarget { from: 4, to: 2 })
+    );
+}
+
+#[test]
+fn a_rec_this_naming_itself_is_an_error_not_a_loop() {
+    // The `RECthis` at 2 names address 2, which is itself: no `RECtype`.
+    let bytes = file_with(&rec_this(2));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert_eq!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::InvalidReferenceTarget { from: 2, to: 2 })
+    );
+}
+
+#[test]
+fn a_rec_this_naming_a_binder_that_is_not_recursive_is_refused_while_it_is_pending() {
+    // `TYPELAMBDAtype` at 2 whose result is a `RECthis` (at 4) naming it.
+    let mut payload = rec_this(2);
+    payload.extend(length_node(163, &package_ref()));
+    payload.push(nat(1));
+    let bytes = file_with(&length_node(LAMBDA, &payload));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert_eq!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::InvalidReferenceTarget { from: 4, to: 2 })
+    );
+    assert_eq!(unpickler.index().type_at(REC_AT), None);
+}
+
+/// A chain of `count` sibling `RECtype`s under an `APPLIEDtype`, each one's
+/// parent a `RECthis` naming the next, the last one's parent a package. The
+/// first is at address 4.
+fn rec_chain(count: u8) -> Vec<u8> {
+    let mut payload = package_ref();
+    for position in 0..count {
+        payload.push(RECTYPE);
+        if position + 1 == count {
+            payload.extend(package_ref());
+        } else {
+            // The next `RECtype` is 3 bytes on.
+            payload.extend(rec_this(4 + 3 * (position + 1)));
+        }
+    }
+    file_with_ast(&length_node(161, &payload))
+}
+
+#[test]
+fn a_short_chain_of_on_demand_binders_decodes() {
+    let bytes = rec_chain(5);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(unpickler.unpickle_type(4).is_ok());
+}
+
+#[test]
+fn a_long_chain_of_on_demand_binders_is_bounded_like_a_shared_chain() {
+    let bytes = rec_chain(30);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let before = unpickler.index().type_count();
+
+    let result = unpickler.unpickle_type(4);
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidReferenceTarget { .. })),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_count(), before);
+}
+
+// The canonical `RecThis` and rollback
+
+#[test]
+fn a_failed_call_does_not_leave_a_stale_canonical_rec_this_behind() {
+    // Top-level 1 (address 0): `FLEXIBLE(AND(RECtype@4 over RECthis@5, IMPORTED))`.
+    // Top-level 2 (address 9): `FLEXIBLE(RECtype@11 over AND(TYPEREFpkg, RECthis@16))`.
+    let mut first = rec_type(&rec_this(4));
+    first.extend([UNSUPPORTED, nat(1)]);
+    let first = length_node(FLEXIBLE, &length_node(AND, &first));
+    assert_eq!(first.len(), 9);
+    let mut both = package_ref();
+    both.extend(rec_this(11));
+    let second = length_node(FLEXIBLE, &rec_type(&length_node(AND, &both)));
+    let mut ast = first;
+    ast.extend(second);
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    // The first call builds a `RecThis` for its binder and then fails.
+    assert!(matches!(
+        unpickler.unpickle_type(2),
+        Err(UnpickleError::UnsupportedType { .. })
+    ));
+    // The second call's binder reuses the id the failed call's had, but its
+    // `RecThis` is allocated at a different position. A surviving entry would
+    // hand back the failed call's `RecThis` id, now some other type.
+    let binder = unpickler.unpickle_type(11).unwrap();
+    let this = unpickler.index().type_at(16).unwrap();
+    drop(unpickler);
+
+    assert_eq!(rec_this_binder(&session.store, this), binder);
+}
+
+#[test]
+fn a_recursive_type_and_its_rec_this_from_an_earlier_call_survive_a_later_failure() {
+    // `RECtype` at 4 over a `RECthis`; an `ANDtype` (at 2) of it and an
+    // unsupported form. Then a second `RECthis` for the same binder in
+    // another top-level node.
+    let mut inner = rec_type(&rec_this(4));
+    inner.extend([UNSUPPORTED, nat(1)]);
+    let first = length_node(FLEXIBLE, &length_node(AND, &inner));
+    // A second top-level `FLEXIBLE` around a `RECthis` to the same `RECtype`.
+    let second = length_node(FLEXIBLE, &rec_this(4));
+    let mut ast = first;
+    let second_at = u32::try_from(ast.len()).unwrap() + 2;
+    ast.extend(second);
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    // The recursive type decodes on its own first.
+    let binder = unpickler.unpickle_type(4).unwrap();
+    let this = unpickler.index().type_at(5).unwrap();
+    let count = unpickler.index().type_count();
+    // A call that includes it fails on the unsupported sibling.
+    assert!(unpickler.unpickle_type(2).is_err());
+
+    // What existed before the failed call is intact.
+    assert_eq!(unpickler.index().type_at(4), Some(binder));
+    assert_eq!(unpickler.index().type_count(), count);
+    // And the canonical `RecThis` is still the one, for a new address.
+    assert_eq!(unpickler.unpickle_type(second_at), Ok(this));
+}
