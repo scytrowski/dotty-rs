@@ -27,6 +27,7 @@ where
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
+    pub(crate) next_wildcard_type_param: u32,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -59,6 +60,7 @@ where
             diagnostics: Vec::new(),
             known_names,
             next_wildcard_param: 0,
+            next_wildcard_type_param: 0,
         }
     }
 
