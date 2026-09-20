@@ -12,8 +12,26 @@ where
         self.advance();
         self.consume_for_newlines();
 
-        let indented = self.accept(TokenKind::Indent);
-        let enums = self.parse_enumerators();
+        let (enums, wrapped, indented) = if self.current().kind
+            == TokenKind::Punctuation(Punctuation::LeftParen)
+            && self.paren_starts_wrapped_enumerators()
+        {
+            self.advance();
+            let enums = self.parse_enumerators(Some(TokenKind::Punctuation(
+                Punctuation::RightParen,
+            )));
+            self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+            (enums, true, false)
+        } else if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
+            let enums = self.parse_enumerators(Some(TokenKind::Punctuation(
+                Punctuation::RightBrace,
+            )));
+            self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
+            (enums, true, false)
+        } else {
+            let indented = self.accept(TokenKind::Indent);
+            (self.parse_enumerators(None), false, indented)
+        };
         if indented {
             self.consume_for_newlines();
             if !self.accept(TokenKind::Outdent) {
@@ -34,10 +52,12 @@ where
                 Some(false)
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `yield` or `do` after for enumerators",
-                );
+                if !wrapped {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected `yield` or `do` after for enumerators",
+                    );
+                }
                 None
             }
         };
@@ -56,7 +76,7 @@ where
         }
     }
 
-    fn parse_enumerators(&mut self) -> Vec<TreeId<Untyped>> {
+    fn parse_enumerators(&mut self, end: Option<TokenKind>) -> Vec<TreeId<Untyped>> {
         let mut enums = Vec::new();
         let mut saw_generator = false;
         self.consume_for_separators();
@@ -64,6 +84,7 @@ where
         while !self.at_for_body_keyword()
             && self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Outdent
+            && !end.is_some_and(|kind| self.current().kind == kind)
         {
             let checkpoint = self.cursor.checkpoint();
             if self.current().kind == TokenKind::Keyword(HardKeyword::If) {
@@ -153,6 +174,8 @@ where
                 TokenKind::Newline
                     | TokenKind::Newlines
                     | TokenKind::Punctuation(Punctuation::Semicolon)
+                    | TokenKind::Punctuation(Punctuation::RightParen)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
                     | TokenKind::Outdent
                     | TokenKind::Eof
             )
@@ -257,6 +280,31 @@ where
 
     fn current_is_operator(&mut self, spelling: &str) -> bool {
         self.current().kind == TokenKind::Operator && self.current_text_is(spelling)
+    }
+
+    fn paren_starts_wrapped_enumerators(&mut self) -> bool {
+        let mut depth = 0usize;
+        let mut offset = 0usize;
+        loop {
+            match self.cursor.lookahead(offset).kind {
+                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let next = self.cursor.lookahead(offset + 1);
+                        return !(next.kind == TokenKind::Operator
+                            && self
+                                .source
+                                .slice(next.span)
+                                .ok()
+                                .is_some_and(|text| matches!(text, "<-" | "=")));
+                    }
+                }
+                TokenKind::Eof => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
     }
 }
 
@@ -414,6 +462,70 @@ mod tests {
         assert!(matches!(
             parser.ast().get(for_tree.enums[1]).kind,
             TreeKind::PhaseSpecific(UntypedNode::GenAlias(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_parenthesized_enumerators() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for (x <- xs) yield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(7, 9).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Yield), 14, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_braced_for_do_with_an_application_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for { x <- xs } do consume()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(8, 10).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 11, 13),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::Keyword(HardKeyword::Do), 16, 18),
+                token(TokenKind::Identifier, 19, 26),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 26, 27),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForDo(_))
         ));
         assert!(parser.diagnostics().is_empty());
     }
