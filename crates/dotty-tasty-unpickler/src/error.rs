@@ -91,6 +91,10 @@ pub enum UnpickleError {
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
     MalformedType { address: u32, reason: &'static str },
+    /// The `TYPEBOUNDS` node at `address` carries variance markers. Dotty
+    /// applies them to a `TypeLambda` bound, which is not decoded until the
+    /// binder milestone, so the node is refused rather than losing them.
+    UnsupportedBoundsVariance { address: u32 },
     /// The prefix of the name-based reference at `address` is a form whose
     /// members cannot be looked up here, and the resolver did not know it
     /// either.
@@ -183,6 +187,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the type at address {address} is malformed: {reason}"
             ),
+            Self::UnsupportedBoundsVariance { address } => write!(
+                formatter,
+                "the bounds at address {address} carry variance markers, which need type lambdas"
+            ),
             Self::UnsupportedResolutionPrefix { address, .. } => write!(
                 formatter,
                 "the reference at address {address} has a prefix whose members cannot be looked up"
@@ -223,6 +231,7 @@ impl std::error::Error for UnpickleError {
             | Self::AmbiguousMember { .. }
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
+            | Self::UnsupportedBoundsVariance { .. }
             | Self::UnsupportedResolutionPrefix { .. }
             | Self::ResolverFailure { .. } => None,
         }

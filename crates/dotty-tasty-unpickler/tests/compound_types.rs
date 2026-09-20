@@ -357,8 +357,6 @@ fn children_of(file: &TastyFile<'_>, at: u32) -> Vec<u32> {
 /// so retagging exposes the type node without reconstructing a method type.
 const BY_NAME_NODE: u32 = 308;
 const BY_NAME_CHILD: u32 = 309;
-/// A real alias-form `TYPEBOUNDS` in the unit.
-const TYPE_BOUNDS: u32 = 159;
 
 #[test]
 fn a_by_name_type_wraps_its_result_and_is_not_lowered_to_it() {
@@ -423,17 +421,8 @@ fn a_super_type_keeps_the_this_type_and_the_super_type_in_their_roles() {
 
 #[test]
 fn unsupported_neighbours_stay_explicit() {
-    // Alias-form `TYPEBOUNDS`, as the compiler wrote it.
-    let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
-    let mut session = Session::new();
-    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
-    unpickler.enter_symbols().unwrap();
-    assert!(matches!(
-        unpickler.unpickle_type(TYPE_BOUNDS),
-        Err(UnpickleError::UnsupportedType { tag: 163, .. })
-    ));
-    drop(unpickler);
-    // The other three have no instance in the unit; a length-prefixed node
+    // `TYPEBOUNDS` is decoded since Milestone 2c2 (see `bounds.rs`).
+    // These three have no instance in the unit; a length-prefixed node
     // retagged to their tag must be refused, never lowered to a child.
     for tag in [193u8, 153, 170] {
         let patched = retagged(COMPOUND, AND as usize, 165, tag);
