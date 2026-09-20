@@ -141,19 +141,25 @@ where
     fn expression_block_body_ended(&self, end: TokenKind) -> bool {
         self.current().kind == end
             || self.current().kind == TokenKind::Eof
-            || (self.context.case_body
-                && matches!(
-                    self.current().kind,
-                    TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                        | TokenKind::Punctuation(Punctuation::RightBrace)
-                        | TokenKind::Outdent
-                ))
+            || (self.context.case_body && self.is_case_body_terminator())
     }
 
     fn consume_block_separators(&mut self, end: TokenKind) {
-        while is_block_separator(self.current().kind) && self.current().kind != end {
+        while is_block_separator(self.current().kind)
+            && self.current().kind != end
+            && !(self.context.case_body && self.is_case_body_terminator())
+        {
             self.advance();
         }
+    }
+
+    fn is_case_body_terminator(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+        )
     }
 
     pub(super) fn synthetic_unit(&mut self) -> TreeId<Untyped> {
