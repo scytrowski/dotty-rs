@@ -5,6 +5,7 @@ use crate::Parser;
 
 mod control_flow;
 mod for_expr;
+mod lambda;
 mod match_expr;
 mod operators;
 mod simple;
@@ -13,11 +14,12 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    /// Parses a complete expression at the future `Expr` grammar boundary.
-    ///
-    /// Lambdas, polyfunctions, and placeholder expressions will extend this
-    /// entry point in later milestones. For now `Expr` is exactly `Expr1`.
+    /// Parses a complete expression at the `Expr` grammar boundary.
     pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        if self.starts_lambda() {
+            let mark = self.mark();
+            return self.parse_lambda(mark);
+        }
         self.expr1()
     }
 

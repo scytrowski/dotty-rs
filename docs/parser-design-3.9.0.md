@@ -157,6 +157,9 @@ braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
 for-comprehensions with generators, case generators, aliases, guards, and
 `yield`/`do` bodies
+explicit function literals with empty, named, wildcard, and typed parameters
+context-function literals using `?=>`, represented with `Given` parameter
+metadata
 ```
 
 The implemented selections and applications are only the simple-expression
@@ -186,6 +189,25 @@ patterns, optional guards, and expression bodies. Case bodies are represented
 as source-level `Block` nodes, and extractor-looking source patterns remain
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
 and pattern semantics remain future work.
+
+The complete-expression boundary also recognizes the initial explicit function
+literal subset:
+
+```text
+Expr -> function literal | Expr1
+function literal -> FunParams `=>` Expr
+                  | FunParams `?=>` Expr
+```
+
+Single parameters may be written without parentheses; parenthesized parameter
+lists may be empty, typed, or contain wildcard parameters. A missing parameter
+type is represented by a zero-width synthetic `TypeTree`, and wildcard
+parameters receive parser-local generated names because the shared AST models
+lambda parameters as `ValDef`. Context-function parameters retain
+`Modifier::Given` metadata. The body is a complete expression; an indented
+body or the remaining region of an enclosing block is represented using the
+existing block-body convention. Polyfunctions, placeholder-function syntax,
+erased parameters, and migration-only forms remain future work.
 
 An `if` without an `else` uses a zero-width synthetic
 `Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the

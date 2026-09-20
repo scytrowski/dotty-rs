@@ -325,7 +325,7 @@ where
         }
     }
 
-    fn parse_indented_block(&mut self) -> TreeId<Untyped> {
+    pub(super) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
         self.advance();
         let mark = self.mark();
         let (stats, expr) = self.parse_expression_block_body(TokenKind::Outdent);
