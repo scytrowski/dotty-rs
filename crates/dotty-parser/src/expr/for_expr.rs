@@ -506,6 +506,72 @@ mod tests {
     }
 
     #[test]
+    fn parses_yield_after_a_newline_following_parenthesized_enumerators() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for (x <- xs)\nyield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(7, 9).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Newline, 13, 14),
+                token(TokenKind::Keyword(HardKeyword::Yield), 14, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_yield_after_a_newline_following_braced_enumerators() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for { x <- xs }\nyield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(8, 10).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 11, 13),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::Newline, 15, 16),
+                token(TokenKind::Keyword(HardKeyword::Yield), 16, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_braced_for_do_with_an_application_body() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
