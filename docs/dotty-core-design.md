@@ -99,10 +99,10 @@ dotty (root)   -> dotty-tasty, dotty-classfile (facade re-exporting `tasty`, `cl
 ```
 
 `dotty-parser` is an incremental Scala 3.9.0 source parser with an expression
-pipeline from `Expr1` through operator/simple expressions and an initial
-source-level pattern grammar. Case/match clauses and the rest of the Scala
-grammar are added incrementally; full grammar coverage, namer, typer, and
-compiler orchestration remain future work. The parser boundary and
+pipeline from `Expr1` through operator/simple expressions, an initial
+source-level pattern grammar, and the first case/match clause layer. The rest
+of the Scala grammar is added incrementally; full grammar coverage, namer,
+typer, and compiler orchestration remain future work. The parser boundary and
 `AstArena<Untyped>` ownership are established. See
 [`docs/parser-design-3.9.0.md`](parser-design-3.9.0.md) for its current scope.
 

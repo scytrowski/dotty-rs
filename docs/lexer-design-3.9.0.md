@@ -5,8 +5,9 @@ Status: working design document for the Rust frontend.
 This document records the architecture, compatibility decisions, incremental
 implementation plan, and testing strategy for the Scala 3.9.0 source lexer.
 It is intended to be updated as implementation and differential testing settle
-details that are not obvious from the language specification. Parser and AST
-work are future consumers of the lexer contract and are not current scope.
+details that are not obvious from the language specification. The parser and
+AST are downstream consumers of this lexer contract; their grammar remains
+outside this lexer design's implementation scope.
 
 The compatibility target is the Scala 3.9.0 compiler at the `3.9.0` tag. When
 the language specification and the compiler disagree, observable behavior of
@@ -24,7 +25,7 @@ RawLexer
     ↓ RawToken + Trivia
 ContextualScanner
     ↓ Token
-future Parser
+    dotty-parser
 ```
 
 The first milestone is deliberately smaller:

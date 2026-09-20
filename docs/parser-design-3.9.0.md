@@ -107,7 +107,7 @@ and `UnsupportedSyntax`, with a source ID and source span.
 Reusable recovery sets cover statements, arguments, type arguments, and case
 clauses. Every recovery loop checks that the token source advances; a broken
 external source cannot turn recovery into an infinite loop. Valid but not yet
-implemented constructs such as `class`, `def`, `for`, `try`, and `match`
+implemented constructs such as `class`, `def`, `for`, and `try`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -151,6 +151,7 @@ feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
 named arguments in the narrow bare-identifier form
 the initial `if` and `while` expression forms
+braced and indented `match` expressions with `case` patterns, guards, and bodies
 ```
 
 The implemented selections and applications are only the simple-expression
@@ -172,9 +173,15 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, match/case grammar, definitions, remaining control flow
-(`try`, `for`, `match`, `throw`, and `return`), templates, interpolation,
-quotes, and macros remain follow-up increments.
+`RefinedType`, definitions, remaining control flow
+(`try`, `for`, `throw`, and `return`), templates, interpolation, quotes, and
+macros remain follow-up increments.
+
+The initial match layer parses braced and indented `case` regions, including
+patterns, optional guards, and expression bodies. Case bodies are represented
+as source-level `Block` nodes, and extractor-looking source patterns remain
+`Apply`/`TypeApply` until later semantic lowering. Full case-clause features
+and pattern semantics remain future work.
 
 An `if` without an `else` uses a zero-width synthetic
 `Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the
@@ -189,9 +196,9 @@ infix expression, prefix expression, and simple expression. Prefix support is
 limited to `-`, `+`, `~`, and `!`; infix reduction uses Scala 3.9 precedence,
 left/right associativity, and mixed-associativity diagnostics. Operators
 ending in `:` are right-associative. Legacy postfix syntax is represented by
-`PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment and
-the initial `if`/`while` forms are implemented above this layer; ascription,
-match clauses, colon arguments, and the remaining higher-level expression
+`PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
+the initial `if`/`while` forms, and match clauses are implemented above this
+layer; ascription, colon arguments, and the remaining higher-level expression
 grammar are not implemented yet.
 
 ## Scala parser oracle
@@ -219,7 +226,8 @@ Rust UTF-8 byte offsets before comparing. The ASCII fixtures are tiny on
 purpose and cover the implemented simple-, operator-, initial `Expr1`, and
 source-pattern subsets, including `super`, `new`, type applications, suffix
 chains, brace blocks, prefix operators, negative literals, infix
-precedence/associativity, assignment, named arguments, `if`/`while`, binders,
+precedence/associativity, assignment, named arguments, `if`/`while`, match and
+case clauses, binders,
 typed patterns, extractor applications, infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
 `tools/scala-parser-oracle/fixtures/patterns/`; `compare.sh` runs both modes.

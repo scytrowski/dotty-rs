@@ -10,7 +10,7 @@ use dotty_core::{
 use crate::{Location, ParseDiagnosticKind, ParseKind, ParseResult, Parser};
 
 /// Parses one source-level pattern fragment with the same pattern grammar used
-/// by future case clauses and generators.
+/// by case clauses and future generators.
 pub fn parse_pattern_fragment<S: TokenSource>(
     source: SourceText<'_>,
     source_id: SourceId,
