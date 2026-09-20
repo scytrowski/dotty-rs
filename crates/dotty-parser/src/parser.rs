@@ -150,6 +150,19 @@ where
         result
     }
 
+    /// Runs a nested parse with a temporary enclosing block delimiter.
+    pub(crate) fn with_block_end<T>(
+        &mut self,
+        block_end: Option<TokenKind>,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.block_end;
+        self.context.block_end = block_end;
+        let result = parse(self);
+        self.context.block_end = previous;
+        result
+    }
+
     /// Forwards a scanner feedback event.
     pub fn observe(&mut self, event: ScannerEvent) {
         self.cursor.observe(event);
@@ -358,7 +371,7 @@ const fn is_zero_width_synthetic(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_core::{TextRange, TokenKind, TokenValue};
+    use dotty_core::{Punctuation, TextRange, TokenKind, TokenValue};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -527,6 +540,30 @@ mod tests {
             &mut names,
         );
         assert!(parser.current_is_structural_operator());
+    }
+
+    #[test]
+    fn scoped_block_end_is_restored_after_nested_parsing() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        assert_eq!(parser.context().block_end, None);
+        let inner = parser.with_block_end(Some(TokenKind::Outdent), |parser| {
+            assert_eq!(parser.context().block_end, Some(TokenKind::Outdent));
+            parser.with_block_end(
+                Some(TokenKind::Punctuation(Punctuation::RightBrace)),
+                |parser| {
+                    assert_eq!(
+                        parser.context().block_end,
+                        Some(TokenKind::Punctuation(Punctuation::RightBrace))
+                    );
+                },
+            );
+            parser.context().block_end
+        });
+
+        assert_eq!(inner, Some(TokenKind::Outdent));
+        assert_eq!(parser.context().block_end, None);
     }
 
     #[test]

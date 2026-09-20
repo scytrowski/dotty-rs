@@ -91,6 +91,15 @@ where
         &mut self,
         end: TokenKind,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        self.with_block_end(Some(end), |parser| {
+            parser.parse_expression_block_body_inner(end)
+        })
+    }
+
+    fn parse_expression_block_body_inner(
+        &mut self,
+        end: TokenKind,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut trees = Vec::new();
         self.consume_block_separators(end);
 
