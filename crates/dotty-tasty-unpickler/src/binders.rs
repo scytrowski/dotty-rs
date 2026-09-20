@@ -338,8 +338,8 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 
     /// Applies the variance markers of the `TYPEBOUNDS` at `at` to `target`,
-    /// its lambda bound: Dotty's `readVariances`. With no markers `target` is
-    /// returned as it is.
+    /// its lambda bound: Dotty's `readVariances`. With no markers, or when `target` is not a
+    /// `TypeLambda`, `target` is returned as it is.
     ///
     /// The markers do not change `target`. Dotty's `withVariances` builds a
     /// *new* lambda whose references to the old binder are substituted, so
@@ -358,16 +358,24 @@ impl TastyUnpickler<'_, '_, '_> {
         if variances.is_empty() {
             return Ok(target);
         }
-        // Not a lambda: not markers-for-a-lambda. Only a lambda already
-        // decoded qualifies, a binder still being built is not one yet.
-        let arity = match (!self.is_pending(target)).then(|| self.store.types.get(target)) {
-            Some(Type::TypeLambda(lambda)) => lambda.params.len(),
-            _ => {
-                return Err(UnpickleError::InvalidBoundsVarianceTarget {
+        // Dotty's `readVariances` matches `HKTypeLambda` and otherwise returns
+        // the type as it is (`case _ => tp`), still consuming the markers, so
+        // a target that is not a lambda is left alone. A lambda that is still
+        // being built is one Dotty would rebind, but its slot is not filled
+        // yet, so that is an error rather than a guess.
+        if let Some(pending) = self.pending_with_id(target) {
+            return if pending.kind == BinderKind::TypeLambda {
+                Err(UnpickleError::BoundsVarianceTargetPending {
                     address: at,
                     target,
-                });
-            }
+                })
+            } else {
+                Ok(target)
+            };
+        }
+        let arity = match self.store.types.get(target) {
+            Type::TypeLambda(lambda) => lambda.params.len(),
+            _ => return Ok(target),
         };
         if arity != variances.len() {
             return Err(UnpickleError::BoundsVarianceArityMismatch {

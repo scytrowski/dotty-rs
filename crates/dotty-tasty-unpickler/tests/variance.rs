@@ -502,7 +502,9 @@ const AT: u32 = 2;
 const CHILD: u32 = 4;
 
 #[test]
-fn markers_on_a_bound_that_is_not_a_lambda_are_a_typed_error_not_dropped() {
+fn markers_on_a_bound_that_is_not_a_lambda_leave_it_alone_as_in_dotty() {
+    // `readVariances` matches `HKTypeLambda` and otherwise returns the type
+    // as it is (`case _ => tp`), still consuming the markers.
     for (label, child) in [
         ("a package reference", package_ref()),
         ("a poly", binder_node(POLY, &package_ref(), 1)),
@@ -511,18 +513,19 @@ fn markers_on_a_bound_that_is_not_a_lambda_are_a_typed_error_not_dropped() {
         let (file, mut session, packages) = synthetic(&bytes);
         let mut unpickler =
             TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
-        let before = unpickler.index().type_count();
 
-        let result = unpickler.unpickle_type(AT);
-        assert!(
-            matches!(
-                result,
-                Err(UnpickleError::InvalidBoundsVarianceTarget { address: AT, .. })
-            ),
-            "{label}: {result:?}"
+        let bounds = unpickler
+            .unpickle_type(AT)
+            .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        let target = unpickler.index().type_at(CHILD).unwrap();
+        drop(unpickler);
+
+        // The alias is the decoded child itself: not rebound, not copied.
+        assert_eq!(
+            session.store.types.get(bounds),
+            &Type::AliasingBounds { alias: target },
+            "{label}"
         );
-        assert_eq!(unpickler.index().type_count(), before, "{label}");
-        assert_eq!(unpickler.index().type_at(AT), None, "{label}");
     }
 }
 
@@ -556,22 +559,51 @@ fn a_marker_count_that_differs_from_the_arity_is_a_typed_error() {
 }
 
 #[test]
-fn a_two_sided_marker_is_checked_against_the_upper_bound_not_the_lower() {
-    // The lower bound is a perfectly good lambda, the upper one is not.
+fn a_two_sided_marker_never_applies_to_the_lower_bound() {
+    // The lower bound is a perfectly good lambda, the upper one is not: the
+    // marker goes to the upper bound, which is left alone, so the lower
+    // lambda keeps no declared variance.
     let low = binder_node(LAMBDA, &package_ref(), 1);
     let bytes = file_with(&bounds_node(&[&low, &package_ref()], &[COVARIANT]));
     let (file, mut session, packages) = synthetic(&bytes);
     let mut unpickler =
         TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
 
+    let bounds = unpickler.unpickle_type(AT).unwrap();
+    let low = unpickler.index().type_at(CHILD).unwrap();
+    drop(unpickler);
+
+    let Type::Bounds { low: found_low, .. } = *session.store.types.get(bounds) else {
+        panic!("not two-sided bounds");
+    };
+    assert_eq!(found_low, low);
+    assert_eq!(declared(&session.store, low), [None]);
+}
+
+#[test]
+fn a_lambda_still_being_decoded_cannot_take_markers_and_is_a_typed_error() {
+    // `[p = <bounds over a link to this lambda> with +] =>> p`: the marker's
+    // target is the lambda at 2, whose slot is reserved and not filled yet.
+    let mut payload = param_type(2, 0);
+    let link = [61, nat(2)];
+    payload.extend(bounds_node(&[&link], &[COVARIANT]));
+    payload.push(nat(1));
+    let bytes = file_with(&length_node(LAMBDA, &payload));
+    let (file, mut session, packages) = synthetic(&bytes);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    let before = unpickler.index().type_count();
+
     let result = unpickler.unpickle_type(AT);
     assert!(
         matches!(
             result,
-            Err(UnpickleError::InvalidBoundsVarianceTarget { address: AT, .. })
+            Err(UnpickleError::BoundsVarianceTargetPending { .. })
         ),
         "{result:?}"
     );
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(AT), None);
 }
 
 #[test]

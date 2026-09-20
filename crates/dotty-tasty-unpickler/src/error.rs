@@ -92,11 +92,11 @@ pub enum UnpickleError {
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
     MalformedType { address: u32, reason: &'static str },
-    /// The `TYPEBOUNDS` node at `address` carries variance markers, but the
-    /// bound they apply to, `target`, is not a `TypeLambda`. Dotty applies
-    /// markers only to an `HKTypeLambda`; they are never dropped or attached
-    /// to anything else.
-    InvalidBoundsVarianceTarget { address: u32, target: TypeId },
+    /// The `TYPEBOUNDS` node at `address` carries variance markers for the
+    /// lambda `target`, which is still being decoded, so it cannot be rebound
+    /// yet. (A marker on a bound that is not a lambda is left alone, as
+    /// Dotty's `readVariances` does.)
+    BoundsVarianceTargetPending { address: u32, target: TypeId },
     /// The `TYPEBOUNDS` node at `address` carries `actual` variance markers,
     /// but the lambda `lambda` it applies to has `expected` parameters.
     BoundsVarianceArityMismatch {
@@ -226,9 +226,9 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the type at address {address} is malformed: {reason}"
             ),
-            Self::InvalidBoundsVarianceTarget { address, .. } => write!(
+            Self::BoundsVarianceTargetPending { address, .. } => write!(
                 formatter,
-                "the bounds at address {address} carry variance markers, but the bound is not a type lambda"
+                "the bounds at address {address} carry variance markers for a lambda that is still being decoded"
             ),
             Self::BoundsVarianceArityMismatch {
                 address,
@@ -309,7 +309,7 @@ impl std::error::Error for UnpickleError {
             | Self::AmbiguousMember { .. }
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
-            | Self::InvalidBoundsVarianceTarget { .. }
+            | Self::BoundsVarianceTargetPending { .. }
             | Self::BoundsVarianceArityMismatch { .. }
             | Self::InvalidMethodModifier { .. }
             | Self::InvalidBinderReference { .. }

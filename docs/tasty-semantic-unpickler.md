@@ -551,8 +551,8 @@ is *declared* variance only; inferred variance belongs to a later typer.
 `AliasingBounds(readVariances(lo))`, so the markers apply to the one child.
 Two-sided: `createNullableTypeBounds(lo, readVariances(readType()))`, so they
 apply to the *upper* bound only; `low` is the plain decoded child, and a
-two-sided node whose `low` is a lambda but whose `high` is not is an error, not a
-marker on `low`.
+two-sided node whose `low` is a lambda but whose `high` is not leaves both as
+decoded: never a marker on `low`.
 
 **Why a rebinding, not a field change.** `readVariances` calls
 `HKTypeLambda.withVariances`, which builds a *new* lambda (`newLikeThis`) and
@@ -589,11 +589,13 @@ a `SHAREDtype` to it still returns that original. The bounds hold a *fresh
 derived* lambda (declared variances, its own `ParamRef`s, no AST address).
 Decoding the bounds again returns the cached bounds, so no second derived lambda
 is made, and both decode orders (child first, bounds first) give the same
-relationship. A target that is not a decoded `TypeLambda` (a `Poly`, an
-unrelated type, a binder still being built) is
-`InvalidBoundsVarianceTarget`; a marker count different from the arity is
-`BoundsVarianceArityMismatch`; nothing is truncated or padded. Valid Scala 3.9
-output does not reach either. `UnsupportedBoundsVariance` is gone.
+relationship. A target that is not a `TypeLambda` (a `Poly`, an unrelated type)
+is left as it is, exactly as Dotty's `readVariances` does (`case _ => tp`): the
+markers are consumed and the bounds hold the decoded child. For a lambda, a
+marker count different from the arity is `BoundsVarianceArityMismatch` (nothing
+is truncated or padded), and a lambda still being decoded, whose slot is not
+filled, is `BoundsVarianceTargetPending` rather than a guess. Valid Scala 3.9
+output reaches neither error. `UnsupportedBoundsVariance` is gone.
 
 The real fixture cases (`Bounds.scala`): `+`, `-`, mixed `[+A, B, -C]` (with
 `STABLE` for `B`), a variance on the upper bound of a two-sided node, an
@@ -936,7 +938,7 @@ because the one library `POLYtype` now decodes.
 
 Same method, same two runs. The compiler corpus has none (0). The library has 90.
 
-| run | total | decoded | external child | invalid target | arity mismatch | rebind failure | unexpected |
+| run | total | decoded | external child | pending target | arity mismatch | rebind failure | unexpected |
 |-----|-------|---------|----------------|----------------|----------------|----------------|------------|
 | no builtins | 90 / 0 | 0 / 0 | 90 / 0 | 0 | 0 | 0 | 0 |
 | builtins | 90 / 0 | 77 / 0 | 13 / 0 | 0 | 0 | 0 | 0 |
@@ -944,7 +946,7 @@ Same method, same two runs. The compiler corpus has none (0). The library has 90
 With builtins, 77 of the 90 decode and the other 13 fail only on an external
 type in the lambda (the library's own collection types, which a classpath
 resolver would supply). No well-formed marker fails for being a marker: 0
-invalid targets, 0 arity mismatches, 0 rebind failures, 0 binder errors and 0
+pending targets, 0 arity mismatches, 0 rebind failures, 0 binder errors and 0
 unexpected errors in any run. Decoded `TYPELAMBDAtype`, with builtins: library
 490 standalone plus 77 as the source of a variance application (567 in all, up
 from 562: the same lambdas, now also reachable through decoded bounds), compiler

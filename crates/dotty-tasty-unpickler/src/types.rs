@@ -52,11 +52,12 @@
 //! `CONTRAVARIANT`), as Dotty's `readVariances` reads them: on an alias-only
 //! node they apply to the one child (`AliasingBounds(readVariances(lo))`), on
 //! a two-sided node to the *upper* bound only (`hi = readVariances(readType())`),
-//! never to `low`. They only mean something on a `TypeLambda`: any other target
-//! is [`InvalidBoundsVarianceTarget`](UnpickleError::InvalidBoundsVarianceTarget),
-//! and a count different from the lambda's parameters is
+//! never to `low`. They only mean something on a `TypeLambda`: for any other
+//! target Dotty's `readVariances` returns the type as it is (`case _ => tp`), and
+//! so does this pass. For a lambda, a count different from its parameters is
 //! [`BoundsVarianceArityMismatch`](UnpickleError::BoundsVarianceArityMismatch)
-//! (nothing is dropped, padded or truncated).
+//! (nothing is dropped, padded or truncated), and a lambda still being decoded
+//! is [`BoundsVarianceTargetPending`](UnpickleError::BoundsVarianceTargetPending).
 //!
 //! Dotty's `withVariances` does not change the lambda: it builds a *new* one
 //! (`newLikeThis`) and substitutes the old binder in it. So does this pass,

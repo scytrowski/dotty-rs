@@ -155,7 +155,7 @@ fn variance_failure(error: &UnpickleError) -> &'static str {
         }
         UnpickleError::MissingReferencedSymbol { .. } => "local missing child",
         UnpickleError::UnsupportedType { .. } => "unsupported child form",
-        UnpickleError::InvalidBoundsVarianceTarget { .. } => "invalid variance target",
+        UnpickleError::BoundsVarianceTargetPending { .. } => "pending variance target",
         UnpickleError::BoundsVarianceArityMismatch { .. } => "arity mismatch",
         UnpickleError::RebindFailed { .. } => "rebind failure",
         UnpickleError::AmbiguousMember { .. }
@@ -393,7 +393,7 @@ fn run(
                     | UnpickleError::InvalidParameterIndex { .. }
                     | UnpickleError::InvalidTypeParameterBounds { .. }
                     | UnpickleError::InvalidMethodModifier { .. }
-                    | UnpickleError::InvalidBoundsVarianceTarget { .. }
+                    | UnpickleError::BoundsVarianceTargetPending { .. }
                     | UnpickleError::BoundsVarianceArityMismatch { .. }
                     | UnpickleError::RebindFailed { .. } => {
                         outcomes.binder_errors += 1;
@@ -632,7 +632,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         assert_eq!(tally.missing_outside_bodies, 0);
         // A well-formed marker never fails for being a marker.
         for kind in [
-            "invalid variance target",
+            "pending variance target",
             "arity mismatch",
             "rebind failure",
             "unexpected",
