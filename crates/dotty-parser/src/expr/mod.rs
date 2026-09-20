@@ -29,6 +29,18 @@ where
             let mark = self.mark();
             return self.parse_while_expr(mark);
         }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Try) {
+            let mark = self.mark();
+            return self.parse_try_expr(mark);
+        }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Throw) {
+            let mark = self.mark();
+            return self.parse_throw_expr(mark);
+        }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Return) {
+            let mark = self.mark();
+            return self.parse_return_expr(mark);
+        }
 
         let tree = self.postfix_expr();
         self.expr1_rest(tree)
@@ -147,6 +159,20 @@ const fn can_start_prefix_expr(kind: TokenKind) -> bool {
             | TokenKind::StringLiteral
             | TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
     )
+}
+
+pub(super) const fn can_start_expr(kind: TokenKind) -> bool {
+    can_start_prefix_expr(kind)
+        || matches!(
+            kind,
+            TokenKind::Keyword(
+                dotty_core::HardKeyword::If
+                    | dotty_core::HardKeyword::While
+                    | dotty_core::HardKeyword::Try
+                    | dotty_core::HardKeyword::Throw
+                    | dotty_core::HardKeyword::Return
+            )
+        )
 }
 
 #[cfg(test)]

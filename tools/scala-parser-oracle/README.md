@@ -29,8 +29,11 @@ Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, and `if`/`while` expressions,
 including basic indented bodies, plus braced and indented `match` expressions
-with case patterns, guards, and bodies. It intentionally does not claim
-coverage for the rest of Scala's expression, type, or argument grammar.
+with case patterns, guards, and bodies. The current control-flow subset also
+includes `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`,
+including their basic indented forms.
+It intentionally does not claim coverage for the rest of Scala's expression,
+type, or argument grammar.
 
 Fixtures under `fixtures/patterns/` use the explicit `pattern` mode. Scala
 mode calls Dotty's real `Parser.pattern()` entry and Rust mode calls the

@@ -108,7 +108,7 @@ and `UnsupportedSyntax`, with a source ID and source span.
 Reusable recovery sets cover statements, arguments, type arguments, and case
 clauses. Every recovery loop checks that the token source advances; a broken
 external source cannot turn recovery into an infinite loop. Valid but not yet
-implemented constructs such as `class`, `def`, `for`, and `try`
+implemented constructs such as `class`, `def`, `for`, and `match`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -152,6 +152,7 @@ feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
 named arguments in the narrow bare-identifier form
 the initial `if` and `while` expression forms
+`throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
 ```
@@ -175,9 +176,9 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, definitions, remaining control flow
-(`try`, `for`, `throw`, and `return`), templates, interpolation, quotes, and
-macros remain follow-up increments.
+`RefinedType`, definitions, remaining control flow (`for`, `match`, and
+`do`/`while`), templates, interpolation, quotes, and macros remain follow-up
+increments.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards, and expression bodies. Case bodies are represented
@@ -199,9 +200,9 @@ limited to `-`, `+`, `~`, and `!`; infix reduction uses Scala 3.9 precedence,
 left/right associativity, and mixed-associativity diagnostics. Operators
 ending in `:` are right-associative. Legacy postfix syntax is represented by
 `PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
-the initial `if`/`while` forms, and match clauses are implemented above this
-layer; ascription, colon arguments, and the remaining higher-level expression
-grammar are not implemented yet.
+the initial `if`/`while`, `throw`, `return`, `try`/`catch`/`finally`, and match
+clauses are implemented above this layer; ascription, colon arguments, and
+the remaining higher-level expression grammar are not implemented yet.
 
 ## Scala parser oracle
 
