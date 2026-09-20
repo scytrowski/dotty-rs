@@ -249,6 +249,10 @@ where
                 return self.parse_lambda_block_body(end);
             }
 
+            if self.context.case_body {
+                return self.parse_lambda_block_body(TokenKind::Eof);
+            }
+
             let mark = self.mark();
             let expr = self.expr();
             return self.alloc_from(

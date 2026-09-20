@@ -165,6 +165,15 @@ where
         result
     }
 
+    /// Runs a nested parse with case/catch-body boundaries enabled.
+    pub(crate) fn with_case_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.context.case_body;
+        self.context.case_body = true;
+        let result = parse(self);
+        self.context.case_body = previous;
+        result
+    }
+
     /// Forwards a scanner feedback event.
     pub fn observe(&mut self, event: ScannerEvent) {
         self.cursor.observe(event);

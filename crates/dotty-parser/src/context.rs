@@ -64,6 +64,9 @@ pub struct ParseContext {
     /// This is separate from [`Location::InBlock`]: nested expression parsing
     /// needs to know whether its enclosing block ends at `}` or `Outdent`.
     pub block_end: Option<dotty_core::TokenKind>,
+    /// Whether the current block is a case/catch body that also ends before
+    /// the next `case` clause.
+    pub case_body: bool,
 }
 
 impl Default for ParseContext {
@@ -74,6 +77,7 @@ impl Default for ParseContext {
             param_owner: None,
             features: ParserFeatures::default(),
             block_end: None,
+            case_body: false,
         }
     }
 }
@@ -92,6 +96,7 @@ mod tests {
                 param_owner: None,
                 features: ParserFeatures::default(),
                 block_end: None,
+                case_body: false,
             }
         );
     }

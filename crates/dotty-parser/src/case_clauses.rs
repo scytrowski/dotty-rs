@@ -41,7 +41,9 @@ where
             self.advance();
             self.consume_case_newlines();
             let indented = self.accept(TokenKind::Indent);
-            let body = self.with_location(Location::InBlock, |parser| parser.expr());
+            let body = self.with_case_body(|parser| {
+                parser.with_location(Location::InBlock, |parser| parser.expr())
+            });
             if indented {
                 self.consume_case_newlines();
                 if !self.accept(TokenKind::Outdent) {
@@ -116,7 +118,9 @@ where
             }
             result
         } else {
-            let expr = self.with_location(Location::InBlock, |parser| parser.expr());
+            let expr = self.with_case_body(|parser| {
+                parser.with_location(Location::InBlock, |parser| parser.expr())
+            });
             if self.accept(TokenKind::Punctuation(Punctuation::Semicolon)) {
                 // Dotty keeps the separator in the source-level case-body
                 // block span. The next case still starts after it.
