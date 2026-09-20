@@ -697,3 +697,28 @@ fn a_member_lookup_through_a_binder_still_being_decoded_is_an_error_not_a_panic(
     );
     assert_eq!(unpickler.index().type_at(2), None);
 }
+
+#[test]
+fn a_failed_binder_gives_its_reserved_slots_back_to_the_arena() {
+    // The next allocation after a failed call must get the id it would have
+    // got had the call never happened: reserved slots are truncated too.
+    let next_id_after = |fail: bool| {
+        let patched = if fail {
+            retagged(BINDERS, TWO_SECOND_BOUNDS, 61, 66)
+        } else {
+            BINDERS.to_vec()
+        };
+        let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+        let (mut session, packages) = session_with_scala();
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+        unpickler.enter_symbols().unwrap();
+        if fail {
+            assert!(unpickler.unpickle_type(TWO).is_err());
+        }
+        drop(unpickler);
+        session.store.types.alloc(Type::NoType)
+    };
+
+    assert_eq!(next_id_after(true), next_id_after(false));
+}
