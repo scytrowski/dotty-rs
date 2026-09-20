@@ -244,10 +244,20 @@ where
             return self.parse_indented_block();
         }
 
-        if self.context.location == Location::InBlock
-            && let Some(end) = self.context.block_end
-        {
-            return self.parse_lambda_block_body(end);
+        if self.context.location == Location::InBlock {
+            if let Some(end) = self.context.block_end {
+                return self.parse_lambda_block_body(end);
+            }
+
+            let mark = self.mark();
+            let expr = self.expr();
+            return self.alloc_from(
+                mark,
+                TreeKind::Block(dotty_core::ast::Block {
+                    stats: Vec::new(),
+                    expr,
+                }),
+            );
         }
 
         if can_start_expr(self.current().kind) {
@@ -576,6 +586,38 @@ mod tests {
                 .message()
                 .contains("expected `,` or `)` after lambda parameter")
         }));
+    }
+
+    #[test]
+    fn lambda_body_in_a_case_region_uses_a_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x => x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.with_location(Location::InBlock, |parser| parser.expr());
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Block(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
