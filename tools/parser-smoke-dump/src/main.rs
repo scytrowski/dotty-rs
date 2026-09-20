@@ -189,6 +189,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
+        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::Return(_) => "Return",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) if tuple.elements.is_empty() => {
             "Literal"
@@ -239,7 +240,17 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::While(while_tree) => vec![while_tree.cond, while_tree.body],
         TreeKind::Match(match_tree) => {
             let mut children = Vec::with_capacity(match_tree.cases.len() + 1);
-            children.push(match_tree.selector);
+            let include_selector =
+                arena
+                    .get(match_tree.selector)
+                    .position
+                    .is_some_and(|position| {
+                        let range = position.span().range();
+                        range.start() != range.end()
+                    });
+            if include_selector {
+                children.push(match_tree.selector);
+            }
             children.extend(match_tree.cases.iter().copied());
             children
         }
@@ -272,6 +283,16 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
         TreeKind::PhaseSpecific(UntypedNode::Throw(throw)) => vec![throw.expr],
+        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(parsed_try)) => {
+            let mut children = vec![parsed_try.expr];
+            if let Some(handler) = parsed_try.handler {
+                children.push(handler);
+            }
+            if let Some(finalizer) = parsed_try.finalizer {
+                children.push(finalizer);
+            }
+            children
+        }
         TreeKind::Return(return_tree) => return_tree.expr.into_iter().collect(),
         _ => Vec::new(),
     }

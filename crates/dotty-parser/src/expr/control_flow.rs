@@ -1,4 +1,4 @@
-use dotty_core::ast::{Block, If, ParsedTry, Return, Throw, UntypedNode, While};
+use dotty_core::ast::{Block, If, Match, ParsedTry, Return, Throw, UntypedNode, While};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
@@ -109,7 +109,11 @@ where
         let expr = self.parse_layout_expression("expected an expression after `try`");
 
         let handler = if self.accept_layout_keyword(dotty_core::HardKeyword::Catch) {
-            Some(self.parse_layout_expression("expected an expression after `catch`"))
+            if self.catch_starts_case_handler() {
+                Some(self.parse_catch_case_handler())
+            } else {
+                Some(self.parse_layout_expression("expected an expression after `catch`"))
+            }
         } else {
             None
         };
@@ -202,6 +206,77 @@ where
         true
     }
 
+    fn catch_starts_case_handler(&mut self) -> bool {
+        let mut lookahead = 0;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+
+        if self.cursor.lookahead(lookahead).kind
+            == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+        {
+            return true;
+        }
+
+        if matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+        ) {
+            lookahead += 1;
+            while matches!(
+                self.cursor.lookahead(lookahead).kind,
+                TokenKind::Newline | TokenKind::Newlines
+            ) {
+                lookahead += 1;
+            }
+            return self.cursor.lookahead(lookahead).kind
+                == TokenKind::Keyword(dotty_core::HardKeyword::Case);
+        }
+
+        false
+    }
+
+    fn parse_catch_case_handler(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        self.consume_control_newlines();
+        let braced = self.accept(TokenKind::Punctuation(Punctuation::LeftBrace));
+        let indented = if braced {
+            false
+        } else {
+            self.consume_control_newlines();
+            self.accept(TokenKind::Indent)
+        };
+
+        let cases = if braced || indented {
+            self.case_clauses()
+        } else {
+            vec![self.case_clause(true)]
+        };
+
+        if braced {
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `}` to close catch cases",
+                );
+            }
+        } else if indented {
+            self.consume_control_newlines();
+            if !self.accept(TokenKind::Outdent) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected an outdent to close catch cases",
+                );
+            }
+        }
+
+        let selector = self.synthetic_unit_at(mark.start());
+        self.alloc_from(mark, TreeKind::Match(Match { selector, cases }))
+    }
+
     fn consume_control_newlines(&mut self) {
         while matches!(
             self.current().kind,
@@ -268,7 +343,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{ParsedTry, Return, Throw, UntypedNode};
+    use dotty_core::ast::{Match, ParsedTry, Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
@@ -540,6 +615,103 @@ mod tests {
         };
 
         assert!(matches!(parser.ast().get(handler).kind, TreeKind::Apply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_try_with_a_single_case_catch_handler() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() catch case error => recover(error)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Catch), 12, 17),
+                token(TokenKind::Keyword(HardKeyword::Case), 18, 22),
+                token(TokenKind::Identifier, 23, 28),
+                token(TokenKind::Operator, 29, 31),
+                token(TokenKind::Identifier, 32, 39),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 39, 40),
+                token(TokenKind::Identifier, 40, 45),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 45, 46),
+                token(TokenKind::Eof, 46, 46),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: Some(handler),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree with a case handler");
+        };
+
+        let TreeKind::Match(Match {
+            selector,
+            ref cases,
+        }) = parser.ast().get(handler).kind
+        else {
+            panic!("expected selectorless match handler");
+        };
+        assert!(parser.ast().get(selector).position.is_some_and(|position| {
+            let range = position.span().range();
+            range.start() == range.end()
+        }));
+        assert_eq!(cases.len(), 1);
+        assert!(matches!(
+            parser.ast().get(cases[0]).kind,
+            TreeKind::CaseDef(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_try_with_braced_catch_cases() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() catch { case error => recover(error) }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Catch), 12, 17),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Case), 20, 24),
+                token(TokenKind::Identifier, 25, 30),
+                token(TokenKind::Operator, 31, 33),
+                token(TokenKind::Identifier, 34, 41),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 41, 42),
+                token(TokenKind::Identifier, 42, 47),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 47, 48),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 49, 50),
+                token(TokenKind::Eof, 50, 50),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: Some(handler),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree with braced cases");
+        };
+
+        let TreeKind::Match(Match { ref cases, .. }) = parser.ast().get(handler).kind else {
+            panic!("expected match handler");
+        };
+        assert_eq!(cases.len(), 1);
+        assert!(matches!(
+            parser.ast().get(cases[0]).kind,
+            TreeKind::CaseDef(_)
+        ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
