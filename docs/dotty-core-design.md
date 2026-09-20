@@ -980,7 +980,7 @@ pub struct TypeLambda {
 None of these carry their own `binder`/`id` field any more — once one of
 them is allocated in the `TypeArena`, the `TypeId` it was allocated under
 *is* its binder identity, exactly the way `Type::Recursive`'s own `TypeId`
-already serves as the binder identity for any `RecThis` nested inside it.
+already serves as the binder identity for any `RecThis` nested inside it. (The TASTy adapter keeps one canonical `RecThis` per `Recursive`, as Dotty's `RecType` keeps one `recThis`; that cache is adapter state, not part of the model.)
 `BinderId`, `Binder`, `BinderArena`, and `BinderKind` are removed entirely
 (§3, §4, §10) — matching them against a `Type` variant via `match` already
 tells you the "kind" the old `BinderKind` existed to record.

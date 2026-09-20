@@ -19,7 +19,10 @@ Status (`crates/dotty-tasty-unpickler`):
   same machinery: implemented (§4, "Binders").
 - Milestone 3c, binder rebinding and variance-bearing `TYPEBOUNDS`:
   implemented (§4, "Variance-bearing `TYPEBOUNDS`"). This closes the binder
-  milestone; Milestone 4 (advanced types) is next.
+  milestone.
+- Milestone 4a, recursive and refined types (`REFINEDtype`, `RECtype`,
+  `RECthis`): implemented (§4, "Recursive and refined types"). Milestone 4b
+  (annotated types) is next.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -68,7 +71,10 @@ function. It follows an enter-before-complete model:
 | 3a. Binder identity | `TypeLambda`, `ParamRef`, with `TypeArena::reserve`/`fill` | 3a |
 | 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
 | 3c. Binder rebinding | `dotty_core::rebind_type_lambda`; variance-bearing `TYPEBOUNDS`; `declared_variance: Option<Variance>` | 3c |
-| 4. Advanced types | refinements, recursive, match, annotated, `*REFin` | 4 |
+| 4a. Refined and recursive | `Refined`, `Recursive`, `RecThis` | 4a |
+| 4b. Annotated types | `ANNOTATEDtype`, the annotation boundary, `MethodParam.erased` | 4b |
+| 4c. `*REFin` | `TYPEREFin` / `TERMREFin` owner-space resolution | 4c |
+| 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
@@ -533,6 +539,72 @@ alike at different addresses are different binders, and their `ParamRef`s
 differ. In practice the compiler shares equal lambdas, so real output rarely
 contains such a pair; the test is synthetic.
 
+### Recursive and refined types (Milestone 4a)
+
+| TASTy | wire shape | semantic type |
+|-------|------------|---------------|
+| `RECtype` | `Type` | `Recursive { parent }` |
+| `RECthis` | `ASTRef` | `RecThis { binder }` |
+| `REFINEDtype` | `NameRef Type Type` | `Refined { parent, name, info }` |
+
+**`RECtype` is a binder.** Its `TypeId` is the binder identity, so it follows
+the same sequence as the methodic binders: validate the node (one child),
+`reserve`, publish `R -> R'` in the index, push a `PendingBinder` of kind
+`Recursive`, decode the parent, `fill`, pop. There is no second id. The pending
+state is the same one: `is_pending` covers a recursive binder, so member lookup
+through one that is still being decoded is `UnsupportedResolutionPrefix`, not a
+read of an unfilled slot. A `Recursive` binds no parameters, so it has *no
+arity* (`PendingBinder.arity` is `None`, not a made-up number), and a
+`PARAMtype` naming one, pending or completed, is `InvalidBinderKind`.
+
+**`RECthis` resolves its binder by address only.** The binder is, in this
+order: a pending one (its recorded id, no arena read, and it must be
+`Recursive`); one already decoded (checked to be a `Recursive`); or one not yet
+decoded, which is decoded on demand, and only when the node is a `RECtype`. That
+decode can reach this very `RECthis` through the parent, so the node's address
+is looked up again afterwards and the `RecThis` the recursive path made is
+returned; a second one would be a `DuplicateType`. The on-demand chain is bounded
+like a `SHAREDtype` chain (`MAX_SHARED_DEPTH`). An address that is not a node, a
+node that is not a `RECtype`, a pending binder that is not recursive, and a
+chain past the bound are all `InvalidReferenceTarget`; no recursive-specific error
+was needed. A `RECthis` that names itself is that error, not a loop.
+
+**One canonical `RecThis` per binder.** Dotty's `RecType` keeps one `recThis`, so
+every `RECthis` naming one binder, at whatever address, gets the same `TypeId`;
+`RecThis` values of different binders are never shared. This is compatible with
+address identity: each address maps to exactly one type, and several addresses
+may map to one. The `Recursive -> RecThis` cache is adapter state (the
+unpickler, not `dotty-core`). It spans `unpickle_type` calls, so it is
+*journaled*: a failed call pops the entries it added, in step with the store
+rollback, because the freed ids are handed out again and a surviving entry would
+pair a new binder with a stale `RecThis` id. A test decodes a failing call and then
+a different recursive type that reuses the ids, at a different position.
+
+**`REFINEDtype`.** Both children come from absolute AST addresses
+(`children[0]` the parent, `children[1]` the info); the structural decoder gives
+the shape and the name. The name is a *term* name unless the info is
+`TYPEBOUNDS`, in which case it is a *type* name, Dotty's rule exactly
+(`if nextUnsharedTag == TYPEBOUNDS then name.toTypeName`). The tag is that of
+the info *after* following `SHAREDtype` (and `SHAREDterm`) links, through
+`AstView::next_unshared_tag`, which validates every target and is bounded like
+any other link chain; the namespace is never guessed from the text of the name.
+A signed refinement name is refused (`UnsupportedSignedReference`) rather than
+stripped. Nested refinements keep the order and nesting TASTy writes: the inner
+one is the outer's parent, nothing is flattened. `Method`, `Poly`, `Bounds` and
+`TypeLambda` infos compose (Methodic.scala and RecursiveRefined.scala).
+
+**No member lookup.** `Refined` holds a parent, a `Name` and an info, but no
+`SymbolId` for the member, and TypeRef/TermRef are symbol-based, so a member of
+a refined or recursive type cannot be found here, and no synthetic symbol or
+text search was added. A by-name reference through such a prefix keeps the
+existing `UnsupportedResolutionPrefix` (`TYPEREFin`/`TERMREFin` is 4c). In
+practice this is the common case for a *recursive* refinement: in
+`C { type T1; type T2 = T1 }` the `T1` is named through a `RECthis`, so that
+whole type decodes only with a resolver that can search refinements. The
+self-referential shape that needs no lookup does decode: `Base { def me: this.type }`
+is `Recursive -> Refined -> ByName -> RecThis`, the `RecThis` naming the exact
+`Recursive` id, in either decode order.
+
 ### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 
 `TYPEBOUNDS Length Type Type? Variance*`, with `STABLE`, `COVARIANT` or
@@ -606,7 +678,7 @@ beside another declared variance.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
 `NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
-`ANNOTATEDtype`, refinements, recursive and match types.
+`ANNOTATEDtype` and match types.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -724,7 +796,12 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 3b: `Method` and `Poly` on the same machinery, `PARAMtype` to all three
      binder kinds, and the `MethodParam` audit (`erased`/`varargs`) — complete;
    - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — complete.
-4. Advanced types (refinements, recursive, match types, annotations, ...).
+4. Advanced types, in steps:
+   - 4a: `Refined`, `Recursive`, `RecThis` — complete;
+   - 4b: annotated types and the annotation boundary, then
+     `MethodParam.erased` from `ErasedParamAnnot`;
+   - 4c: `TYPEREFin` / `TERMREFin` owner-space resolution;
+   - 4d: `Match` / `MatchCase` and whatever else measurement shows.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
@@ -954,6 +1031,32 @@ from 562: the same lambdas, now also reachable through decoded bounds), compiler
 library `TYPEBOUNDS` decode 716 (from 639), `PARAMtype` 1,445 (from 1,431), of
 which `TYPELAMBDAtype` binders 1,444 and `POLYtype` 1. `TYPELAMBDAtype` counts as
 "standalone" when it is not the direct child of a variance-bearing `TYPEBOUNDS`.
+
+### Refined and recursive types after 4a (library / compiler)
+
+Same method, same two runs (each node decoded as its own root; "builtins" =
+`scala.Any`/`Nothing`/`Null` entered).
+
+| node | run | nodes | decoded | external | unsupported prefix | unsupported form | binder errors |
+|------|-----|-------|---------|----------|--------------------|------------------|---------------|
+| `REFINEDtype` | no builtins | 54 / 118 | 18 / 1 | 25 / 117 | 2 / 0 | 9 / 0 | 0 |
+| `RECtype` | no builtins | 2 / 0 | 0 / 0 | 0 | 2 / 0 | 0 | 0 |
+| `RECthis` | no builtins | 2 / 0 | 0 / 0 | 0 | 2 / 0 | 0 | 0 |
+| `REFINEDtype` | builtins | 54 / 118 | 23 / 1 | 20 / 117 | 2 / 0 | 9 / 0 | 0 |
+| `RECtype` | builtins | 2 / 0 | 0 / 0 | 0 | 2 / 0 | 0 | 0 |
+| `RECthis` | builtins | 2 / 0 | 0 / 0 | 0 | 2 / 0 | 0 | 0 |
+
+The real corpus has very few recursive types: 2 `RECtype` and 2 `RECthis` in the
+library, none in the compiler. All four fail the same way, as the prefix of a
+by-name member (`UnsupportedResolutionPrefix`, see "No member lookup"), so no
+`RECthis` decodes there: unique recursive binders named 0, canonical `RecThis`
+ids 0, and the two `RECthis` roots are asked for before their binder has a type
+(binder decoded on demand 2). The corpus test also asserts the canonicalization
+invariant (one `TypeId` per binder) for every decoded `RECthis`, which the
+fixtures exercise instead. The 9 library refinements with an unsupported form
+fail on a child (`ANNOTATEDtype`), the rest on an external type. Recursive
+binder errors: 0, unexpected errors: 0 in every run, and none of the three forms
+is reported as an unsupported form.
 
 ## 9. Review of Milestone 1
 

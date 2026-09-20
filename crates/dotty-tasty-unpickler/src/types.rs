@@ -46,6 +46,23 @@
 //! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
 //! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
 //!
+//! ## Recursive and refined types (Milestone 4a)
+//!
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `RECtype`             | `Type`                    | `Recursive { parent }`             |
+//! | `RECthis`             | `ASTRef`                  | `RecThis { binder }`               |
+//! | `REFINEDtype`         | `NameRef Type Type`       | `Refined { parent, name, info }`   |
+//!
+//! A `RECtype` is a binder like the lambdas (see the `recursive` module): its
+//! id is reserved and published before the parent is decoded, and a `RECthis`
+//! carries that exact id, found by address. Every `RECthis` naming one binder
+//! shares one `RecThis` `TypeId`, as Dotty's `RecType` has one `recThis`. A
+//! `REFINEDtype` name is a term name unless the info, after `SHAREDtype` links,
+//! is `TYPEBOUNDS` (see the `refined` module). A refinement member has no
+//! symbol, so a by-name reference through a refined or recursive prefix stays
+//! `UnsupportedResolutionPrefix`.
+//!
 //! ## Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 //!
 //! `TYPEBOUNDS` may end in variance markers (`STABLE`, `COVARIANT`,
@@ -121,7 +138,7 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, refinements, recursive and match types, and
+//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, match types, and
 //! `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
