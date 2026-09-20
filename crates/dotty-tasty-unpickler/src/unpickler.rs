@@ -10,6 +10,7 @@ use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
 use crate::ast_view::AstView;
+use crate::binders::PendingBinder;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::ScopeJournal;
@@ -41,6 +42,9 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) resolver: Box<dyn SymbolResolver>,
     /// Declarations made into scopes during the current `enter_symbols`.
     pub(crate) scope_journal: ScopeJournal,
+    /// Binders reserved and published but not yet filled, innermost last.
+    /// Decoding state only: empty whenever a public call returns.
+    pub(crate) pending_binders: Vec<PendingBinder>,
     /// The file's AST view, built on first use and shared by both passes.
     ast: Option<Rc<AstView<'bytes>>>,
 }
@@ -80,6 +84,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             packages,
             resolver: Box::new(NoResolver),
             scope_journal: Vec::new(),
+            pending_binders: Vec::new(),
             ast: None,
         }
     }
@@ -183,6 +188,10 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             self.store.rollback_to(checkpoint);
             self.index.roll_back_types(mark);
         }
+        // Nothing is pending outside a call, and every binder unregisters
+        // itself; this only guarantees the invariant for the next call.
+        debug_assert!(self.pending_binders.is_empty());
+        self.pending_binders.clear();
         result
     }
 
