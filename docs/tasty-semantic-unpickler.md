@@ -14,8 +14,10 @@ Status (`crates/dotty-tasty-unpickler`):
   `AliasingBounds`, `Flexible`, lossless constants and `CLASSconst`):
   implemented (§4, "Bounds, flexible and constant types").
 - Milestone 3a, binder identity (`TYPELAMBDAtype`, `PARAMtype`): implemented
-  (§4, "Binders"). Milestone 3b (`METHODtype`, `POLYtype`, variance-bearing
-  `TYPEBOUNDS`) is next.
+  (§4, "Binders").
+- Milestone 3b, the other two binder forms (`METHODtype`, `POLYtype`) on the
+  same machinery: implemented (§4, "Binders"). Milestone 3c (binder rebinding
+  and variance-bearing `TYPEBOUNDS`) is next.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -62,7 +64,8 @@ function. It follows an enter-before-complete model:
 | 2c1. Compound types | `Applied`, `And`, `Or`, `SuperType`, `ByName` | 2c1 |
 | 2c2. Core-model gaps | `Bounds`, `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst` | 2c2 |
 | 3a. Binder identity | `TypeLambda`, `ParamRef`, with `TypeArena::reserve`/`fill` | 3a |
-| 3b. Methodic binders | `Method`, `Poly`, variance-bearing `TYPEBOUNDS` (needs binder rebinding) | 3b |
+| 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
+| 3c. Binder rebinding | a binder-rebinding substitution; variance-bearing `TYPEBOUNDS` | 3c |
 | 4. Advanced types | refinements, recursive, match, annotated, `*REFin` | 4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
@@ -378,10 +381,10 @@ Bounds, flexible and constant types (Milestone 2c2):
   which would collide with `SymbolKind::TypeAlias` (a symbol kind).
 - **Variance markers.** Dotty does not attach the trailing variance markers to
   the bounds: it rewrites the parameter variances of an `HKTypeLambda` bound,
-  then wraps it. There is no `TypeLambda` decoder yet, and inventing a
-  bounds-level variance field would be wrong, so a `TYPEBOUNDS` with markers is
-  `UnsupportedBoundsVariance` (refused before any child is decoded). It closes
-  with the binder milestone.
+  then wraps it. Inventing a bounds-level variance field would be wrong, and
+  applying the markers needs a binder-rebinding substitution, so a `TYPEBOUNDS`
+  with markers is `UnsupportedBoundsVariance` (refused before any child is
+  decoded). It closes with Milestone 3c.
 - **Flexible types.** `Flexible` is a preserved wrapper; the model never
   strips it. Only local member lookup looks through it (`lookup_owner`
   follows any chain of `Flexible` to a searchable prefix); a resolver still
@@ -404,27 +407,31 @@ Bounds, flexible and constant types (Milestone 2c2):
   nothing is interned structurally: equal constants at different addresses
   keep different ids.
 
-### Binders (Milestone 3a)
+### Binders (Milestones 3a and 3b)
 
 | TASTy | wire shape | semantic type |
 |-------|------------|---------------|
 | `TYPELAMBDAtype` | `Type (Type NameRef)*` | `TypeLambda { params, result }` |
+| `POLYtype` | `Type (Type NameRef)*` | `Poly { params, result }` |
+| `METHODtype` | `Type (Type NameRef)* Modifier*` | `Method { params, result, kind }` |
 | `PARAMtype` | `ASTRef Nat` | `ParamRef { binder, index }` |
 
-**The invariant.** `ParamRef.binder` is the exact `TypeId` of the `TypeLambda`
-it refers to, found by the binder's AST address only:
+**The invariant.** `ParamRef.binder` is the exact `TypeId` of the `TypeLambda`,
+`Poly` or `Method` it refers to, found by the binder's AST address only:
 
 ```text
 binder AST address
     -> reserved TypeId
     -> published in TastySemanticIndex
     -> ParamRef children use that TypeId
-    -> reserved slot filled with the final TypeLambda
+    -> reserved slot filled with the final binder
 ```
 
-The sequence for a `TYPELAMBDAtype` at address `B`:
+The sequence is one helper (`decode_methodic`, Dotty's `readMethodic`) shared
+by all three forms. For a binder at address `B`:
 
-1. validate the envelope (the AST children must be `1 + parameters`) and read
+1. validate the envelope (the AST children must be `1 + parameters`, and a
+   `POLYtype` or `TYPELAMBDAtype` must have at least one parameter) and read
    the parameter names, so a malformed node fails before anything is reserved;
 2. `TypeArena::reserve` gives the binder id `B'`;
 3. `B -> B'` is recorded in the index, *before* any child is decoded;
@@ -434,8 +441,8 @@ The sequence for a `TYPELAMBDAtype` at address `B`:
    the payload and only validate the shape, as in 2c1). Either order works once
    the binder is published; bounds first lets a bad parameter info fail before
    the result is read;
-6. `TypeArena::fill` puts the `TypeLambda` in the reserved slot (no second
-   `TypeId` is allocated), and the pending binder is popped.
+6. `TypeArena::fill` puts the `TypeLambda`, `Poly` or `Method` in the reserved
+   slot (no second `TypeId` is allocated), and the pending binder is popped.
 
 **Why pending metadata exists.** Between steps 3 and 6 the address entry
 refers to an *unfilled* arena slot, and reading one panics. That is confined to
@@ -453,7 +460,8 @@ failed nested lambda restores the enclosing stack.
 
 **`PARAMtype`.** The binder address must be the start of a node
 (`InvalidBinderReference`). The binder is, in order: a pending binder; one
-already decoded, which must be a `TypeLambda` (`InvalidBinderKind`); or one not
+already decoded, which must be a `TypeLambda`, `Poly` or `Method`
+(`InvalidBinderKind`); or one not
 yet decoded, which is decoded on demand. The index is then checked against the
 arity (`InvalidParameterIndex`, for `index >= arity`). Decoding a binder on
 demand can re-enter this very `PARAMtype` through the binder's own children
@@ -464,9 +472,48 @@ on-demand chain is bounded like a `SHAREDtype` chain (`MAX_SHARED_DEPTH`), so a
 `PARAMtype` that names itself, or two that name each other, are an
 `InvalidReferenceTarget`, not a stack overflow.
 
-**Parameter infos** must be `Bounds` or `AliasingBounds`
-(`InvalidTypeParameterBounds`). A standalone `TYPELAMBDAtype` has no variance
-of its own, so every parameter is `Invariant`.
+**Parameter infos** of a `TYPELAMBDAtype` or `POLYtype` must be `Bounds` or
+`AliasingBounds` (`InvalidTypeParameterBounds`). Neither carries variance of
+its own, so every parameter is `Invariant`. A `Poly` is reserved and published
+before its bounds are read, so an F-bound (`[A <: Ord[A]]`) names the poly
+being built. An empty `POLYtype` or `TYPELAMBDAtype` is `MalformedType`,
+because Dotty's `PolyType` and `HKTypeLambda` require a parameter, although the
+wire grammar (`Type NameRef*`) does not.
+
+**`METHODtype`** parameters are term parameters: a `TermName` and any type (not
+bounds). Unlike a poly, `()` is a valid clause, so an empty method decodes and
+owns an id. The modifier tail is the clause kind, as Dotty's
+`methodTypeCompanion`:
+
+| tail | `MethodKind` |
+|------|--------------|
+| none | `Plain` |
+| `IMPLICIT` | `Implicit` |
+| `GIVEN` | `Contextual` |
+| `IMPLICIT` and `GIVEN` | `MalformedType` |
+| any other modifier | `InvalidMethodModifier { address, tag }` |
+
+Implicit and contextual (`using`) clauses are different kinds in `dotty-core`
+and are never merged; a repeated modifier is harmless, as in Dotty's flag set.
+A `PARAMtype` to a method is a reference to one of its *term* parameters, so a
+dependent result (`(x: Box): x.Out`) is a `TypeRef` whose prefix is
+`ParamRef { binder: <that method's id>, index: 0 }`. A later clause may name an
+earlier one, `(x: Box)(y: x.Out)`: the inner method is the outer's result, and
+its `PARAMtype` resolves by address to the OUTER binder while the inner one is
+also pending. The same holds for `Poly -> Method -> Method`, where three
+binders are pending at once and each reference finds its own.
+
+**`MethodParam.erased` and `varargs`.** Both are `false`, by audit, not by
+guess. `varargs` is the JVM `ACC_VARARGS` distinction (a Java `T...`), which
+`METHODtype` does not encode: Scala's repeated parameter is the parameter's
+*type*. It is not inferred from position or name. Dotty derives `erased` from
+an `ErasedParamAnnot` on the parameter *type* (`MethodType.hasErasedParams`),
+not from a clause modifier, and that type is an `ANNOTATEDtype`, which is not
+decoded yet, so a method whose parameter is erased does not decode at all
+today. When Milestone 4 decodes annotations it must revisit this and derive
+`erased` from them if the field stays in the core model. The type node is also
+self-contained: a `METHODtype` in a refinement has no `DEFDEF` whose parameter
+flags could be copied, so nothing is read from definition symbols.
 
 `SHAREDtype` to a lambda returns its exact binder id, including one that
 is still pending (as in Dotty, which registers the lambda before reading its
@@ -486,14 +533,14 @@ The `PARAMtype`s in the file still name the old address. Copying the cached
 lambda and changing a variance would leave every nested `ParamRef` pointing at
 the old `TypeId`; mutating it would change a type other addresses share. So the
 markers are still `UnsupportedBoundsVariance`, and the nested lambda decodes on
-its own. Milestone 3b must either add a binder-rebinding substitution or
-establish a context-aware decoding rule proven correct for TASTy's
-parent-carried variance.
+its own. Milestone 3c must either add a format-agnostic binder-rebinding
+substitution in `dotty-core` or establish a context-aware decoding rule proven
+correct for TASTy's parent-carried variance. It was split from 3b because it is
+a separate semantic operation, not one more decoder case.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
 `NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
-`ANNOTATEDtype`, `METHODtype`, `POLYtype`, refinements, recursive and match
-types.
+`ANNOTATEDtype`, refinements, recursive and match types.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -608,10 +655,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
 3. Binder types, in two steps:
    - 3a: binder identity (`TypeLambda`, `ParamRef`, reserve/publish/fill) —
      complete;
-   - 3b: `Method` and `Poly`, variance-bearing `TYPEBOUNDS` and the binder
-     rebinding they need — next. `MethodParam`'s `erased`/`varargs` are not
-     written by `METHODtype` (they are classfile-oriented), so 3b audits that
-     contract.
+   - 3b: `Method` and `Poly` on the same machinery, `PARAMtype` to all three
+     binder kinds, and the `MethodParam` audit (`erased`/`varargs`) — complete;
+   - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — next.
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -652,7 +698,7 @@ Deliberately not supported yet:
 - companion links (`SymbolLinks::companion`);
 - `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`; `TYPEBOUNDS` with variance markers —
-  `UnsupportedBoundsVariance` until binder rebinding exists (3b);
+  `UnsupportedBoundsVariance` until binder rebinding exists (3c);
 - signed term references, cross-unit class members and
   inherited members (§4, "Name-based references");
 - packages and members outside the entered state with no resolver that knows
@@ -781,7 +827,7 @@ binder is invalid (0 `InvalidBinderReference`, `InvalidBinderKind`,
 `InvalidParameterIndex` or `InvalidTypeParameterBounds`), and there were 0
 unexpected errors in any run. What remains is child resolution: an external
 type in a parameter's bounds or in the result, `TYPEBOUNDS` with variance
-markers (3b) and the odd unsupported child (`ANNOTATEDtype`). "Binder decoded
+markers (3c) and the odd unsupported child (`ANNOTATEDtype`). "Binder decoded
 on demand" counts `PARAMtype` roots asked for before their binder had a type:
 1,672 / 169 with no builtins (every lambda fails, so none is ever cached) and
 242 / 94 with them (the lambdas that fail and are rolled back). Order
@@ -797,8 +843,30 @@ Nodes with no decoder yet (instances in the corpus):
 |------|---------|----------|
 | `ANNOTATEDtype` | 2,014 | 5,409 |
 
-`ANNOTATEDtype` belongs to the annotation work; `METHODtype`/`POLYtype` are
-Milestone 3b.
+`ANNOTATEDtype` belongs to the annotation work.
+
+### Binder types after 3b (library / compiler)
+
+Same method, same two runs. `METHODtype` and `POLYtype` are rare as type nodes
+(most method types are in `DEFDEF` trees, not in the type language), so the
+real-compiler fixture `Methodic.scala` carries most of the coverage; the corpus
+confirms nothing unexpected.
+
+| node | run | nodes | decoded | external | unsupported form | binder errors |
+|------|-----|-------|---------|----------|------------------|---------------|
+| `METHODtype` | no builtins | 3 / 4 | 0 / 0 | 3 / 4 | 0 | 0 |
+| `POLYtype` | no builtins | 1 / 0 | 0 / 0 | 1 / 0 | 0 | 0 |
+| `METHODtype` | builtins | 3 / 4 | 3 / 0 | 0 / 4 | 0 | 0 |
+| `POLYtype` | builtins | 1 / 0 | 1 / 0 | 0 | 0 | 0 |
+| `PARAMtype` | builtins | 1,672 / 169 | 1,431 / 75 | 217 / 94 | 0 | 0 |
+
+`TYPELAMBDAtype` is unchanged (562 / 72 decoded with builtins). Decoded
+`PARAMtype` roots by the kind of node their binder address names, with
+builtins: `TYPELAMBDAtype` 1,430 / 75, `POLYtype` 1 / 0, `METHODtype` 0 / 0
+(the four compiler methods are external). Binder identity errors: 0, unexpected
+errors: 0, and no binder form is reported as an unsupported form in any run.
+The `PARAMtype` counts of 3a moved by one (1,431, and 241 decoded on demand)
+because the one library `POLYtype` now decodes.
 
 ## 9. Review of Milestone 1
 

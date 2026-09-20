@@ -1,10 +1,11 @@
 //! Binder identity: the state that lets a `PARAMtype` refer to a binder that
 //! is still being decoded.
 //!
-//! A binder is the `TypeId` its `Type::TypeLambda` (or `Poly`/`Method`) is
-//! stored under, and a `ParamRef` names that id. The id must therefore exist
-//! before the binder's children are decoded, since they may contain the
-//! `ParamRef`s. The sequence for a `TYPELAMBDAtype` at address `B` is:
+//! A binder is the `TypeId` its `Type::TypeLambda`, `Type::Poly` or
+//! `Type::Method` is stored under, and a `ParamRef` names that id. The id must
+//! therefore exist before the binder's children are decoded, since they may
+//! contain the `ParamRef`s. All three forms share one sequence (Dotty's
+//! `readMethodic`); for a binder at address `B` it is:
 //!
 //! ```text
 //! validate the envelope and parameter names

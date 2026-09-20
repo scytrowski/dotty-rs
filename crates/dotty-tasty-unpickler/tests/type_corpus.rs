@@ -31,8 +31,13 @@ const TYPEBOUNDS_TAG: u8 = 163;
 const FLEXIBLETYPE_TAG: u8 = 193;
 const CLASSCONST_TAG: u8 = 92;
 
-/// The binder forms decoded since Milestone 3a.
-const BINDER_TAGS: [(u8, &str); 2] = [(170, "TYPELAMBDAtype"), (172, "PARAMtype")];
+/// The binder forms decoded since Milestones 3a and 3b.
+const BINDER_TAGS: [(u8, &str); 4] = [
+    (170, "TYPELAMBDAtype"),
+    (169, "POLYtype"),
+    (180, "METHODtype"),
+    (172, "PARAMtype"),
+];
 
 /// The bounds and flexible forms decoded since Milestone 2c2.
 const WRAPPER_TAGS: [(u8, &str); 2] = [
@@ -145,6 +150,9 @@ struct Tally {
     /// Per measured tag: compound, bounds, flexible and constant nodes.
     compound: BTreeMap<u8, Outcomes>,
     bounds: BoundsShapes,
+    /// Decoded `PARAMtype` roots, by the kind of node their binder address
+    /// names (`TYPELAMBDAtype`, `POLYtype`, `METHODtype`, or another node).
+    param_binders: BTreeMap<&'static str, usize>,
     /// Nodes of the forms that stay unsupported.
     unsupported_nodes: BTreeMap<u8, usize>,
     unresolved_members: usize,
@@ -261,6 +269,21 @@ fn run(
                 outcomes.decoded += 1;
                 // Identity: decoding again never allocates a second type.
                 assert_eq!(unpickler.unpickle_type(at), Ok(first));
+                if tag == 172 {
+                    let binder = file
+                        .ast_address_index()
+                        .unwrap()
+                        .get(at)
+                        .and_then(|raw| raw.decode_param_type().ok())
+                        .map(|param| param.binder.address);
+                    let kind = match binder.and_then(|address| tags.get(&address)) {
+                        Some(170) => "TYPELAMBDAtype",
+                        Some(169) => "POLYtype",
+                        Some(180) => "METHODtype",
+                        _ => "another node",
+                    };
+                    *tally.param_binders.entry(kind).or_default() += 1;
+                }
                 if tag == TYPEBOUNDS_TAG {
                     let shape = file
                         .ast_address_index()
@@ -296,7 +319,8 @@ fn run(
                     UnpickleError::InvalidBinderReference { .. }
                     | UnpickleError::InvalidBinderKind { .. }
                     | UnpickleError::InvalidParameterIndex { .. }
-                    | UnpickleError::InvalidTypeParameterBounds { .. } => {
+                    | UnpickleError::InvalidTypeParameterBounds { .. }
+                    | UnpickleError::InvalidMethodModifier { .. } => {
                         outcomes.binder_errors += 1;
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
@@ -483,6 +507,10 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);
         report("binder types", &BINDER_TAGS);
+        println!(
+            "decoded PARAMtype by binder kind: {:?}",
+            tally.param_binders
+        );
         report("constant nodes", &CONSTANT_TAGS);
         println!(
             "TYPEBOUNDS shapes: total {}, two-sided {}, alias-only {}, with variance {}, malformed {}; decoded alias-only {}, decoded two-sided {}",
@@ -520,5 +548,12 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         }
         assert!(tally.unexpected.is_empty());
         assert_eq!(tally.missing_outside_bodies, 0);
+        // No binder form is ever "unsupported" for being that form.
+        for (tag, label) in BINDER_TAGS {
+            assert!(
+                !tally.unsupported.contains_key(&tag),
+                "{label} was reported as an unsupported form"
+            );
+        }
     }
 }
