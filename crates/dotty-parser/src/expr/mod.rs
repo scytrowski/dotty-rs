@@ -166,7 +166,7 @@ const fn can_start_prefix_expr(kind: TokenKind) -> bool {
     )
 }
 
-pub(super) const fn can_start_expr(kind: TokenKind) -> bool {
+pub(crate) const fn can_start_expr(kind: TokenKind) -> bool {
     can_start_prefix_expr(kind)
         || matches!(
             kind,

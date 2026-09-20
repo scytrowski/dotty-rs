@@ -180,7 +180,7 @@ where
                     | TokenKind::Eof
             )
         {
-            self.advance();
+            self.recover_until(crate::RecoverySet::Enumerator);
         }
         (self.error_pattern(self.current_span()), false)
     }

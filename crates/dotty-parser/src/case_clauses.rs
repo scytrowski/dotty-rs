@@ -92,6 +92,14 @@ where
             return None;
         }
         self.advance();
+        if !crate::expr::can_start_expr(self.current().kind) {
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedExpression,
+                "expected an expression after guard `if`",
+            );
+            return Some(self.error_expr(position));
+        }
         Some(self.with_location(Location::InGuard, |parser| parser.postfix_expr()))
     }
 

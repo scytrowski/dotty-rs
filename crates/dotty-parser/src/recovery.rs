@@ -7,6 +7,7 @@ pub enum RecoverySet {
     Argument,
     TypeArgument,
     Case,
+    Enumerator,
 }
 
 impl RecoverySet {
@@ -44,6 +45,17 @@ impl RecoverySet {
                     | TokenKind::Punctuation(Punctuation::Semicolon)
                     | TokenKind::Outdent
                     | TokenKind::Punctuation(Punctuation::RightBrace)
+                    | TokenKind::Eof
+            ),
+            Self::Enumerator => matches!(
+                kind,
+                TokenKind::Keyword(HardKeyword::Yield | HardKeyword::Do)
+                    | TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Punctuation(Punctuation::Semicolon)
+                    | TokenKind::Punctuation(Punctuation::RightParen)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+                    | TokenKind::Outdent
                     | TokenKind::Eof
             ),
         }
@@ -115,5 +127,23 @@ mod tests {
         assert!(!RecoverySet::Argument.contains(unrelated));
         assert!(!RecoverySet::TypeArgument.contains(unrelated));
         assert!(!RecoverySet::Case.contains(unrelated));
+        assert!(!RecoverySet::Enumerator.contains(unrelated));
+    }
+
+    #[test]
+    fn enumerator_recovery_accepts_for_boundaries() {
+        for kind in [
+            TokenKind::Keyword(HardKeyword::Yield),
+            TokenKind::Keyword(HardKeyword::Do),
+            TokenKind::Newline,
+            TokenKind::Newlines,
+            TokenKind::Punctuation(Punctuation::Semicolon),
+            TokenKind::Punctuation(Punctuation::RightParen),
+            TokenKind::Punctuation(Punctuation::RightBrace),
+            TokenKind::Outdent,
+            TokenKind::Eof,
+        ] {
+            assert!(RecoverySet::Enumerator.contains(kind), "{kind:?}");
+        }
     }
 }
