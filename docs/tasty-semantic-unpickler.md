@@ -391,7 +391,7 @@ Bounds, flexible and constant types (Milestone 2c2):
   signed zero, and equality is bitwise. `STRINGconst` carries a `NameRef` and Dotty reads it as
   `readName().toString`, so any valid name entry is a string: a UTF-8 entry
   is its text and a derived entry (qualified, expanded, ...) is its rendered
-  spelling (`string_value`). A signed entry is `UnsupportedName`: Dotty renders it `name[with sig ...]`, which would need the signature rendered. Known
+  spelling (`string_value`). A signed entry (directly or nested in a derived one) renders with its signature, as Dotty's `SignedName.mkString` does: `f[with sig Signature(List(Int, 2),Unit)]`, unlike the member spelling used for lookup, which drops it. Known
   limit: `dotty-tasty` rejects a name table that is not valid UTF-8, so a
   string with an unpaired surrogate cannot reach the unpickler and
   `Constant::StringUtf16` is not produced from TASTy yet. `CLASSconst` stores

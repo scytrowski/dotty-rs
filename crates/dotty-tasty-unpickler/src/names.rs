@@ -64,16 +64,26 @@ const MAX_NAME_DEPTH: usize = 64;
 /// The text of a string constant. `STRINGconst` carries a `NameRef`, and Dotty
 /// reads it as `readName().toString`, so any valid name entry is a string: a
 /// plain UTF-8 entry is its text, and a derived entry (qualified, expanded,
-/// unique, ...) is its rendered spelling, as [`wire_name`] renders it.
+/// unique, ...) is its rendered spelling.
 ///
-/// A signed entry is refused with `UnsupportedName`: Dotty's `toString` of a
-/// `SignedName` is `name[with sig <signature>]`, which needs the signature
-/// rendered, and reading it as the bare original would silently differ.
+/// Unlike [`wire_name`], which spells a member for lookup and drops a
+/// signature, this is the *value* of the name, so a signed entry (directly, or
+/// nested in a derived one) renders as Dotty's `SignedName.mkString` does:
+/// `f[with sig Signature(List(A, 1),R)]`. `Signature` is a case class without
+/// its own `toString`, so its parts print as `List` and `String` do: term
+/// parameters by name, type-parameter sections by their length, then the
+/// result, with no space before the result.
 pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
-    if is_signed(names, reference) {
-        return Err(UnpickleError::UnsupportedName { reference });
-    }
-    wire_name(names, reference)
+    resolve(names, reference, reference, 0, Spelling::Value)
+}
+
+/// What a rendered name is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spelling {
+    /// A member name for lookup: a signature is dropped.
+    Member,
+    /// The value of the name, as Dotty's `Name.toString`: signatures show.
+    Value,
 }
 
 /// Renders the name at the zero-based wire `reference` to its Scala spelling.
@@ -82,7 +92,7 @@ pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<String, 
 /// original name: the signature is not part of the name, and overloads are
 /// told apart by definition address, not by signature text.
 pub(crate) fn wire_name(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
-    resolve(names, reference, reference, 0)
+    resolve(names, reference, reference, 0, Spelling::Member)
 }
 
 /// Whether the name at `reference` is a signed name (`SIGNED` or
@@ -166,6 +176,7 @@ fn resolve(
     root: u32,
     reference: u32,
     depth: usize,
+    spelling: Spelling,
 ) -> Result<String, UnpickleError> {
     if depth > MAX_NAME_DEPTH {
         return Err(UnpickleError::InvalidNameReference { reference: root });
@@ -174,7 +185,7 @@ fn resolve(
         .ok()
         .and_then(|index| names.entries().get(index))
         .ok_or(UnpickleError::InvalidNameReference { reference })?;
-    let inner = |reference: u32| resolve(names, root, reference, depth + 1);
+    let inner = |reference: u32| resolve(names, root, reference, depth + 1, spelling);
 
     Ok(match entry {
         RawName::Utf8(text) => text.clone(),
@@ -221,8 +232,38 @@ fn resolve(
         RawName::BodyRetainer { underlying } => {
             format!("{}$retainedBody", inner(*underlying)?)
         }
-        RawName::Signed { original, .. } | RawName::TargetSigned { original, .. } => {
-            inner(*original)?
+        RawName::Signed {
+            original,
+            result_signature,
+            parameter_signatures,
+        }
+        | RawName::TargetSigned {
+            original,
+            result_signature,
+            parameter_signatures,
+            ..
+        } => {
+            let original = inner(*original)?;
+            if spelling == Spelling::Member {
+                return Ok(original);
+            }
+            // Dotty's `readParamSig`: a negative value is the length of a
+            // type-parameter section, anything else a name reference.
+            let mut parameters = Vec::with_capacity(parameter_signatures.len());
+            for signature in parameter_signatures {
+                parameters.push(match u32::try_from(*signature) {
+                    Ok(reference) => inner(reference)?,
+                    Err(_) => signature
+                        .checked_abs()
+                        .ok_or(UnpickleError::InvalidNameReference { reference })?
+                        .to_string(),
+                });
+            }
+            format!(
+                "{original}[with sig Signature(List({}),{})]",
+                parameters.join(", "),
+                inner(*result_signature)?
+            )
         }
         RawName::Unknown { .. } => {
             return Err(UnpickleError::UnsupportedName { reference });
@@ -439,32 +480,60 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_signed_name_is_not_a_string_value() {
-        // Dotty renders it `name[with sig ...]`, not the bare original.
-        let names = table(vec![
+    /// Entries: 1 `f`, 2 `Unit`, 3 `Int`, 4 `g`, then 5 a signed name with a
+    /// term parameter and a two-long type-parameter section, 6 a target-signed
+    /// name without parameters, 7 a qualified name whose prefix is entry 5.
+    fn signed_names() -> NameTable {
+        table(vec![
             utf8("f"),
             utf8("Unit"),
+            utf8("Int"),
             utf8("g"),
             RawName::Signed {
                 original: 1,
                 result_signature: 2,
-                parameter_signatures: Vec::new(),
+                parameter_signatures: vec![3, -2],
             },
             RawName::TargetSigned {
                 original: 1,
-                target: 3,
+                target: 4,
                 result_signature: 2,
                 parameter_signatures: Vec::new(),
             },
-        ]);
+            RawName::Qualified {
+                prefix: 5,
+                selector: 4,
+            },
+        ])
+    }
 
-        for reference in [4, 5] {
-            assert_eq!(
-                string_value(&names, reference),
-                Err(UnpickleError::UnsupportedName { reference })
-            );
-        }
+    #[test]
+    fn a_signed_string_value_shows_its_signature_like_dotty() {
+        let names = signed_names();
+
+        // `SignedName.mkString`: `$underlying[with sig $sig]`, and the
+        // case-class `Signature` prints as `Signature(List(..),result)`.
+        assert_eq!(
+            string_value(&names, 5).unwrap(),
+            "f[with sig Signature(List(Int, 2),Unit)]"
+        );
+        assert_eq!(
+            string_value(&names, 6).unwrap(),
+            "f[with sig Signature(List(),Unit)]"
+        );
+    }
+
+    #[test]
+    fn a_signed_name_nested_in_a_derived_name_shows_its_signature() {
+        let names = signed_names();
+
+        assert_eq!(
+            string_value(&names, 7).unwrap(),
+            "f[with sig Signature(List(Int, 2),Unit)].g"
+        );
+        // The member spelling of the same entries still drops it.
+        assert_eq!(wire_name(&names, 5).unwrap(), "f");
+        assert_eq!(wire_name(&names, 7).unwrap(), "f.g");
     }
 
     #[test]

@@ -403,6 +403,19 @@ fn file_with_qualified_name(ast: &[u8]) -> Vec<u8> {
             prefix: 1,
             selector: 2,
         },
+        RawName::Utf8("Unit".to_owned()),
+        RawName::Utf8("Int".to_owned()),
+        // 6: `a` signed with a term parameter `Int` and a two-long
+        // type-parameter section; 7: that name qualified by `b`.
+        RawName::Signed {
+            original: 1,
+            result_signature: 4,
+            parameter_signatures: vec![5, -2],
+        },
+        RawName::Qualified {
+            prefix: 6,
+            selector: 2,
+        },
     ])
     .unwrap();
     TastyFile::from_parts(
@@ -440,6 +453,21 @@ fn a_string_constant_may_name_any_valid_name_entry() {
     // `readName().toString`: a qualified entry is a string, spelled `a.b`.
     assert_eq!(string_constant_over(1).as_deref(), Ok("a"));
     assert_eq!(string_constant_over(3).as_deref(), Ok("a.b"));
+}
+
+#[test]
+fn a_string_constant_may_name_a_signed_name_and_shows_its_signature() {
+    // Dotty's `readName().toString` of a `SignedName` is
+    // `original[with sig Signature(List(params),result)]`, also when the signed
+    // name is nested in a derived one.
+    assert_eq!(
+        string_constant_over(6).as_deref(),
+        Ok("a[with sig Signature(List(Int, 2),Unit)]")
+    );
+    assert_eq!(
+        string_constant_over(7).as_deref(),
+        Ok("a[with sig Signature(List(Int, 2),Unit)].b")
+    );
 }
 
 #[test]
