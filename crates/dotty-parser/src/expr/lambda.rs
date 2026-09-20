@@ -621,6 +621,139 @@ mod tests {
     }
 
     #[test]
+    fn lambda_case_body_leaves_the_next_case_boundary_available() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x => first; second case",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 10, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Case), 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.with_case_body(|parser| {
+            parser.with_location(Location::InBlock, |parser| parser.expr())
+        });
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(function.body).kind else {
+            panic!("expected the lambda body to be a block");
+        };
+
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Keyword(dotty_core::HardKeyword::Case)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lambda_case_body_leaves_a_closing_brace_available() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x => first; second }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 10, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.with_case_body(|parser| {
+            parser.with_location(Location::InBlock, |parser| parser.expr())
+        });
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(function.body).kind else {
+            panic!("expected the lambda body to be a block");
+        };
+
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lambda_case_body_leaves_an_outdent_available() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x => first; second\n",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 10, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Newline, 18, 19),
+                token(TokenKind::Outdent, 19, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.with_case_body(|parser| {
+            parser.with_location(Location::InBlock, |parser| parser.expr())
+        });
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(function.body).kind else {
+            panic!("expected the lambda body to be a block");
+        };
+
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Outdent);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn lambda_in_a_braced_block_owns_the_remaining_block_body() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
