@@ -7,8 +7,8 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    /// Parses one `case Pattern [if Guard] => Block` production.
-    pub(crate) fn case_clause(&mut self) -> TreeId<Untyped> {
+    /// Parses one `case Pattern [if Guard] =>` production.
+    pub(crate) fn case_clause(&mut self, expr_only: bool) -> TreeId<Untyped> {
         let mark = self.mark();
         if !self.accept(TokenKind::Keyword(HardKeyword::Case)) {
             self.report(ParseDiagnosticKind::ExpectedToken, "expected `case`");
@@ -39,7 +39,11 @@ where
 
         self.observe_arrow_indented();
         self.advance();
-        let body = self.parse_case_body(body_mark);
+        let body = if expr_only {
+            self.with_location(Location::InBlock, |parser| parser.expr())
+        } else {
+            self.parse_case_body(body_mark)
+        };
         self.alloc_from(
             mark,
             TreeKind::CaseDef(CaseDef {
@@ -56,7 +60,7 @@ where
         self.consume_case_separators();
         while self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
             let checkpoint = self.cursor.checkpoint();
-            cases.push(self.case_clause());
+            cases.push(self.case_clause(false));
             self.consume_case_separators();
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -148,7 +152,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.case_clause();
+        let id = parser.case_clause(false);
         let TreeKind::CaseDef(CaseDef {
             pattern,
             body,
@@ -200,7 +204,7 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.case_clause();
+        let id = parser.case_clause(false);
         let TreeKind::CaseDef(CaseDef { guard, .. }) = parser.ast().get(id).kind else {
             panic!("expected case definition");
         };
@@ -278,7 +282,7 @@ mod tests {
             &mut names,
         );
 
-        let case = parser.case_clause();
+        let case = parser.case_clause(false);
 
         assert!(matches!(parser.ast().get(case).kind, TreeKind::CaseDef(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);

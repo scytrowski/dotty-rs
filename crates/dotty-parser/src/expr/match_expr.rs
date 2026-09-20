@@ -27,6 +27,8 @@ where
                 );
             }
             cases
+        } else if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+            vec![self.case_clause(true)]
         } else {
             self.consume_match_newlines();
             if self.accept(TokenKind::Indent) {
@@ -178,6 +180,49 @@ mod tests {
         let tree = parser.expr();
 
         assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_single_case_without_braces_or_indentation() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value match case x => x",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Case), 12, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(tree).kind else {
+            panic!("expected match tree");
+        };
+        assert_eq!(cases.len(), 1);
+        let TreeKind::CaseDef(CaseDef { pattern, body, .. }) = parser.ast().get(cases[0]).kind
+        else {
+            panic!("expected case definition");
+        };
+        assert!(matches!(parser.ast().get(pattern).kind, TreeKind::Ident(_)));
+        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            parser.ast().get(tree).position.unwrap().span().range(),
+            TextRange::new(0, 23).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(cases[0]).position.unwrap().span().range(),
+            TextRange::new(12, 23).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(body).position.unwrap().span().range(),
+            TextRange::new(22, 23).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 

@@ -152,6 +152,7 @@ ordinary assignment with bare `=`
 named arguments in the narrow bare-identifier form
 the initial `if` and `while` expression forms
 braced and indented `match` expressions with `case` patterns, guards, and bodies
+single-case `match` expressions in the expression-only form
 ```
 
 The implemented selections and applications are only the simple-expression
