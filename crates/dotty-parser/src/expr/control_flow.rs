@@ -1,4 +1,4 @@
-use dotty_core::ast::{Block, If, Throw, UntypedNode, While};
+use dotty_core::ast::{Block, If, Return, Throw, UntypedNode, While};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
@@ -104,6 +104,14 @@ where
         )
     }
 
+    pub(super) fn parse_return_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let indented = self.accept_layout_indent();
+        let expr = can_start_expr(self.current().kind).then(|| self.expr());
+        self.close_layout_expression(indented);
+        self.alloc_from(mark, TreeKind::Return(Return { expr, from: None }))
+    }
+
     fn parse_control_body(&mut self) -> TreeId<Untyped> {
         self.consume_control_newlines();
         if self.current().kind == TokenKind::Indent {
@@ -113,8 +121,7 @@ where
     }
 
     fn parse_layout_expression(&mut self, message: &str) -> TreeId<Untyped> {
-        self.consume_control_newlines();
-        let indented = self.accept(TokenKind::Indent);
+        let indented = self.accept_layout_indent();
         let expression = if can_start_expr(self.current().kind) {
             self.expr()
         } else {
@@ -122,6 +129,26 @@ where
             self.report(crate::ParseDiagnosticKind::ExpectedExpression, message);
             self.error_expr(position)
         };
+        self.close_layout_expression(indented);
+        expression
+    }
+
+    fn accept_layout_indent(&mut self) -> bool {
+        let mut lookahead = 0;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        if self.cursor.lookahead(lookahead).kind != TokenKind::Indent {
+            return false;
+        }
+        self.consume_control_newlines();
+        self.accept(TokenKind::Indent)
+    }
+
+    fn close_layout_expression(&mut self, indented: bool) {
         if indented {
             self.consume_control_newlines();
             if !self.accept(TokenKind::Outdent) {
@@ -131,7 +158,6 @@ where
                 );
             }
         }
-        expression
     }
 
     fn consume_control_newlines(&mut self) {
@@ -200,7 +226,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Throw, UntypedNode};
+    use dotty_core::ast::{Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
@@ -312,5 +338,112 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_bare_return_without_an_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "return",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Return), 0, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Return(Return { expr, from }) = parser.ast().get(id).kind else {
+            panic!("expected return tree");
+        };
+
+        assert!(expr.is_none());
+        assert!(from.is_none());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_return_with_a_full_expression_operand() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "return value + 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Return), 0, 6),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::IntegerLiteral, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Return(Return { expr, from }) = parser.ast().get(id).kind else {
+            panic!("expected return tree");
+        };
+        let expr = expr.expect("expected return expression");
+
+        assert!(matches!(
+            parser.ast().get(expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(from.is_none());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_return_with_an_indented_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "return\n  value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Return), 0, 6),
+                token(TokenKind::Newline, 6, 7),
+                token(TokenKind::Indent, 9, 9),
+                token(TokenKind::Identifier, 9, 14),
+                token(TokenKind::Outdent, 14, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Return(Return { expr, .. }) = parser.ast().get(id).kind else {
+            panic!("expected return tree");
+        };
+
+        assert!(matches!(
+            parser
+                .ast()
+                .get(expr.expect("expected return expression"))
+                .kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn does_not_consume_else_as_a_bare_return_operand() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "return else",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Return), 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Else), 7, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::Return(Return { expr, .. }) = parser.ast().get(id).kind else {
+            panic!("expected return tree");
+        };
+
+        assert!(expr.is_none());
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Else));
+        assert!(parser.diagnostics().is_empty());
     }
 }

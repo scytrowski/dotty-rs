@@ -33,6 +33,10 @@ where
             let mark = self.mark();
             return self.parse_throw_expr(mark);
         }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Return) {
+            let mark = self.mark();
+            return self.parse_return_expr(mark);
+        }
 
         let tree = self.postfix_expr();
         self.expr1_rest(tree)
