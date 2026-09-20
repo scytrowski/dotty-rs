@@ -32,6 +32,10 @@ including basic indented bodies, plus braced and indented `match` expressions
 with case patterns, guards, and bodies. The current control-flow subset also
 includes `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`,
 including their basic indented forms.
+The lambda fixtures cover explicit function literals with single, empty,
+multiple, typed, wildcard, and context-function parameters, plus nested,
+applied, argument, block, and indented bodies. Context-function parameters are
+compared through their normalized `given` marker on `ValDef`.
 It intentionally does not claim coverage for the rest of Scala's expression,
 type, or argument grammar.
 
