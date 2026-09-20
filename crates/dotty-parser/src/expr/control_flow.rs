@@ -245,7 +245,7 @@ where
     }
 
     fn parse_catch_case_handler(&mut self) -> TreeId<Untyped> {
-        let mark = self.mark();
+        let initial_mark = self.mark();
         self.consume_control_newlines();
         let braced = self.accept(TokenKind::Punctuation(Punctuation::LeftBrace));
         let indented = if braced {
@@ -254,6 +254,7 @@ where
             self.consume_control_newlines();
             self.accept(TokenKind::Indent)
         };
+        let mark = if braced { initial_mark } else { self.mark() };
 
         let cases = if braced || indented {
             self.case_clauses()
