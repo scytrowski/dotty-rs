@@ -812,3 +812,233 @@ fn a_failing_refinement_child_leaves_nothing_behind() {
 
     assert_eq!(next_id_after(true), next_id_after(false));
 }
+
+// Real Scala 3.9.0 output: `tests/fixtures/semantic/RecursiveRefined.scala`.
+
+const REAL: &[u8] = include_bytes!("fixtures/semantic/RecursiveRefined.tasty");
+
+/// `Base { type T = Int }`: a type member, alias bounds.
+const TYPE_MEMBER: u32 = 203;
+const TYPE_MEMBER_INFO: u32 = 209;
+/// `Base { type T <: Any }`: two-sided bounds.
+const UPPER_MEMBER: u32 = 244;
+/// `Base { def run(x: Int): Int }`: a term member with a method info.
+const METHOD_MEMBER: u32 = 289;
+const METHOD_MEMBER_INFO: u32 = 295;
+/// `Base { type T = Int; def run(x: Int): Int }`: the parent is a link to
+/// [`TYPE_MEMBER`].
+const TWO_MEMBERS: u32 = 344;
+/// `Base { type T = Int; type U = Int }`: the parent links to [`TYPE_MEMBER`]
+/// and the info links to [`TYPE_MEMBER_INFO`].
+const SHARED_BOUNDS: u32 = 489;
+/// `C { type T1; type T2 = T1 }`: a `RECtype` (399) over two refinements whose
+/// `T2` names `T1` by name through the `RECthis` at 419.
+const RECURSIVE: u32 = 399;
+const RECURSIVE_THIS: u32 = 419;
+/// `Base { def me: this.type }`: a `RECtype` (446) over a refinement whose info
+/// is a by-name type over the `RECthis` at 454.
+const SELF_TYPE: u32 = 446;
+const SELF_TYPE_REFINED: u32 = 447;
+const SELF_TYPE_THIS: u32 = 454;
+
+/// A session holding the `scala` classes the fixture references but does not
+/// define, with its own symbols entered.
+macro_rules! real_unit {
+    ($file:ident, $session:ident, $unpickler:ident) => {
+        let $file = TastyFile::parse_scala_3_9(REAL).unwrap();
+        let mut $session = Session::new();
+        let mut packages = Packages::new();
+        let scala = packages
+            .enter(&mut $session.store, SymbolOrigin::Synthetic, &["scala"])
+            .pop()
+            .unwrap();
+        for class in ["Int", "Any", "Nothing"] {
+            let name = dotty_core::Name::new($session.store.names.intern(class), Namespace::Type);
+            let symbol = $session.store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(scala.symbol),
+                kind: dotty_core::SymbolKind::Class,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: dotty_core::Visibility::Public,
+                info: dotty_core::SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: dotty_core::SymbolLinks::default(),
+            });
+            $session
+                .store
+                .scopes
+                .get_mut(scala.scope)
+                .enter(name, symbol);
+        }
+        let mut $unpickler = TastyUnpickler::with_packages(
+            &$file,
+            &mut $session.store,
+            $session.definitions,
+            packages,
+        );
+        $unpickler.enter_symbols().unwrap();
+    };
+}
+
+fn member_name(store: &SemanticStore, name: dotty_core::Name) -> String {
+    store.names.resolve(name.text()).to_string()
+}
+
+#[test]
+fn a_real_type_refinement_has_a_type_name_and_alias_bounds() {
+    real_unit!(file, session, unpickler);
+    let id = unpickler.unpickle_type(TYPE_MEMBER).unwrap();
+    let info = unpickler.index().type_at(TYPE_MEMBER_INFO).unwrap();
+    drop(unpickler);
+
+    let (parent, name, found) = refined_parts(&session.store, id);
+    assert_eq!(member_name(&session.store, name), "T");
+    assert_eq!(name.namespace(), Namespace::Type);
+    assert_eq!(found, info);
+    assert!(matches!(
+        session.store.types.get(found),
+        Type::AliasingBounds { .. }
+    ));
+    assert!(matches!(
+        session.store.types.get(parent),
+        Type::TypeRef { .. }
+    ));
+}
+
+#[test]
+fn a_real_upper_bound_refinement_has_a_type_name_and_two_sided_bounds() {
+    real_unit!(file, session, unpickler);
+    let id = unpickler.unpickle_type(UPPER_MEMBER).unwrap();
+    drop(unpickler);
+
+    let (_, name, info) = refined_parts(&session.store, id);
+    assert_eq!(name.namespace(), Namespace::Type);
+    assert!(matches!(session.store.types.get(info), Type::Bounds { .. }));
+}
+
+#[test]
+fn a_real_method_refinement_has_a_term_name_and_a_method_info() {
+    real_unit!(file, session, unpickler);
+    let id = unpickler.unpickle_type(METHOD_MEMBER).unwrap();
+    let info = unpickler.index().type_at(METHOD_MEMBER_INFO).unwrap();
+    drop(unpickler);
+
+    let (_, name, found) = refined_parts(&session.store, id);
+    assert_eq!(member_name(&session.store, name), "run");
+    assert_eq!(name.namespace(), Namespace::Term);
+    assert_eq!(found, info);
+    assert!(matches!(session.store.types.get(found), Type::Method(_)));
+}
+
+#[test]
+fn real_members_are_nested_in_the_order_they_are_written() {
+    real_unit!(file, session, unpickler);
+    let outer = unpickler.unpickle_type(TWO_MEMBERS).unwrap();
+    let inner = unpickler.unpickle_type(TYPE_MEMBER).unwrap();
+    drop(unpickler);
+
+    // `{ type T = Int; def run }`: the type member is the inner refinement,
+    // written first, and it is the very one at its own address.
+    let (parent, name, _) = refined_parts(&session.store, outer);
+    assert_eq!(parent, inner);
+    assert_eq!(member_name(&session.store, name), "run");
+    let (_, inner_name, _) = refined_parts(&session.store, inner);
+    assert_eq!(member_name(&session.store, inner_name), "T");
+}
+
+#[test]
+fn a_real_refinement_whose_info_is_a_shared_link_still_has_a_type_name() {
+    real_unit!(file, session, unpickler);
+    let id = unpickler.unpickle_type(SHARED_BOUNDS).unwrap();
+    let bounds = unpickler.index().type_at(TYPE_MEMBER_INFO).unwrap();
+    let parent = unpickler.index().type_at(TYPE_MEMBER).unwrap();
+    drop(unpickler);
+
+    // Both children are `SHAREDtype` links: the namespace comes from the
+    // bounds they lead to, and each resolves to the exact earlier type.
+    let (found_parent, name, info) = refined_parts(&session.store, id);
+    assert_eq!(member_name(&session.store, name), "U");
+    assert_eq!(name.namespace(), Namespace::Type);
+    assert_eq!(info, bounds);
+    assert_eq!(found_parent, parent);
+}
+
+#[test]
+fn a_real_recursive_refinement_ties_recursive_refined_and_rec_this() {
+    real_unit!(file, session, unpickler);
+    let recursive = unpickler.unpickle_type(SELF_TYPE).unwrap();
+    let refined_id = unpickler.index().type_at(SELF_TYPE_REFINED).unwrap();
+    let this = unpickler.index().type_at(SELF_TYPE_THIS).unwrap();
+    drop(unpickler);
+
+    // Recursive -> Refined -> ByName -> RecThis, the last naming the very
+    // `Recursive` id.
+    assert_eq!(recursive_parent(&session.store, recursive), refined_id);
+    let (_, name, info) = refined_parts(&session.store, refined_id);
+    assert_eq!(member_name(&session.store, name), "me");
+    assert_eq!(name.namespace(), Namespace::Term);
+    assert_eq!(
+        session.store.types.get(info),
+        &Type::ByName { result: this }
+    );
+    assert_eq!(rec_this_binder(&session.store, this), recursive);
+}
+
+#[test]
+fn a_real_rec_this_decoded_first_builds_the_same_graph() {
+    real_unit!(file, session, unpickler);
+    let this = unpickler.unpickle_type(SELF_TYPE_THIS).unwrap();
+    let recursive = unpickler.index().type_at(SELF_TYPE).unwrap();
+    let count = unpickler.index().type_count();
+
+    assert_eq!(unpickler.unpickle_type(SELF_TYPE), Ok(recursive));
+    assert_eq!(unpickler.unpickle_type(SELF_TYPE_THIS), Ok(this));
+    assert_eq!(unpickler.index().type_count(), count);
+    drop(unpickler);
+    assert_eq!(rec_this_binder(&session.store, this), recursive);
+}
+
+#[test]
+fn a_real_member_selected_by_name_from_a_rec_this_is_an_unsupported_prefix() {
+    // `T2 = T1`: the `T1` is a name-based reference whose prefix is a
+    // `RecThis`. A refinement member has no symbol, so it cannot be looked up,
+    // and no synthetic symbol is invented for it.
+    real_unit!(file, session, unpickler);
+    let before = unpickler.index().type_count();
+
+    for at in [RECURSIVE, RECURSIVE_THIS] {
+        let result = unpickler.unpickle_type(at);
+        assert!(
+            matches!(
+                result,
+                Err(UnpickleError::UnsupportedResolutionPrefix { .. })
+            ),
+            "{at}: {result:?}"
+        );
+        // Everything, including the recursive binder and the `RecThis`, is
+        // rolled back.
+        assert_eq!(unpickler.index().type_count(), before, "{at}");
+        assert_eq!(unpickler.index().type_at(RECURSIVE), None, "{at}");
+    }
+}
+
+#[test]
+fn a_real_failure_after_a_rec_this_was_made_leaves_the_next_recursive_type_correct() {
+    // Decoding `RECURSIVE` creates its binder and its canonical `RecThis`
+    // before failing on the member selection. A different recursive type
+    // decoded afterwards gets the freed ids and must get its own `RecThis`.
+    real_unit!(file, session, unpickler);
+    assert!(unpickler.unpickle_type(RECURSIVE).is_err());
+
+    let recursive = unpickler.unpickle_type(SELF_TYPE).unwrap();
+    let this = unpickler.index().type_at(SELF_TYPE_THIS).unwrap();
+    drop(unpickler);
+
+    assert_eq!(rec_this_binder(&session.store, this), recursive);
+    assert!(matches!(
+        session.store.types.get(recursive),
+        Type::Recursive { .. }
+    ));
+}
