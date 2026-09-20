@@ -87,7 +87,7 @@ where
         self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
     }
 
-    pub(super) fn parse_expression_block_body(
+    pub(crate) fn parse_expression_block_body(
         &mut self,
         end: TokenKind,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
