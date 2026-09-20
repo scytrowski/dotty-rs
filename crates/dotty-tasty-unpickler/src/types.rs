@@ -48,8 +48,32 @@
 //!
 //! `TYPEBOUNDS` with trailing variance markers is
 //! [`UnsupportedBoundsVariance`](UnpickleError::UnsupportedBoundsVariance):
-//! Dotty applies the markers to a `TypeLambda` bound, so they cannot be kept
-//! faithfully until binder types exist (Milestone 3).
+//! Dotty applies the markers to a `TypeLambda` bound by building a *new*
+//! lambda that substitutes the old binder's parameter references. Even though
+//! `TypeLambda` now exists (see below), that rebinding is not implemented, so
+//! the markers are still refused rather than dropped or applied by mutating
+//! or cloning the cached lambda (Milestone 3b).
+//!
+//! ## Binders (Milestone 3a)
+//!
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `TYPELAMBDAtype`      | `Type (Type NameRef)*`    | `TypeLambda { params, result }`    |
+//! | `PARAMtype`           | `ASTRef Nat`              | `ParamRef { binder, index }`       |
+//!
+//! A binder is the `TypeId` of its `TypeLambda`, and a `ParamRef` carries that
+//! exact id, found through the binder's AST address, never a name. The id is
+//! reserved and its address published before the children are decoded, so a
+//! `ParamRef` in a parameter's bounds, in the result or in a nested type
+//! resolves to the binder under construction; the slot is filled last. See
+//! the `binders` module for the sequence, the pending-binder state that lets
+//! a `PARAMtype` validate a binder whose arena slot is still unfilled, and the
+//! rules for a `PARAMtype` decoded before its binder.
+//!
+//! Each parameter's info must be `Bounds` or `AliasingBounds`, or the node is
+//! [`InvalidTypeParameterBounds`](UnpickleError::InvalidTypeParameterBounds);
+//! a standalone `TYPELAMBDAtype` has no variance of its own, so parameters are
+//! `Invariant`.
 //!
 //! `And` and `Or` keep the operand order and nesting the compiler wrote: no
 //! commutative normalisation, no flattening. `BYNAMEtype` stays a wrapper; it
@@ -61,9 +85,9 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `ANNOTATEDtype`,
-//! `TYPELAMBDAtype`, method/poly/param types,
-//! refinements, recursive and match types, and `TYPEREFin`/`TERMREFin`.
+//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, `METHODtype`,
+//! `POLYtype`, refinements, recursive and match types, and
+//! `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};
@@ -73,9 +97,10 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
-    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPEREF_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    FLEXIBLETYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
+    TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
+    TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -258,6 +283,14 @@ impl TastyUnpickler<'_, '_, '_> {
                 let class = self.decode_type(ast, &tree.decode_class_const()?.child, depth)?;
                 Type::Constant(Constant::Class(class))
             }
+            // A binder-related node owns its identity: it records its own
+            // address, possibly before its children are decoded.
+            RawTree::LengthNode(node) if tag == TYPELAMBDATYPE_TAG => {
+                return self.decode_type_lambda(ast, node, at, depth);
+            }
+            RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
+                return self.decode_param_type(ast, node, at, depth);
+            }
             RawTree::LengthNode(node) if tag == FLEXIBLETYPE_TAG => {
                 node.decode_flexible_type()?;
                 let ids = self.decode_children(ast, at, 1, depth)?;
@@ -360,6 +393,22 @@ impl TastyUnpickler<'_, '_, '_> {
             });
         }
         let name = Name::new(self.store.names.intern(&text), namespace);
+
+        // A prefix that is (or wraps) a binder still being decoded has no
+        // readable slot yet, so its members cannot be looked up.
+        let mut walk = prefix;
+        loop {
+            if self.is_pending(walk) {
+                return Err(UnpickleError::UnsupportedResolutionPrefix {
+                    address: at,
+                    prefix,
+                });
+            }
+            match self.store.types.get(walk) {
+                Type::Flexible { underlying } => walk = *underlying,
+                _ => break,
+            }
+        }
 
         let local = lookup_member(self.store, &self.index, &self.packages, prefix, &name);
         let unsupported_prefix = local == LocalLookup::UnsupportedPrefix;

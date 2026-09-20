@@ -31,6 +31,9 @@ const TYPEBOUNDS_TAG: u8 = 163;
 const FLEXIBLETYPE_TAG: u8 = 193;
 const CLASSCONST_TAG: u8 = 92;
 
+/// The binder forms decoded since Milestone 3a.
+const BINDER_TAGS: [(u8, &str); 2] = [(170, "TYPELAMBDAtype"), (172, "PARAMtype")];
+
 /// The bounds and flexible forms decoded since Milestone 2c2.
 const WRAPPER_TAGS: [(u8, &str); 2] = [
     (TYPEBOUNDS_TAG, "TYPEBOUNDS"),
@@ -56,13 +59,14 @@ const CONSTANT_TAGS: [(u8, &str); 13] = [
 ];
 
 /// Forms that stay unsupported; only their instances are counted.
-const UNSUPPORTED_TAGS: [(u8, &str); 2] = [(153, "ANNOTATEDtype"), (170, "TYPELAMBDAtype")];
+const UNSUPPORTED_TAGS: [(u8, &str); 1] = [(153, "ANNOTATEDtype")];
 
 /// Whether `tag` is a form measured node by node (compound, bounds, flexible or
 /// constant) rather than as a reference.
 fn is_measured(tag: u8) -> bool {
     COMPOUND_TAGS.iter().any(|(t, _)| *t == tag)
         || WRAPPER_TAGS.iter().any(|(t, _)| *t == tag)
+        || BINDER_TAGS.iter().any(|(t, _)| *t == tag)
         || CONSTANT_TAGS.iter().any(|(t, _)| *t == tag)
 }
 
@@ -98,8 +102,14 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
-    /// `TYPEBOUNDS` with variance markers, deferred to the binder milestone.
+    /// `TYPEBOUNDS` with variance markers, deferred to Milestone 3b.
     deferred_variance: usize,
+    /// A binder reference or parameter that is malformed: an invalid binder
+    /// address, kind, parameter index, or a parameter info that is not bounds.
+    binder_errors: usize,
+    /// `PARAMtype` roots whose binder had no type when they were asked for, so
+    /// the binder was decoded on demand.
+    binder_on_demand: usize,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: usize,
 }
@@ -236,6 +246,15 @@ fn run(
             _ => &mut tally.by_address,
         };
         outcomes.nodes += 1;
+        if tag == 172 {
+            let binder_known = file
+                .ast_address_index()
+                .unwrap()
+                .get(at)
+                .and_then(|raw| raw.decode_param_type().ok())
+                .is_some_and(|param| unpickler.index().type_at(param.binder.address).is_some());
+            outcomes.binder_on_demand += usize::from(!binder_known);
+        }
         match unpickler.unpickle_type(at) {
             Ok(first) => {
                 decoded += 1;
@@ -273,6 +292,14 @@ fn run(
                     }
                     UnpickleError::UnsupportedBoundsVariance { .. } => {
                         outcomes.deferred_variance += 1;
+                    }
+                    UnpickleError::InvalidBinderReference { .. }
+                    | UnpickleError::InvalidBinderKind { .. }
+                    | UnpickleError::InvalidParameterIndex { .. }
+                    | UnpickleError::InvalidTypeParameterBounds { .. } => {
+                        outcomes.binder_errors += 1;
+                        outcomes.unexpected += 1;
+                        tally.unexpected.push(format!("{label} @{at}: {error:?}"));
                     }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
                     UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
@@ -333,16 +360,56 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
     assert_eq!(tally.unexpected, Vec::<String>::new());
 }
 
+/// Enters `scala.Any`, `scala.Nothing` and `scala.Null`, which the compiler
+/// defines and no TASTy file declares.
+fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages) {
+    use dotty_core::names::{Name, Namespace};
+    use dotty_core::symbols::{
+        Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+    };
+    let chain = packages.enter(store, SymbolOrigin::Synthetic, &["scala"]);
+    let scala = chain.last().unwrap();
+    for class in ["Any", "Nothing", "Null"] {
+        let name = Name::new(store.names.intern(class), Namespace::Type);
+        let symbol = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(scala.symbol),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store.scopes.get_mut(scala.scope).enter(name, symbol);
+    }
+}
+
 #[test]
 #[ignore = "walks the whole scala3-library and scala3-compiler corpora"]
 fn measure_the_type_pass_over_the_scala3_corpora() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dotty-tasty/tests/fixtures");
-    for corpus in ["scala3-library", "scala3-compiler"] {
+    // The library's own TASTy has no `scala.Any` or `scala.Nothing`: the
+    // compiler defines them. Every type-lambda parameter is bounded by them,
+    // so without them no lambda can decode, and the binder path would go
+    // unmeasured. The second pass provides just those (and `Null`), nothing
+    // else, so the remaining failures are still real external references.
+    for (corpus, builtins) in [
+        ("scala3-library", false),
+        ("scala3-compiler", false),
+        ("scala3-library", true),
+        ("scala3-compiler", true),
+    ] {
         // One store and one package registry per corpus, as a classpath
         // would have.
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
+        if builtins {
+            provide_compiler_builtins(&mut store, &mut packages);
+        }
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {
             let bytes = fs::read(&path).unwrap();
@@ -358,7 +425,14 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
 
         let mut unsupported: Vec<_> = tally.unsupported.iter().collect();
         unsupported.sort_by(|a, b| b.1.cmp(a.1));
-        println!("== {corpus}");
+        println!(
+            "== {corpus} ({})",
+            if builtins {
+                "compiler builtins provided"
+            } else {
+                "no builtins"
+            }
+        );
         println!("units: {}", tally.units);
         println!(
             "units with a decoded type: {}",
@@ -390,7 +464,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 let none = Outcomes::default();
                 let o = tally.compound.get(tag).unwrap_or(&none);
                 println!(
-                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, deferred variance {}; unexpected {}",
+                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, deferred variance {}, binder errors {}; binder decoded on demand {}; unexpected {}",
                     o.nodes,
                     o.decoded,
                     o.needs_external,
@@ -400,12 +474,15 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                     o.missing_local,
                     o.unsupported_child,
                     o.deferred_variance,
+                    o.binder_errors,
+                    o.binder_on_demand,
                     o.unexpected,
                 );
             }
         };
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);
+        report("binder types", &BINDER_TAGS);
         report("constant nodes", &CONSTANT_TAGS);
         println!(
             "TYPEBOUNDS shapes: total {}, two-sided {}, alias-only {}, with variance {}, malformed {}; decoded alias-only {}, decoded two-sided {}",

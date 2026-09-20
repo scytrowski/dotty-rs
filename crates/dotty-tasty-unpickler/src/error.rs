@@ -95,6 +95,27 @@ pub enum UnpickleError {
     /// applies them to a `TypeLambda` bound, which is not decoded until the
     /// binder milestone, so the node is refused rather than losing them.
     UnsupportedBoundsVariance { address: u32 },
+    /// The `PARAMtype` at `from` names `binder`, which is not the start of a
+    /// visible AST node.
+    InvalidBinderReference { from: u32, binder: u32 },
+    /// The `PARAMtype` at `from` names a node whose type, `binder`, is not a
+    /// binder this pass supports (a `TypeLambda`).
+    InvalidBinderKind { from: u32, binder: TypeId },
+    /// The `PARAMtype` at `address` names parameter `index` of `binder`, which
+    /// has only `arity` parameters.
+    InvalidParameterIndex {
+        address: u32,
+        binder: TypeId,
+        index: u32,
+        arity: usize,
+    },
+    /// Parameter `index` of `binder` has an info, `bounds`, that is not a
+    /// bounds type (`Bounds` or `AliasingBounds`).
+    InvalidTypeParameterBounds {
+        binder: TypeId,
+        index: u32,
+        bounds: TypeId,
+    },
     /// The prefix of the name-based reference at `address` is a form whose
     /// members cannot be looked up here, and the resolver did not know it
     /// either.
@@ -191,6 +212,27 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the bounds at address {address} carry variance markers, which need type lambdas"
             ),
+            Self::InvalidBinderReference { from, binder } => write!(
+                formatter,
+                "the parameter type at address {from} names address {binder}, which is not a node"
+            ),
+            Self::InvalidBinderKind { from, .. } => write!(
+                formatter,
+                "the parameter type at address {from} names a type that is not a binder"
+            ),
+            Self::InvalidParameterIndex {
+                address,
+                index,
+                arity,
+                ..
+            } => write!(
+                formatter,
+                "the parameter type at address {address} names parameter {index} of a binder with {arity} parameters"
+            ),
+            Self::InvalidTypeParameterBounds { index, .. } => write!(
+                formatter,
+                "the info of type parameter {index} is not a bounds type"
+            ),
             Self::UnsupportedResolutionPrefix { address, .. } => write!(
                 formatter,
                 "the reference at address {address} has a prefix whose members cannot be looked up"
@@ -232,6 +274,10 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
             | Self::UnsupportedBoundsVariance { .. }
+            | Self::InvalidBinderReference { .. }
+            | Self::InvalidBinderKind { .. }
+            | Self::InvalidParameterIndex { .. }
+            | Self::InvalidTypeParameterBounds { .. }
             | Self::UnsupportedResolutionPrefix { .. }
             | Self::ResolverFailure { .. } => None,
         }
