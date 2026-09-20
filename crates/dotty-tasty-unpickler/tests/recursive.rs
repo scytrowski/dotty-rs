@@ -7,6 +7,7 @@
 use dotty_core::Definitions;
 use dotty_core::Packages;
 use dotty_core::ids::TypeId;
+use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
 use dotty_core::types::Type;
@@ -53,6 +54,12 @@ fn file_with_ast(ast: &[u8]) -> Vec<u8> {
         RawName::Utf8("ASTs".to_owned()),
         RawName::Utf8("p".to_owned()),
         RawName::Utf8("m".to_owned()),
+        // 3: `p` signed, which a refinement name may not be.
+        RawName::Signed {
+            original: 1,
+            result_signature: 2,
+            parameter_signatures: vec![],
+        },
     ])
     .unwrap();
     TastyFile::from_parts(
@@ -603,4 +610,205 @@ fn a_recursive_type_and_its_rec_this_from_an_earlier_call_survive_a_later_failur
     assert_eq!(unpickler.index().type_count(), count);
     // And the canonical `RecThis` is still the one, for a new address.
     assert_eq!(unpickler.unpickle_type(second_at), Ok(this));
+}
+
+// REFINEDtype
+
+const REFINED: u8 = 159;
+const TYPEBOUNDS: u8 = 163;
+const APPLIED: u8 = 161;
+
+/// `REFINEDtype Length name_NameRef parent info`.
+fn refined(name: u8, parent: &[u8], info: &[u8]) -> Vec<u8> {
+    let mut payload = vec![nat(name)];
+    payload.extend(parent);
+    payload.extend(info);
+    length_node(REFINED, &payload)
+}
+
+/// `TYPEBOUNDS` over one alias child: 4 bytes.
+fn alias_bounds() -> Vec<u8> {
+    length_node(TYPEBOUNDS, &package_ref())
+}
+
+/// A file whose only top-level node is an `APPLIEDtype` over the given
+/// children (any count), the first at address 2.
+fn file_with_many(children: &[&[u8]]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for child in children {
+        payload.extend(*child);
+    }
+    file_with_ast(&length_node(APPLIED, &payload))
+}
+
+fn refined_parts(store: &SemanticStore, id: TypeId) -> (TypeId, dotty_core::Name, TypeId) {
+    match store.types.get(id) {
+        Type::Refined { parent, name, info } => (*parent, *name, *info),
+        other => panic!("not a refined type: {other:?}"),
+    }
+}
+
+fn namespace_of(bytes: &[u8], at: u32) -> Namespace {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let id = unpickler.unpickle_type(at).unwrap();
+    drop(unpickler);
+    let (_, name, _) = refined_parts(&session.store, id);
+    assert_eq!(session.store.names.resolve(name.text()), "m");
+    name.namespace()
+}
+
+#[test]
+fn a_refinement_whose_info_is_not_bounds_has_a_term_name() {
+    let bytes = file_with(&refined(2, &package_ref(), &package_ref()));
+    assert_eq!(namespace_of(&bytes, 2), Namespace::Term);
+}
+
+#[test]
+fn a_refinement_whose_info_is_bounds_has_a_type_name() {
+    let bytes = file_with(&refined(2, &package_ref(), &alias_bounds()));
+    assert_eq!(namespace_of(&bytes, 2), Namespace::Type);
+}
+
+#[test]
+fn the_namespace_follows_a_shared_link_to_bounds() {
+    // The bounds at 2 (4 bytes); a refinement at 6 whose info is a link to it.
+    let bounds = alias_bounds();
+    let link = [SHARED, nat(2)];
+    let bytes = file_with_many(&[&bounds, &refined(2, &package_ref(), &link)]);
+    assert_eq!(namespace_of(&bytes, 6), Namespace::Type);
+}
+
+#[test]
+fn the_namespace_follows_a_chain_of_shared_links() {
+    // Bounds at 2, a link to them at 6, and a refinement at 8 whose info is a
+    // link to that link.
+    let bounds = alias_bounds();
+    let first = [SHARED, nat(2)];
+    let second = [SHARED, nat(6)];
+    let bytes = file_with_many(&[&bounds, &first, &refined(2, &package_ref(), &second)]);
+    assert_eq!(namespace_of(&bytes, 8), Namespace::Type);
+}
+
+#[test]
+fn a_shared_link_to_something_that_is_not_bounds_leaves_a_term_name() {
+    // A `TYPEREFpkg` at 2 and a refinement at 4 whose info is a link to it.
+    let pkg = package_ref();
+    let link = [SHARED, nat(2)];
+    let bytes = file_with_many(&[&pkg, &refined(2, &package_ref(), &link)]);
+    assert_eq!(namespace_of(&bytes, 4), Namespace::Term);
+}
+
+#[test]
+fn a_refinement_info_that_links_to_itself_is_an_error_not_a_loop() {
+    // Refinement at 2: name at 4, parent at 5, info at 7 is a link to 7.
+    let bytes = file_with(&refined(2, &package_ref(), &[SHARED, nat(7)]));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(2),
+        Err(UnpickleError::InvalidReferenceTarget { from: 2, .. })
+    ));
+    assert_eq!(unpickler.index().type_at(2), None);
+}
+
+#[test]
+fn a_refinement_keeps_its_parent_and_info_from_their_absolute_addresses() {
+    // Parent at 5 (a `TYPEREFpkg`), info at 7 (another one): distinct nodes.
+    let bytes = file_with(&refined(2, &package_ref(), &package_ref()));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(2).unwrap();
+    let (parent, info) = (
+        unpickler.index().type_at(5).unwrap(),
+        unpickler.index().type_at(7).unwrap(),
+    );
+    drop(unpickler);
+
+    let (found_parent, _, found_info) = refined_parts(&session.store, id);
+    assert_eq!((found_parent, found_info), (parent, info));
+}
+
+#[test]
+fn nested_refinements_keep_the_order_and_nesting_tasty_writes() {
+    // `Base { m1 } { m2 }`: the inner refinement is the outer one's parent.
+    // Names: `p` for the inner member, `m` for the outer one.
+    let inner = refined(1, &package_ref(), &package_ref());
+    let bytes = file_with(&refined(2, &inner, &alias_bounds()));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let outer = unpickler.unpickle_type(2).unwrap();
+    let inner_id = unpickler.index().type_at(5).unwrap();
+    drop(unpickler);
+
+    let (parent, name, _) = refined_parts(&session.store, outer);
+    assert_eq!(parent, inner_id);
+    assert_eq!(session.store.names.resolve(name.text()), "m");
+    assert_eq!(name.namespace(), Namespace::Type);
+    let (base, inner_name, _) = refined_parts(&session.store, inner_id);
+    assert_eq!(session.store.names.resolve(inner_name.text()), "p");
+    assert_eq!(inner_name.namespace(), Namespace::Term);
+    assert!(matches!(
+        session.store.types.get(base),
+        Type::TypeRef { .. }
+    ));
+}
+
+#[test]
+fn a_refinement_is_decoded_once_and_a_shared_link_returns_its_id() {
+    let refinement = refined(2, &package_ref(), &package_ref());
+    let link_at = 2 + u8::try_from(refinement.len()).unwrap();
+    let bytes = file_with_two(&refinement, &[SHARED, nat(2)]);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(2).unwrap();
+    assert_eq!(unpickler.unpickle_type(2), Ok(id));
+    assert_eq!(unpickler.unpickle_type(u32::from(link_at)), Ok(id));
+}
+
+#[test]
+fn a_signed_refinement_name_is_refused_not_stripped() {
+    let bytes = file_with(&refined(3, &package_ref(), &package_ref()));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(2),
+        Err(UnpickleError::UnsupportedSignedReference { address: 2, .. })
+    ));
+}
+
+#[test]
+fn a_failing_refinement_child_leaves_nothing_behind() {
+    // The parent decodes, the info does not.
+    let bytes = file_with(&refined(2, &package_ref(), &[UNSUPPORTED, nat(1)]));
+    let next_id_after = |fail: bool| {
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let mut session = Session::new();
+        let mut unpickler = unpickler_for(&file, &mut session);
+        if fail {
+            let before = unpickler.index().type_count();
+            assert!(matches!(
+                unpickler.unpickle_type(2),
+                Err(UnpickleError::UnsupportedType { .. })
+            ));
+            assert_eq!(unpickler.index().type_count(), before);
+            assert_eq!(unpickler.index().type_at(2), None);
+            assert_eq!(unpickler.index().type_at(5), None);
+        }
+        drop(unpickler);
+        session.store.types.alloc(Type::NoType)
+    };
+
+    assert_eq!(next_id_after(true), next_id_after(false));
 }

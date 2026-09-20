@@ -28,7 +28,6 @@ pub(crate) fn address(offset: usize) -> u32 {
     u32::try_from(offset).unwrap_or(u32::MAX)
 }
 
-#[allow(dead_code)]
 fn tree_tag(tree: &RawTree<'_>) -> u8 {
     match tree {
         RawTree::Leaf(term) => term.tag,
@@ -97,7 +96,6 @@ impl<'bytes> AstView<'bytes> {
     /// to its target, however many are chained, up to the same bound as any
     /// other chain of links, and every target must be a visible node. `from`
     /// is the referring node, for the error.
-    #[allow(dead_code)]
     pub(crate) fn next_unshared_tag(&self, at: u32, from: u32) -> Result<u8, UnpickleError> {
         let mut current = at;
         for _ in 0..=MAX_SHARED_DEPTH {
@@ -122,5 +120,98 @@ impl<'bytes> AstView<'bytes> {
 
     pub(crate) fn children(&self, at: u32) -> &[AstTreeNode] {
         self.children.get(&at).map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_tasty::tasty::{Header, NameTable, RawName, Section, SectionTable};
+
+    const TYPEREFPKG: u8 = 65;
+
+    fn nat(value: u8) -> u8 {
+        0x80 | value
+    }
+
+    /// An `APPLIEDtype` (address 0) over: a `TYPEREFpkg` at 2, a `SHAREDtype`
+    /// to it at 4, a `SHAREDterm` to that link at 6, a `SHAREDtype` to itself at
+    /// 8, and a `SHAREDtype` to address 1 (not a node) at 10.
+    fn file() -> Vec<u8> {
+        let mut payload = vec![TYPEREFPKG, nat(1)];
+        payload.extend([SHAREDTYPE_TAG, nat(2)]);
+        payload.extend([SHAREDTERM_TAG, nat(4)]);
+        payload.extend([SHAREDTYPE_TAG, nat(8)]);
+        payload.extend([SHAREDTYPE_TAG, nat(1)]);
+        let mut ast = vec![161, nat(u8::try_from(payload.len()).unwrap())];
+        ast.extend(payload);
+        let names = NameTable::from_entries(vec![
+            RawName::Utf8("ASTs".to_owned()),
+            RawName::Utf8("p".to_owned()),
+        ])
+        .unwrap();
+        TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names,
+            SectionTable::from_sections(vec![Section::new(0, &ast)]),
+        )
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn view(bytes: &[u8]) -> AstView<'_> {
+        AstView::new(&TastyFile::parse_scala_3_9(bytes).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_unshared_node_reports_its_own_tag() {
+        let bytes = file();
+        assert_eq!(view(&bytes).next_unshared_tag(2, 0), Ok(TYPEREFPKG));
+    }
+
+    #[test]
+    fn a_shared_type_link_is_followed_to_its_target() {
+        let bytes = file();
+        assert_eq!(view(&bytes).next_unshared_tag(4, 0), Ok(TYPEREFPKG));
+    }
+
+    #[test]
+    fn a_chain_through_shared_term_and_shared_type_links_is_followed() {
+        let bytes = file();
+        assert_eq!(view(&bytes).next_unshared_tag(6, 0), Ok(TYPEREFPKG));
+    }
+
+    #[test]
+    fn a_link_to_itself_is_an_invalid_reference_not_a_loop() {
+        let bytes = file();
+        assert!(matches!(
+            view(&bytes).next_unshared_tag(8, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn a_link_to_no_node_is_an_invalid_reference() {
+        let bytes = file();
+        assert_eq!(
+            view(&bytes).next_unshared_tag(10, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 1 })
+        );
+    }
+
+    #[test]
+    fn a_start_that_is_no_node_is_an_invalid_reference() {
+        let bytes = file();
+        assert_eq!(
+            view(&bytes).next_unshared_tag(3, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 3 })
+        );
     }
 }
