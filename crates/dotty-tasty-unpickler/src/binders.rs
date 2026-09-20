@@ -30,16 +30,17 @@
 //! `unpickle_type` returns.
 
 use dotty_core::ids::TypeId;
-use dotty_core::types::Type;
+use dotty_core::names::TypeName;
+use dotty_core::types::{Type, TypeLambda, TypeParam, Variance};
 use dotty_tasty::tasty::RawNode;
 
-use crate::ast_view::{AstView, MAX_SHARED_DEPTH};
+use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
+use crate::names::wire_name;
 use crate::unpickler::TastyUnpickler;
 
 /// What a pending binder will be once filled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // constructed by the TYPELAMBDAtype decoder (next commit)
 pub(crate) enum BinderKind {
     TypeLambda,
 }
@@ -158,10 +159,104 @@ impl TastyUnpickler<'_, '_, '_> {
         Ok(id)
     }
 
+    /// `TYPELAMBDAtype Length result_Type (paramBounds_Type paramName_NameRef)*`
+    /// at `at`, as a `TypeLambda` stored under its own address's `TypeId`.
+    ///
+    /// The envelope and the parameter names are validated first. Then the id is
+    /// reserved and published, and only then are the children decoded, so a
+    /// `ParamRef` inside them (in a parameter's bounds, in the result, or in a
+    /// nested type) resolves to the id under construction. The parameter
+    /// bounds are decoded before the result: either order works once the
+    /// binder is published, and this one lets a bound that is not a bounds
+    /// type fail before the result is read. Every child comes from the AST
+    /// index by absolute address; the structural decoder's trees are relative
+    /// to the payload and only validate the shape.
+    ///
+    /// A `TYPELAMBDAtype` carries no variance of its own, so the parameters are
+    /// invariant. Variance markers belong to an enclosing `TYPEBOUNDS`, which
+    /// is deferred (see the module documentation of `types`).
+    pub(crate) fn decode_type_lambda(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        let shape = node.decode_poly_type()?;
+        let children: Vec<u32> = ast
+            .children(at)
+            .iter()
+            .map(|child| address(child.offset))
+            .collect();
+        if children.len() != shape.type_names.len() + 1 {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the type lambda's children disagree with its parameters",
+            });
+        }
+        let mut names = Vec::with_capacity(shape.type_names.len());
+        for parameter in &shape.type_names {
+            let text = wire_name(self.file.names(), parameter.name)?;
+            names.push(TypeName::new(self.store.names.intern(&text)));
+        }
+
+        let reserved = self.store.types.reserve();
+        let id = reserved.id();
+        self.index.insert_type(at, id)?;
+        let binder = PendingBinder {
+            address: at,
+            id,
+            kind: BinderKind::TypeLambda,
+            arity: names.len(),
+        };
+        let (params, result) = self.with_pending_binder(binder, |this| {
+            let mut params = Vec::with_capacity(names.len());
+            for (position, name) in names.iter().enumerate() {
+                let bounds = this.type_at(ast, children[position + 1], at, depth)?;
+                this.check_parameter_bounds(id, position, bounds)?;
+                params.push(TypeParam {
+                    name: *name,
+                    bounds,
+                    variance: Variance::Invariant,
+                });
+            }
+            let result = this.type_at(ast, children[0], at, depth)?;
+            Ok::<_, UnpickleError>((params, result))
+        })?;
+
+        self.store
+            .types
+            .fill(reserved, Type::TypeLambda(TypeLambda { params, result }));
+        Ok(id)
+    }
+
+    /// A parameter's info must be a bounds type. `bounds` is read from the
+    /// arena only when it is not a binder still being decoded.
+    fn check_parameter_bounds(
+        &self,
+        binder: TypeId,
+        position: usize,
+        bounds: TypeId,
+    ) -> Result<(), UnpickleError> {
+        let is_bounds = !self.is_pending(bounds)
+            && matches!(
+                self.store.types.get(bounds),
+                Type::Bounds { .. } | Type::AliasingBounds { .. }
+            );
+        if is_bounds {
+            Ok(())
+        } else {
+            Err(UnpickleError::InvalidTypeParameterBounds {
+                binder,
+                index: u32::try_from(position).unwrap_or(u32::MAX),
+                bounds,
+            })
+        }
+    }
+
     /// Runs `decode` with `binder` registered as pending, and unregisters it
     /// however `decode` ends, so an error in a child cannot leave the binder
     /// (or a nested one) behind.
-    #[allow(dead_code)] // used by the TYPELAMBDAtype decoder (next commit)
     pub(crate) fn with_pending_binder<T>(
         &mut self,
         binder: PendingBinder,

@@ -422,22 +422,18 @@ fn a_super_type_keeps_the_this_type_and_the_super_type_in_their_roles() {
 #[test]
 fn unsupported_neighbours_stay_explicit() {
     // `TYPEBOUNDS` is decoded since Milestone 2c2 (see `bounds.rs`).
-    // These two have no instance in the unit; a length-prefixed node
-    // retagged to their tag must be refused, never lowered to a child.
-    for tag in [153u8, 170] {
-        let patched = retagged(COMPOUND, AND as usize, 165, tag);
-        let file = TastyFile::parse_scala_3_9(&patched).unwrap();
-        let mut session = Session::new();
-        let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
-        unpickler.enter_symbols().unwrap();
-        assert!(
-            matches!(
-                unpickler.unpickle_type(AND),
-                Err(UnpickleError::UnsupportedType { tag: found, .. }) if found == tag
-            ),
-            "tag {tag}"
-        );
-    }
+    // `ANNOTATEDtype` has no instance in the unit; a length-prefixed node
+    // retagged to it must be refused, never lowered to a child.
+    let tag = 153u8;
+    let patched = retagged(COMPOUND, AND as usize, 165, tag);
+    let file = TastyFile::parse_scala_3_9(&patched).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    assert!(matches!(
+        unpickler.unpickle_type(AND),
+        Err(UnpickleError::UnsupportedType { tag: found, .. }) if found == tag
+    ));
 }
 
 #[test]

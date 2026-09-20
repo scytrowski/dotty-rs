@@ -75,7 +75,8 @@ use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
     FLEXIBLETYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
     TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
-    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -260,6 +261,9 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             // A binder-related node owns its identity: it records its own
             // address, possibly before its children are decoded.
+            RawTree::LengthNode(node) if tag == TYPELAMBDATYPE_TAG => {
+                return self.decode_type_lambda(ast, node, at, depth);
+            }
             RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
                 return self.decode_param_type(ast, node, at, depth);
             }
