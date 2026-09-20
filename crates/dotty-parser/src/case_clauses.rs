@@ -17,7 +17,7 @@ where
         let pattern = self.with_parse_kind(ParseKind::Pattern, |parser| {
             parser.with_location(Location::InPattern, |parser| parser.pattern())
         });
-        let guard = self.case_guard();
+        let guard = self.parse_guard();
         let body_mark = self.mark();
 
         if !self.current_is_arrow() {
@@ -86,7 +86,8 @@ where
         cases
     }
 
-    fn case_guard(&mut self) -> Option<TreeId<Untyped>> {
+    /// Parses the shared `if PostfixExpr` guard production.
+    pub(crate) fn parse_guard(&mut self) -> Option<TreeId<Untyped>> {
         if self.current().kind != TokenKind::Keyword(HardKeyword::If) {
             return None;
         }

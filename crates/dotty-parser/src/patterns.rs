@@ -83,7 +83,7 @@ where
         self.alloc_from(mark, TreeKind::Alternative(Alternative { alternatives }))
     }
 
-    fn pattern1(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn pattern1(&mut self) -> TreeId<Untyped> {
         let pattern = self.pattern2();
         if !self.current_is_pattern_colon() {
             return pattern;
