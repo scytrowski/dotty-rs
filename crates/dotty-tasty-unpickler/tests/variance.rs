@@ -12,7 +12,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
     Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
 };
-use dotty_core::types::{Type, TypeLambda, Variance};
+use dotty_core::types::{Type, TypeLambda, TypeRebindError, Variance};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -670,4 +670,35 @@ fn a_failed_rebinding_call_gives_back_every_id_it_took() {
     };
 
     assert_eq!(next_id_after(true), next_id_after(false));
+}
+
+#[test]
+fn a_lambda_that_reaches_a_binder_still_being_built_is_a_typed_error_not_a_panic() {
+    // A poly (pending) whose parameter info is `= [p] =>> <link to the poly>`
+    // with `+`: the lambda's result is a `SHAREDtype` to the poly at 2, whose
+    // slot is reserved and not filled while the bounds are decoded. Rebinding
+    // would have to read it.
+    let lambda = binder_node(LAMBDA, &[61, nat(2)], 1);
+    let mut payload = package_ref();
+    payload.extend(bounds_node(&[&lambda], &[COVARIANT]));
+    payload.push(nat(1));
+    let bytes = file_with(&length_node(POLY, &payload));
+    let (file, mut session, packages) = synthetic(&bytes);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    let before = unpickler.index().type_count();
+
+    let result = unpickler.unpickle_type(AT);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::RebindFailed {
+                error: TypeRebindError::UnfilledType { .. },
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(AT), None);
 }

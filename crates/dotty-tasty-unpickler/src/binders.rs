@@ -430,13 +430,10 @@ pub(crate) fn declared_variances(at: u32, markers: &[u8]) -> Result<Vec<Variance
             STABLE_TAG => Ok(Variance::Invariant),
             COVARIANT_TAG => Ok(Variance::Covariant),
             CONTRAVARIANT_TAG => Ok(Variance::Contravariant),
-            tag => Err(UnpickleError::MalformedType {
+            // The structural decoder only lets the three markers through.
+            _ => Err(UnpickleError::MalformedType {
                 address: at,
-                reason: if tag == 0 {
-                    "a variance marker is empty"
-                } else {
-                    "a bounds tail holds a marker that is not a variance"
-                },
+                reason: "a bounds tail holds a marker that is not a variance",
             }),
         })
         .collect()
