@@ -174,7 +174,7 @@ where
         let type_tree = if self.accept_lambda_colon() {
             self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
         } else {
-            self.synthetic_type_tree()
+            self.synthetic_type_tree_at(mark.start())
         };
 
         self.alloc_from(
@@ -301,10 +301,6 @@ where
         self.next_wildcard_param = self.next_wildcard_param.saturating_add(1);
         let name = format!("$lambda_wildcard_{index}");
         TermName::new(self.names.intern(&name))
-    }
-
-    fn synthetic_type_tree(&mut self) -> TreeId<Untyped> {
-        self.synthetic_type_tree_at(self.current().span.start())
     }
 
     fn synthetic_type_tree_at(&mut self, start: u32) -> TreeId<Untyped> {
