@@ -10,7 +10,7 @@ use dotty_core::{
 use crate::{Location, ParseDiagnosticKind, ParseKind, ParseResult, Parser};
 
 /// Parses one source-level pattern fragment with the same pattern grammar used
-/// by future case clauses and generators.
+/// by case clauses and future generators.
 pub fn parse_pattern_fragment<S: TokenSource>(
     source: SourceText<'_>,
     source_id: SourceId,
@@ -59,6 +59,7 @@ where
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
+        self.consume_deferred_sequence_marker();
         if !self.current_text_is("|") {
             return first;
         }
@@ -74,7 +75,9 @@ where
                 alternatives.push(self.error_pattern(self.current_span()));
                 break;
             }
-            alternatives.push(self.pattern1());
+            let alternative = self.pattern1();
+            self.consume_deferred_sequence_marker();
+            alternatives.push(alternative);
         }
 
         self.alloc_from(mark, TreeKind::Alternative(Alternative { alternatives }))
@@ -133,13 +136,20 @@ where
 
     fn pattern3(&mut self) -> TreeId<Untyped> {
         let pattern = self.infix_pattern();
-        if self.current_text_is("*") {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "sequence patterns are not supported yet",
-            );
-        }
+        self.consume_deferred_sequence_marker();
         pattern
+    }
+
+    fn consume_deferred_sequence_marker(&mut self) {
+        if self.current().kind != TokenKind::Operator || !self.current_text_is("*") {
+            return;
+        }
+
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "sequence patterns are not supported yet",
+        );
+        self.advance();
     }
 
     fn infix_pattern(&mut self) -> TreeId<Untyped> {
@@ -153,6 +163,18 @@ where
             let left_associative = !crate::is_right_associative(&spelling);
             if self.pattern_operand_offset().is_none() {
                 break;
+            }
+
+            if let Some(top) = operators.last().copied() {
+                let top_spelling = self.names.resolve(top.text()).to_owned();
+                if crate::infix::has_mixed_associativity(&top_spelling, &spelling) {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        format!(
+                            "mixed left- and right-associative pattern operators `{top_spelling}` and `{spelling}`"
+                        ),
+                    );
+                }
             }
 
             while let Some(top) = operators.last().copied() {
@@ -411,7 +433,7 @@ where
         // literal is prefixed with `-`.  It belongs to Pattern1's typed
         // literal production, not to the infix-pattern layer.  Keep symbolic
         // operators such as `::` available for right-associative patterns.
-        if matches!(spelling, "|" | "@" | "=" | ":") {
+        if matches!(spelling, "|" | "@" | ":") || self.current_is_structural_operator() {
             return None;
         }
         self.pattern_operand_offset()?;
@@ -436,10 +458,6 @@ where
         ) && self.current_text().ok() == Some(":")
     }
 
-    fn current_text_is(&self, expected: &str) -> bool {
-        self.current_text().ok() == Some(expected)
-    }
-
     fn token_text_at(&mut self, offset: usize) -> Option<&'src str> {
         let token = self.cursor.lookahead(offset);
         self.source.slice(token.span).ok()
@@ -448,7 +466,18 @@ where
     fn unexpected_pattern(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedPattern, "expected a pattern");
-        if self.current().kind != TokenKind::Eof {
+        if self.current().kind != TokenKind::Eof
+            && !self.current_is_structural_operator()
+            && !matches!(
+                self.current().kind,
+                TokenKind::Punctuation(
+                    Punctuation::Comma
+                        | Punctuation::RightParen
+                        | Punctuation::RightBrace
+                        | Punctuation::Semicolon
+                )
+            )
+        {
             self.advance();
         }
         self.error_pattern(position)
@@ -719,6 +748,56 @@ mod tests {
     }
 
     #[test]
+    fn reports_mixed_associativity_in_pattern_infix_operators() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a + b +: c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert!(result.diagnostics[0].message().contains("mixed"));
+    }
+
+    #[test]
+    fn reports_mixed_associativity_when_right_associative_operator_comes_first() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a +: b + c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert!(result.diagnostics[0].message().contains("mixed"));
+    }
+
+    #[test]
     fn accepts_a_newline_after_an_infix_pattern_operator() {
         let mut names = NameInterner::new();
         let parser = parser_for(
@@ -922,6 +1001,100 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_top_level_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x*",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_bound_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x @ _*",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_an_extractor_sequence_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(xs*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn reports_one_focused_diagnostic_for_a_sequence_pattern_after_a_comma() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(head, tail*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
         );
     }
 }

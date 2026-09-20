@@ -257,6 +257,29 @@ where
         self.source.slice(span)
     }
 
+    /// Returns whether the current token has the requested source spelling.
+    pub(crate) fn current_text_is(&self, expected: &str) -> bool {
+        self.current_text().ok() == Some(expected)
+    }
+
+    /// Returns whether the current token is the ordinary case arrow `=>`.
+    pub(crate) fn current_is_arrow(&self) -> bool {
+        self.current().kind == TokenKind::Operator && self.current_text_is("=>")
+    }
+
+    /// Returns whether the current token is the context-function arrow `?=>`.
+    pub(crate) fn current_is_context_arrow(&self) -> bool {
+        self.current().kind == TokenKind::Operator && self.current_text_is("?=>")
+    }
+
+    /// Returns whether the current operator is reserved for a later grammar layer.
+    pub(crate) fn current_is_structural_operator(&self) -> bool {
+        self.current().kind == TokenKind::Operator
+            && (self.current_is_arrow()
+                || self.current_is_context_arrow()
+                || matches!(self.current_text().ok(), Some("=" | "<-")))
+    }
+
     fn current_name_text(&self) -> Result<&'src str, SourceTextError> {
         let text = self.current_text()?;
         if self.current().kind == TokenKind::BackquotedIdentifier {
@@ -466,6 +489,47 @@ mod tests {
     }
 
     #[test]
+    fn structural_operator_helpers_use_source_spelling() {
+        let mut names = NameInterner::new();
+        let parser = parser_with_tokens(
+            "=>",
+            vec![
+                token(TokenKind::Operator, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+        assert!(parser.current_text_is("=>"));
+        assert!(parser.current_is_arrow());
+        assert!(!parser.current_is_context_arrow());
+        assert!(parser.current_is_structural_operator());
+        drop(parser);
+
+        let parser = parser_with_tokens(
+            "?=>",
+            vec![
+                token(TokenKind::Operator, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        assert!(!parser.current_is_arrow());
+        assert!(parser.current_is_context_arrow());
+        assert!(parser.current_is_structural_operator());
+        drop(parser);
+
+        let parser = parser_with_tokens(
+            "<-",
+            vec![
+                token(TokenKind::Operator, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+        assert!(parser.current_is_structural_operator());
+    }
+
+    #[test]
     fn token_text_rejects_a_range_outside_the_source() {
         let mut names = NameInterner::new();
         let parser = parser_for("abc", TextRange::new(1, 4).unwrap(), &mut names);
@@ -541,6 +605,7 @@ mod tests {
                 erased_definitions: false,
                 into: true,
                 postfix_ops: false,
+                sub_cases: false,
             });
         let expected = parser.known_names().into;
 

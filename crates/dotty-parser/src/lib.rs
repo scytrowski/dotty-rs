@@ -8,6 +8,7 @@
 //! Its public compilation-unit entry point exists, while grammar coverage is
 //! intentionally incomplete.
 
+mod case_clauses;
 mod compilation_unit;
 mod context;
 mod cursor;
