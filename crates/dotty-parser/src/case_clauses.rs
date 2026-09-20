@@ -3,7 +3,6 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped}
 
 use crate::{Location, ParseDiagnosticKind, ParseKind, Parser, RecoverySet};
 
-#[allow(dead_code)]
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,

@@ -66,7 +66,11 @@ where
             }
         }
 
-        self.reduce_operator_stack(&mut operators, top, 0, true, None)
+        let mut tree = self.reduce_operator_stack(&mut operators, top, 0, true, None);
+        while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+            tree = self.parse_match_clause(tree);
+        }
+        tree
     }
 
     fn current_infix_operator(&mut self) -> Option<PendingOperator> {

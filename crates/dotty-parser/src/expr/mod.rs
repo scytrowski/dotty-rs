@@ -4,6 +4,7 @@ use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, Tr
 use crate::Parser;
 
 mod control_flow;
+mod match_expr;
 mod operators;
 mod simple;
 
