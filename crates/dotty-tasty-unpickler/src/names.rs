@@ -19,6 +19,20 @@ use crate::error::UnpickleError;
 /// malformed (or cyclic) table rather than a real name.
 const MAX_NAME_DEPTH: usize = 64;
 
+/// The text of a string constant: the UTF-8 entry at `reference`, exactly as
+/// written. A string is a value, not a name, so none of the spelling rules of
+/// [`wire_name`] apply, and an entry that is not plain UTF-8 text (a
+/// qualified, signed or unique name) is not a string.
+pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<&str, UnpickleError> {
+    match usize::try_from(reference)
+        .ok()
+        .and_then(|index| names.entries().get(index))
+    {
+        Some(RawName::Utf8(text)) => Ok(text),
+        _ => Err(UnpickleError::InvalidNameReference { reference }),
+    }
+}
+
 /// Renders the name at the zero-based wire `reference` to its Scala spelling.
 ///
 /// A signed name (a method name carrying its erased signature) reads as its
@@ -179,6 +193,29 @@ mod tests {
 
     fn utf8(text: &str) -> RawName {
         RawName::Utf8(text.to_owned())
+    }
+
+    #[test]
+    fn a_string_value_is_the_utf8_text_and_nothing_else() {
+        let names = table(vec![
+            utf8("a.b"),
+            utf8("b"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        // Not split, not rendered: the text as written.
+        assert_eq!(string_value(&names, 1).unwrap(), "a.b");
+        assert_eq!(
+            string_value(&names, 3),
+            Err(UnpickleError::InvalidNameReference { reference: 3 })
+        );
+        assert_eq!(
+            string_value(&names, 9),
+            Err(UnpickleError::InvalidNameReference { reference: 9 })
+        );
     }
 
     #[test]
