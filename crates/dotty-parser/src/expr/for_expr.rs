@@ -17,15 +17,13 @@ where
             && self.paren_starts_wrapped_enumerators()
         {
             self.advance();
-            let enums = self.parse_enumerators(Some(TokenKind::Punctuation(
-                Punctuation::RightParen,
-            )));
+            let enums =
+                self.parse_enumerators(Some(TokenKind::Punctuation(Punctuation::RightParen)));
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             (enums, true, false)
         } else if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
-            let enums = self.parse_enumerators(Some(TokenKind::Punctuation(
-                Punctuation::RightBrace,
-            )));
+            let enums =
+                self.parse_enumerators(Some(TokenKind::Punctuation(Punctuation::RightBrace)));
             self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
             (enums, true, false)
         } else {
@@ -64,15 +62,15 @@ where
 
         let body = self.parse_for_body();
         if kind == Some(true) {
-            self.alloc_from(mark, TreeKind::PhaseSpecific(UntypedNode::ForYield(ForYield {
-                enums,
-                body,
-            })))
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::ForYield(ForYield { enums, body })),
+            )
         } else {
-            self.alloc_from(mark, TreeKind::PhaseSpecific(UntypedNode::ForDo(ForDo {
-                enums,
-                body,
-            })))
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::ForDo(ForDo { enums, body })),
+            )
         }
     }
 
@@ -337,7 +335,8 @@ mod tests {
         );
 
         let tree = parser.expr();
-        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) = parser.ast().get(tree).kind
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) =
+            parser.ast().get(tree).kind
         else {
             panic!("expected ForYield");
         };
@@ -374,7 +373,8 @@ mod tests {
         );
 
         let tree = parser.expr();
-        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) = parser.ast().get(tree).kind
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) =
+            parser.ast().get(tree).kind
         else {
             panic!("expected ForYield");
         };
@@ -411,7 +411,8 @@ mod tests {
         );
 
         let tree = parser.expr();
-        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) = parser.ast().get(tree).kind
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) =
+            parser.ast().get(tree).kind
         else {
             panic!("expected ForYield");
         };
@@ -420,7 +421,10 @@ mod tests {
             parser.ast().get(for_tree.enums[0]).kind,
             TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
         ));
-        assert!(matches!(parser.ast().get(for_tree.enums[1]).kind, TreeKind::Ident(_)));
+        assert!(matches!(
+            parser.ast().get(for_tree.enums[1]).kind,
+            TreeKind::Ident(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -454,7 +458,8 @@ mod tests {
         );
 
         let tree = parser.expr();
-        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) = parser.ast().get(tree).kind
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) =
+            parser.ast().get(tree).kind
         else {
             panic!("expected ForYield");
         };
