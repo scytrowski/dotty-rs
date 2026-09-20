@@ -82,14 +82,17 @@ where
         self.advance();
         let name = self.fresh_wildcard_param_name();
         let tpt = self.synthetic_type_tree_at(mark.start());
-        let parameter = self.alloc_from(
-            mark,
+        let parameter = self.alloc(
             TreeKind::ValDef(ValDef {
                 name,
                 tpt,
                 rhs: None,
                 metadata: dotty_core::ast::Modifiers::default(),
             }),
+            Some(SourceSpan::new(
+                self.source_id,
+                Span::without_point(TextRange::new(mark.start(), mark.start()).unwrap()),
+            )),
         );
         self.placeholder_params.push(parameter);
         self.alloc_from(
@@ -613,7 +616,7 @@ mod tests {
         );
         assert_eq!(
             parser.ast().get(parameter).position.unwrap().span().range(),
-            TextRange::new(0, 1).unwrap()
+            TextRange::new(0, 0).unwrap()
         );
         assert_eq!(
             name,
