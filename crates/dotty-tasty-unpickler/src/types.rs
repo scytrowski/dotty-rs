@@ -46,6 +46,23 @@
 //! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
 //! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
 //!
+//! ## Recursive and refined types (Milestone 4a)
+//!
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `RECtype`             | `Type`                    | `Recursive { parent }`             |
+//! | `RECthis`             | `ASTRef`                  | `RecThis { binder }`               |
+//! | `REFINEDtype`         | `NameRef Type Type`       | `Refined { parent, name, info }`   |
+//!
+//! A `RECtype` is a binder like the lambdas (see the `recursive` module): its
+//! id is reserved and published before the parent is decoded, and a `RECthis`
+//! carries that exact id, found by address. Every `RECthis` naming one binder
+//! shares one `RecThis` `TypeId`, as Dotty's `RecType` has one `recThis`. A
+//! `REFINEDtype` name is a term name unless the info, after `SHAREDtype` links,
+//! is `TYPEBOUNDS` (see the `refined` module). A refinement member has no
+//! symbol, so a by-name reference through a refined or recursive prefix stays
+//! `UnsupportedResolutionPrefix`.
+//!
 //! ## Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 //!
 //! `TYPEBOUNDS` may end in variance markers (`STABLE`, `COVARIANT`,
@@ -121,7 +138,7 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, refinements, recursive and match types, and
+//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, match types, and
 //! `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
@@ -132,10 +149,11 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RawTree,
-    SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG,
+    RECTYPE_TAG, REFINEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
+    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
+    TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -206,6 +224,9 @@ impl TastyUnpickler<'_, '_, '_> {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
                     let prefix = self.definitions.no_prefix;
                     Type::TypeRef { prefix, symbol }
+                }
+                (RECTHIS_TAG, TermValue::AstRef(target)) => {
+                    return self.decode_rec_this(ast, at, *target, depth);
                 }
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;
@@ -330,6 +351,13 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             RawTree::LengthNode(node) if tag == METHODTYPE_TAG => {
                 return self.decode_method_type(ast, node, at, depth);
+            }
+            RawTree::Ast { .. } if tag == RECTYPE_TAG => {
+                tree.decode_rec_type()?;
+                return self.decode_rec_type(ast, at, depth);
+            }
+            RawTree::LengthNode(node) if tag == REFINEDTYPE_TAG => {
+                self.decode_refined_type(ast, node, at, depth)?
             }
             RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
                 return self.decode_param_type(ast, node, at, depth);

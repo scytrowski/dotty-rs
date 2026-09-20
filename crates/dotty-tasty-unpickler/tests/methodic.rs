@@ -311,7 +311,7 @@ fn a_failure_after_one_bound_is_decoded_leaves_nothing_behind() {
     // poly is reserved, published, and one bound decoded before it fails.
     let mut payload = package_ref();
     payload.extend(alias_param());
-    payload.extend([66, nat(1), nat(2)]);
+    payload.extend([75, nat(1), nat(2)]);
     let bytes = file_with(&length_node(POLY, &payload));
     let next_id_after = |fail: bool| {
         let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
@@ -321,7 +321,7 @@ fn a_failure_after_one_bound_is_decoded_leaves_nothing_behind() {
             let before = unpickler.index().type_count();
             let result = unpickler.unpickle_type(POLY_AT);
             assert!(
-                matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+                matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
                 "{result:?}"
             );
             assert_eq!(unpickler.index().type_count(), before);
@@ -579,7 +579,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
     // reserved, published, and one parameter decoded before it fails.
     let bytes = file_with(&method_node(
         &package_ref(),
-        &[package_ref(), vec![66, nat(1)]],
+        &[package_ref(), vec![75, nat(1)]],
         &[],
     ));
     let next_id_after = |fail: bool| {
@@ -590,7 +590,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
             let before = unpickler.index().type_count();
             let result = unpickler.unpickle_type(POLY_AT);
             assert!(
-                matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+                matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
                 "{result:?}"
             );
             assert_eq!(unpickler.index().type_count(), before);
@@ -606,7 +606,7 @@ fn a_failure_after_one_parameter_is_decoded_leaves_nothing_behind() {
 #[test]
 fn a_failed_method_inside_a_poly_fails_the_whole_call_and_forgets_both() {
     // Poly (pending) -> Method (pending) -> an unsupported parameter type.
-    let inner = method_node(&package_ref(), &[vec![66, nat(1)]], &[]);
+    let inner = method_node(&package_ref(), &[vec![75, nat(1)]], &[]);
     let bad = poly_node(&inner, 1);
     // A good method follows in the same file, at a known address, naming itself.
     let good_at = 2 + u8::try_from(bad.len()).unwrap();
@@ -624,7 +624,7 @@ fn a_failed_method_inside_a_poly_fails_the_whole_call_and_forgets_both() {
         // Twice: a stale pending binder or index entry would change the second.
         let result = unpickler.unpickle_type(POLY_AT);
         assert!(
-            matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+            matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
             "{result:?}"
         );
         assert_eq!(unpickler.index().type_count(), before);
@@ -706,6 +706,29 @@ fn session_with_scala() -> (Session, Packages) {
             .get_mut(scala.scope)
             .enter(name, symbol);
     }
+    // The refinement parents that are not `Gen` are `java.lang.Object`.
+    let lang = packages
+        .enter(
+            &mut session.store,
+            SymbolOrigin::Synthetic,
+            &["java", "lang"],
+        )
+        .pop()
+        .unwrap();
+    let name = Name::new(session.store.names.intern("Object"), Namespace::Type);
+    let object = session.store.symbols.alloc(Symbol {
+        name,
+        owner: Some(lang.symbol),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    session.store.scopes.get_mut(lang.scope).enter(name, object);
     (session, packages)
 }
 
@@ -997,4 +1020,48 @@ fn equal_looking_real_methods_at_different_addresses_have_distinct_ids() {
         method(&session.store, first).params.len(),
         method(&session.store, second).params.len()
     );
+}
+
+/// The refinement whose info is [`PLAIN`], `Object { def run(x: Int): Boolean }`,
+/// and the one whose info is the `Poly` at [`GENERIC`].
+const PLAIN_REFINED: u32 = 288;
+const GENERIC_REFINED: u32 = 525;
+
+#[test]
+fn a_real_method_info_composes_inside_a_refinement() {
+    unit!(file, session, unpickler);
+    let refined = unpickler.unpickle_type(PLAIN_REFINED).unwrap();
+    let info = unpickler.index().type_at(PLAIN).unwrap();
+    drop(unpickler);
+
+    let Type::Refined {
+        name, info: found, ..
+    } = *session.store.types.get(refined)
+    else {
+        panic!("not a refined type");
+    };
+    // `def run` is a term member, and its info is the method type.
+    assert_eq!(session.store.names.resolve(name.text()), "run");
+    assert_eq!(name.namespace(), dotty_core::Namespace::Term);
+    assert_eq!(found, info);
+    assert!(matches!(session.store.types.get(found), Type::Method(_)));
+}
+
+#[test]
+fn a_real_poly_info_composes_inside_a_refinement() {
+    unit!(file, session, unpickler);
+    let refined = unpickler.unpickle_type(GENERIC_REFINED).unwrap();
+    let poly = unpickler.index().type_at(GENERIC).unwrap();
+    drop(unpickler);
+
+    let Type::Refined {
+        name, info: found, ..
+    } = *session.store.types.get(refined)
+    else {
+        panic!("not a refined type");
+    };
+    assert_eq!(session.store.names.resolve(name.text()), "id");
+    assert_eq!(name.namespace(), dotty_core::Namespace::Term);
+    assert_eq!(found, poly);
+    assert!(matches!(session.store.types.get(found), Type::Poly(_)));
 }

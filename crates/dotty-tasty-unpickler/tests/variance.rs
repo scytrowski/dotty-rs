@@ -656,7 +656,7 @@ fn a_failure_after_the_rebinding_rolls_back_the_derived_lambda_but_not_the_older
     // AND is the wrapper at 0: its first child, the bounds, is at 2; the
     // lambda inside them at 4.
     let mut children = bounds_node(&[&lambda], &[COVARIANT]);
-    children.extend([66, nat(1)]);
+    children.extend([75, nat(1)]);
     let bytes = file_with_ast(&length_node(AND, &children));
     let (file, mut session, packages) = synthetic(&bytes);
     let mut unpickler =
@@ -669,7 +669,7 @@ fn a_failure_after_the_rebinding_rolls_back_the_derived_lambda_but_not_the_older
     for _ in 0..2 {
         let result = unpickler.unpickle_type(0);
         assert!(
-            matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+            matches!(result, Err(UnpickleError::UnsupportedType { tag: 75, .. })),
             "{result:?}"
         );
         // Nothing of the failed call survives: no bounds, no derived lambda,
@@ -687,7 +687,7 @@ fn a_failure_after_the_rebinding_rolls_back_the_derived_lambda_but_not_the_older
 fn a_failed_rebinding_call_gives_back_every_id_it_took() {
     let lambda = binder_node(LAMBDA, &param_type(4, 0), 1);
     let mut children = bounds_node(&[&lambda], &[COVARIANT]);
-    children.extend([66, nat(1)]);
+    children.extend([75, nat(1)]);
     let bytes = file_with_ast(&length_node(AND, &children));
     let next_id_after = |fail: bool| {
         let (file, mut session, packages) = synthetic(&bytes);

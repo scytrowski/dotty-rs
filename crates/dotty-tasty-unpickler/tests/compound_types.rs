@@ -236,7 +236,7 @@ fn a_failure_after_several_children_decoded_leaves_no_trace() {
     // `Pair[Item, Box[Item]]`: retag the last argument (a `SHAREDtype` at 422)
     // to a tag the decoder does not support. By then the constructor, the
     // first argument and the prefixes below them have all been allocated.
-    let patched = retagged(COMPOUND, SHARED_SINGLE as usize, 61, 66);
+    let patched = retagged(COMPOUND, SHARED_SINGLE as usize, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -244,7 +244,7 @@ fn a_failure_after_several_children_decoded_leaves_no_trace() {
     let before = unpickler.index().type_count();
     assert!(matches!(
         unpickler.unpickle_type(SEVERAL),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(SEVERAL), None);
@@ -327,7 +327,7 @@ fn a_failing_operand_is_reported_as_itself_and_rolls_back() {
     let file = TastyFile::parse_scala_3_9(COMPOUND).unwrap();
     let right_operand = *children_of(&file, AND_CHAIN).last().unwrap();
     drop(file);
-    let patched = retagged(COMPOUND, right_operand as usize, 61, 66);
+    let patched = retagged(COMPOUND, right_operand as usize, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -335,7 +335,7 @@ fn a_failing_operand_is_reported_as_itself_and_rolls_back() {
     let before = unpickler.index().type_count();
     assert!(matches!(
         unpickler.unpickle_type(AND_CHAIN),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(AND_CHAIN), None);
@@ -381,7 +381,7 @@ fn a_by_name_type_wraps_its_result_and_is_not_lowered_to_it() {
 fn a_by_name_type_reports_the_error_of_its_child() {
     // `=> T` where the wrapped node is an unsupported form.
     let by_name = retagged(COMPOUND, BY_NAME_NODE as usize, 90, 93);
-    let by_name = retagged(&by_name, BY_NAME_CHILD as usize, 61, 66);
+    let by_name = retagged(&by_name, BY_NAME_CHILD as usize, 61, 75);
     let file = TastyFile::parse_scala_3_9(&by_name).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -389,7 +389,7 @@ fn a_by_name_type_reports_the_error_of_its_child() {
     let before = unpickler.index().type_count();
     assert!(matches!(
         unpickler.unpickle_type(BY_NAME_NODE),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
 }
@@ -440,7 +440,7 @@ fn unsupported_neighbours_stay_explicit() {
 fn a_failure_inside_a_nested_compound_forgets_the_compounds_already_built() {
     // `A | (B | C)`: the inner union at 945 and its first operand are built
     // before its second operand (950) fails. Neither union may stay recorded.
-    let patched = retagged(COMPOUND, 950, 61, 66);
+    let patched = retagged(COMPOUND, 950, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -448,7 +448,7 @@ fn a_failure_inside_a_nested_compound_forgets_the_compounds_already_built() {
     let before = unpickler.index().type_count();
     assert!(matches!(
         unpickler.unpickle_type(OR_DEEP),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(OR_DEEP), None);
@@ -471,8 +471,8 @@ fn nat(n: usize) -> Vec<u8> {
 /// A file whose only AST node is `depth` nested `ANDtype`s over a leaf the
 /// decoder does not support, written from the inside out.
 fn nested_intersections(depth: usize) -> Vec<u8> {
-    // `RECthis`: a tag with a `Nat` the type pass does not decode.
-    const LEAF: [u8; 2] = [66, 0x80];
+    // `IMPORTED`: a tag with a `Nat` the type pass does not decode.
+    const LEAF: [u8; 2] = [75, 0x80];
     let mut node = LEAF.to_vec();
     for _ in 0..depth {
         let mut payload = node;
@@ -522,7 +522,7 @@ fn a_deeply_nested_compound_type_is_an_error_not_a_stack_overflow() {
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
     assert!(matches!(
         unpickler.unpickle_type(0),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
 }
 

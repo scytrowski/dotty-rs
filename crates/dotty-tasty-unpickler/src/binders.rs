@@ -51,6 +51,9 @@ pub(crate) enum BinderKind {
     TypeLambda,
     Poly,
     Method,
+    /// A `RECtype`. It binds no parameters, so it has no arity and a
+    /// `PARAMtype` can never name it (see [`PendingBinder::arity`]).
+    Recursive,
 }
 
 /// The number of parameters of a completed binder type, or `None` if `ty` is
@@ -64,6 +67,15 @@ fn completed_arity(ty: &Type) -> Option<usize> {
     }
 }
 
+/// The parameter count of a pending binder a `PARAMtype` at `from` names, or
+/// `InvalidBinderKind` if it binds no parameters (a `RECtype`).
+fn parameter_arity(pending: PendingBinder, from: u32) -> Result<usize, UnpickleError> {
+    pending.arity.ok_or(UnpickleError::InvalidBinderKind {
+        from,
+        binder: pending.id,
+    })
+}
+
 /// A binder whose `TypeId` is reserved and published but not yet filled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PendingBinder {
@@ -72,8 +84,10 @@ pub(crate) struct PendingBinder {
     /// The reserved id: the binder identity a `ParamRef` carries.
     pub(crate) id: TypeId,
     pub(crate) kind: BinderKind,
-    /// The number of parameters, for checking a `PARAMtype` index.
-    pub(crate) arity: usize,
+    /// The number of parameters, for checking a `PARAMtype` index. `None` for
+    /// a recursive binder, which has no parameters: it is not given a made-up
+    /// arity, and a `PARAMtype` that names one is an `InvalidBinderKind`.
+    pub(crate) arity: Option<usize>,
 }
 
 impl TastyUnpickler<'_, '_, '_> {
@@ -93,7 +107,7 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 
     /// The pending binder whose reserved id is `id`, if any.
-    fn pending_with_id(&self, id: TypeId) -> Option<PendingBinder> {
+    pub(crate) fn pending_with_id(&self, id: TypeId) -> Option<PendingBinder> {
         self.pending_binders
             .iter()
             .rev()
@@ -137,7 +151,7 @@ impl TastyUnpickler<'_, '_, '_> {
         }
 
         let (binder, arity) = if let Some(pending) = self.pending_at(binder_address) {
-            (pending.id, pending.arity)
+            (pending.id, parameter_arity(pending, at)?)
         } else {
             let id = match self.index.type_at(binder_address) {
                 Some(id) => id,
@@ -152,7 +166,7 @@ impl TastyUnpickler<'_, '_, '_> {
             match self.pending_with_id(id) {
                 // The address is a `SHAREDtype` link to a binder that is
                 // still being decoded.
-                Some(pending) => (pending.id, pending.arity),
+                Some(pending) => (pending.id, parameter_arity(pending, at)?),
                 None => match completed_arity(self.store.types.get(id)) {
                     Some(arity) => (id, arity),
                     None => {
@@ -283,7 +297,7 @@ impl TastyUnpickler<'_, '_, '_> {
             address: at,
             id,
             kind: form.kind(),
-            arity: interned.len(),
+            arity: Some(interned.len()),
         };
         let (params, result) = self.with_pending_binder(binder, |this| {
             let mut params = Vec::with_capacity(interned.len());
@@ -516,7 +530,7 @@ mod tests {
             address,
             id,
             kind: BinderKind::TypeLambda,
-            arity: 1,
+            arity: Some(1),
         }
     }
 
