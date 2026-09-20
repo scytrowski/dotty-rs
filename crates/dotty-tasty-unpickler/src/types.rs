@@ -40,6 +40,7 @@
 //! | `ORtype`              | `Type Type`               | `Or { left, right }`               |
 //! | `SUPERtype`           | `Type Type`               | `SuperType { this_type, super_type }` |
 //! | `BYNAMEtype`          | `Type`                    | `ByName { result }`                |
+//! | `FLEXIBLEtype`        | `Type`                    | `Flexible { underlying }`          |
 //! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
 //! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
 //!
@@ -59,7 +60,7 @@
 //! at different addresses keep different ids.
 //!
 //! Every other form is `UnsupportedType`: `ANNOTATEDtype`,
-//! `TYPELAMBDAtype`, `FLEXIBLEtype`, constants, method/poly/param types,
+//! `TYPELAMBDAtype`, constants, method/poly/param types,
 //! refinements, recursive and match types, and `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
@@ -69,9 +70,10 @@ use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    ANDTYPE_TAG, APPLIEDTYPE_TAG, BYNAMETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG,
-    SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-    TYPEBOUNDS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    ANDTYPE_TAG, APPLIEDTYPE_TAG, BYNAMETYPE_TAG, FLEXIBLETYPE_TAG, ORTYPE_TAG, RawTree,
+    SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG,
+    TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -244,6 +246,11 @@ impl TastyUnpickler<'_, '_, '_> {
                     let ids = self.decode_children(ast, at, 1, depth)?;
                     Type::AliasingBounds { alias: ids[0] }
                 }
+            }
+            RawTree::LengthNode(node) if tag == FLEXIBLETYPE_TAG => {
+                node.decode_flexible_type()?;
+                let ids = self.decode_children(ast, at, 1, depth)?;
+                Type::Flexible { underlying: ids[0] }
             }
             RawTree::Ast { .. } if tag == BYNAMETYPE_TAG => {
                 let result = self.decode_type(ast, &tree.decode_by_name_type()?.child, depth)?;

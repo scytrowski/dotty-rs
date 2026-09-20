@@ -42,6 +42,11 @@ sources=$(cd "$fixture_dir" && ls -- *.scala)
 (cd "$fixture_dir" && java -cp "$compiler_class_path" dotty.tools.dotc.Main \
   -usejavacp:false -classpath "$library_class_path" -d "$work_dir" $sources)
 
+# Units under explicit_nulls/ are compiled with -Yexplicit-nulls, the only
+# setting under which the compiler writes FLEXIBLEtype nodes.
+(cd "$fixture_dir/explicit_nulls" && java -cp "$compiler_class_path" dotty.tools.dotc.Main \
+  -usejavacp:false -classpath "$library_class_path" -Yexplicit-nulls -d "$work_dir" *.scala)
+
 # DefaultPackage.scala has no `package` clause, so its units land in the root of
 # the output directory; everything else is in the fixtures package.
 for tasty in "$work_dir"/*.tasty "$work_dir"/me/cytrowski/tastyfixtures/semantic/*.tasty; do

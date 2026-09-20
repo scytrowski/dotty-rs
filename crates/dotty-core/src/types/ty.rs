@@ -81,6 +81,12 @@ pub enum Type {
     ByName {
         result: TypeId,
     },
+    /// A flexible type (`FlexibleType(hi)` in Dotty), the explicit-nulls type
+    /// of a Java-defined member: its members are those of `underlying`, but
+    /// the wrapper is part of the type and is never stripped by the model.
+    Flexible {
+        underlying: TypeId,
+    },
 
     And {
         left: TypeId,

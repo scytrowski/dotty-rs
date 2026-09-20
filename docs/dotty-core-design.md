@@ -896,6 +896,7 @@ pub enum Type {
     Bounds { low: TypeId, high: TypeId },       // genuine `>: low <: high`
     AliasingBounds { alias: TypeId },           // `= alias`; not Bounds{alias, alias}
     ByName { result: TypeId },
+    Flexible { underlying: TypeId },            // explicit-nulls flexible type
 
     And { left: TypeId, right: TypeId },
     Or { left: TypeId, right: TypeId },
