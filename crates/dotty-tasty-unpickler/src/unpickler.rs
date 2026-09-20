@@ -1,5 +1,6 @@
 //! The semantic unpickler driver.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use dotty_core::ids::TypeId;
@@ -45,6 +46,12 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     /// Binders reserved and published but not yet filled, innermost last.
     /// Decoding state only: empty whenever a public call returns.
     pub(crate) pending_binders: Vec<PendingBinder>,
+    /// Each `Recursive` binder's one canonical `RecThis`, as Dotty's `RecType`
+    /// keeps one `recThis`. Survives across `unpickle_type` calls, so it is
+    /// journaled: a failed call takes back the entries it added.
+    pub(crate) rec_this: HashMap<TypeId, TypeId>,
+    /// The binders `rec_this` gained entries for, in order, to roll back.
+    pub(crate) rec_this_journal: Vec<TypeId>,
     /// The file's AST view, built on first use and shared by both passes.
     ast: Option<Rc<AstView<'bytes>>>,
 }
@@ -85,6 +92,8 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             resolver: Box::new(NoResolver),
             scope_journal: Vec::new(),
             pending_binders: Vec::new(),
+            rec_this: HashMap::new(),
+            rec_this_journal: Vec::new(),
             ast: None,
         }
     }
@@ -183,10 +192,12 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let ast = self.ast_view()?;
         let checkpoint = self.store.checkpoint();
         let mark = self.index.mark_types();
+        let rec_this_mark = self.rec_this_journal.len();
         let result = self.type_at(&ast, address, address, 0);
         if result.is_err() {
             self.store.rollback_to(checkpoint);
             self.index.roll_back_types(mark);
+            self.roll_back_rec_this(rec_this_mark);
         }
         // Nothing is pending outside a call, and every binder unregisters
         // itself; this only guarantees the invariant for the next call.

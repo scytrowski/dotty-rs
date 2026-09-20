@@ -151,7 +151,7 @@ fn an_unresolved_alias_child_is_reported_as_itself_and_rolls_back() {
 
 #[test]
 fn a_failing_alias_child_leaves_no_trace() {
-    let patched = retagged(BOUNDS, ALIAS_CHILD, 61, 66);
+    let patched = retagged(BOUNDS, ALIAS_CHILD, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -160,7 +160,7 @@ fn a_failing_alias_child_leaves_no_trace() {
 
     assert!(matches!(
         unpickler.unpickle_type(ALIAS),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(ALIAS), None);
@@ -168,7 +168,7 @@ fn a_failing_alias_child_leaves_no_trace() {
 
 #[test]
 fn a_failing_high_bound_forgets_the_low_bound_that_decoded() {
-    let patched = retagged(BOUNDS, HIGH_CHILD, 61, 66);
+    let patched = retagged(BOUNDS, HIGH_CHILD, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -177,7 +177,7 @@ fn a_failing_high_bound_forgets_the_low_bound_that_decoded() {
 
     assert!(matches!(
         unpickler.unpickle_type(TWO_SIDED),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(196), None);

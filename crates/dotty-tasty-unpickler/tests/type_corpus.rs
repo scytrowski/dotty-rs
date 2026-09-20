@@ -39,6 +39,9 @@ const BINDER_TAGS: [(u8, &str); 4] = [
     (172, "PARAMtype"),
 ];
 
+/// The refined and recursive forms decoded since Milestone 4a.
+const RECURSIVE_TAGS: [(u8, &str); 3] = [(159, "REFINEDtype"), (100, "RECtype"), (66, "RECthis")];
+
 /// The bounds and flexible forms decoded since Milestone 2c2.
 const WRAPPER_TAGS: [(u8, &str); 2] = [
     (TYPEBOUNDS_TAG, "TYPEBOUNDS"),
@@ -72,6 +75,7 @@ fn is_measured(tag: u8) -> bool {
     COMPOUND_TAGS.iter().any(|(t, _)| *t == tag)
         || WRAPPER_TAGS.iter().any(|(t, _)| *t == tag)
         || BINDER_TAGS.iter().any(|(t, _)| *t == tag)
+        || RECURSIVE_TAGS.iter().any(|(t, _)| *t == tag)
         || CONSTANT_TAGS.iter().any(|(t, _)| *t == tag)
 }
 
@@ -185,6 +189,10 @@ struct Tally {
     /// Decoded `PARAMtype` roots, by the kind of node their binder address
     /// names (`TYPELAMBDAtype`, `POLYtype`, `METHODtype`, or another node).
     param_binders: BTreeMap<&'static str, usize>,
+    /// Distinct `RECtype` binders that a decoded `RECthis` root names, and the
+    /// distinct canonical `RecThis` types they got (Milestone 4a).
+    rec_binders: usize,
+    rec_canonical_ids: usize,
     /// Nodes of the forms that stay unsupported.
     unsupported_nodes: BTreeMap<u8, usize>,
     unresolved_members: usize,
@@ -298,6 +306,22 @@ fn run(
         (bounds, sources)
     };
 
+    // For each `RECthis`, the binder address it names (its one `Nat`).
+    let rec_this_target = |at: u32| -> Option<u32> {
+        let payload = file
+            .section(dotty_tasty::tasty::StandardSection::Asts)?
+            .payload;
+        let mut value: u32 = 0;
+        for byte in payload.get(usize::try_from(at).ok()? + 1..)? {
+            value = value.checked_mul(128)? | u32::from(byte & 0x7f);
+            if byte & 0x80 != 0 {
+                return Some(value);
+            }
+        }
+        None
+    };
+    let mut rec_this_ids: HashMap<u32, HashSet<dotty_core::ids::TypeId>> = HashMap::new();
+
     let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
     unpickler.enter_symbols().unwrap();
 
@@ -311,6 +335,11 @@ fn run(
             _ => &mut tally.by_address,
         };
         outcomes.nodes += 1;
+        if tag == 66 {
+            let known = rec_this_target(at)
+                .is_some_and(|binder| unpickler.index().type_at(binder).is_some());
+            outcomes.binder_on_demand += usize::from(!known);
+        }
         tally.variance.total += usize::from(variance_bounds.contains(&at));
         if tag == 172 {
             let binder_known = file
@@ -336,6 +365,10 @@ fn run(
                     } else {
                         tally.variance.lambdas_standalone += 1;
                     }
+                }
+                if tag == 66 {
+                    let binder = rec_this_target(at).expect("a decoded RECthis has a target");
+                    rec_this_ids.entry(binder).or_default().insert(first);
                 }
                 if tag == 172 {
                     let binder = file
@@ -395,7 +428,8 @@ fn run(
                     | UnpickleError::InvalidMethodModifier { .. }
                     | UnpickleError::BoundsVarianceTargetPending { .. }
                     | UnpickleError::BoundsVarianceArityMismatch { .. }
-                    | UnpickleError::RebindFailed { .. } => {
+                    | UnpickleError::RebindFailed { .. }
+                    | UnpickleError::InvalidReferenceTarget { .. } => {
                         outcomes.binder_errors += 1;
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
@@ -420,6 +454,12 @@ fn run(
             }
         }
     }
+    for (binder, ids) in &rec_this_ids {
+        // One binder, one canonical `RecThis`, however many addresses name it.
+        assert_eq!(ids.len(), 1, "{label}: binder {binder} has {ids:?}");
+    }
+    tally.rec_binders += rec_this_ids.len();
+    tally.rec_canonical_ids += rec_this_ids.values().map(HashSet::len).sum::<usize>();
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
     unpickler.into_parts().1
@@ -581,6 +621,11 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);
         report("binder types", &BINDER_TAGS);
+        report("refined and recursive types", &RECURSIVE_TAGS);
+        println!(
+            "RECthis: unique recursive binders named {}, canonical RecThis ids {}",
+            tally.rec_binders, tally.rec_canonical_ids
+        );
         println!(
             "decoded PARAMtype by binder kind: {:?}",
             tally.param_binders
@@ -644,7 +689,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             );
         }
         // No binder form is ever "unsupported" for being that form.
-        for (tag, label) in BINDER_TAGS {
+        for (tag, label) in BINDER_TAGS.into_iter().chain(RECURSIVE_TAGS) {
             assert!(
                 !tally.unsupported.contains_key(&tag),
                 "{label} was reported as an unsupported form"

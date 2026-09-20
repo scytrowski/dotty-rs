@@ -196,7 +196,7 @@ fn equal_constants_at_different_addresses_are_not_interned() {
 
 #[test]
 fn a_failing_class_child_is_reported_and_leaves_no_trace() {
-    let patched = retagged(CONSTANTS, CLASS_CHILD as usize, 61, 66);
+    let patched = retagged(CONSTANTS, CLASS_CHILD as usize, 61, 75);
     let file = TastyFile::parse_scala_3_9(&patched).unwrap();
     let mut session = Session::new();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
@@ -205,7 +205,7 @@ fn a_failing_class_child_is_reported_and_leaves_no_trace() {
 
     assert!(matches!(
         unpickler.unpickle_type(CLASS),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(CLASS), None);
@@ -376,7 +376,7 @@ fn an_out_of_range_constant_is_an_error_not_a_wrap() {
 fn a_failure_after_a_constant_decoded_forgets_the_constant() {
     // `ANDtype` over an `INTconst` and a tag the decoder does not support.
     let mut payload = vec![70, 0x81];
-    payload.push(66);
+    payload.push(75);
     payload.extend(nat_bytes(0));
     let bytes = file_with_ast(&length_node(165, &payload));
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
@@ -386,7 +386,7 @@ fn a_failure_after_a_constant_decoded_forgets_the_constant() {
 
     assert!(matches!(
         unpickler.unpickle_type(0),
-        Err(UnpickleError::UnsupportedType { tag: 66, .. })
+        Err(UnpickleError::UnsupportedType { tag: 75, .. })
     ));
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(2), None);
