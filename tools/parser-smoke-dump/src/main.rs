@@ -188,6 +188,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
+        TreeKind::Return(_) => "Return",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) if tuple.elements.is_empty() => {
             "Literal"
         }
@@ -269,6 +271,8 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => vec![prefix.operand],
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
+        TreeKind::PhaseSpecific(UntypedNode::Throw(throw)) => vec![throw.expr],
+        TreeKind::Return(return_tree) => return_tree.expr.into_iter().collect(),
         _ => Vec::new(),
     }
 }
