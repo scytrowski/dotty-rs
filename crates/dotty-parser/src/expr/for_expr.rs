@@ -529,4 +529,102 @@ mod tests {
         ));
         assert!(parser.diagnostics().is_empty());
     }
+
+    #[test]
+    fn recovers_from_a_for_without_enumerators() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_generator_without_an_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for x <- yield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(6, 8).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Keyword(HardKeyword::Yield), 9, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_for_pattern_without_an_enumerator_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for x xs yield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Identifier, 6, 8),
+                token(TokenKind::Keyword(HardKeyword::Yield), 9, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_yield_visible_after_a_missing_guard_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for x <- xs if yield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(6, 8).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Keyword(HardKeyword::If), 12, 14),
+                token(TokenKind::Keyword(HardKeyword::Yield), 15, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
 }
