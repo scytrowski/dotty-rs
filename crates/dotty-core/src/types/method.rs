@@ -39,13 +39,27 @@ pub struct MethodType {
 }
 
 /// A type parameter of a [`PolyType`] or [`TypeLambda`].
+///
+/// `declared_variance` is the variance the parameter was *declared* with, and
+/// absence is a state of its own: `None` is "no declared variance", which is
+/// what a standalone `[A] =>> A` or a `PolyType` has, while
+/// `Some(Variance::Invariant)` is an explicit invariant declaration (a TASTy
+/// `STABLE` marker). Dotty keeps the same distinction
+/// (`HKTypeLambda.isDeclaredVarianceLambda = variances.nonEmpty`, where the
+/// list may hold `Invariant`), so the two must not be conflated. It holds
+/// declared variance only: variance inferred from a type's structure belongs
+/// to a later typer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeParam {
     pub name: TypeName,
     pub bounds: TypeId,
-    pub variance: Variance,
+    pub declared_variance: Option<Variance>,
 }
 
+/// A declared variance.
+///
+/// There is deliberately no "unspecified" member: absence of a declaration is
+/// `Option::None` on [`TypeParam::declared_variance`], not a variance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variance {
     Invariant,
@@ -106,14 +120,29 @@ mod tests {
     }
 
     #[test]
-    fn type_param_carries_its_variance() {
+    fn no_declared_variance_is_not_an_explicit_invariant_declaration() {
+        let param = |declared_variance| TypeParam {
+            name: TypeName::new(NameId::new(1)),
+            bounds: TypeId::new(2),
+            declared_variance,
+        };
+
+        assert_ne!(param(None), param(Some(Variance::Invariant)));
+        assert_ne!(
+            param(Some(Variance::Invariant)),
+            param(Some(Variance::Covariant))
+        );
+    }
+
+    #[test]
+    fn type_param_carries_its_declared_variance() {
         let param = TypeParam {
             name: TypeName::new(NameId::new(1)),
             bounds: TypeId::new(2),
-            variance: Variance::Covariant,
+            declared_variance: Some(Variance::Covariant),
         };
 
-        assert_eq!(param.variance, Variance::Covariant);
+        assert_eq!(param.declared_variance, Some(Variance::Covariant));
     }
 
     #[test]

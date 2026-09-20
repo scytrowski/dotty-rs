@@ -49,8 +49,6 @@ const ALIAS_CHILD: usize = 432;
 /// Alias bounds over `List[Item]`, whose constructor lives in a package the
 /// unit does not enter.
 const ALIAS_EXTERNAL: u32 = 468;
-/// `TYPEBOUNDS` over a `TYPELAMBDAtype` followed by the variance marker `+`.
-const VARIANT: u32 = 525;
 /// A real `SHAREDtype` link to [`TWO_SIDED`].
 const SHARED_TWO_SIDED: u32 = 364;
 const HIGH_CHILD: usize = 199;
@@ -134,21 +132,6 @@ fn bounds_children_resolve_through_shared_links_to_the_same_ids() {
 
     assert_eq!(session.store.types.get(id), &Type::Bounds { low, high });
     assert_ne!(low, high);
-}
-
-#[test]
-fn variance_markers_are_a_typed_deferral_not_dropped() {
-    let (file, mut session) = open(BOUNDS);
-    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
-    unpickler.enter_symbols().unwrap();
-    let before = unpickler.index().type_count();
-
-    assert_eq!(
-        unpickler.unpickle_type(VARIANT),
-        Err(UnpickleError::UnsupportedBoundsVariance { address: VARIANT })
-    );
-    // Refused before any child was decoded.
-    assert_eq!(unpickler.index().type_count(), before);
 }
 
 #[test]

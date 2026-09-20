@@ -34,8 +34,11 @@ use dotty_core::ids::TypeId;
 use dotty_core::names::{TermName, TypeName};
 use dotty_core::types::{
     MethodKind, MethodParam, MethodType, PolyType, Type, TypeLambda, TypeParam, Variance,
+    rebind_type_lambda,
 };
-use dotty_tasty::tasty::{GIVEN_TAG, IMPLICIT_TAG, RawNode};
+use dotty_tasty::tasty::{
+    CONTRAVARIANT_TAG, COVARIANT_TAG, GIVEN_TAG, IMPLICIT_TAG, RawNode, STABLE_TAG,
+};
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
@@ -178,8 +181,8 @@ impl TastyUnpickler<'_, '_, '_> {
     /// `TYPELAMBDAtype Length result_Type (paramBounds_Type paramName_NameRef)*`
     /// at `at`, as a `TypeLambda` stored under its own address's `TypeId`.
     ///
-    /// A `TYPELAMBDAtype` carries no variance of its own, so the parameters are
-    /// invariant. Variance markers belong to an enclosing `TYPEBOUNDS`, which
+    /// A `TYPELAMBDAtype` carries no declared variance of its own (`None`, not an
+    /// explicit invariant). Variance markers belong to an enclosing `TYPEBOUNDS`, which
     /// is deferred (see the module documentation of `types`).
     pub(crate) fn decode_type_lambda(
         &mut self,
@@ -195,7 +198,7 @@ impl TastyUnpickler<'_, '_, '_> {
 
     /// `POLYtype Length result_Type (paramBounds_Type paramName_NameRef)*` at
     /// `at`, as a `Poly` stored under its own address's `TypeId`. Its
-    /// parameters are invariant: a `PolyType` has no variance markers.
+    /// parameters have no declared variance: a `PolyType` has no variance markers.
     pub(crate) fn decode_poly_type(
         &mut self,
         ast: &AstView<'_>,
@@ -301,7 +304,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 .map(|(name, info)| TypeParam {
                     name: TypeName::new(*name),
                     bounds: *info,
-                    variance: Variance::Invariant,
+                    declared_variance: None,
                 })
                 .collect()
         };
@@ -332,6 +335,58 @@ impl TastyUnpickler<'_, '_, '_> {
         };
         self.store.types.fill(reserved, ty);
         Ok(id)
+    }
+
+    /// Applies the variance markers of the `TYPEBOUNDS` at `at` to `target`,
+    /// its lambda bound: Dotty's `readVariances`. With no markers, or when `target` is not a
+    /// `TypeLambda`, `target` is returned as it is.
+    ///
+    /// The markers do not change `target`. Dotty's `withVariances` builds a
+    /// *new* lambda whose references to the old binder are substituted, so
+    /// this does the same through [`rebind_type_lambda`]: the result is a fresh
+    /// derived `TypeLambda`, and `target`, which stays the type cached at its
+    /// own AST address (and what a `SHAREDtype` link to it returns), keeps its
+    /// own binder and its absent variances. The derived lambda has no AST
+    /// address. Repeating the decode of the bounds returns the cached bounds,
+    /// so no second derived lambda is made.
+    pub(crate) fn apply_declared_variances(
+        &mut self,
+        at: u32,
+        target: TypeId,
+        variances: &[Variance],
+    ) -> Result<TypeId, UnpickleError> {
+        if variances.is_empty() {
+            return Ok(target);
+        }
+        // Dotty's `readVariances` matches `HKTypeLambda` and otherwise returns
+        // the type as it is (`case _ => tp`), still consuming the markers, so
+        // a target that is not a lambda is left alone. A lambda that is still
+        // being built is one Dotty would rebind, but its slot is not filled
+        // yet, so that is an error rather than a guess.
+        if let Some(pending) = self.pending_with_id(target) {
+            return if pending.kind == BinderKind::TypeLambda {
+                Err(UnpickleError::BoundsVarianceTargetPending {
+                    address: at,
+                    target,
+                })
+            } else {
+                Ok(target)
+            };
+        }
+        let arity = match self.store.types.get(target) {
+            Type::TypeLambda(lambda) => lambda.params.len(),
+            _ => return Ok(target),
+        };
+        if arity != variances.len() {
+            return Err(UnpickleError::BoundsVarianceArityMismatch {
+                address: at,
+                lambda: target,
+                expected: arity,
+                actual: variances.len(),
+            });
+        }
+        rebind_type_lambda(self.store, target, variances)
+            .map_err(|error| UnpickleError::RebindFailed { address: at, error })
     }
 
     /// A parameter's info must be a bounds type. `bounds` is read from the
@@ -372,6 +427,24 @@ impl TastyUnpickler<'_, '_, '_> {
         self.pending_binders.truncate(depth);
         result
     }
+}
+
+/// The declared variances a `TYPEBOUNDS` tail spells: `STABLE` is an explicit
+/// invariant declaration, not the absence of one.
+pub(crate) fn declared_variances(at: u32, markers: &[u8]) -> Result<Vec<Variance>, UnpickleError> {
+    markers
+        .iter()
+        .map(|&marker| match marker {
+            STABLE_TAG => Ok(Variance::Invariant),
+            COVARIANT_TAG => Ok(Variance::Covariant),
+            CONTRAVARIANT_TAG => Ok(Variance::Contravariant),
+            // The structural decoder only lets the three markers through.
+            _ => Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "a bounds tail holds a marker that is not a variance",
+            }),
+        })
+        .collect()
 }
 
 /// The binder forms that share the reserve/publish/fill sequence.

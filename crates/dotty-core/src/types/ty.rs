@@ -150,7 +150,7 @@ mod tests {
     use super::*;
     use crate::ids::ScopeId;
     use crate::names::Namespace;
-    use crate::types::method::{MethodKind, TypeParam, Variance};
+    use crate::types::method::{MethodKind, TypeParam};
 
     fn name(raw: u32) -> Name {
         Name::new(NameId::new(raw), Namespace::Term)
@@ -405,7 +405,7 @@ mod tests {
         let param = TypeParam {
             name: crate::names::TypeName::new(NameId::new(1)),
             bounds: TypeId::new(2),
-            variance: Variance::Invariant,
+            declared_variance: None,
         };
         let poly = PolyType {
             params: vec![param],

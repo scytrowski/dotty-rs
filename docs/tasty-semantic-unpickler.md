@@ -16,8 +16,10 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 3a, binder identity (`TYPELAMBDAtype`, `PARAMtype`): implemented
   (§4, "Binders").
 - Milestone 3b, the other two binder forms (`METHODtype`, `POLYtype`) on the
-  same machinery: implemented (§4, "Binders"). Milestone 3c (binder rebinding
-  and variance-bearing `TYPEBOUNDS`) is next.
+  same machinery: implemented (§4, "Binders").
+- Milestone 3c, binder rebinding and variance-bearing `TYPEBOUNDS`:
+  implemented (§4, "Variance-bearing `TYPEBOUNDS`"). This closes the binder
+  milestone; Milestone 4 (advanced types) is next.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -65,7 +67,7 @@ function. It follows an enter-before-complete model:
 | 2c2. Core-model gaps | `Bounds`, `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst` | 2c2 |
 | 3a. Binder identity | `TypeLambda`, `ParamRef`, with `TypeArena::reserve`/`fill` | 3a |
 | 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
-| 3c. Binder rebinding | a binder-rebinding substitution; variance-bearing `TYPEBOUNDS` | 3c |
+| 3c. Binder rebinding | `dotty_core::rebind_type_lambda`; variance-bearing `TYPEBOUNDS`; `declared_variance: Option<Variance>` | 3c |
 | 4. Advanced types | refinements, recursive, match, annotated, `*REFin` | 4 |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
@@ -381,10 +383,9 @@ Bounds, flexible and constant types (Milestone 2c2):
   which would collide with `SymbolKind::TypeAlias` (a symbol kind).
 - **Variance markers.** Dotty does not attach the trailing variance markers to
   the bounds: it rewrites the parameter variances of an `HKTypeLambda` bound,
-  then wraps it. Inventing a bounds-level variance field would be wrong, and
-  applying the markers needs a binder-rebinding substitution, so a `TYPEBOUNDS`
-  with markers is `UnsupportedBoundsVariance` (refused before any child is
-  decoded). It closes with Milestone 3c.
+  then wraps it. The model has no bounds-level variance field either; the
+  markers become the `declared_variance` of a rebound `TypeLambda` (see
+  "Variance-bearing `TYPEBOUNDS`" below).
 - **Flexible types.** `Flexible` is a preserved wrapper; the model never
   strips it. Only local member lookup looks through it (`lookup_owner`
   follows any chain of `Flexible` to a searchable prefix); a resolver still
@@ -532,18 +533,76 @@ alike at different addresses are different binders, and their `ParamRef`s
 differ. In practice the compiler shares equal lambdas, so real output rarely
 contains such a pair; the test is synthetic.
 
-**Why variance-bearing `TYPEBOUNDS` stays deferred.** `TypeLambda` exists now,
-but Dotty's `readVariances` calls `HKTypeLambda.withVariances`, which builds a
-*new* lambda (`newLikeThis`) and substitutes the old binder's parameter
-references in the parameter infos and the result (`paramInfos.mapConserve(_.subst(this, x))`).
-The `PARAMtype`s in the file still name the old address. Copying the cached
-lambda and changing a variance would leave every nested `ParamRef` pointing at
-the old `TypeId`; mutating it would change a type other addresses share. So the
-markers are still `UnsupportedBoundsVariance`, and the nested lambda decodes on
-its own. Milestone 3c must either add a format-agnostic binder-rebinding
-substitution in `dotty-core` or establish a context-aware decoding rule proven
-correct for TASTy's parent-carried variance. It was split from 3b because it is
-a separate semantic operation, not one more decoder case.
+### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
+
+`TYPEBOUNDS Length Type Type? Variance*`, with `STABLE`, `COVARIANT` or
+`CONTRAVARIANT` markers after the types.
+
+**Declared variance is not absent variance.** `TypeParam.declared_variance` is
+`Option<Variance>`: `None` means nothing was declared (a standalone
+`[A] =>> A`, a `POLYtype`, a classfile generic method), `Some(Invariant)` is an
+explicit declaration, which is what `STABLE` writes. Dotty keeps the two apart
+(`HKTypeLambda.isDeclaredVarianceLambda = variances.nonEmpty`, the list may hold
+`Invariant`; the pickler writes markers only for such lambdas, and `pickleVariances`
+writes `STABLE` for an invariant entry in a lambda that declares any). The field
+is *declared* variance only; inferred variance belongs to a later typer.
+
+**Placement, as in Dotty's `readType`.** Alias-only:
+`AliasingBounds(readVariances(lo))`, so the markers apply to the one child.
+Two-sided: `createNullableTypeBounds(lo, readVariances(readType()))`, so they
+apply to the *upper* bound only; `low` is the plain decoded child, and a
+two-sided node whose `low` is a lambda but whose `high` is not leaves both as
+decoded: never a marker on `low`.
+
+**Why a rebinding, not a field change.** `readVariances` calls
+`HKTypeLambda.withVariances`, which builds a *new* lambda (`newLikeThis`) and
+substitutes the old binder's parameter references in the parameter infos and
+the result (`paramInfos.mapConserve(_.subst(this, x))`). The `PARAMtype`s in the
+file still name the old address. Copying the cached lambda and changing a
+variance would leave every nested `ParamRef` on the old `TypeId`; mutating it
+would change a type other addresses share.
+
+**`dotty_core::rebind_type_lambda(store, source, variances)`** is that
+operation, format-agnostic (no address, no TASTy concept in `dotty-core`):
+
+- it reserves the new binder's id before transforming the children, so a
+  reference to the binder inside them resolves to it, and rewrites every
+  reachable `ParamRef` of the old binder to the same parameter of the new one;
+- it is a memoized graph transformation, so a shared node is transformed once,
+  and a node with no dependence on the rebound binder keeps its own id (no
+  structural interning);
+- a nested `Method`, `Poly` or `TypeLambda`, and a `Recursive` with its
+  `RecThis`, is copied under a reserved id and remapped, so the copy is
+  internally consistent (conservatively: whenever it is reached);
+- an `Annotated` type gets a new annotation with the transformed type (the
+  stored one is never mutated, an unaffected one is reused); a `ClassInfo` gets
+  transformed `prefix`, `parents` and `self_type`, and keeps its class symbol
+  and scope;
+- the `match` over `Type` has no wildcard arm, so a new variant forces a review;
+- it is atomic: a store checkpoint is rolled back on any error (not a lambda,
+  variance-count mismatch, a reached slot that is reserved but unfilled, a cycle,
+  or a graph deeper than 512), and interned names are not touched.
+
+**Identity in the unpickler.** The child `TYPELAMBDAtype` is decoded normally
+first and stays the type cached at its own address, with no declared variance;
+a `SHAREDtype` to it still returns that original. The bounds hold a *fresh
+derived* lambda (declared variances, its own `ParamRef`s, no AST address).
+Decoding the bounds again returns the cached bounds, so no second derived lambda
+is made, and both decode orders (child first, bounds first) give the same
+relationship. A target that is not a `TypeLambda` (a `Poly`, an unrelated type)
+is left as it is, exactly as Dotty's `readVariances` does (`case _ => tp`): the
+markers are consumed and the bounds hold the decoded child. For a lambda, a
+marker count different from the arity is `BoundsVarianceArityMismatch` (nothing
+is truncated or padded), and a lambda still being decoded, whose slot is not
+filled, is `BoundsVarianceTargetPending` rather than a guess. Valid Scala 3.9
+output reaches neither error. `UnsupportedBoundsVariance` is gone.
+
+The real fixture cases (`Bounds.scala`): `+`, `-`, mixed `[+A, B, -C]` (with
+`STABLE` for `B`), a variance on the upper bound of a two-sided node, an
+F-bounded parameter, and both bounds of a two-sided node being `SHAREDtype`
+links to one lambda (only the upper carries the marker). An unannotated
+`type F[A] = ...` writes no marker at all in the fixture, so `STABLE` shows up
+beside another declared variance.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
 `NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
@@ -664,7 +723,7 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      complete;
    - 3b: `Method` and `Poly` on the same machinery, `PARAMtype` to all three
      binder kinds, and the `MethodParam` audit (`erased`/`varargs`) — complete;
-   - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — next.
+   - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — complete.
 4. Advanced types (refinements, recursive, match types, annotations, ...).
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -704,8 +763,7 @@ Deliberately not supported yet:
   aliases;
 - companion links (`SymbolLinks::companion`);
 - `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
-  `UnsupportedType`; `TYPEBOUNDS` with variance markers —
-  `UnsupportedBoundsVariance` until binder rebinding exists (3c);
+  `UnsupportedType`;
 - signed term references, cross-unit class members and
   inherited members (§4, "Name-based references");
 - packages and members outside the entered state with no resolver that knows
@@ -833,8 +891,9 @@ No `TYPELAMBDAtype` or `PARAMtype` is `UnsupportedType` for its own form, no
 binder is invalid (0 `InvalidBinderReference`, `InvalidBinderKind`,
 `InvalidParameterIndex` or `InvalidTypeParameterBounds`), and there were 0
 unexpected errors in any run. What remains is child resolution: an external
-type in a parameter's bounds or in the result, `TYPEBOUNDS` with variance
-markers (3c) and the odd unsupported child (`ANNOTATEDtype`). "Binder decoded
+type in a parameter's bounds or in the result, and the odd unsupported child
+(`ANNOTATEDtype`). (`TYPEBOUNDS` with variance markers, which used to be a
+deferred bucket here, decode since 3c.) "Binder decoded
 on demand" counts `PARAMtype` roots asked for before their binder had a type:
 1,672 / 169 with no builtins (every lambda fails, so none is ever cached) and
 242 / 94 with them (the lambdas that fail and are rolled back). Order
@@ -874,6 +933,27 @@ builtins: `TYPELAMBDAtype` 1,430 / 75, `POLYtype` 1 / 0, `METHODtype` 0 / 0
 errors: 0, and no binder form is reported as an unsupported form in any run.
 The `PARAMtype` counts of 3a moved by one (1,431, and 241 decoded on demand)
 because the one library `POLYtype` now decodes.
+
+### Variance-bearing `TYPEBOUNDS` after 3c (library / compiler)
+
+Same method, same two runs. The compiler corpus has none (0). The library has 90.
+
+| run | total | decoded | external child | pending target | arity mismatch | rebind failure | unexpected |
+|-----|-------|---------|----------------|----------------|----------------|----------------|------------|
+| no builtins | 90 / 0 | 0 / 0 | 90 / 0 | 0 | 0 | 0 | 0 |
+| builtins | 90 / 0 | 77 / 0 | 13 / 0 | 0 | 0 | 0 | 0 |
+
+With builtins, 77 of the 90 decode and the other 13 fail only on an external
+type in the lambda (the library's own collection types, which a classpath
+resolver would supply). No well-formed marker fails for being a marker: 0
+pending targets, 0 arity mismatches, 0 rebind failures, 0 binder errors and 0
+unexpected errors in any run. Decoded `TYPELAMBDAtype`, with builtins: library
+490 standalone plus 77 as the source of a variance application (567 in all, up
+from 562: the same lambdas, now also reachable through decoded bounds), compiler
+72 standalone and none as a source. The builtin run moves the earlier tables:
+library `TYPEBOUNDS` decode 716 (from 639), `PARAMtype` 1,445 (from 1,431), of
+which `TYPELAMBDAtype` binders 1,444 and `POLYtype` 1. `TYPELAMBDAtype` counts as
+"standalone" when it is not the direct child of a variance-bearing `TYPEBOUNDS`.
 
 ## 9. Review of Milestone 1
 

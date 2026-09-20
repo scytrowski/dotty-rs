@@ -26,7 +26,7 @@ use dotty_core::{
     Annotation as CoreAnnotation, ClassInfo, Definitions, ErrorType, MethodKind, MethodParam,
     MethodType, Name, Namespace, PolyType, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags,
     SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName,
-    TypeParam, Variance, Visibility,
+    TypeParam, Visibility,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1700,7 +1700,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             type_params.push(TypeParam {
                 name: TypeName::new(text),
                 bounds: high,
-                variance: Variance::Invariant,
+                declared_variance: None,
             });
         }
 
