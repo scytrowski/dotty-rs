@@ -85,7 +85,7 @@ fn render_tree(
             let name = names.resolve(ident.name.text());
             fields.push(format!(
                 "\"name\":{}",
-                quote(&normalize_placeholder_name(
+                quote(normalize_placeholder_name(
                     name,
                     &source_slice(tree, source)
                 ))
