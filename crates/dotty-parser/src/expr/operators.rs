@@ -80,8 +80,7 @@ where
             return None;
         }
 
-        let spelling = self.current_text().ok()?;
-        if spelling == "=" {
+        if self.current_is_structural_operator() {
             return None;
         }
 

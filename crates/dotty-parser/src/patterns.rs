@@ -433,7 +433,7 @@ where
         // literal is prefixed with `-`.  It belongs to Pattern1's typed
         // literal production, not to the infix-pattern layer.  Keep symbolic
         // operators such as `::` available for right-associative patterns.
-        if matches!(spelling, "|" | "@" | "=" | ":") {
+        if matches!(spelling, "|" | "@" | ":") || self.current_is_structural_operator() {
             return None;
         }
         self.pattern_operand_offset()?;
@@ -456,10 +456,6 @@ where
                 | TokenKind::ColonEol
                 | TokenKind::Punctuation(Punctuation::Colon)
         ) && self.current_text().ok() == Some(":")
-    }
-
-    fn current_text_is(&self, expected: &str) -> bool {
-        self.current_text().ok() == Some(expected)
     }
 
     fn token_text_at(&mut self, offset: usize) -> Option<&'src str> {
