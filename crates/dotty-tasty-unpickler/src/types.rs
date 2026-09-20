@@ -40,6 +40,16 @@
 //! | `ORtype`              | `Type Type`               | `Or { left, right }`               |
 //! | `SUPERtype`           | `Type Type`               | `SuperType { this_type, super_type }` |
 //! | `BYNAMEtype`          | `Type`                    | `ByName { result }`                |
+//! | `UNITconst` .. `STRINGconst` | the constant itself | `Constant(..)`, losslessly        |
+//! | `CLASSconst`          | `Type`                    | `Constant(Class(type))`            |
+//! | `FLEXIBLEtype`        | `Type`                    | `Flexible { underlying }`          |
+//! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
+//! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
+//!
+//! `TYPEBOUNDS` with trailing variance markers is
+//! [`UnsupportedBoundsVariance`](UnpickleError::UnsupportedBoundsVariance):
+//! Dotty applies the markers to a `TypeLambda` bound, so they cannot be kept
+//! faithfully until binder types exist (Milestone 3).
 //!
 //! `And` and `Or` keep the operand order and nesting the compiler wrote: no
 //! commutative normalisation, no flattening. `BYNAMEtype` stays a wrapper; it
@@ -51,8 +61,8 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `TYPEBOUNDS`, `ANNOTATEDtype`,
-//! `TYPELAMBDAtype`, `FLEXIBLEtype`, constants, method/poly/param types,
+//! Every other form is `UnsupportedType`: `ANNOTATEDtype`,
+//! `TYPELAMBDAtype`, method/poly/param types,
 //! refinements, recursive and match types, and `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
@@ -60,17 +70,18 @@ use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
 use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
-use dotty_core::types::Type;
+use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
-    ANDTYPE_TAG, APPLIEDTYPE_TAG, BYNAMETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG,
-    SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
+    FLEXIBLETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
+    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPEREF_TAG,
+    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
 use crate::lookup::{LocalLookup, lookup_member};
-use crate::names::{is_signed, package_segments, wire_name};
+use crate::names::{is_signed, package_segments, string_value, wire_name};
 use crate::unpickler::TastyUnpickler;
 
 /// The tag and absolute address of a tree's root node.
@@ -150,7 +161,10 @@ impl TastyUnpickler<'_, '_, '_> {
                     let prefix = self.definitions.no_prefix;
                     Type::TermRef { prefix, symbol }
                 }
-                _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
+                _ => match term.constant_value().map_err(AstError::from)? {
+                    Some(value) => Type::Constant(self.constant(value)?),
+                    None => return Err(UnpickleError::UnsupportedType { tag, address: at }),
+                },
             },
             RawTree::NatAst {
                 value: target,
@@ -223,6 +237,32 @@ impl TastyUnpickler<'_, '_, '_> {
                     super_type,
                 }
             }
+            RawTree::LengthNode(node) if tag == TYPEBOUNDS_TAG => {
+                let shape = node.decode_type_bounds()?;
+                if !shape.variances.is_empty() {
+                    // Dotty applies the markers to an `HKTypeLambda` bound,
+                    // which is not decoded yet: never drop them.
+                    return Err(UnpickleError::UnsupportedBoundsVariance { address: at });
+                }
+                if shape.high.is_some() {
+                    let [low, high] = self.decode_binary(ast, at, depth)?;
+                    Type::Bounds { low, high }
+                } else {
+                    let ids = self.decode_children(ast, at, 1, depth)?;
+                    Type::AliasingBounds { alias: ids[0] }
+                }
+            }
+            RawTree::Ast { .. } if tag == CLASSCONST_TAG => {
+                // The constant holds the type the class literal denotes, not
+                // a reference to a class symbol.
+                let class = self.decode_type(ast, &tree.decode_class_const()?.child, depth)?;
+                Type::Constant(Constant::Class(class))
+            }
+            RawTree::LengthNode(node) if tag == FLEXIBLETYPE_TAG => {
+                node.decode_flexible_type()?;
+                let ids = self.decode_children(ast, at, 1, depth)?;
+                Type::Flexible { underlying: ids[0] }
+            }
             RawTree::Ast { .. } if tag == BYNAMETYPE_TAG => {
                 let result = self.decode_type(ast, &tree.decode_by_name_type()?.child, depth)?;
                 Type::ByName { result }
@@ -233,6 +273,27 @@ impl TastyUnpickler<'_, '_, '_> {
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
+    }
+
+    /// The semantic constant for a wire constant, losslessly: floating-point
+    /// bit patterns and 16-bit characters are carried as they were written.
+    fn constant(&mut self, value: ConstantValue) -> Result<Constant, UnpickleError> {
+        Ok(match value {
+            ConstantValue::Unit => Constant::Unit,
+            ConstantValue::Null => Constant::Null,
+            ConstantValue::Boolean(value) => Constant::Boolean(value),
+            ConstantValue::Byte(value) => Constant::Byte(value),
+            ConstantValue::Short(value) => Constant::Short(value),
+            ConstantValue::Char(unit) => Constant::Char(unit),
+            ConstantValue::Int(value) => Constant::Int(value),
+            ConstantValue::Long(value) => Constant::Long(value),
+            ConstantValue::FloatBits(bits) => Constant::FloatBits(bits),
+            ConstantValue::DoubleBits(bits) => Constant::DoubleBits(bits),
+            ConstantValue::String(reference) => {
+                let text = string_value(self.file.names(), reference)?;
+                Constant::String(self.store.names.intern(&text))
+            }
+        })
     }
 
     /// Decodes the `count` child types of the length-prefixed node at `at`,

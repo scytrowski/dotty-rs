@@ -27,14 +27,44 @@ const COMPOUND_TAGS: [(u8, &str); 5] = [
     (93, "BYNAMEtype"),
 ];
 
-/// Forms that stay unsupported; only their instances are counted.
-const UNSUPPORTED_TAGS: [(u8, &str); 3] = [
-    (153, "ANNOTATEDtype"),
-    (170, "TYPELAMBDAtype"),
-    (193, "FLEXIBLEtype"),
+const TYPEBOUNDS_TAG: u8 = 163;
+const FLEXIBLETYPE_TAG: u8 = 193;
+const CLASSCONST_TAG: u8 = 92;
+
+/// The bounds and flexible forms decoded since Milestone 2c2.
+const WRAPPER_TAGS: [(u8, &str); 2] = [
+    (TYPEBOUNDS_TAG, "TYPEBOUNDS"),
+    (FLEXIBLETYPE_TAG, "FLEXIBLEtype"),
 ];
 
-const TYPEBOUNDS_TAG: u8 = 163;
+/// The constant nodes decoded since Milestone 2c2. A constant type and a
+/// literal term are the same node, so these count every occurrence.
+const CONSTANT_TAGS: [(u8, &str); 13] = [
+    (2, "UNITconst"),
+    (3, "FALSEconst"),
+    (4, "TRUEconst"),
+    (5, "NULLconst"),
+    (67, "BYTEconst"),
+    (68, "SHORTconst"),
+    (69, "CHARconst"),
+    (70, "INTconst"),
+    (71, "LONGconst"),
+    (72, "FLOATconst"),
+    (73, "DOUBLEconst"),
+    (74, "STRINGconst"),
+    (CLASSCONST_TAG, "CLASSconst"),
+];
+
+/// Forms that stay unsupported; only their instances are counted.
+const UNSUPPORTED_TAGS: [(u8, &str); 2] = [(153, "ANNOTATEDtype"), (170, "TYPELAMBDAtype")];
+
+/// Whether `tag` is a form measured node by node (compound, bounds, flexible or
+/// constant) rather than as a reference.
+fn is_measured(tag: u8) -> bool {
+    COMPOUND_TAGS.iter().any(|(t, _)| *t == tag)
+        || WRAPPER_TAGS.iter().any(|(t, _)| *t == tag)
+        || CONSTANT_TAGS.iter().any(|(t, _)| *t == tag)
+}
 
 fn tasty_files(root: &Path) -> Vec<PathBuf> {
     let mut directories = vec![root.to_path_buf()];
@@ -68,6 +98,8 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
+    /// `TYPEBOUNDS` with variance markers, deferred to the binder milestone.
+    deferred_variance: usize,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: usize,
 }
@@ -82,6 +114,9 @@ struct BoundsShapes {
     alias_only: usize,
     /// Any variance marker after the types.
     with_variance: usize,
+    /// Decoded, by form.
+    decoded_alias: usize,
+    decoded_two_sided: usize,
     /// Not decodable structurally.
     malformed: usize,
 }
@@ -97,7 +132,7 @@ struct Tally {
     /// Name-based `TYPEREF` and `TERMREF`.
     named_type: Outcomes,
     named_term: Outcomes,
-    /// Per compound tag.
+    /// Per measured tag: compound, bounds, flexible and constant nodes.
     compound: BTreeMap<u8, Outcomes>,
     bounds: BoundsShapes,
     /// Nodes of the forms that stay unsupported.
@@ -132,10 +167,7 @@ fn run(
         let index = file.ast_address_index().unwrap();
         index
             .iter_nodes()
-            .filter(|node| {
-                REFERENCE_TAGS.contains(&node.tag)
-                    || COMPOUND_TAGS.iter().any(|(tag, _)| *tag == node.tag)
-            })
+            .filter(|node| REFERENCE_TAGS.contains(&node.tag) || is_measured(node.tag))
             .map(|node| (u32::try_from(node.offset).unwrap(), node.tag))
             .collect()
     };
@@ -200,9 +232,7 @@ fn run(
         let outcomes = match tag {
             117 => &mut tally.named_type,
             115 => &mut tally.named_term,
-            tag if COMPOUND_TAGS.iter().any(|(compound, _)| *compound == tag) => {
-                tally.compound.entry(tag).or_default()
-            }
+            tag if is_measured(tag) => tally.compound.entry(tag).or_default(),
             _ => &mut tally.by_address,
         };
         outcomes.nodes += 1;
@@ -212,6 +242,17 @@ fn run(
                 outcomes.decoded += 1;
                 // Identity: decoding again never allocates a second type.
                 assert_eq!(unpickler.unpickle_type(at), Ok(first));
+                if tag == TYPEBOUNDS_TAG {
+                    let shape = file
+                        .ast_address_index()
+                        .unwrap()
+                        .get(at)
+                        .unwrap()
+                        .decode_type_bounds()
+                        .unwrap();
+                    tally.bounds.decoded_alias += usize::from(shape.high.is_none());
+                    tally.bounds.decoded_two_sided += usize::from(shape.high.is_some());
+                }
             }
             Err(error) => {
                 failed += 1;
@@ -229,6 +270,9 @@ fn run(
                     UnpickleError::UnresolvedMember { .. } => {
                         outcomes.needs_external += 1;
                         tally.unresolved_members += 1;
+                    }
+                    UnpickleError::UnsupportedBoundsVariance { .. } => {
+                        outcomes.deferred_variance += 1;
                     }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
                     UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
@@ -340,42 +384,38 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 outcomes.unexpected,
             );
         }
-        println!("compound types (decoded: the node and every child decode):");
-        for (tag, label) in COMPOUND_TAGS {
-            let outcomes = tally
-                .compound
-                .get(&tag)
-                .map_or_else(Outcomes::default, |o| Outcomes {
-                    nodes: o.nodes,
-                    decoded: o.decoded,
-                    needs_external: o.needs_external,
-                    ambiguous: o.ambiguous,
-                    signed: o.signed,
-                    unsupported_prefix: o.unsupported_prefix,
-                    missing_local: o.missing_local,
-                    unsupported_child: o.unsupported_child,
-                    unexpected: o.unexpected,
-                });
-            println!(
-                "  {label}: nodes {}, decoded {}; child failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}; unexpected {}",
-                outcomes.nodes,
-                outcomes.decoded,
-                outcomes.needs_external,
-                outcomes.ambiguous,
-                outcomes.signed,
-                outcomes.unsupported_prefix,
-                outcomes.missing_local,
-                outcomes.unsupported_child,
-                outcomes.unexpected,
-            );
-        }
+        let report = |title: &str, tags: &[(u8, &str)]| {
+            println!("{title} (decoded: the node and every child decode):");
+            for (tag, label) in tags {
+                let none = Outcomes::default();
+                let o = tally.compound.get(tag).unwrap_or(&none);
+                println!(
+                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, deferred variance {}; unexpected {}",
+                    o.nodes,
+                    o.decoded,
+                    o.needs_external,
+                    o.ambiguous,
+                    o.signed,
+                    o.unsupported_prefix,
+                    o.missing_local,
+                    o.unsupported_child,
+                    o.deferred_variance,
+                    o.unexpected,
+                );
+            }
+        };
+        report("compound types", &COMPOUND_TAGS);
+        report("bounds and flexible types", &WRAPPER_TAGS);
+        report("constant nodes", &CONSTANT_TAGS);
         println!(
-            "TYPEBOUNDS: total {}, two-sided {}, alias-only {}, with variance {}, malformed {}",
+            "TYPEBOUNDS shapes: total {}, two-sided {}, alias-only {}, with variance {}, malformed {}; decoded alias-only {}, decoded two-sided {}",
             tally.bounds.total,
             tally.bounds.two_sided,
             tally.bounds.alias_only,
             tally.bounds.with_variance,
             tally.bounds.malformed,
+            tally.bounds.decoded_alias,
+            tally.bounds.decoded_two_sided,
         );
         for (tag, label) in UNSUPPORTED_TAGS {
             println!(

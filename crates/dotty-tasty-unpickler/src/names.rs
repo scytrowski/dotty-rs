@@ -15,9 +15,76 @@ use dotty_tasty::tasty::{NameTable, RawName};
 
 use crate::error::UnpickleError;
 
+/// The separators of the unique-name kinds Scala 3.9.0 registers
+/// (`NameKinds.uniqueNameKinds`, plus `$jsclass` from `ExplicitJSClasses`).
+/// Dotty's reader looks the separator up in that map and throws for any other,
+/// so an unregistered separator is not a name it reads.
+const UNIQUE_SEPARATORS: &[&str] = &[
+    "$",
+    "evidence$",
+    "contextual$",
+    "canThrow$",
+    "try$",
+    "ev$",
+    "(param)",
+    "$_lazy_implicit_$",
+    "$lzy",
+    "$lzyINIT",
+    "$OFFSET",
+    "bitmap$",
+    "nonLocalReturnKey",
+    "_$",
+    "tailLabel",
+    "$tailLocal",
+    "$tmp",
+    "ex",
+    "ex$",
+    "?",
+    "'s",
+    "$superArg$",
+    "$doc",
+    "$i",
+    "$scrutinee",
+    "$proxy",
+    "$macro$",
+    "$extension",
+    "x",
+    "matchAlts",
+    "matchResult",
+    "$given",
+    "ilo",
+    "boundary",
+    "$jsclass",
+];
+
 /// Composite names nest a handful of levels at most; anything deeper is a
 /// malformed (or cyclic) table rather than a real name.
 const MAX_NAME_DEPTH: usize = 64;
+
+/// The text of a string constant. `STRINGconst` carries a `NameRef`, and Dotty
+/// reads it as `readName().toString`, so any valid name entry is a string: a
+/// plain UTF-8 entry is its text, and a derived entry (qualified, expanded,
+/// unique, ...) is its rendered spelling.
+///
+/// Unlike [`wire_name`], which spells a member for lookup and drops a
+/// signature, this is the *value* of the name, so a signed entry (directly, or
+/// nested in a derived one) renders as Dotty's `SignedName.mkString` does:
+/// `f[with sig Signature(List(A, 1),R)]`. `Signature` is a case class without
+/// its own `toString`, so its parts print as `List` and `String` do: term
+/// parameters by name, type-parameter sections by their length, then the
+/// result, with no space before the result.
+pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
+    resolve(names, reference, reference, 0, Spelling::Value)
+}
+
+/// What a rendered name is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spelling {
+    /// A member name for lookup: a signature is dropped.
+    Member,
+    /// The value of the name, as Dotty's `Name.toString`: signatures show.
+    Value,
+}
 
 /// Renders the name at the zero-based wire `reference` to its Scala spelling.
 ///
@@ -25,7 +92,7 @@ const MAX_NAME_DEPTH: usize = 64;
 /// original name: the signature is not part of the name, and overloads are
 /// told apart by definition address, not by signature text.
 pub(crate) fn wire_name(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
-    resolve(names, reference, reference, 0)
+    resolve(names, reference, reference, 0, Spelling::Member)
 }
 
 /// Whether the name at `reference` is a signed name (`SIGNED` or
@@ -104,64 +171,265 @@ fn collect_segments(
     Ok(())
 }
 
+fn entry_at(names: &NameTable, reference: u32) -> Result<&RawName, UnpickleError> {
+    usize::try_from(reference)
+        .ok()
+        .and_then(|index| names.entries().get(index))
+        .ok_or(UnpickleError::InvalidNameReference { reference })
+}
+
+/// The qualifier separator of a qualified-name kind (`QualifiedNameKind`).
+fn qualified_parts(entry: &RawName) -> Option<(u32, u32, &'static str)> {
+    match entry {
+        RawName::Qualified { prefix, selector } => Some((*prefix, *selector, ".")),
+        RawName::Expanded { prefix, selector } => Some((*prefix, *selector, "$$")),
+        RawName::ExpandPrefix { prefix, selector } => Some((*prefix, *selector, "$")),
+        _ => None,
+    }
+}
+
+/// What a derived (non-qualified) entry is built over: `None` for entries that
+/// are not derived this way, `Some(None)` for a unique name with no original.
+fn derived_underlying(entry: &RawName) -> Option<Option<u32>> {
+    match entry {
+        RawName::Unique { underlying, .. } => Some(*underlying),
+        RawName::DefaultGetter { underlying, .. }
+        | RawName::SuperAccessor { underlying }
+        | RawName::InlineAccessor { underlying }
+        | RawName::ObjectClass { underlying }
+        | RawName::BodyRetainer { underlying } => Some(Some(*underlying)),
+        RawName::Signed { original, .. } | RawName::TargetSigned { original, .. } => {
+            Some(Some(*original))
+        }
+        _ => None,
+    }
+}
+
+/// Dotty's `PrefixNameKind` / `SuffixNameKind`: these apply to the last
+/// segment of a qualified underlying name (`qualToString`), not to the whole.
+fn segment_affix(entry: &RawName) -> Option<(&'static str, &'static str)> {
+    match entry {
+        RawName::SuperAccessor { .. } => Some(("super$", "")),
+        RawName::InlineAccessor { .. } => Some(("inline$", "")),
+        RawName::ObjectClass { .. } => Some(("", "$")),
+        RawName::BodyRetainer { .. } => Some(("", "$retainedBody")),
+        _ => None,
+    }
+}
+
+/// Dotty's `Name.split`, rendered: a qualified name `first sep last`, or
+/// `("", the name, "")` for one that is not qualified. A name derived over a
+/// qualified one splits like the underlying, with the derivation applied to the
+/// last segment. `last_is_simple` is whether that segment is a plain name.
+struct Split {
+    first: String,
+    last: String,
+    last_is_simple: bool,
+    separator: &'static str,
+}
+
+fn split(
+    names: &NameTable,
+    root: u32,
+    reference: u32,
+    depth: usize,
+    spelling: Spelling,
+) -> Result<Split, UnpickleError> {
+    if depth > MAX_NAME_DEPTH {
+        return Err(UnpickleError::InvalidNameReference { reference: root });
+    }
+    let entry = entry_at(names, reference)?;
+    let inner = |reference: u32| resolve(names, root, reference, depth + 1, spelling);
+    if let Some((prefix, selector, separator)) = qualified_parts(entry) {
+        return Ok(Split {
+            first: inner(prefix)?,
+            last: inner(selector)?,
+            last_is_simple: true,
+            separator,
+        });
+    }
+    match derived_underlying(entry) {
+        None => Ok(Split {
+            first: String::new(),
+            last: resolve(names, root, reference, depth, spelling)?,
+            last_is_simple: true,
+            separator: "",
+        }),
+        Some(underlying) => {
+            let under = match underlying {
+                Some(underlying) => split(names, root, underlying, depth + 1, spelling)?,
+                None => Split {
+                    first: String::new(),
+                    last: String::new(),
+                    last_is_simple: false,
+                    separator: "",
+                },
+            };
+            let last = derive(
+                names,
+                root,
+                reference,
+                depth,
+                spelling,
+                entry,
+                &under.last,
+                under.last_is_simple,
+            )?;
+            Ok(Split {
+                first: under.first,
+                last,
+                last_is_simple: false,
+                separator: under.separator,
+            })
+        }
+    }
+}
+
+/// Applies the kind of the derived `entry` to an already rendered underlying
+/// name. `under_is_simple` is whether the underlying is a plain name, which is
+/// what Dotty's `isConstructorName` compares.
+#[allow(clippy::too_many_arguments)]
+fn derive(
+    names: &NameTable,
+    root: u32,
+    reference: u32,
+    depth: usize,
+    spelling: Spelling,
+    entry: &RawName,
+    under: &str,
+    under_is_simple: bool,
+) -> Result<String, UnpickleError> {
+    let inner = |reference: u32| resolve(names, root, reference, depth + 1, spelling);
+    Ok(match entry {
+        RawName::Unique {
+            separator, uniqid, ..
+        } => {
+            let separator = inner(*separator)?;
+            if !UNIQUE_SEPARATORS.contains(&separator.as_str()) {
+                return Err(UnpickleError::UnsupportedName { reference });
+            }
+            // Dotty's `UniqueNameKind.mkString`, with the two kinds that
+            // override it: `$` names an anonymous number `$3$`, and
+            // `contextual$` keeps a non-empty original as it is.
+            let sanitized = under.replace(['<', '>'], "$");
+            if under.is_empty() && separator == "$" {
+                format!("${uniqid}$")
+            } else if separator == "contextual$" && !under.is_empty() {
+                sanitized
+            } else {
+                format!("{sanitized}{separator}{uniqid}")
+            }
+        }
+        RawName::DefaultGetter { index, .. } => {
+            // A constructor's default getters are named after
+            // `nme.DEFAULT_GETTER_INIT`, not after `<init>`.
+            let constructor = under_is_simple && matches!(under, "<init>" | "$init$");
+            let prefix = if constructor {
+                "$lessinit$greater"
+            } else {
+                under
+            };
+            format!("{prefix}$default${}", u64::from(*index) + 1)
+        }
+        RawName::SuperAccessor { .. }
+        | RawName::InlineAccessor { .. }
+        | RawName::ObjectClass { .. }
+        | RawName::BodyRetainer { .. } => {
+            let (prefix, suffix) = segment_affix(entry).unwrap_or(("", ""));
+            format!("{prefix}{under}{suffix}")
+        }
+        RawName::Signed {
+            result_signature,
+            parameter_signatures,
+            ..
+        }
+        | RawName::TargetSigned {
+            result_signature,
+            parameter_signatures,
+            ..
+        } => {
+            if spelling == Spelling::Member {
+                return Ok(under.to_owned());
+            }
+            // Dotty's `readParamSig`: a negative value is the length of a
+            // type-parameter section, anything else a name reference.
+            let mut parameters = Vec::with_capacity(parameter_signatures.len());
+            for signature in parameter_signatures {
+                parameters.push(match u32::try_from(*signature) {
+                    Ok(reference) => inner(reference)?,
+                    Err(_) => signature
+                        .checked_abs()
+                        .ok_or(UnpickleError::InvalidNameReference { reference })?
+                        .to_string(),
+                });
+            }
+            format!(
+                "{under}[with sig Signature(List({}),{})]",
+                parameters.join(", "),
+                inner(*result_signature)?
+            )
+        }
+        _ => return Err(UnpickleError::UnsupportedName { reference }),
+    })
+}
+
 fn resolve(
     names: &NameTable,
     root: u32,
     reference: u32,
     depth: usize,
+    spelling: Spelling,
 ) -> Result<String, UnpickleError> {
     if depth > MAX_NAME_DEPTH {
         return Err(UnpickleError::InvalidNameReference { reference: root });
     }
-    let entry = usize::try_from(reference)
-        .ok()
-        .and_then(|index| names.entries().get(index))
-        .ok_or(UnpickleError::InvalidNameReference { reference })?;
-    let inner = |reference: u32| resolve(names, root, reference, depth + 1);
+    let entry = entry_at(names, reference)?;
+    let inner = |reference: u32| resolve(names, root, reference, depth + 1, spelling);
 
-    Ok(match entry {
-        RawName::Utf8(text) => text.clone(),
-        RawName::Qualified { prefix, selector } => {
-            format!("{}.{}", inner(*prefix)?, inner(*selector)?)
-        }
-        RawName::Expanded { prefix, selector } => {
-            format!("{}$${}", inner(*prefix)?, inner(*selector)?)
-        }
-        RawName::ExpandPrefix { prefix, selector } => {
-            format!("{}${}", inner(*prefix)?, inner(*selector)?)
-        }
-        RawName::Unique {
-            separator,
-            uniqid,
-            underlying,
-        } => {
-            let separator = inner(*separator)?;
-            let underlying = match underlying {
-                Some(underlying) => inner(*underlying)?,
-                None => String::new(),
-            };
-            if underlying.is_empty() && separator == "$" {
-                format!("${uniqid}$")
-            } else {
-                format!("{underlying}{separator}{uniqid}")
-            }
-        }
-        RawName::DefaultGetter { underlying, index } => {
-            format!("{}$default${}", inner(*underlying)?, u64::from(*index) + 1)
-        }
-        RawName::SuperAccessor { underlying } => format!("super${}", inner(*underlying)?),
-        RawName::InlineAccessor { underlying } => format!("inline${}", inner(*underlying)?),
-        RawName::ObjectClass { underlying } => format!("{}$", inner(*underlying)?),
-        RawName::BodyRetainer { underlying } => {
-            format!("{}$retainedBody", inner(*underlying)?)
-        }
-        RawName::Signed { original, .. } | RawName::TargetSigned { original, .. } => {
-            inner(*original)?
-        }
-        RawName::Unknown { .. } => {
-            return Err(UnpickleError::UnsupportedName { reference });
-        }
-    })
+    if let RawName::Utf8(text) = entry {
+        return Ok(text.clone());
+    }
+    if let Some((prefix, selector, separator)) = qualified_parts(entry) {
+        return Ok(format!("{}{separator}{}", inner(prefix)?, inner(selector)?));
+    }
+    let Some(underlying) = derived_underlying(entry) else {
+        return Err(UnpickleError::UnsupportedName { reference });
+    };
+
+    if segment_affix(entry).is_some() {
+        // `qualToString`: split the underlying, apply the kind to its last
+        // segment, and rejoin (sanitised) when there is a qualifier.
+        let under = match underlying {
+            Some(underlying) => split(names, root, underlying, depth + 1, spelling)?,
+            None => return Err(UnpickleError::InvalidNameReference { reference }),
+        };
+        let last = derive(
+            names,
+            root,
+            reference,
+            depth,
+            spelling,
+            entry,
+            &under.last,
+            under.last_is_simple,
+        )?;
+        return Ok(if under.first.is_empty() {
+            last
+        } else {
+            format!("{}{}{last}", under.first, under.separator).replace(['<', '>'], "$")
+        });
+    }
+
+    let (under, simple) = match underlying {
+        Some(underlying) => (
+            inner(underlying)?,
+            matches!(entry_at(names, underlying)?, RawName::Utf8(_)),
+        ),
+        None => (String::new(), false),
+    };
+    derive(
+        names, root, reference, depth, spelling, entry, &under, simple,
+    )
 }
 
 #[cfg(test)]
@@ -179,6 +447,27 @@ mod tests {
 
     fn utf8(text: &str) -> RawName {
         RawName::Utf8(text.to_owned())
+    }
+
+    #[test]
+    fn a_string_value_is_any_valid_name_rendered_as_dotty_does() {
+        let names = table(vec![
+            utf8("a.b"),
+            utf8("b"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+        ]);
+
+        // A plain entry is its text, not split.
+        assert_eq!(string_value(&names, 1).unwrap(), "a.b");
+        // A derived entry is its rendered name.
+        assert_eq!(string_value(&names, 3).unwrap(), "a.b.b");
+        assert_eq!(
+            string_value(&names, 9),
+            Err(UnpickleError::InvalidNameReference { reference: 9 })
+        );
     }
 
     #[test]
@@ -301,6 +590,216 @@ mod tests {
         ]);
 
         assert_eq!(wire_name(&names, 3).unwrap(), "<init>");
+    }
+
+    #[test]
+    fn a_constructor_default_getter_is_named_after_lessinit_greater() {
+        let names = table(vec![
+            utf8("<init>"),
+            utf8("$init$"),
+            utf8("f"),
+            utf8("a"),
+            RawName::DefaultGetter {
+                underlying: 1,
+                index: 0,
+            },
+            RawName::DefaultGetter {
+                underlying: 2,
+                index: 1,
+            },
+            RawName::DefaultGetter {
+                underlying: 3,
+                index: 0,
+            },
+            RawName::Qualified {
+                prefix: 4,
+                selector: 1,
+            },
+            RawName::DefaultGetter {
+                underlying: 8,
+                index: 0,
+            },
+        ]);
+
+        // `DefaultGetterName.mkString`: `isConstructorName` is `<init>` or
+        // `$init$`, which use `nme.DEFAULT_GETTER_INIT`.
+        assert_eq!(wire_name(&names, 5).unwrap(), "$lessinit$greater$default$1");
+        assert_eq!(wire_name(&names, 6).unwrap(), "$lessinit$greater$default$2");
+        assert_eq!(wire_name(&names, 7).unwrap(), "f$default$1");
+        // A qualified `a.<init>` is not a constructor name.
+        assert_eq!(wire_name(&names, 9).unwrap(), "a.<init>$default$1");
+        assert_eq!(
+            string_value(&names, 5).unwrap(),
+            "$lessinit$greater$default$1"
+        );
+    }
+
+    #[test]
+    fn prefix_and_suffix_kinds_apply_to_the_last_segment_of_a_qualified_name() {
+        // Entries: 1 `a`, 2 `b`, 3 `a.b`, 4.. accessors over 3.
+        let names = table(vec![
+            utf8("a"),
+            utf8("b"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::SuperAccessor { underlying: 3 },
+            RawName::InlineAccessor { underlying: 3 },
+            RawName::ObjectClass { underlying: 3 },
+            RawName::BodyRetainer { underlying: 3 },
+            RawName::SuperAccessor { underlying: 2 },
+        ]);
+
+        assert_eq!(wire_name(&names, 4).unwrap(), "a.super$b");
+        assert_eq!(wire_name(&names, 5).unwrap(), "a.inline$b");
+        assert_eq!(wire_name(&names, 6).unwrap(), "a.b$");
+        assert_eq!(wire_name(&names, 7).unwrap(), "a.b$retainedBody");
+        // No qualifier: the prefix goes on the whole name.
+        assert_eq!(wire_name(&names, 8).unwrap(), "super$b");
+        assert_eq!(string_value(&names, 4).unwrap(), "a.super$b");
+    }
+
+    #[test]
+    fn a_qualified_affix_result_is_sanitized_like_qual_to_string() {
+        let names = table(vec![
+            utf8("<root>"),
+            utf8("x"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::SuperAccessor { underlying: 3 },
+        ]);
+
+        // `str.sanitize` covers the whole rejoined name, including `<root>`.
+        assert_eq!(wire_name(&names, 4).unwrap(), "$root$.super$x");
+    }
+
+    #[test]
+    fn a_derived_name_over_a_qualified_one_splits_like_the_underlying() {
+        // `SuperAccessor(DefaultGetter(a.b))`: the accessor prefix lands on the
+        // last segment, which is the default getter `b$default$1`.
+        let names = table(vec![
+            utf8("a"),
+            utf8("b"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            RawName::DefaultGetter {
+                underlying: 3,
+                index: 0,
+            },
+            RawName::SuperAccessor { underlying: 4 },
+        ]);
+
+        assert_eq!(wire_name(&names, 5).unwrap(), "a.super$b$default$1");
+    }
+
+    #[test]
+    fn a_unique_name_sanitizes_its_original_like_dotty() {
+        let names = table(vec![
+            utf8("$"),
+            utf8("<init>"),
+            RawName::Unique {
+                separator: 1,
+                uniqid: 2,
+                underlying: Some(2),
+            },
+            utf8("contextual$"),
+            RawName::Unique {
+                separator: 4,
+                uniqid: 1,
+                underlying: Some(2),
+            },
+            RawName::Unique {
+                separator: 4,
+                uniqid: 1,
+                underlying: None,
+            },
+        ]);
+
+        // `str.sanitize` turns `<` and `>` into `$` before the separator.
+        assert_eq!(wire_name(&names, 3).unwrap(), "$init$$2");
+        // `contextual$` keeps a non-empty original alone, else `contextual$1`.
+        assert_eq!(wire_name(&names, 5).unwrap(), "$init$");
+        assert_eq!(wire_name(&names, 6).unwrap(), "contextual$1");
+    }
+
+    #[test]
+    fn a_unique_name_with_an_unregistered_separator_is_unsupported() {
+        // Dotty looks the separator up in `uniqueNameKinds` and throws.
+        let names = table(vec![
+            utf8("#"),
+            utf8("a"),
+            RawName::Unique {
+                separator: 1,
+                uniqid: 1,
+                underlying: Some(2),
+            },
+        ]);
+
+        assert_eq!(
+            wire_name(&names, 3),
+            Err(UnpickleError::UnsupportedName { reference: 3 })
+        );
+    }
+
+    /// Entries: 1 `f`, 2 `Unit`, 3 `Int`, 4 `g`, then 5 a signed name with a
+    /// term parameter and a two-long type-parameter section, 6 a target-signed
+    /// name without parameters, 7 a qualified name whose prefix is entry 5.
+    fn signed_names() -> NameTable {
+        table(vec![
+            utf8("f"),
+            utf8("Unit"),
+            utf8("Int"),
+            utf8("g"),
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: vec![3, -2],
+            },
+            RawName::TargetSigned {
+                original: 1,
+                target: 4,
+                result_signature: 2,
+                parameter_signatures: Vec::new(),
+            },
+            RawName::Qualified {
+                prefix: 5,
+                selector: 4,
+            },
+        ])
+    }
+
+    #[test]
+    fn a_signed_string_value_shows_its_signature_like_dotty() {
+        let names = signed_names();
+
+        // `SignedName.mkString`: `$underlying[with sig $sig]`, and the
+        // case-class `Signature` prints as `Signature(List(..),result)`.
+        assert_eq!(
+            string_value(&names, 5).unwrap(),
+            "f[with sig Signature(List(Int, 2),Unit)]"
+        );
+        assert_eq!(
+            string_value(&names, 6).unwrap(),
+            "f[with sig Signature(List(),Unit)]"
+        );
+    }
+
+    #[test]
+    fn a_signed_name_nested_in_a_derived_name_shows_its_signature() {
+        let names = signed_names();
+
+        assert_eq!(
+            string_value(&names, 7).unwrap(),
+            "f[with sig Signature(List(Int, 2),Unit)].g"
+        );
+        // The member spelling of the same entries still drops it.
+        assert_eq!(wire_name(&names, 5).unwrap(), "f");
+        assert_eq!(wire_name(&names, 7).unwrap(), "f.g");
     }
 
     #[test]
