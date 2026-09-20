@@ -29,6 +29,10 @@ where
             let mark = self.mark();
             return self.parse_while_expr(mark);
         }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Try) {
+            let mark = self.mark();
+            return self.parse_try_expr(mark);
+        }
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Throw) {
             let mark = self.mark();
             return self.parse_throw_expr(mark);
