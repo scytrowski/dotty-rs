@@ -442,7 +442,7 @@ by all three forms. For a binder at address `B`:
    the parameter names, so a malformed node fails before anything is reserved;
 2. `TypeArena::reserve` gives the binder id `B'`;
 3. `B -> B'` is recorded in the index, *before* any child is decoded;
-4. a `PendingBinder { address, id, kind, arity }` is pushed;
+4. a `PendingBinder { address, id, kind, arity }` is pushed (`arity` is `None` for a `RECtype`, which binds no parameters);
 5. the parameter bounds, then the result, are decoded from the absolute
    addresses in the AST index (the structural decoder's trees are relative to
    the payload and only validate the shape, as in 2c1). Either order works once
