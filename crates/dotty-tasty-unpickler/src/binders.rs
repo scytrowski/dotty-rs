@@ -30,9 +30,11 @@
 //! `unpickle_type` returns.
 
 use dotty_core::ids::TypeId;
-use dotty_core::names::TypeName;
-use dotty_core::types::{PolyType, Type, TypeLambda, TypeParam, Variance};
-use dotty_tasty::tasty::RawNode;
+use dotty_core::names::{TermName, TypeName};
+use dotty_core::types::{
+    MethodKind, MethodParam, MethodType, PolyType, Type, TypeLambda, TypeParam, Variance,
+};
+use dotty_tasty::tasty::{GIVEN_TAG, IMPLICIT_TAG, RawNode};
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
@@ -206,6 +208,25 @@ impl TastyUnpickler<'_, '_, '_> {
         self.decode_methodic(ast, at, depth, Methodic::Poly, names)
     }
 
+    /// `METHODtype Length result_Type (paramType_Type paramName_NameRef)*
+    /// Modifier*` at `at`, as a `Method` stored under its own address's
+    /// `TypeId`. Zero parameters is a valid clause, `(): R`.
+    ///
+    /// A `ParamRef` to this binder is a *term* parameter reference, which is
+    /// how a dependent result (`(x: Box): x.Out`) names the clause it is in.
+    pub(crate) fn decode_method_type(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        let shape = node.decode_method_type()?;
+        let kind = method_kind(at, &shape.modifiers)?;
+        let names = shape.type_names.iter().map(|entry| entry.name).collect();
+        self.decode_methodic(ast, at, depth, Methodic::Method(kind), names)
+    }
+
     /// The shared body of every binder form (Dotty's `readMethodic`): the
     /// envelope and the parameter names are validated first. Then the id is
     /// reserved and published, and only then are the children decoded, so a
@@ -265,20 +286,49 @@ impl TastyUnpickler<'_, '_, '_> {
             let mut params = Vec::with_capacity(interned.len());
             for (position, name) in interned.iter().enumerate() {
                 let info = this.type_at(ast, children[position + 1], at, depth)?;
-                this.check_parameter_bounds(id, position, info)?;
-                params.push(TypeParam {
-                    name: TypeName::new(*name),
-                    bounds: info,
-                    variance: Variance::Invariant,
-                });
+                if form.has_type_parameters() {
+                    this.check_parameter_bounds(id, position, info)?;
+                }
+                params.push((*name, info));
             }
             let result = this.type_at(ast, children[0], at, depth)?;
             Ok::<_, UnpickleError>((params, result))
         })?;
 
+        let type_params = || {
+            params
+                .iter()
+                .map(|(name, info)| TypeParam {
+                    name: TypeName::new(*name),
+                    bounds: *info,
+                    variance: Variance::Invariant,
+                })
+                .collect()
+        };
         let ty = match form {
-            Methodic::TypeLambda => Type::TypeLambda(TypeLambda { params, result }),
-            Methodic::Poly => Type::Poly(PolyType { params, result }),
+            Methodic::TypeLambda => Type::TypeLambda(TypeLambda {
+                params: type_params(),
+                result,
+            }),
+            Methodic::Poly => Type::Poly(PolyType {
+                params: type_params(),
+                result,
+            }),
+            // `erased` and `varargs` are not on the wire of a `METHODtype`:
+            // see the module documentation.
+            Methodic::Method(kind) => Type::Method(MethodType {
+                params: params
+                    .iter()
+                    .map(|(name, info)| MethodParam {
+                        name: TermName::new(*name),
+                        ty: *info,
+                        erased: false,
+                        varargs: false,
+                    })
+                    .collect(),
+                result,
+                kind,
+            }),
         };
         self.store.types.fill(reserved, ty);
         Ok(id)
@@ -329,6 +379,7 @@ impl TastyUnpickler<'_, '_, '_> {
 enum Methodic {
     TypeLambda,
     Poly,
+    Method(MethodKind),
 }
 
 impl Methodic {
@@ -336,15 +387,45 @@ impl Methodic {
         match self {
             Self::TypeLambda => BinderKind::TypeLambda,
             Self::Poly => BinderKind::Poly,
+            Self::Method(_) => BinderKind::Method,
         }
     }
 
-    /// Whether an empty parameter list is malformed for this form.
-    fn requires_parameters(self) -> bool {
-        match self {
-            Self::TypeLambda | Self::Poly => true,
-        }
+    /// Whether the parameters are type parameters (with bounds infos) rather
+    /// than term parameters.
+    fn has_type_parameters(self) -> bool {
+        !matches!(self, Self::Method(_))
     }
+
+    /// Whether an empty parameter list is malformed for this form. Only a
+    /// method clause may be empty, `()`.
+    fn requires_parameters(self) -> bool {
+        self.has_type_parameters()
+    }
+}
+
+/// The clause kind of a `METHODtype` from its modifier tail, as Dotty's
+/// `methodTypeCompanion`: `IMPLICIT` is an implicit clause, `GIVEN` a
+/// contextual one, neither a plain one. Both at once contradict each other,
+/// and any other modifier has no meaning on a method type, so neither is
+/// silently ignored.
+fn method_kind(at: u32, modifiers: &[u8]) -> Result<MethodKind, UnpickleError> {
+    let mut kind = MethodKind::Plain;
+    for &modifier in modifiers {
+        let next = match modifier {
+            IMPLICIT_TAG => MethodKind::Implicit,
+            GIVEN_TAG => MethodKind::Contextual,
+            tag => return Err(UnpickleError::InvalidMethodModifier { address: at, tag }),
+        };
+        if kind != MethodKind::Plain && kind != next {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the method type is both implicit and given",
+            });
+        }
+        kind = next;
+    }
+    Ok(kind)
 }
 
 #[cfg(test)]

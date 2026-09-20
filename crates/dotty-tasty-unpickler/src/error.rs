@@ -95,6 +95,9 @@ pub enum UnpickleError {
     /// applies them to a `TypeLambda` bound, which is not decoded until the
     /// binder milestone, so the node is refused rather than losing them.
     UnsupportedBoundsVariance { address: u32 },
+    /// The `METHODtype` at `address` ends with a modifier, `tag`, that a method
+    /// type does not use (only `IMPLICIT` and `GIVEN` do).
+    InvalidMethodModifier { address: u32, tag: u8 },
     /// The `PARAMtype` at `from` names `binder`, which is not the start of a
     /// visible AST node.
     InvalidBinderReference { from: u32, binder: u32 },
@@ -212,6 +215,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the bounds at address {address} carry variance markers, which need type lambdas"
             ),
+            Self::InvalidMethodModifier { address, tag } => write!(
+                formatter,
+                "the method type at address {address} carries modifier {tag}, which a method type does not use"
+            ),
             Self::InvalidBinderReference { from, binder } => write!(
                 formatter,
                 "the parameter type at address {from} names address {binder}, which is not a node"
@@ -274,6 +281,7 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
             | Self::UnsupportedBoundsVariance { .. }
+            | Self::InvalidMethodModifier { .. }
             | Self::InvalidBinderReference { .. }
             | Self::InvalidBinderKind { .. }
             | Self::InvalidParameterIndex { .. }
