@@ -1,5 +1,6 @@
 use dotty_core::ast::{
     Apply, ApplyKind, Block, Ident, NamedArg, New, Parens, Select, Super, This, Tuple, UntypedNode,
+    ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -33,6 +34,9 @@ where
 
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                if self.current().kind == TokenKind::Identifier && self.current_text_is("_") {
+                    return self.parse_placeholder(mark);
+                }
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let Ok(name) = self.intern_current_term_name() else {
                     return self.unexpected_expression();
@@ -72,6 +76,29 @@ where
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
             _ => self.unexpected_expression(),
         }
+    }
+
+    fn parse_placeholder(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let name = self.fresh_wildcard_param_name();
+        let tpt = self.synthetic_type_tree_at(mark.start());
+        let parameter = self.alloc_from(
+            mark,
+            TreeKind::ValDef(ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata: dotty_core::ast::Modifiers::default(),
+            }),
+        );
+        self.placeholder_params.push(parameter);
+        self.alloc_from(
+            mark,
+            TreeKind::Ident(Ident {
+                name: *name.as_name(),
+                backquoted: false,
+            }),
+        )
     }
 
     fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -547,5 +574,76 @@ where
             self.advance();
         }
         self.error_expr(position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::NameInterner;
+    use dotty_core::ast::{Ident, ValDef};
+
+    #[test]
+    fn parses_an_expression_placeholder_as_a_synthetic_identifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "_",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        let TreeKind::Ident(Ident { name, backquoted }) = parser.ast().get(tree).kind else {
+            panic!("expected a placeholder identifier");
+        };
+        assert!(!backquoted);
+        assert_eq!(parser.placeholder_params.len(), 1);
+        let parameter = parser.placeholder_params[0];
+        assert!(matches!(
+            parser.ast().get(parameter).kind,
+            TreeKind::ValDef(ValDef { rhs: None, .. })
+        ));
+        assert_eq!(
+            parser.ast().get(tree).position.unwrap().span().range(),
+            TextRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(parameter).position.unwrap().span().range(),
+            TextRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            name,
+            match &parser.ast().get(parameter).kind {
+                TreeKind::ValDef(definition) => *definition.name.as_name(),
+                _ => unreachable!(),
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_backquoted_underscore_as_a_regular_identifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "`_`",
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Ident(Ident {
+                backquoted: true,
+                ..
+            })
+        ));
+        assert!(parser.placeholder_params.is_empty());
     }
 }

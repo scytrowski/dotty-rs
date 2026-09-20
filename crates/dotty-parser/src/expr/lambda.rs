@@ -306,14 +306,14 @@ where
         ) && can_start_expr(self.cursor.lookahead(2).kind)
     }
 
-    fn fresh_wildcard_param_name(&mut self) -> TermName {
+    pub(super) fn fresh_wildcard_param_name(&mut self) -> TermName {
         let index = self.next_wildcard_param;
         self.next_wildcard_param = self.next_wildcard_param.saturating_add(1);
         let name = format!("$lambda_wildcard_{index}");
         TermName::new(self.names.intern(&name))
     }
 
-    fn synthetic_type_tree_at(&mut self, start: u32) -> TreeId<Untyped> {
+    pub(super) fn synthetic_type_tree_at(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width synthetic type range");
         self.alloc(
             TreeKind::TypeTree(dotty_core::ast::TypeTree),

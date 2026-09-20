@@ -28,6 +28,7 @@ where
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
+    pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -61,6 +62,7 @@ where
             known_names,
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
+            placeholder_params: Vec::new(),
         }
     }
 
