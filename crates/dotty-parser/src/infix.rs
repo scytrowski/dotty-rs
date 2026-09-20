@@ -33,6 +33,12 @@ pub fn is_right_associative(operator: &str) -> bool {
     operator.ends_with(':')
 }
 
+/// Returns whether two equal-precedence operators mix associativity.
+pub(crate) fn has_mixed_associativity(left: &str, right: &str) -> bool {
+    precedence(left) == precedence(right)
+        && is_right_associative(left) != is_right_associative(right)
+}
+
 /// Returns whether `operator` is a Scala assignment operator.
 pub fn is_assignment_operator(operator: &str) -> bool {
     operator.ends_with('=') && !matches!(operator, "==" | "!=" | "<=" | ">=")
@@ -120,6 +126,14 @@ mod tests {
         assert!(is_right_associative("::"));
         assert!(is_right_associative(":"));
         assert!(!is_right_associative("+"));
+    }
+
+    #[test]
+    fn detects_mixed_associativity_at_equal_precedence() {
+        assert!(has_mixed_associativity("+", "+:"));
+        assert!(has_mixed_associativity("+:", "+"));
+        assert!(!has_mixed_associativity("+", "-"));
+        assert!(!has_mixed_associativity("+", "*"));
     }
 
     #[test]

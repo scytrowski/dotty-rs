@@ -155,6 +155,18 @@ where
                 break;
             }
 
+            if let Some(top) = operators.last().copied() {
+                let top_spelling = self.names.resolve(top.text()).to_owned();
+                if crate::infix::has_mixed_associativity(&top_spelling, &spelling) {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        format!(
+                            "mixed left- and right-associative pattern operators `{top_spelling}` and `{spelling}`"
+                        ),
+                    );
+                }
+            }
+
             while let Some(top) = operators.last().copied() {
                 let top_spelling = self.names.resolve(top.text());
                 let top_precedence = crate::precedence(top_spelling);
@@ -716,6 +728,56 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_mixed_associativity_in_pattern_infix_operators() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a + b +: c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert!(result.diagnostics[0].message().contains("mixed"));
+    }
+
+    #[test]
+    fn reports_mixed_associativity_when_right_associative_operator_comes_first() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a +: b + c",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert!(result.diagnostics[0].message().contains("mixed"));
     }
 
     #[test]

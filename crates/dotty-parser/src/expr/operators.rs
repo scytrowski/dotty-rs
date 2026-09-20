@@ -133,10 +133,7 @@ where
         if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
             let stack_spelling = self.names.resolve(stack_top.operator.text()).to_owned();
             let next_spelling = self.names.resolve(next_operator.text()).to_owned();
-            let stack_precedence = crate::infix::precedence(&stack_spelling);
-            if stack_precedence == precedence
-                && crate::infix::is_right_associative(&stack_spelling) == left_associative
-            {
+            if crate::infix::has_mixed_associativity(&stack_spelling, &next_spelling) {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
                     format!(
