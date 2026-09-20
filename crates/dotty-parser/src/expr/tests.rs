@@ -2768,3 +2768,55 @@ fn unsupported_expression_input_produces_an_error_tree_and_diagnostic() {
     ));
     assert_eq!(parser.diagnostics().len(), 1);
 }
+
+#[test]
+fn wraps_an_infix_placeholder_expression_in_a_function() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "_ + 1",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            Token {
+                kind: TokenKind::Operator,
+                span: TextRange::new(2, 3).unwrap(),
+                value: dotty_core::TokenValue::None,
+            },
+            token(TokenKind::IntegerLiteral, 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+    else {
+        panic!("expected a placeholder function");
+    };
+    assert_eq!(function.params.len(), 1);
+    assert!(matches!(
+        parser.ast().get(function.body).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 5).unwrap()
+    );
+    assert!(parser.placeholder_params.is_empty());
+}
+
+#[test]
+fn leaves_a_bare_placeholder_unwrapped_until_its_parent_expression_finishes() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "_",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Eof, 1, 1),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
+    assert_eq!(parser.placeholder_params.len(), 1);
+}

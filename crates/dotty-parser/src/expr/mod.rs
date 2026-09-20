@@ -1,4 +1,4 @@
-use dotty_core::ast::{Assign, UntypedNode};
+use dotty_core::ast::{Assign, Function, UntypedNode};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
@@ -17,15 +17,57 @@ where
 {
     /// Parses a complete expression at the `Expr` grammar boundary.
     pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
-        if self.starts_poly_function() {
-            let mark = self.mark();
-            return self.parse_poly_function(mark);
+        let mark = self.mark();
+        let saved_placeholders = std::mem::take(&mut self.placeholder_params);
+        let tree = if self.starts_poly_function() {
+            self.parse_poly_function(mark)
+        } else if self.starts_lambda() {
+            self.parse_lambda(mark)
+        } else {
+            self.expr1()
+        };
+        let local_placeholders = std::mem::take(&mut self.placeholder_params);
+
+        if self.is_placeholder_reference(tree, &local_placeholders) {
+            let mut propagated = saved_placeholders;
+            propagated.extend(local_placeholders);
+            self.placeholder_params = propagated;
+            return tree;
         }
-        if self.starts_lambda() {
-            let mark = self.mark();
-            return self.parse_lambda(mark);
+
+        self.placeholder_params = saved_placeholders;
+        if local_placeholders.is_empty() {
+            return tree;
         }
-        self.expr1()
+
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Function(Function {
+                params: local_placeholders,
+                body: tree,
+            })),
+        )
+    }
+
+    fn is_placeholder_reference(
+        &self,
+        tree: TreeId<Untyped>,
+        placeholders: &[TreeId<Untyped>],
+    ) -> bool {
+        let Some(parameter) = placeholders.last() else {
+            return false;
+        };
+        let TreeKind::ValDef(definition) = &self.ast.get(*parameter).kind else {
+            return false;
+        };
+        match &self.ast.get(tree).kind {
+            TreeKind::Ident(identifier) => identifier.name == *definition.name.as_name(),
+            TreeKind::Typed(typed) => self.is_placeholder_reference(typed.expr, placeholders),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.is_placeholder_reference(parens.inner, placeholders)
+            }
+            _ => false,
+        }
     }
 
     fn expr1(&mut self) -> TreeId<Untyped> {
