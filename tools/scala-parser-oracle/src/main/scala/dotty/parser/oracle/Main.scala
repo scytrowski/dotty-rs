@@ -37,7 +37,7 @@ object Main:
 
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
-        fields += field("name", quote(normalizePlaceholderName(ident.name.toString)))
+        fields += field("name", quote(normalizePlaceholderName(ident.name.toString, slice(ident, source))))
         if isBackquotedIdent(ident, source) then
           fields += field("backquoted", "true")
       case select: dotty.tools.dotc.ast.Trees.Select[?] =>
@@ -103,11 +103,13 @@ object Main:
       case text if text.startsWith("`") && text.endsWith("`") => text.drop(1).dropRight(1)
       case text => text
 
-  private def normalizePlaceholderName(name: String): String =
-    name match
-      case suffix if suffix.startsWith("_$") =>
-        suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - 1}").getOrElse(name)
-      case _ => name
+  private def normalizePlaceholderName(name: String, sourceText: String): String =
+    if sourceText == "_" then
+      name match
+        case suffix if suffix.startsWith("_$") =>
+          suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - 1}").getOrElse(name)
+        case _ => name
+    else name
 
   private def isBackquotedIdent(ident: dotty.tools.dotc.ast.Trees.Ident[?], source: String): Boolean =
     val text = slice(ident, source)

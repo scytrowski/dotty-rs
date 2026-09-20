@@ -85,7 +85,10 @@ fn render_tree(
             let name = names.resolve(ident.name.text());
             fields.push(format!(
                 "\"name\":{}",
-                quote(&normalize_placeholder_name(name))
+                quote(&normalize_placeholder_name(
+                    name,
+                    &source_slice(tree, source)
+                ))
             ));
             if ident.backquoted {
                 fields.push("\"backquoted\":true".to_owned());
@@ -244,10 +247,14 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
     }
 }
 
-fn normalize_placeholder_name(name: &str) -> String {
-    name.strip_prefix("$lambda_wildcard_")
-        .map(|index| format!("$placeholder_{index}"))
-        .unwrap_or_else(|| name.to_owned())
+fn normalize_placeholder_name(name: &str, source_text: &str) -> String {
+    if source_text == "_" {
+        return name
+            .strip_prefix("$lambda_wildcard_")
+            .map(|index| format!("$placeholder_{index}"))
+            .unwrap_or_else(|| name.to_owned());
+    }
+    name.to_owned()
 }
 
 fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<Untyped>> {
