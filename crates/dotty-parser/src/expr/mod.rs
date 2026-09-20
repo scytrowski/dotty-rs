@@ -4,6 +4,7 @@ use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, Tr
 use crate::Parser;
 
 mod control_flow;
+mod for_expr;
 mod match_expr;
 mod operators;
 mod simple;
@@ -40,6 +41,10 @@ where
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Return) {
             let mark = self.mark();
             return self.parse_return_expr(mark);
+        }
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::For) {
+            let mark = self.mark();
+            return self.parse_for_expr(mark);
         }
 
         let tree = self.postfix_expr();
@@ -171,6 +176,7 @@ pub(super) const fn can_start_expr(kind: TokenKind) -> bool {
                     | dotty_core::HardKeyword::Try
                     | dotty_core::HardKeyword::Throw
                     | dotty_core::HardKeyword::Return
+                    | dotty_core::HardKeyword::For
             )
         )
 }
