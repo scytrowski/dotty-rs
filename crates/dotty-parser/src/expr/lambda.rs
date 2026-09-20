@@ -513,6 +513,72 @@ mod tests {
     }
 
     #[test]
+    fn missing_lambda_body_reports_a_diagnostic_and_reaches_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected an expression after lambda arrow")
+        }));
+    }
+
+    #[test]
+    fn malformed_lambda_parameters_report_a_diagnostic_and_consume_the_input() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x y) => x",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 4, 5),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(6, 8).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected `,` or `)` after lambda parameter")
+        }));
+    }
+
+    #[test]
     fn lambda_in_a_braced_block_owns_the_remaining_block_body() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
