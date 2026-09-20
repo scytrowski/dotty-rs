@@ -155,10 +155,16 @@ fn resolve(
                 Some(underlying) => inner(*underlying)?,
                 None => String::new(),
             };
+            // Dotty's `UniqueNameKind.mkString`, with the two kinds that
+            // override it: `$` names an anonymous number `$3$`, and
+            // `contextual$` keeps a non-empty original as it is.
+            let sanitized = underlying.replace(['<', '>'], "$");
             if underlying.is_empty() && separator == "$" {
                 format!("${uniqid}$")
+            } else if separator == "contextual$" && !underlying.is_empty() {
+                sanitized
             } else {
-                format!("{underlying}{separator}{uniqid}")
+                format!("{sanitized}{separator}{uniqid}")
             }
         }
         RawName::DefaultGetter { underlying, index } => {
@@ -337,6 +343,36 @@ mod tests {
         ]);
 
         assert_eq!(wire_name(&names, 3).unwrap(), "<init>");
+    }
+
+    #[test]
+    fn a_unique_name_sanitizes_its_original_like_dotty() {
+        let names = table(vec![
+            utf8("$"),
+            utf8("<init>"),
+            RawName::Unique {
+                separator: 1,
+                uniqid: 2,
+                underlying: Some(2),
+            },
+            utf8("contextual$"),
+            RawName::Unique {
+                separator: 4,
+                uniqid: 1,
+                underlying: Some(2),
+            },
+            RawName::Unique {
+                separator: 4,
+                uniqid: 1,
+                underlying: None,
+            },
+        ]);
+
+        // `str.sanitize` turns `<` and `>` into `$` before the separator.
+        assert_eq!(wire_name(&names, 3).unwrap(), "$init$$2");
+        // `contextual$` keeps a non-empty original alone, else `contextual$1`.
+        assert_eq!(wire_name(&names, 5).unwrap(), "$init$");
+        assert_eq!(wire_name(&names, 6).unwrap(), "contextual$1");
     }
 
     #[test]
