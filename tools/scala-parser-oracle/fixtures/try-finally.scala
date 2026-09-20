@@ -1,0 +1,1 @@
+try risky() finally cleanup()

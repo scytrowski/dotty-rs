@@ -117,13 +117,18 @@ where
         } else {
             None
         };
+        let finalizer = if self.accept_layout_keyword(dotty_core::HardKeyword::Finally) {
+            Some(self.parse_layout_expression("expected an expression after `finally`"))
+        } else {
+            None
+        };
 
         self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
                 expr,
                 handler,
-                finalizer: None,
+                finalizer,
             })),
         )
     }
@@ -711,6 +716,87 @@ mod tests {
         assert!(matches!(
             parser.ast().get(cases[0]).kind,
             TreeKind::CaseDef(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_try_with_a_finally_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() finally cleanup()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Finally), 12, 19),
+                token(TokenKind::Identifier, 20, 27),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 27, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: None,
+            finalizer: Some(finalizer),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree with a finalizer");
+        };
+
+        assert!(matches!(
+            parser.ast().get(finalizer).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_try_with_catch_and_an_indented_finally_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() catch recover() finally\n  cleanup()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Catch), 12, 17),
+                token(TokenKind::Identifier, 18, 25),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 25, 26),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 26, 27),
+                token(TokenKind::Keyword(HardKeyword::Finally), 28, 35),
+                token(TokenKind::Indent, 38, 38),
+                token(TokenKind::Identifier, 38, 45),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 45, 46),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 46, 47),
+                token(TokenKind::Outdent, 47, 47),
+                token(TokenKind::Eof, 47, 47),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: Some(handler),
+            finalizer: Some(finalizer),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree with catch and finally");
+        };
+
+        assert!(matches!(parser.ast().get(handler).kind, TreeKind::Apply(_)));
+        assert!(matches!(
+            parser.ast().get(finalizer).kind,
+            TreeKind::Apply(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
