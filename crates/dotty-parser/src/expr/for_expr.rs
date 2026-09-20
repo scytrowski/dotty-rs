@@ -39,6 +39,9 @@ where
                 );
             }
         }
+        if wrapped {
+            self.consume_for_newlines();
+        }
 
         let kind = match self.current().kind {
             TokenKind::Keyword(HardKeyword::Yield) => {
