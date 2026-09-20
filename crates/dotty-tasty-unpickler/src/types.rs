@@ -73,9 +73,9 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, ORTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
-    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPEREF_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    FLEXIBLETYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
+    TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
+    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -258,6 +258,11 @@ impl TastyUnpickler<'_, '_, '_> {
                 let class = self.decode_type(ast, &tree.decode_class_const()?.child, depth)?;
                 Type::Constant(Constant::Class(class))
             }
+            // A binder-related node owns its identity: it records its own
+            // address, possibly before its children are decoded.
+            RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
+                return self.decode_param_type(ast, node, at, depth);
+            }
             RawTree::LengthNode(node) if tag == FLEXIBLETYPE_TAG => {
                 node.decode_flexible_type()?;
                 let ids = self.decode_children(ast, at, 1, depth)?;
@@ -360,6 +365,22 @@ impl TastyUnpickler<'_, '_, '_> {
             });
         }
         let name = Name::new(self.store.names.intern(&text), namespace);
+
+        // A prefix that is (or wraps) a binder still being decoded has no
+        // readable slot yet, so its members cannot be looked up.
+        let mut walk = prefix;
+        loop {
+            if self.is_pending(walk) {
+                return Err(UnpickleError::UnsupportedResolutionPrefix {
+                    address: at,
+                    prefix,
+                });
+            }
+            match self.store.types.get(walk) {
+                Type::Flexible { underlying } => walk = *underlying,
+                _ => break,
+            }
+        }
 
         let local = lookup_member(self.store, &self.index, &self.packages, prefix, &name);
         let unsupported_prefix = local == LocalLookup::UnsupportedPrefix;

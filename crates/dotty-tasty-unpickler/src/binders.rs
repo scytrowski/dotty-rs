@@ -29,15 +29,17 @@
 //! result, is not stored in `dotty-core`, and is empty whenever
 //! `unpickle_type` returns.
 
-// The decoders that use this state arrive in the next commits.
-#![allow(dead_code)]
-
 use dotty_core::ids::TypeId;
+use dotty_core::types::Type;
+use dotty_tasty::tasty::RawNode;
 
+use crate::ast_view::{AstView, MAX_SHARED_DEPTH};
+use crate::error::UnpickleError;
 use crate::unpickler::TastyUnpickler;
 
 /// What a pending binder will be once filled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // constructed by the TYPELAMBDAtype decoder (next commit)
 pub(crate) enum BinderKind {
     TypeLambda,
 }
@@ -70,9 +72,96 @@ impl TastyUnpickler<'_, '_, '_> {
         self.pending_binders.iter().any(|binder| binder.id == id)
     }
 
+    /// The pending binder whose reserved id is `id`, if any.
+    fn pending_with_id(&self, id: TypeId) -> Option<PendingBinder> {
+        self.pending_binders
+            .iter()
+            .rev()
+            .find(|binder| binder.id == id)
+            .copied()
+    }
+
+    /// `PARAMtype Length binder_ASTRef paramNum_Nat` at `at`: a `ParamRef` to
+    /// the binder at that AST address, by address only, never by name.
+    ///
+    /// The binder is, in this order: a pending one (validated from its
+    /// recorded arity, never from the arena), one already decoded (checked to
+    /// be a `TypeLambda`), or one not yet decoded, which is decoded now. That
+    /// last decode can reach this very node through the binder's own
+    /// children, so the address is looked up again afterwards instead of
+    /// allocating a second `ParamRef`.
+    pub(crate) fn decode_param_type(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        let shape = node.decode_param_type()?;
+        let binder_address = shape.binder.address;
+        let index = shape.parameter_number;
+        // Decoding a binder on demand can lead back here (through the binder,
+        // or through a `PARAMtype` that names another `PARAMtype`), so the
+        // chain is bounded like a `SHAREDtype` chain.
+        if depth >= MAX_SHARED_DEPTH {
+            return Err(UnpickleError::InvalidReferenceTarget {
+                from: at,
+                to: binder_address,
+            });
+        }
+        if !ast.is_node(binder_address) {
+            return Err(UnpickleError::InvalidBinderReference {
+                from: at,
+                binder: binder_address,
+            });
+        }
+
+        let (binder, arity) = if let Some(pending) = self.pending_at(binder_address) {
+            (pending.id, pending.arity)
+        } else {
+            let id = match self.index.type_at(binder_address) {
+                Some(id) => id,
+                None => {
+                    let id = self.type_at(ast, binder_address, at, depth + 1)?;
+                    if let Some(existing) = self.index.type_at(at) {
+                        return Ok(existing);
+                    }
+                    id
+                }
+            };
+            match self.pending_with_id(id) {
+                // The address is a `SHAREDtype` link to a binder that is
+                // still being decoded.
+                Some(pending) => (pending.id, pending.arity),
+                None => match self.store.types.get(id) {
+                    Type::TypeLambda(lambda) => (id, lambda.params.len()),
+                    _ => {
+                        return Err(UnpickleError::InvalidBinderKind {
+                            from: at,
+                            binder: id,
+                        });
+                    }
+                },
+            }
+        };
+
+        if usize::try_from(index).map_or(true, |index| index >= arity) {
+            return Err(UnpickleError::InvalidParameterIndex {
+                address: at,
+                binder,
+                index,
+                arity,
+            });
+        }
+        let id = self.store.types.alloc(Type::ParamRef { binder, index });
+        self.index.insert_type(at, id)?;
+        Ok(id)
+    }
+
     /// Runs `decode` with `binder` registered as pending, and unregisters it
     /// however `decode` ends, so an error in a child cannot leave the binder
     /// (or a nested one) behind.
+    #[allow(dead_code)] // used by the TYPELAMBDAtype decoder (next commit)
     pub(crate) fn with_pending_binder<T>(
         &mut self,
         binder: PendingBinder,
