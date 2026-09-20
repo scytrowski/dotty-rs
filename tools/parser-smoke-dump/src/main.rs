@@ -117,9 +117,10 @@ fn render_tree(
         }
         TreeKind::TypeDef(definition) => {
             let name = names.resolve(definition.name.as_name().text());
+            let source_text = source_slice(tree, source);
             fields.push(format!(
                 "\"name\":{}",
-                quote(if name.starts_with("$type_wildcard_") {
+                quote(if source_text.trim() == "_" {
                     "$type_wildcard"
                 } else {
                     name
