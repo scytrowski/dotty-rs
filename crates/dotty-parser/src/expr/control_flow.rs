@@ -117,6 +117,12 @@ where
         } else {
             None
         };
+        if handler.is_some_and(|handler| self.is_empty_block(handler)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "catch handler cannot be empty",
+            );
+        }
         let finalizer = if self.accept_layout_keyword(dotty_core::HardKeyword::Finally) {
             Some(self.parse_layout_expression("expected an expression after `finally`"))
         } else {
@@ -240,7 +246,6 @@ where
             return matches!(
                 self.cursor.lookahead(lookahead).kind,
                 TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                    | TokenKind::Punctuation(Punctuation::RightBrace)
             );
         }
 
@@ -290,6 +295,17 @@ where
 
         let selector = self.synthetic_unit_at(mark.start());
         self.alloc_from(mark, TreeKind::Match(Match { selector, cases }))
+    }
+
+    fn is_empty_block(&self, tree: TreeId<Untyped>) -> bool {
+        let TreeKind::Block(Block { stats, expr }) = &self.ast.get(tree).kind else {
+            return false;
+        };
+        stats.is_empty()
+            && self.ast.get(*expr).position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() == range.end()
+            })
     }
 
     fn consume_control_newlines(&mut self) {
@@ -358,7 +374,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Match, ParsedTry, Return, Throw, UntypedNode};
+    use dotty_core::ast::{Block, Match, ParsedTry, Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
@@ -846,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_from_an_empty_braced_catch_handler() {
+    fn recovers_from_an_empty_braced_catch_handler_as_a_block() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "try risky() catch {}",
@@ -872,10 +888,10 @@ mod tests {
             panic!("expected a recovered empty catch handler");
         };
 
-        let TreeKind::Match(Match { ref cases, .. }) = parser.ast().get(handler).kind else {
-            panic!("expected match handler");
+        let TreeKind::Block(Block { ref stats, .. }) = parser.ast().get(handler).kind else {
+            panic!("expected block handler");
         };
-        assert!(cases.is_empty());
+        assert!(stats.is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
