@@ -37,11 +37,13 @@ where
             );
         }
 
-        self.observe_arrow_indented();
-        self.advance();
         let body = if expr_only {
+            self.advance();
+            self.consume_case_newlines();
             self.with_location(Location::InBlock, |parser| parser.expr())
         } else {
+            self.observe_arrow_indented();
+            self.advance();
             self.parse_case_body(body_mark)
         };
         self.alloc_from(
@@ -135,7 +137,43 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{CaseDef, Ident, UntypedNode};
-    use dotty_core::{NameInterner, TextRange};
+    use dotty_core::{NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct RecordingTokenSource {
+        tokens: Vec<Token>,
+        index: usize,
+        observed: Rc<RefCell<Vec<ScannerEvent>>>,
+    }
+
+    impl dotty_core::TokenSource for RecordingTokenSource {
+        fn current(&self) -> &Token {
+            &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
+        }
+
+        fn advance(&mut self) {
+            if self.index + 1 < self.tokens.len() {
+                self.index += 1;
+            }
+        }
+
+        fn lookahead(&mut self, n: usize) -> &Token {
+            let index = self
+                .index
+                .saturating_add(n)
+                .min(self.tokens.len().saturating_sub(1));
+            &self.tokens[index]
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            self.observed.borrow_mut().push(event);
+        }
+    }
 
     #[test]
     fn parses_a_case_with_a_block_body() {
@@ -182,6 +220,39 @@ mod tests {
             parser.ast().get(body).position.unwrap().span().range(),
             TextRange::new(7, 14).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_multiline_expression_only_case_without_opening_a_layout_body() {
+        let mut names = NameInterner::new();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let mut parser = Parser::new(
+            SourceText::new("case x =>\n  body").expect("valid source"),
+            SourceId::from_index(1),
+            RecordingTokenSource {
+                tokens: vec![
+                    token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                    token(TokenKind::Identifier, 5, 6),
+                    token(TokenKind::Operator, 7, 9),
+                    token(TokenKind::Newline, 9, 10),
+                    token(TokenKind::Identifier, 12, 16),
+                    token(TokenKind::Eof, 16, 16),
+                ],
+                index: 0,
+                observed: Rc::clone(&observed),
+            },
+            &mut names,
+        );
+
+        let id = parser.case_clause(true);
+        let TreeKind::CaseDef(CaseDef { body, .. }) = parser.ast().get(id).kind else {
+            panic!("expected case definition");
+        };
+
+        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(observed.borrow().is_empty());
         assert!(parser.diagnostics().is_empty());
     }
 
