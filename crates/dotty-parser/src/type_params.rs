@@ -55,6 +55,7 @@ where
             }
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket)
                 || self.current().kind == TokenKind::Eof
+                || self.current_is_arrow()
             {
                 break;
             }
@@ -64,6 +65,9 @@ where
                 "expected `,` or `]` after a type parameter",
             );
             self.recover_type_param_clause();
+            if self.current_is_arrow() {
+                break;
+            }
         }
 
         self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
@@ -156,7 +160,8 @@ where
         if !matches!(
             self.current().kind,
             TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
-        ) {
+        ) && !self.current_is_arrow()
+        {
             self.advance();
         }
         self.fresh_wildcard_type_name()
@@ -179,7 +184,8 @@ where
         while !matches!(
             self.current().kind,
             TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
-        ) {
+        ) && !self.current_is_arrow()
+        {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {

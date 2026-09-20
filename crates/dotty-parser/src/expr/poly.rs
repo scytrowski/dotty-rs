@@ -195,4 +195,33 @@ mod tests {
                 .contains("value-parameter function body")
         }));
     }
+
+    #[test]
+    fn recovers_a_missing_type_parameter_closing_bracket_before_the_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A => body",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(3, 5).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.message().contains("RightBracket") })
+        );
+    }
 }
