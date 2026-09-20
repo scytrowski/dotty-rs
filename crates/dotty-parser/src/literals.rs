@@ -54,7 +54,7 @@ where
                 return self.alloc_from(
                     mark,
                     TreeKind::Literal(Literal {
-                        value: Constant::Float(value),
+                        value: Constant::float(value),
                     }),
                 );
             }
@@ -66,7 +66,7 @@ where
                 return self.alloc_from(
                     mark,
                     TreeKind::Literal(Literal {
-                        value: Constant::Double(value),
+                        value: Constant::double(value),
                     }),
                 );
             }
@@ -362,8 +362,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Float(value)
-            }) if value == 1.5
+                ref value
+            }) if *value == Constant::FloatBits(0x3fc0_0000)
         ));
     }
 
@@ -384,8 +384,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Double(value)
-            }) if value == 1.5
+                ref value
+            }) if *value == Constant::DoubleBits(0x3ff8_0000_0000_0000)
         ));
     }
 

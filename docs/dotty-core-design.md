@@ -893,8 +893,10 @@ pub enum Type {
     Constant(Constant),
 
     Applied { tycon: TypeId, args: Vec<TypeId> },
-    Bounds { low: TypeId, high: TypeId },
+    Bounds { low: TypeId, high: TypeId },       // genuine `>: low <: high`
+    AliasingBounds { alias: TypeId },           // `= alias`; not Bounds{alias, alias}
     ByName { result: TypeId },
+    Flexible { underlying: TypeId },            // explicit-nulls flexible type
 
     And { left: TypeId, right: TypeId },
     Or { left: TypeId, right: TypeId },
@@ -930,6 +932,15 @@ pub enum Type {
 
 `TermRef`/`TypeRef` use `SymbolId`, not the symbol's `Name`, so a symbol
 rename doesn't require walking every type that references it.
+
+`Bounds` is a genuine `>: low <: high` range; `AliasingBounds` is the info of
+an alias (`= alias`) and is deliberately not `Bounds { low: alias, high: alias }`,
+matching Dotty's `AliasingBounds`. It is not named `Alias`, which would collide
+with `SymbolKind::TypeAlias`. `Flexible` is a real wrapper (Dotty's
+`FlexibleType`) that model code must not strip; only member lookup sees through
+it. Variance markers that TASTy writes after `TYPEBOUNDS` belong to a
+`TypeLambda` bound, not to the bounds, so the model has no bounds-level
+variance.
 
 ### `[BLOCKER 1]` Binder identity is `TypeId`, not a separate `BinderId`
 
@@ -1051,11 +1062,11 @@ pub enum Constant {
     Boolean(bool),
     Byte(i8),
     Short(i16),
-    Char(char),
+    Char(u16),        // one UTF-16 code unit
     Int(i32),
     Long(i64),
-    Float(f32),
-    Double(f64),
+    FloatBits(u32),   // IEEE-754 bit pattern
+    DoubleBits(u64),  // IEEE-754 bit pattern
     String(NameId),
     StringUtf16(Vec<u16>),
     Class(TypeId),
@@ -1068,6 +1079,13 @@ string table instead of allocating separately. `StringUtf16` is the
 lossless representation for Scala string values containing an unpaired
 UTF-16 surrogate; well-formed surrogate pairs are normalized to scalar
 values in `Constant::String`.
+
+Constants are lossless: every constant TASTy can write is representable
+exactly. `Char` is a 16-bit code unit (a Scala `Char` can be a lone
+surrogate), and floating-point constants hold their bit patterns, so NaN
+payloads and negative zero survive; equality is bitwise. Use
+`Constant::float`/`double` and `as_float`/`as_double` (and `char`/`as_char`)
+instead of matching the bit variants when the numeric value is what matters.
 
 ```rust
 pub struct ClassInfo {

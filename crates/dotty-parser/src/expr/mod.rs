@@ -2327,8 +2327,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Float(value)
-            }) if value == -1.5
+                ref value
+            }) if value.as_float() == Some(-1.5)
         ));
         assert!(parser.diagnostics().is_empty());
     }
@@ -2351,8 +2351,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Double(value)
-            }) if value == -1.5
+                ref value
+            }) if value.as_double() == Some(-1.5)
         ));
         assert!(parser.diagnostics().is_empty());
     }
@@ -2401,8 +2401,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Float(value)
-            }) if value == -1.0
+                ref value
+            }) if value.as_float() == Some(-1.0)
         ));
         assert!(parser.diagnostics().is_empty());
     }
@@ -2426,8 +2426,8 @@ mod tests {
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Double(value)
-            }) if value == -1.0
+                ref value
+            }) if value.as_double() == Some(-1.0)
         ));
         assert!(parser.diagnostics().is_empty());
     }

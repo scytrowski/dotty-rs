@@ -9,7 +9,8 @@
 //!
 //! Only prefixes whose lookup semantics are understood are searched:
 //! `ThisType`, `TypeRef` naming a class, trait, module class or package, and
-//! `TermRef` naming a package or an object (through its module class). Anything else is `UnsupportedPrefix`. There is no textual
+//! `TermRef` naming a package or an object (through its module class), and
+//! `Flexible` around any of these (looked through, never stripped). Anything else is `UnsupportedPrefix`. There is no textual
 //! fallback and no search across owners. The lookup is not inheritance-aware:
 //! it sees the members the prefix's own scope declares.
 
@@ -56,6 +57,12 @@ pub(crate) fn lookup_owner(
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass | SymbolKind::Package
         )
     };
+    // A flexible type has the members of its underlying type; nothing else
+    // is looked through.
+    let mut prefix = prefix;
+    while let Type::Flexible { underlying } = store.types.get(prefix) {
+        prefix = *underlying;
+    }
     match store.types.get(prefix) {
         Type::ThisType { class } => Some(*class),
         Type::TypeRef { symbol, .. } if is_scope_owner(*symbol) => Some(*symbol),
@@ -247,6 +254,36 @@ mod tests {
         let prefix = world.store.types.alloc(Type::ThisType { class });
 
         assert_eq!(world.lookup(prefix, &inner), LocalLookup::Found(member));
+    }
+
+    #[test]
+    fn a_flexible_prefix_is_searched_through_its_underlying_type() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let inner = world.name("Inner", Namespace::Type);
+        let member = world.declare(scope, class, inner, SymbolKind::Class);
+        let underlying = world.type_ref(class);
+        let flexible = world.store.types.alloc(Type::Flexible { underlying });
+        let twice = world.store.types.alloc(Type::Flexible {
+            underlying: flexible,
+        });
+
+        assert_eq!(world.lookup(flexible, &inner), LocalLookup::Found(member));
+        assert_eq!(world.lookup(twice, &inner), LocalLookup::Found(member));
+    }
+
+    #[test]
+    fn a_flexible_wrapper_around_an_unsearchable_type_stays_unsupported() {
+        let mut world = World::new();
+        let inner = world.name("Inner", Namespace::Type);
+        let flexible = world.store.types.alloc(Type::Flexible {
+            underlying: world.no_prefix,
+        });
+
+        assert_eq!(
+            world.lookup(flexible, &inner),
+            LocalLookup::UnsupportedPrefix
+        );
     }
 
     #[test]
