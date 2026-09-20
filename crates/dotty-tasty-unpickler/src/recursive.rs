@@ -80,6 +80,14 @@ impl TastyUnpickler<'_, '_, '_> {
     /// instead of allocating a second `RecThis`. The chain is bounded like a
     /// `SHAREDtype` chain.
     ///
+    /// The address must be the `RECtype` node itself, not a `SHAREDtype` link
+    /// to one: Dotty's `RECthis` is `typeAtAddr(readAddr())`, a lookup of that
+    /// exact address in a map that only `RECtype` (and other registering
+    /// nodes) and the *targets* of links are entered in, never a link's own
+    /// address, and its pickler writes the `RECtype`'s address. So a link is an
+    /// `InvalidReferenceTarget` whatever was decoded before, not something
+    /// that depends on decode order.
+    ///
     /// Dotty's `RecType` keeps one `recThis` per binder, so every `RECthis`
     /// naming one binder, at whatever address, gets the same `TypeId`
     /// (address identity is kept: each address maps to exactly one type, and

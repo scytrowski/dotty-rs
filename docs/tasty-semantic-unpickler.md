@@ -567,7 +567,7 @@ returned; a second one would be a `DuplicateType`. The on-demand chain is bounde
 like a `SHAREDtype` chain (`MAX_SHARED_DEPTH`). An address that is not a node, a
 node that is not a `RECtype`, a pending binder that is not recursive, and a
 chain past the bound are all `InvalidReferenceTarget`; no recursive-specific error
-was needed. A `RECthis` that names itself is that error, not a loop.
+was needed. A `RECthis` that names itself is that error, not a loop. The address must be the `RECtype` itself: a `SHAREDtype` link to one is refused too, in either decode order, because Dotty's `RECthis` is `typeAtAddr(readAddr())` on that exact address, and a link's own address is never registered there (only registering nodes and link *targets* are), so it is a lookup failure in Dotty as well.
 
 **One canonical `RecThis` per binder.** Dotty's `RecType` keeps one `recThis`, so
 every `RECthis` naming one binder, at whatever address, gets the same `TypeId`;

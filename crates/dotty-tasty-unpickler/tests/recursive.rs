@@ -1042,3 +1042,37 @@ fn a_real_failure_after_a_rec_this_was_made_leaves_the_next_recursive_type_corre
         Type::Recursive { .. }
     ));
 }
+
+#[test]
+fn a_rec_this_naming_a_shared_link_to_a_recursive_type_is_refused_in_either_order() {
+    // `RECtype` at 2 (over a package, 4 bytes on to 6), a `SHAREDtype` link to
+    // it at 6, and a `RECthis` naming the LINK at 8. Dotty's `RECthis` is
+    // `typeAtAddr(readAddr())` on the address itself, and only nodes that
+    // register themselves (`RECtype`, lambdas) or targets of a link are in
+    // that map: a link's own address never is, so it is a lookup failure
+    // there and an `InvalidReferenceTarget` here, whatever was decoded before.
+    let rec = rec_type(&package_ref());
+    let link_at = 2 + u8::try_from(rec.len()).unwrap();
+    let link = [SHARED, nat(2)];
+    let this = rec_this(link_at);
+    let bytes = file_with_many(&[&rec, &link, &this]);
+    let this_at = u32::from(link_at) + 2;
+    let expected = Err(UnpickleError::InvalidReferenceTarget {
+        from: this_at,
+        to: u32::from(link_at),
+    });
+
+    // Nothing decoded before.
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    assert_eq!(unpickler.unpickle_type(this_at), expected);
+
+    // The `RECtype` and the link decoded first.
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    unpickler.unpickle_type(2).unwrap();
+    unpickler.unpickle_type(u32::from(link_at)).unwrap();
+    assert_eq!(unpickler.unpickle_type(this_at), expected);
+}
