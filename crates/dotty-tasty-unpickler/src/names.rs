@@ -22,8 +22,15 @@ const MAX_NAME_DEPTH: usize = 64;
 /// The text of a string constant. `STRINGconst` carries a `NameRef`, and Dotty
 /// reads it as `readName().toString`, so any valid name entry is a string: a
 /// plain UTF-8 entry is its text, and a derived entry (qualified, expanded,
-/// unique, ...) is its rendered spelling, exactly as [`wire_name`] renders it.
+/// unique, ...) is its rendered spelling, as [`wire_name`] renders it.
+///
+/// A signed entry is refused with `UnsupportedName`: Dotty's `toString` of a
+/// `SignedName` is `name[with sig <signature>]`, which needs the signature
+/// rendered, and reading it as the bare original would silently differ.
 pub(crate) fn string_value(names: &NameTable, reference: u32) -> Result<String, UnpickleError> {
+    if is_signed(names, reference) {
+        return Err(UnpickleError::UnsupportedName { reference });
+    }
     wire_name(names, reference)
 }
 
@@ -330,6 +337,34 @@ mod tests {
         ]);
 
         assert_eq!(wire_name(&names, 3).unwrap(), "<init>");
+    }
+
+    #[test]
+    fn a_signed_name_is_not_a_string_value() {
+        // Dotty renders it `name[with sig ...]`, not the bare original.
+        let names = table(vec![
+            utf8("f"),
+            utf8("Unit"),
+            utf8("g"),
+            RawName::Signed {
+                original: 1,
+                result_signature: 2,
+                parameter_signatures: Vec::new(),
+            },
+            RawName::TargetSigned {
+                original: 1,
+                target: 3,
+                result_signature: 2,
+                parameter_signatures: Vec::new(),
+            },
+        ]);
+
+        for reference in [4, 5] {
+            assert_eq!(
+                string_value(&names, reference),
+                Err(UnpickleError::UnsupportedName { reference })
+            );
+        }
     }
 
     #[test]
