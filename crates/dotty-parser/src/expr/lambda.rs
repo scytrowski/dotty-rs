@@ -14,7 +14,7 @@ where
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 self.cursor.lookahead(1).kind == TokenKind::Operator
-                    && self.lookahead_text_is(1, "=>")
+                    && (self.lookahead_text_is(1, "=>") || self.lookahead_text_is(1, "?=>"))
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
                 self.lambda_arrow_after_parenthesized_params()
@@ -35,7 +35,8 @@ where
                     if depth == 0 {
                         let next_kind = self.cursor.lookahead(offset + 1).kind;
                         return next_kind == TokenKind::Operator
-                            && self.lookahead_text_is(offset + 1, "=>");
+                            && (self.lookahead_text_is(offset + 1, "=>")
+                                || self.lookahead_text_is(offset + 1, "?=>"));
                     }
                 }
                 TokenKind::Eof => return false,
@@ -51,8 +52,18 @@ where
 
     pub(super) fn parse_lambda(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let params = self.parse_fun_params();
+        let context_arrow = self.current_is_context_arrow();
+        if context_arrow && params.is_empty() {
+            self.report(
+                ParseDiagnosticKind::ExpectedExpression,
+                "context function literals require at least one formal parameter",
+            );
+        }
+        if context_arrow {
+            self.add_given_to_params(&params);
+        }
 
-        if self.current_is_arrow() {
+        if self.current_is_arrow() || context_arrow {
             if self.arrow_starts_indented_body() {
                 self.observe_arrow_indented();
             }
@@ -99,7 +110,7 @@ where
                 self.advance();
                 break;
             }
-            if self.current_is_arrow() {
+            if self.current_is_arrow() || self.current_is_context_arrow() {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected `)` after lambda parameters",
@@ -125,6 +136,7 @@ where
             }
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen))
                 || self.current_is_arrow()
+                || self.current_is_context_arrow()
             {
                 break;
             }
@@ -183,7 +195,7 @@ where
                 TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen)
             )
             && !self.current_is_arrow()
-            && !self.current_is_arrow()
+            && !self.current_is_context_arrow()
         {
             self.advance();
         }
@@ -205,11 +217,23 @@ where
             self.current().kind,
             TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen) | TokenKind::Eof
         ) && !self.current_is_arrow()
+            && !self.current_is_context_arrow()
         {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {
                 break;
+            }
+        }
+    }
+
+    fn add_given_to_params(&mut self, params: &[TreeId<Untyped>]) {
+        for parameter in params {
+            if let TreeKind::ValDef(definition) = &mut self.ast.get_mut(*parameter).kind {
+                definition
+                    .metadata
+                    .modifiers
+                    .push(dotty_core::ast::Modifier::Given);
             }
         }
     }
@@ -422,5 +446,73 @@ mod tests {
         };
         assert!(selection.name.is_type());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_context_function_literal_with_given_parameter_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "ctx ?=> use(ctx)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(4, 7).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected a context function literal");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a ValDef parameter");
+        };
+        assert_eq!(
+            parameter.metadata.modifiers,
+            vec![dotty_core::ast::Modifier::Given]
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_empty_context_function_parameter_list() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "() ?=> body",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 1, 2),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(3, 6).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 7, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("at least one formal parameter")
+        }));
     }
 }
