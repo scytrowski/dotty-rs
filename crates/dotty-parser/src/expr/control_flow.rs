@@ -237,8 +237,11 @@ where
             ) {
                 lookahead += 1;
             }
-            return self.cursor.lookahead(lookahead).kind
-                == TokenKind::Keyword(dotty_core::HardKeyword::Case);
+            return matches!(
+                self.cursor.lookahead(lookahead).kind,
+                TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            );
         }
 
         false
@@ -261,6 +264,12 @@ where
         } else {
             vec![self.case_clause(true)]
         };
+        if cases.is_empty() {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedPattern,
+                "expected at least one `case` clause after `catch`",
+            );
+        }
 
         if braced {
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
@@ -801,6 +810,107 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_catch_without_a_handler_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() catch",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Catch), 12, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: Some(handler),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected a recovered catch handler");
+        };
+
+        assert!(matches!(
+            parser.ast().get(handler).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_empty_braced_catch_handler() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() catch {}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Catch), 12, 17),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            handler: Some(handler),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected a recovered empty catch handler");
+        };
+
+        let TreeKind::Match(Match { ref cases, .. }) = parser.ast().get(handler).kind else {
+            panic!("expected match handler");
+        };
+        assert!(cases.is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_finally_without_a_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() finally",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Finally), 12, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            finalizer: Some(finalizer),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected a recovered finalizer");
+        };
+
+        assert!(matches!(
+            parser.ast().get(finalizer).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
