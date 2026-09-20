@@ -1248,8 +1248,8 @@ fn decodes_a_negated_float_literal_as_a_negative_constant() {
     assert!(matches!(
         parser.ast().get(id).kind,
         TreeKind::Literal(Literal {
-            value: Constant::Float(value)
-        }) if value == -1.5
+            ref value
+        }) if *value == Constant::float(-1.5)
     ));
     assert!(parser.diagnostics().is_empty());
 }
@@ -1272,8 +1272,8 @@ fn decodes_a_negated_double_literal_as_a_negative_constant() {
     assert!(matches!(
         parser.ast().get(id).kind,
         TreeKind::Literal(Literal {
-            value: Constant::Double(value)
-        }) if value == -1.5
+            ref value
+        }) if *value == Constant::double(-1.5)
     ));
     assert!(parser.diagnostics().is_empty());
 }
@@ -1322,8 +1322,8 @@ fn decodes_a_spaced_negated_float_literal() {
     assert!(matches!(
         parser.ast().get(id).kind,
         TreeKind::Literal(Literal {
-            value: Constant::Float(value)
-        }) if value == -1.0
+            ref value
+        }) if *value == Constant::float(-1.0)
     ));
     assert!(parser.diagnostics().is_empty());
 }
@@ -1347,8 +1347,8 @@ fn decodes_a_spaced_negated_double_literal() {
     assert!(matches!(
         parser.ast().get(id).kind,
         TreeKind::Literal(Literal {
-            value: Constant::Double(value)
-        }) if value == -1.0
+            ref value
+        }) if *value == Constant::double(-1.0)
     ));
     assert!(parser.diagnostics().is_empty());
 }
