@@ -8,6 +8,7 @@ mod for_expr;
 mod lambda;
 mod match_expr;
 mod operators;
+mod poly;
 mod simple;
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -16,6 +17,10 @@ where
 {
     /// Parses a complete expression at the `Expr` grammar boundary.
     pub(crate) fn expr(&mut self) -> TreeId<Untyped> {
+        if self.starts_poly_function() {
+            let mark = self.mark();
+            return self.parse_poly_function(mark);
+        }
         if self.starts_lambda() {
             let mark = self.mark();
             return self.parse_lambda(mark);
@@ -179,7 +184,7 @@ pub(crate) const fn can_start_expr(kind: TokenKind) -> bool {
                     | dotty_core::HardKeyword::Throw
                     | dotty_core::HardKeyword::Return
                     | dotty_core::HardKeyword::For
-            )
+            ) | TokenKind::Punctuation(Punctuation::LeftBracket)
         )
 }
 

@@ -285,7 +285,7 @@ where
         )
     }
 
-    fn consume_lambda_newlines(&mut self) {
+    pub(super) fn consume_lambda_newlines(&mut self) {
         while matches!(
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
@@ -299,7 +299,7 @@ where
         }
     }
 
-    fn arrow_starts_indented_body(&mut self) -> bool {
+    pub(super) fn arrow_starts_indented_body(&mut self) -> bool {
         matches!(
             self.cursor.lookahead(1).kind,
             TokenKind::Newline | TokenKind::Newlines
