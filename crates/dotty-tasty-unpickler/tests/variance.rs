@@ -14,7 +14,7 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::{Type, TypeLambda, Variance};
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
+use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
 const BOUNDS: &[u8] = include_bytes!("fixtures/semantic/Bounds.tasty");
 
@@ -39,6 +39,8 @@ const F_BOUNDED_LAMBDA: u32 = 981;
 /// `type G[+A] >: List[A] <: List[A]`: both bounds are `SHAREDtype` links to
 /// the lambda at 527, and only the upper one carries the marker.
 const SHARED_LAMBDA: u32 = 1149;
+const SHARED_LOW: u32 = 1151;
+const SHARED_HIGH: u32 = 1154;
 
 struct Session {
     store: SemanticStore,
@@ -319,4 +321,353 @@ fn a_lambda_shared_between_both_bounds_is_rebound_only_as_the_upper_bound() {
     assert_ne!(high, original);
     assert_eq!(declared(&session.store, low), [None]);
     assert_eq!(declared(&session.store, high), [Some(Variance::Covariant)]);
+}
+
+// Identity, order, sharing
+
+#[test]
+fn the_child_and_the_bounds_decode_in_either_order_to_the_same_relationship() {
+    // Child first.
+    unit!(file, session, unpickler);
+    let child = unpickler.unpickle_type(VARIANT_LAMBDA).unwrap();
+    let bounds = unpickler.unpickle_type(VARIANT).unwrap();
+    assert_eq!(unpickler.index().type_at(VARIANT_LAMBDA), Some(child));
+    drop(unpickler);
+    let Type::AliasingBounds { alias: derived } = *session.store.types.get(bounds) else {
+        panic!("not alias bounds");
+    };
+    assert_ne!(derived, child);
+    assert_eq!(declared(&session.store, child), [None]);
+    assert_eq!(
+        declared(&session.store, derived),
+        [Some(Variance::Covariant)]
+    );
+
+    // Bounds first: decoding them decodes and caches the child.
+    unit!(file, session, unpickler);
+    assert_eq!(unpickler.index().type_at(VARIANT_LAMBDA), None);
+    let bounds = unpickler.unpickle_type(VARIANT).unwrap();
+    let child = unpickler.index().type_at(VARIANT_LAMBDA).unwrap();
+    assert_eq!(unpickler.unpickle_type(VARIANT_LAMBDA), Ok(child));
+    drop(unpickler);
+    let Type::AliasingBounds { alias: derived } = *session.store.types.get(bounds) else {
+        panic!("not alias bounds");
+    };
+    assert_ne!(derived, child);
+    assert_eq!(declared(&session.store, child), [None]);
+    assert_eq!(
+        declared(&session.store, derived),
+        [Some(Variance::Covariant)]
+    );
+}
+
+#[test]
+fn decoding_the_bounds_again_returns_them_and_makes_no_second_derived_lambda() {
+    let next_id_after = |repeats: usize| {
+        unit!(file, session, unpickler);
+        let bounds = unpickler.unpickle_type(VARIANT).unwrap();
+        for _ in 0..repeats {
+            assert_eq!(unpickler.unpickle_type(VARIANT), Ok(bounds));
+        }
+        drop(unpickler);
+        session.store.types.alloc(Type::NoType)
+    };
+
+    // A repeat allocates nothing: the next id is the same as after one decode.
+    assert_eq!(next_id_after(0), next_id_after(3));
+}
+
+#[test]
+fn a_shared_link_to_the_lambda_still_returns_the_original_not_the_derived_one() {
+    unit!(file, session, unpickler);
+    let bounds = unpickler.unpickle_type(SHARED_LAMBDA).unwrap();
+    let original = unpickler.index().type_at(VARIANT_LAMBDA).unwrap();
+
+    // Both bounds children are `SHAREDtype` links to the lambda at 527.
+    assert_eq!(unpickler.unpickle_type(SHARED_LOW), Ok(original));
+    assert_eq!(unpickler.unpickle_type(SHARED_HIGH), Ok(original));
+    drop(unpickler);
+
+    let Type::Bounds { high, .. } = *session.store.types.get(bounds) else {
+        panic!("not two-sided bounds");
+    };
+    assert_ne!(high, original);
+    assert_eq!(declared(&session.store, original), [None]);
+}
+
+#[test]
+fn a_link_decoded_before_the_bounds_gives_the_same_original() {
+    unit!(file, session, unpickler);
+    let linked = unpickler.unpickle_type(SHARED_HIGH).unwrap();
+    let bounds = unpickler.unpickle_type(SHARED_LAMBDA).unwrap();
+    drop(unpickler);
+
+    let Type::Bounds { low, high } = *session.store.types.get(bounds) else {
+        panic!("not two-sided bounds");
+    };
+    assert_eq!(low, linked);
+    assert_ne!(high, linked);
+}
+
+// Malformed markers and rollback (synthetic wire files)
+
+const FLEXIBLE: u8 = 193;
+const AND: u8 = 165;
+const POLY: u8 = 169;
+const LAMBDA: u8 = 170;
+const PARAM: u8 = 172;
+const TYPEBOUNDS: u8 = 163;
+const TYPEREFPKG: u8 = 65;
+const COVARIANT: u8 = 28;
+const CONTRAVARIANT: u8 = 29;
+
+fn nat(value: u8) -> u8 {
+    assert!(value < 128);
+    0x80 | value
+}
+
+fn length_node(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut node = vec![tag, nat(u8::try_from(payload.len()).unwrap())];
+    node.extend(payload);
+    node
+}
+
+fn file_with_ast(ast: &[u8]) -> Vec<u8> {
+    use dotty_tasty::tasty::{Header, NameTable, RawName, Section, SectionTable};
+    let names = NameTable::from_entries(vec![
+        RawName::Utf8("ASTs".to_owned()),
+        RawName::Utf8("p".to_owned()),
+    ])
+    .unwrap();
+    TastyFile::from_parts(
+        Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 0,
+            tooling_version: "Scala 3.9.0".to_owned(),
+            uuid: [0; 16],
+        },
+        names,
+        SectionTable::from_sections(vec![Section::new(0, ast)]),
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+/// `TYPEREFpkg p`.
+fn package_ref() -> Vec<u8> {
+    vec![TYPEREFPKG, nat(1)]
+}
+
+fn param_type(binder: u8, number: u8) -> Vec<u8> {
+    length_node(PARAM, &[nat(binder), nat(number)])
+}
+
+/// A `TYPELAMBDAtype` or `POLYtype` (`tag`) with `arity` parameters, each with
+/// alias bounds and the name `p`.
+fn binder_node(tag: u8, result: &[u8], arity: usize) -> Vec<u8> {
+    let mut payload = result.to_vec();
+    for _ in 0..arity {
+        payload.extend(length_node(TYPEBOUNDS, &package_ref()));
+        payload.push(nat(1));
+    }
+    length_node(tag, &payload)
+}
+
+fn bounds_node(children: &[&[u8]], markers: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for child in children {
+        payload.extend(*child);
+    }
+    payload.extend(markers);
+    length_node(TYPEBOUNDS, &payload)
+}
+
+/// A file whose ASTs are a `FLEXIBLEtype` wrapper around `child`, at address 2.
+fn file_with(child: &[u8]) -> Vec<u8> {
+    file_with_ast(&length_node(FLEXIBLE, child))
+}
+
+fn synthetic(bytes: &[u8]) -> (TastyFile<'_>, Session, Packages) {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    packages.enter(&mut store, SymbolOrigin::Synthetic, &["p"]);
+    (file, Session { store, definitions }, packages)
+}
+
+const AT: u32 = 2;
+const CHILD: u32 = 4;
+
+#[test]
+fn markers_on_a_bound_that_is_not_a_lambda_are_a_typed_error_not_dropped() {
+    for (label, child) in [
+        ("a package reference", package_ref()),
+        ("a poly", binder_node(POLY, &package_ref(), 1)),
+    ] {
+        let bytes = file_with(&bounds_node(&[&child], &[COVARIANT]));
+        let (file, mut session, packages) = synthetic(&bytes);
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+        let before = unpickler.index().type_count();
+
+        let result = unpickler.unpickle_type(AT);
+        assert!(
+            matches!(
+                result,
+                Err(UnpickleError::InvalidBoundsVarianceTarget { address: AT, .. })
+            ),
+            "{label}: {result:?}"
+        );
+        assert_eq!(unpickler.index().type_count(), before, "{label}");
+        assert_eq!(unpickler.index().type_at(AT), None, "{label}");
+    }
+}
+
+#[test]
+fn a_marker_count_that_differs_from_the_arity_is_a_typed_error() {
+    let cases: [(usize, &[u8]); 3] = [
+        (1, &[COVARIANT, CONTRAVARIANT]),
+        (2, &[COVARIANT]),
+        (3, &[COVARIANT, COVARIANT]),
+    ];
+    for (arity, markers) in cases {
+        let lambda = binder_node(LAMBDA, &package_ref(), arity);
+        let bytes = file_with(&bounds_node(&[&lambda], markers));
+        let (file, mut session, packages) = synthetic(&bytes);
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+        let before = unpickler.index().type_count();
+
+        let result = unpickler.unpickle_type(AT);
+        assert!(
+            matches!(
+                result,
+                Err(UnpickleError::BoundsVarianceArityMismatch { address: AT, expected, actual, .. })
+                    if expected == arity && actual == markers.len()
+            ),
+            "{arity} parameters, {} markers: {result:?}",
+            markers.len()
+        );
+        assert_eq!(unpickler.index().type_count(), before);
+    }
+}
+
+#[test]
+fn a_two_sided_marker_is_checked_against_the_upper_bound_not_the_lower() {
+    // The lower bound is a perfectly good lambda, the upper one is not.
+    let low = binder_node(LAMBDA, &package_ref(), 1);
+    let bytes = file_with(&bounds_node(&[&low, &package_ref()], &[COVARIANT]));
+    let (file, mut session, packages) = synthetic(&bytes);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+
+    let result = unpickler.unpickle_type(AT);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::InvalidBoundsVarianceTarget { address: AT, .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_synthetic_lambda_with_a_self_reference_is_rebound_to_itself() {
+    // `[p] =>> p` with `+`: the result is a `PARAMtype` to the lambda at 4.
+    let lambda = binder_node(LAMBDA, &param_type(4, 0), 1);
+    let bytes = file_with(&bounds_node(&[&lambda], &[COVARIANT]));
+    let (file, mut session, packages) = synthetic(&bytes);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+
+    let bounds = unpickler.unpickle_type(AT).unwrap();
+    let original = unpickler.index().type_at(CHILD).unwrap();
+    drop(unpickler);
+
+    let Type::AliasingBounds { alias } = *session.store.types.get(bounds) else {
+        panic!("not alias bounds");
+    };
+    assert_eq!(
+        session
+            .store
+            .types
+            .get(lambda_result(&session.store, alias)),
+        &Type::ParamRef {
+            binder: alias,
+            index: 0
+        }
+    );
+    assert_eq!(
+        session
+            .store
+            .types
+            .get(lambda_result(&session.store, original)),
+        &Type::ParamRef {
+            binder: original,
+            index: 0
+        }
+    );
+}
+
+fn lambda_result(store: &SemanticStore, id: TypeId) -> TypeId {
+    lambda(store, id).result
+}
+
+#[test]
+fn a_failure_after_the_rebinding_rolls_back_the_derived_lambda_but_not_the_older_child() {
+    // `AND(bounds-with-marker, <unsupported form>)`: the left operand decodes
+    // and its lambda is rebound, then the right one fails.
+    let lambda = binder_node(LAMBDA, &param_type(4, 0), 1);
+    // AND is the wrapper at 0: its first child, the bounds, is at 2; the
+    // lambda inside them at 4.
+    let mut children = bounds_node(&[&lambda], &[COVARIANT]);
+    children.extend([66, nat(1)]);
+    let bytes = file_with_ast(&length_node(AND, &children));
+    let (file, mut session, packages) = synthetic(&bytes);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+
+    // The lambda is decoded on its own first, so it exists before the failure.
+    let older = unpickler.unpickle_type(CHILD).unwrap();
+    let before = unpickler.index().type_count();
+
+    for _ in 0..2 {
+        let result = unpickler.unpickle_type(0);
+        assert!(
+            matches!(result, Err(UnpickleError::UnsupportedType { tag: 66, .. })),
+            "{result:?}"
+        );
+        // Nothing of the failed call survives: no bounds, no derived lambda,
+        // no copied node, and no stale pending state to trip the retry.
+        assert_eq!(unpickler.index().type_count(), before);
+        assert_eq!(unpickler.index().type_at(AT), None);
+        // What existed before the call is intact.
+        assert_eq!(unpickler.index().type_at(CHILD), Some(older));
+    }
+    drop(unpickler);
+    assert_eq!(declared(&session.store, older), [None]);
+}
+
+#[test]
+fn a_failed_rebinding_call_gives_back_every_id_it_took() {
+    let lambda = binder_node(LAMBDA, &param_type(4, 0), 1);
+    let mut children = bounds_node(&[&lambda], &[COVARIANT]);
+    children.extend([66, nat(1)]);
+    let bytes = file_with_ast(&length_node(AND, &children));
+    let next_id_after = |fail: bool| {
+        let (file, mut session, packages) = synthetic(&bytes);
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+        unpickler.unpickle_type(CHILD).unwrap();
+        if fail {
+            assert!(unpickler.unpickle_type(0).is_err());
+        }
+        drop(unpickler);
+        session.store.types.alloc(Type::NoType)
+    };
+
+    assert_eq!(next_id_after(true), next_id_after(false));
 }
