@@ -111,6 +111,15 @@ fn render_tree(
                 quote(names.resolve(bind.name.text()))
             ));
         }
+        TreeKind::ValDef(definition) => {
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Given)
+            {
+                fields.push("\"given\":true".to_owned());
+            }
+        }
         TreeKind::Alternative(_) | TreeKind::Typed(_) => {}
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
@@ -186,6 +195,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Alternative(_) => "Alternative",
         TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
+        TreeKind::ValDef(_) => "ValDef",
+        TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::If(_) => "If",
         TreeKind::While(_) => "While",
         TreeKind::Match(_) => "Match",
@@ -201,6 +212,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
         TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
         TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
         TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
@@ -279,6 +291,14 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children.push(case_def.body);
             children
         }
+        TreeKind::ValDef(definition) => {
+            let mut children = vec![definition.tpt];
+            if let Some(rhs) = definition.rhs {
+                children.push(rhs);
+            }
+            children
+        }
+        TreeKind::TypeTree(_) => Vec::new(),
         TreeKind::Block(block) => {
             let mut children = Vec::with_capacity(block.stats.len() + 1);
             children.extend(block.stats.iter().copied());
@@ -299,6 +319,11 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => vec![prefix.operand],
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
+        TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
+            let mut children = function.params.clone();
+            children.push(function.body);
+            children
+        }
         TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) => {
             let mut children = for_tree.enums.clone();
             children.push(for_tree.body);

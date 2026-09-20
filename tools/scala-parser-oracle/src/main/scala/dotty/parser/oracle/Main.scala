@@ -3,6 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
+import dotty.tools.dotc.core.Flags.Given
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -48,6 +49,8 @@ object Main:
         fields += field("check_mode", quote(generator.checkMode.toString))
       case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
         fields += field("name", quote(bind.name.toString))
+      case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] if vdef.mods.is(Given) =>
+        fields += field("given", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
