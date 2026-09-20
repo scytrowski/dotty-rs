@@ -108,7 +108,7 @@ and `UnsupportedSyntax`, with a source ID and source span.
 Reusable recovery sets cover statements, arguments, type arguments, and case
 clauses. Every recovery loop checks that the token source advances; a broken
 external source cannot turn recovery into an infinite loop. Valid but not yet
-implemented constructs such as `class`, `def`, `for`, and `match`
+implemented constructs such as `class`, `def`, and `for`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -176,9 +176,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, definitions, remaining control flow (`for`, `match`, and
-`do`/`while`), templates, interpolation, quotes, and macros remain follow-up
-increments.
+`RefinedType`, definitions, remaining control flow (`for` and `do`/`while`),
+templates, interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards, and expression bodies. Case bodies are represented
