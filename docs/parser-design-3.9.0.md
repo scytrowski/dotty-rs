@@ -206,8 +206,28 @@ parameters receive parser-local generated names because the shared AST models
 lambda parameters as `ValDef`. Context-function parameters retain
 `Modifier::Given` metadata. The body is a complete expression; an indented
 body or the remaining region of an enclosing block is represented using the
-existing block-body convention. Polyfunctions, placeholder-function syntax,
-erased parameters, and migration-only forms remain future work.
+existing block-body convention. Polyfunctions use the shared `TypeDef` and
+`TypeBoundsTree` representation for their type-parameter clause. Expression
+placeholders create synthetic `ValDef` parameters and lower to ordinary
+`Function` nodes when the enclosing expression is complete; Dotty's internal
+`WildcardFunction` node is not exposed by the Rust AST. Erased parameters and
+migration-only forms remain future work.
+
+The initial polymorphic and placeholder-function subset covers:
+
+```text
+[A] => (x: A) => x
+[A >: Lower <: Upper] => (x: A) => x
+_ + 1
+foo(_, 1)
+_.name
+```
+
+Placeholder parameters are scoped to the complete expression that contains
+them. A nested expression such as `foo(bar(_))` therefore creates the
+placeholder function inside `bar(_)`, rather than wrapping the outer call.
+Generated names and the Scala compiler's `WildcardFunction` kind are
+normalized by the differential oracle.
 
 An `if` without an `else` uses a zero-width synthetic
 `Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the
