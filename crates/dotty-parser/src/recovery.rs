@@ -39,6 +39,9 @@ impl RecoverySet {
             Self::Case => matches!(
                 kind,
                 TokenKind::Keyword(HardKeyword::Case)
+                    | TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Punctuation(Punctuation::Semicolon)
                     | TokenKind::Outdent
                     | TokenKind::Punctuation(Punctuation::RightBrace)
                     | TokenKind::Eof
@@ -93,6 +96,9 @@ mod tests {
     fn case_recovery_accepts_case_boundaries() {
         for kind in [
             TokenKind::Keyword(HardKeyword::Case),
+            TokenKind::Newline,
+            TokenKind::Newlines,
+            TokenKind::Punctuation(Punctuation::Semicolon),
             TokenKind::Outdent,
             TokenKind::Punctuation(Punctuation::RightBrace),
             TokenKind::Eof,

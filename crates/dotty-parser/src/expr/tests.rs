@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::compilation_unit::tests::{parser_for, token};
 use dotty_core::ast::{Block, Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode};

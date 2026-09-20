@@ -237,4 +237,51 @@ mod tests {
         assert_eq!(cases.len(), 2);
         assert!(parser.diagnostics().is_empty());
     }
+
+    #[test]
+    fn recovers_from_a_case_without_an_arrow_before_the_next_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x body\ncase y => result",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Identifier, 7, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Case), 12, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let cases = parser.case_clauses();
+
+        assert_eq!(cases.len(), 2);
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_case_with_a_missing_pattern_without_swallowing_the_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case => result",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Operator, 5, 7),
+                token(TokenKind::Identifier, 8, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause();
+
+        assert!(matches!(parser.ast().get(case).kind, TreeKind::CaseDef(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
 }

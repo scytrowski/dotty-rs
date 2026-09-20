@@ -47,6 +47,13 @@ where
             }
         };
 
+        if cases.is_empty() {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedPattern,
+                "expected at least one `case` clause after `match`",
+            );
+        }
+
         self.alloc_from(mark, TreeKind::Match(Match { selector, cases }))
     }
 
@@ -172,5 +179,26 @@ mod tests {
 
         assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_an_empty_match_case_region() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value match {}",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 }

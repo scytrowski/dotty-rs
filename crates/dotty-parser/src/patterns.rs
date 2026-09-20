@@ -466,7 +466,18 @@ where
     fn unexpected_pattern(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedPattern, "expected a pattern");
-        if self.current().kind != TokenKind::Eof {
+        if self.current().kind != TokenKind::Eof
+            && !self.current_is_structural_operator()
+            && !matches!(
+                self.current().kind,
+                TokenKind::Punctuation(
+                    Punctuation::Comma
+                        | Punctuation::RightParen
+                        | Punctuation::RightBrace
+                        | Punctuation::Semicolon
+                )
+            )
+        {
             self.advance();
         }
         self.error_pattern(position)
