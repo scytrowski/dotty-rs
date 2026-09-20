@@ -49,6 +49,9 @@ object Main:
         fields += field("check_mode", quote(generator.checkMode.toString))
       case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
         fields += field("name", quote(bind.name.toString))
+      case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
+        val name = tdef.name.toString
+        fields += field("name", quote(if slice(tdef, source).trim == "_" then "$type_wildcard" else name))
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] if vdef.mods.is(Given) =>
         fields += field("given", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
