@@ -142,3 +142,91 @@ fn an_unresolved_underlying_type_is_reported_and_rolls_back() {
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(FLEXIBLE), None);
 }
+
+/// A file whose ASTs are exactly `ast`, over the names `ASTs`, `p`, `C`.
+fn file_with_ast(ast: &[u8]) -> Vec<u8> {
+    let names = dotty_tasty::tasty::NameTable::from_entries(
+        ["ASTs", "p", "C"]
+            .map(|text| dotty_tasty::tasty::RawName::Utf8(text.to_owned()))
+            .to_vec(),
+    )
+    .unwrap();
+    let sections =
+        dotty_tasty::tasty::SectionTable::from_sections(vec![dotty_tasty::tasty::Section::new(
+            0, ast,
+        )]);
+    TastyFile::from_parts(
+        dotty_tasty::tasty::Header {
+            major_version: 28,
+            minor_version: 9,
+            experimental_version: 0,
+            tooling_version: "Scala 3.9.0".to_owned(),
+            uuid: [0; 16],
+        },
+        names,
+        sections,
+    )
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+/// `TYPEREF C prefix` where the prefix is `prefix_tag Length (TYPEREFpkg p)`,
+/// itself inside an outer `FLEXIBLEtype` so the node is at address 2.
+fn reference_to_c_through(prefix_tag: u8) -> Vec<u8> {
+    let prefix = [prefix_tag, 0x82, 65, 0x81];
+    let mut inner = vec![117, 0x82];
+    inner.extend(prefix);
+    let mut outer = vec![193, 0x80 | inner.len() as u8];
+    outer.extend(inner);
+    file_with_ast(&outer)
+}
+
+fn session_with_p_c() -> (Session, Packages) {
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    let chain = packages.enter(&mut session.store, SymbolOrigin::Synthetic, &["p"]);
+    let package = chain.last().unwrap();
+    let name = Name::new(session.store.names.intern("C"), Namespace::Type);
+    let class = session.store.symbols.alloc(Symbol {
+        name,
+        owner: Some(package.symbol),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    session
+        .store
+        .scopes
+        .get_mut(package.scope)
+        .enter(name, class);
+    (session, packages)
+}
+
+#[test]
+fn a_named_reference_through_a_flexible_prefix_is_found_in_the_wrapped_prefix() {
+    // `TYPEREF C (FLEXIBLEtype (TYPEREFpkg p))`: `C` is a member of package
+    // `p`, which the wrapper must not hide.
+    let bytes = reference_to_c_through(193);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let (mut session, packages) = session_with_p_c();
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    let id = unpickler.unpickle_type(2).unwrap();
+    drop(unpickler);
+
+    let Type::TypeRef { prefix, symbol } = session.store.types.get(id) else {
+        panic!("expected a type reference");
+    };
+    assert!(matches!(
+        session.store.types.get(*prefix),
+        Type::Flexible { .. }
+    ));
+    let name = session.store.symbols.get(*symbol).name.text();
+    assert_eq!(session.store.names.resolve(name), "C");
+}
