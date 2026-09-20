@@ -2770,6 +2770,131 @@ fn unsupported_expression_input_produces_an_error_tree_and_diagnostic() {
 }
 
 #[test]
+fn collects_two_placeholder_parameters_in_source_order() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "_ + _",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            Token {
+                kind: TokenKind::Operator,
+                span: TextRange::new(2, 3).unwrap(),
+                value: dotty_core::TokenValue::None,
+            },
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+    else {
+        panic!("expected a placeholder function");
+    };
+    assert_eq!(function.params.len(), 2);
+    let names_in_order = function
+        .params
+        .iter()
+        .map(|parameter| match &parser.ast().get(*parameter).kind {
+            TreeKind::ValDef(definition) => parser.names.resolve(definition.name.as_name().text()),
+            _ => panic!("expected a placeholder parameter"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names_in_order,
+        vec!["$lambda_wildcard_0", "$lambda_wildcard_1"]
+    );
+}
+
+#[test]
+fn wraps_placeholder_in_an_application_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(_) ",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+    else {
+        panic!("expected a placeholder function");
+    };
+    let TreeKind::Apply(application) = &parser.ast().get(function.body).kind else {
+        panic!("expected an application body");
+    };
+    assert_eq!(application.args.len(), 1);
+    assert!(matches!(
+        parser.ast().get(application.args[0]).kind,
+        TreeKind::Ident(_)
+    ));
+}
+
+#[test]
+fn nested_placeholder_scope_stays_inside_the_nested_application() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(bar(_))",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+            token(TokenKind::Identifier, 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+            token(TokenKind::Eof, 11, 11),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(outer) = &parser.ast().get(tree).kind else {
+        panic!("expected the outer application");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+        &parser.ast().get(outer.args[0]).kind
+    else {
+        panic!("expected a nested placeholder function");
+    };
+    assert_eq!(function.params.len(), 1);
+}
+
+#[test]
+fn explicit_wildcard_lambda_parameter_is_not_an_expression_placeholder() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "_ => 1",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            Token {
+                kind: TokenKind::Operator,
+                span: TextRange::new(2, 4).unwrap(),
+                value: dotty_core::TokenValue::None,
+            },
+            token(TokenKind::IntegerLiteral, 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+    else {
+        panic!("expected an explicit lambda");
+    };
+    assert_eq!(function.params.len(), 1);
+    assert!(parser.placeholder_params.is_empty());
+}
+
+#[test]
 fn wraps_an_infix_placeholder_expression_in_a_function() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

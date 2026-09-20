@@ -82,9 +82,10 @@ fn render_tree(
 
     match &tree.kind {
         TreeKind::Ident(ident) => {
+            let name = names.resolve(ident.name.text());
             fields.push(format!(
                 "\"name\":{}",
-                quote(names.resolve(ident.name.text()))
+                quote(&normalize_placeholder_name(name))
             ));
             if ident.backquoted {
                 fields.push("\"backquoted\":true".to_owned());
@@ -241,6 +242,12 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::Error(_)) => "Error",
         _ => "Unsupported",
     }
+}
+
+fn normalize_placeholder_name(name: &str) -> String {
+    name.strip_prefix("$lambda_wildcard_")
+        .map(|index| format!("$placeholder_{index}"))
+        .unwrap_or_else(|| name.to_owned())
 }
 
 fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<Untyped>> {
