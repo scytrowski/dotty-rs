@@ -1031,9 +1031,10 @@ out-of-range arena index.
 `types/binder.rs` is kept only for this `reserve`/`fill` API; it no longer
 defines a `Binder` type.
 
-**How an adapter uses it (TASTy, Milestone 3a).** An adapter that reads a
+**How an adapter uses it (TASTy, Milestones 3a and 3b).** An adapter that reads a
 format where a parameter reference names its binder by a stable key (TASTy: the
-binder's AST address) ties the knot like this: reserve the `TypeId`, publish
+binder's AST address) ties the knot like this, for all three binder forms
+(`TypeLambda`, `Poly`, `Method`) through one sequence: reserve the `TypeId`, publish
 `key -> id` in its own address index, decode the children (a `ParamRef` now
 resolves the key to the id), then `fill`. Between publishing and `fill` the
 address entry refers to an unfilled slot, so during that window the adapter must
@@ -1047,7 +1048,7 @@ binder (for example applying declared variances to a `TypeLambda`, as Dotty's
 `withVariances` does) is not a copy with one field changed: every `ParamRef`
 inside the copy still names the old id. It requires a new binder and a
 substitution of the old binder's references (Dotty's `subst`), or a decoding
-rule that avoids the copy. No such operation exists yet (TASTy Milestone 3b).
+rule that avoids the copy. No such operation exists yet (TASTy Milestone 3c).
 
 ### `types/method.rs`, `types/constant.rs`, `types/class_info.rs`, `types/annotation.rs`
 
@@ -1056,6 +1057,7 @@ pub struct MethodParam {
     pub name: TermName,
     pub ty: TypeId,
     pub erased: bool,
+    pub varargs: bool,
 }
 
 pub enum MethodKind {
@@ -1092,6 +1094,14 @@ pub enum Constant {
     Class(TypeId),
 }
 ```
+
+`varargs` is the JVM `ACC_VARARGS` distinction only. A TASTy `METHODtype` does not
+encode it (a Scala repeated parameter is part of the parameter's *type*), so the
+TASTy adapter always sets it to `false` and never infers it. `erased` is derived
+in Dotty from an `ErasedParamAnnot` on the parameter's type, not from a clause
+modifier; the TASTy adapter sets it to `false` until annotations are decoded
+(Milestone 4), at which point it must revisit this. The `MethodKind` of a TASTy
+`METHODtype` comes from its `IMPLICIT`/`GIVEN` modifier tail.
 
 `Constant::String` uses `NameId` (interned, see §5) rather than an owned
 `String`, so AST literals and future TASTy constant pool entries share one
