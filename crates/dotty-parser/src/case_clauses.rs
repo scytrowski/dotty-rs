@@ -40,7 +40,18 @@ where
         let body = if expr_only {
             self.advance();
             self.consume_case_newlines();
-            self.with_location(Location::InBlock, |parser| parser.expr())
+            let indented = self.accept(TokenKind::Indent);
+            let body = self.with_location(Location::InBlock, |parser| parser.expr());
+            if indented {
+                self.consume_case_newlines();
+                if !self.accept(TokenKind::Outdent) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an outdent to close an expression-only case body",
+                    );
+                }
+            }
+            body
         } else {
             self.observe_arrow_indented();
             self.advance();
@@ -236,7 +247,9 @@ mod tests {
                     token(TokenKind::Identifier, 5, 6),
                     token(TokenKind::Operator, 7, 9),
                     token(TokenKind::Newline, 9, 10),
+                    token(TokenKind::Indent, 12, 12),
                     token(TokenKind::Identifier, 12, 16),
+                    token(TokenKind::Outdent, 16, 16),
                     token(TokenKind::Eof, 16, 16),
                 ],
                 index: 0,
