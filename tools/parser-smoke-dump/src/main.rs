@@ -133,6 +133,19 @@ fn render_tree(
                 quote(names.resolve(postfix.op.text()))
             ));
         }
+        TreeKind::PhaseSpecific(UntypedNode::GenFrom(generator)) => {
+            fields.push(format!(
+                "\"check_mode\":{}",
+                quote(match generator.check_mode {
+                    dotty_core::ast::GenCheckMode::Ignore => "Ignore",
+                    dotty_core::ast::GenCheckMode::Filtered => "Filtered",
+                    dotty_core::ast::GenCheckMode::Check => "Check",
+                    dotty_core::ast::GenCheckMode::CheckAndFilter => "CheckAndFilter",
+                    dotty_core::ast::GenCheckMode::FilterNow => "FilterNow",
+                    dotty_core::ast::GenCheckMode::FilterAlways => "FilterAlways",
+                })
+            ));
+        }
         _ => {}
     }
 
@@ -188,6 +201,10 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
+        TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
+        TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
+        TreeKind::PhaseSpecific(UntypedNode::GenAlias(_)) => "GenAlias",
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::Return(_) => "Return",
@@ -282,6 +299,20 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => vec![prefix.operand],
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
+        TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) => {
+            let mut children = for_tree.enums.clone();
+            children.push(for_tree.body);
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ForDo(for_tree)) => {
+            let mut children = for_tree.enums.clone();
+            children.push(for_tree.body);
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::GenFrom(generator)) => {
+            vec![generator.pattern, generator.expr]
+        }
+        TreeKind::PhaseSpecific(UntypedNode::GenAlias(alias)) => vec![alias.pattern, alias.expr],
         TreeKind::PhaseSpecific(UntypedNode::Throw(throw)) => vec![throw.expr],
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(parsed_try)) => {
             let mut children = vec![parsed_try.expr];

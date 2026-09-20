@@ -44,6 +44,8 @@ object Main:
           fields += field("backquoted", "true")
       case named: dotty.tools.dotc.ast.Trees.NamedArg[?] =>
         fields += field("name", quote(named.name.toString))
+      case generator: dotty.tools.dotc.ast.untpd.GenFrom =>
+        fields += field("check_mode", quote(generator.checkMode.toString))
       case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
         fields += field("name", quote(bind.name.toString))
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
