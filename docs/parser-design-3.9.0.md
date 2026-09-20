@@ -223,6 +223,11 @@ foo(_, 1)
 _.name
 ```
 
+Type-parameter bounds currently accept only simple or qualified type names.
+Applied, infix, refined, and other full type forms (for example `List[Int]`
+or `Foo & Bar`) remain deferred and produce a parser diagnostic in this
+milestone.
+
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the
 placeholder function inside `bar(_)`, rather than wrapping the outer call.

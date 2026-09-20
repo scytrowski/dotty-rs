@@ -333,6 +333,39 @@ mod tests {
     }
 
     #[test]
+    fn reports_unsupported_applied_type_in_a_bound_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A <: Foo & Bar]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(3, 5).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected `,` or `]` after a type parameter")
+        }));
+    }
+
+    #[test]
     fn malformed_type_parameter_clause_recovers_at_the_closing_bracket() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
