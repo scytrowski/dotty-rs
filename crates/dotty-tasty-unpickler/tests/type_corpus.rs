@@ -5,7 +5,7 @@
 //! because it walks every unit of the two Scala 3 corpora; run it with
 //! `cargo test -p dotty-tasty-unpickler --release --test type_corpus -- --ignored --nocapture`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -134,8 +134,42 @@ struct BoundsShapes {
     malformed: usize,
 }
 
+/// How the variance-bearing `TYPEBOUNDS` nodes fared (Milestone 3c), and how
+/// the lambdas decoded split between standalone ones and ones that are the
+/// source of a variance application.
+#[derive(Default)]
+struct VarianceBounds {
+    total: usize,
+    decoded: usize,
+    /// Failures, by kind.
+    failures: BTreeMap<&'static str, usize>,
+    lambdas_standalone: usize,
+    lambdas_as_variance_source: usize,
+}
+
+/// Why a variance-bearing `TYPEBOUNDS` failed, for the report.
+fn variance_failure(error: &UnpickleError) -> &'static str {
+    match error {
+        UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. } => {
+            "external child"
+        }
+        UnpickleError::MissingReferencedSymbol { .. } => "local missing child",
+        UnpickleError::UnsupportedType { .. } => "unsupported child form",
+        UnpickleError::InvalidBoundsVarianceTarget { .. } => "invalid variance target",
+        UnpickleError::BoundsVarianceArityMismatch { .. } => "arity mismatch",
+        UnpickleError::RebindFailed { .. } => "rebind failure",
+        UnpickleError::AmbiguousMember { .. }
+        | UnpickleError::UnsupportedSignedReference { .. }
+        | UnpickleError::UnsupportedResolutionPrefix { .. } => {
+            "other known (ambiguous/signed/prefix)"
+        }
+        _ => "unexpected",
+    }
+}
+
 #[derive(Default)]
 struct Tally {
+    variance: VarianceBounds,
     units: usize,
     units_with_a_decoded_type: usize,
     units_fully_decoded: usize,
@@ -239,6 +273,31 @@ fn run(
         }
     }
 
+    // Variance-bearing bounds, and the lambdas that are their direct children.
+    let (variance_bounds, variance_sources): (HashSet<u32>, HashSet<u32>) = {
+        let index = file.ast_address_index().unwrap();
+        let bounds: HashSet<u32> = index
+            .iter_nodes()
+            .filter(|node| node.tag == TYPEBOUNDS_TAG)
+            .map(|node| u32::try_from(node.offset).unwrap())
+            .filter(|at| {
+                index
+                    .get(*at)
+                    .and_then(|raw| raw.decode_type_bounds().ok())
+                    .is_some_and(|shape| !shape.variances.is_empty())
+            })
+            .collect();
+        let sources = index
+            .iter_tree_edges()
+            .filter(|edge| {
+                edge.child.tag == 170
+                    && bounds.contains(&u32::try_from(edge.parent.offset).unwrap())
+            })
+            .map(|edge| u32::try_from(edge.child.offset).unwrap())
+            .collect();
+        (bounds, sources)
+    };
+
     let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
     unpickler.enter_symbols().unwrap();
 
@@ -252,6 +311,7 @@ fn run(
             _ => &mut tally.by_address,
         };
         outcomes.nodes += 1;
+        tally.variance.total += usize::from(variance_bounds.contains(&at));
         if tag == 172 {
             let binder_known = file
                 .ast_address_index()
@@ -267,6 +327,16 @@ fn run(
                 outcomes.decoded += 1;
                 // Identity: decoding again never allocates a second type.
                 assert_eq!(unpickler.unpickle_type(at), Ok(first));
+                if variance_bounds.contains(&at) {
+                    tally.variance.decoded += 1;
+                }
+                if tag == 170 {
+                    if variance_sources.contains(&at) {
+                        tally.variance.lambdas_as_variance_source += 1;
+                    } else {
+                        tally.variance.lambdas_standalone += 1;
+                    }
+                }
                 if tag == 172 {
                     let binder = file
                         .ast_address_index()
@@ -296,6 +366,13 @@ fn run(
             }
             Err(error) => {
                 failed += 1;
+                if variance_bounds.contains(&at) {
+                    *tally
+                        .variance
+                        .failures
+                        .entry(variance_failure(&error))
+                        .or_default() += 1;
+                }
                 match error {
                     UnpickleError::UnsupportedType { tag, .. } => {
                         // For a reference node this is the node's own form;
@@ -510,6 +587,14 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         );
         report("constant nodes", &CONSTANT_TAGS);
         println!(
+            "variance-bearing TYPEBOUNDS: total {}, decoded {}; failures {:?}",
+            tally.variance.total, tally.variance.decoded, tally.variance.failures
+        );
+        println!(
+            "TYPELAMBDAtype decoded: standalone {}, as variance source {}",
+            tally.variance.lambdas_standalone, tally.variance.lambdas_as_variance_source
+        );
+        println!(
             "TYPEBOUNDS shapes: total {}, two-sided {}, alias-only {}, with variance {}, malformed {}; decoded alias-only {}, decoded two-sided {}",
             tally.bounds.total,
             tally.bounds.two_sided,
@@ -545,6 +630,19 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         }
         assert!(tally.unexpected.is_empty());
         assert_eq!(tally.missing_outside_bodies, 0);
+        // A well-formed marker never fails for being a marker.
+        for kind in [
+            "invalid variance target",
+            "arity mismatch",
+            "rebind failure",
+            "unexpected",
+        ] {
+            assert_eq!(
+                tally.variance.failures.get(kind).copied().unwrap_or(0),
+                0,
+                "{kind}"
+            );
+        }
         // No binder form is ever "unsupported" for being that form.
         for (tag, label) in BINDER_TAGS {
             assert!(

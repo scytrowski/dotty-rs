@@ -1047,8 +1047,33 @@ transaction (`SemanticStore::rollback_to` truncates reserved slots).
 binder (for example applying declared variances to a `TypeLambda`, as Dotty's
 `withVariances` does) is not a copy with one field changed: every `ParamRef`
 inside the copy still names the old id. It requires a new binder and a
-substitution of the old binder's references (Dotty's `subst`), or a decoding
-rule that avoids the copy. No such operation exists yet (TASTy Milestone 3c).
+substitution of the old binder's references (Dotty's `subst`).
+`rebind_type_lambda(store, source, declared_variances)` in `types/rebind.rs` is
+that operation, and it is format-agnostic: it knows nothing of AST addresses.
+
+- The new binder id is reserved *before* the children are transformed, and every
+  reachable `ParamRef` of the old binder becomes the same parameter of the new
+  one. The source graph is left unchanged.
+- The transformation is memoized over `TypeId`s: a node reachable twice becomes
+  one node, and a node that does not depend on the rebound binder keeps its id.
+  Nothing is interned structurally.
+- Nested `Method`/`Poly`/`TypeLambda` binders and `Recursive` types are copied
+  under a reserved id, with their own `ParamRef`/`RecThis` remapped, so a copy is
+  internally consistent (conservatively, whenever one is reached).
+- `Annotated` gets a new annotation with the transformed type (an unaffected
+  annotation is reused, a stored one is never mutated); `ClassInfo` gets
+  transformed `prefix`/`parents`/`self_type` and keeps its class symbol and
+  declaration scope, because a symbol table is not a type graph.
+- The `match` over `Type` has no wildcard arm: adding a variant forces the
+  rebinder to be reviewed.
+- It is atomic (a store checkpoint is rolled back on any error) and returns a
+  typed `TypeRebindError` for a source that is not a lambda, a variance count that
+  differs from the arity, an unfilled slot, a cycle, or a graph deeper than 512.
+  Nothing panics for a caller's semantic mismatch.
+
+The TASTy adapter uses it for `TYPEBOUNDS` variance markers (Milestone 3c),
+keeping the wire lambda cached at its own address and putting the derived
+lambda in the bounds.
 
 ### `types/method.rs`, `types/constant.rs`, `types/class_info.rs`, `types/annotation.rs`
 
