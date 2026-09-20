@@ -83,8 +83,8 @@
 //! and its type is any type, not bounds. `()` is a valid clause, so an empty
 //! method is accepted. The modifier tail is the clause kind, as Dotty's
 //! `methodTypeCompanion` reads it: none is `Plain`, `IMPLICIT` is `Implicit`,
-//! `GIVEN` is `Contextual`. Both together are `MalformedType`, and any other
-//! modifier is [`InvalidMethodModifier`](UnpickleError::InvalidMethodModifier).
+//! `GIVEN` is `Contextual`. Both together are `Implicit`, as in Dotty, and any
+//! other modifier is [`InvalidMethodModifier`](UnpickleError::InvalidMethodModifier).
 //! A `PARAMtype` to a method is a reference to one of its term parameters,
 //! which is how a dependent result (`(x: Box): x.Out`) names its own clause.
 //!

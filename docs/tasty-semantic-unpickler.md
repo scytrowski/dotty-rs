@@ -490,15 +490,15 @@ owns an id. The modifier tail is the clause kind, as Dotty's
 | none | `Plain` |
 | `IMPLICIT` | `Implicit` |
 | `GIVEN` | `Contextual` |
-| `IMPLICIT` and `GIVEN` | `MalformedType` |
+| `IMPLICIT` and `GIVEN` (either order) | `Implicit` (`IMPLICIT` wins, as in Dotty) |
 | any other modifier | `InvalidMethodModifier { address, tag }` |
 
 Implicit and contextual (`using`) clauses are different kinds in `dotty-core`
 and are never merged; a repeated modifier is harmless, as in Dotty's flag set.
-Dotty's reader fails on any other modifier byte (`readParamNamesAndMods`) and,
-if both were present, would let `IMPLICIT` win; its pickler writes `GIVEN` or
-`IMPLICIT`, never both (`TreePickler`), so the pair is refused as malformed
-rather than silently resolved.
+Dotty's reader fails on any other modifier byte (`readParamNamesAndMods`), which
+is `InvalidMethodModifier` here, and otherwise collects the tail into a flag set
+where `methodTypeCompanion` tests `IMPLICIT` before `GIVEN`; the same precedence
+is kept. Its pickler writes `GIVEN` or `IMPLICIT`, never both.
 A `PARAMtype` to a method is a reference to one of its *term* parameters, so a
 dependent result (`(x: Box): x.Out`) is a `TypeRef` whose prefix is
 `ParamRef { binder: <that method's id>, index: 0 }`. Selecting a member *by name* from

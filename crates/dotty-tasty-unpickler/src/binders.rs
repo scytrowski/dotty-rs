@@ -404,28 +404,28 @@ impl Methodic {
     }
 }
 
-/// The clause kind of a `METHODtype` from its modifier tail, as Dotty's
-/// `methodTypeCompanion`: `IMPLICIT` is an implicit clause, `GIVEN` a
-/// contextual one, neither a plain one. Both at once contradict each other,
-/// and any other modifier has no meaning on a method type, so neither is
-/// silently ignored.
+/// The clause kind of a `METHODtype` from its modifier tail, as Dotty reads
+/// it: `readParamNamesAndMods` accumulates the tail into a flag set (any
+/// modifier other than `IMPLICIT` or `GIVEN` fails there, so it is refused
+/// here rather than ignored) and `methodTypeCompanion` tests `IMPLICIT` first,
+/// then `GIVEN`. So `IMPLICIT` wins when both are present, in either order,
+/// and a repeated modifier changes nothing. Dotty's pickler never writes both.
 fn method_kind(at: u32, modifiers: &[u8]) -> Result<MethodKind, UnpickleError> {
-    let mut kind = MethodKind::Plain;
+    let (mut implicit, mut given) = (false, false);
     for &modifier in modifiers {
-        let next = match modifier {
-            IMPLICIT_TAG => MethodKind::Implicit,
-            GIVEN_TAG => MethodKind::Contextual,
+        match modifier {
+            IMPLICIT_TAG => implicit = true,
+            GIVEN_TAG => given = true,
             tag => return Err(UnpickleError::InvalidMethodModifier { address: at, tag }),
-        };
-        if kind != MethodKind::Plain && kind != next {
-            return Err(UnpickleError::MalformedType {
-                address: at,
-                reason: "the method type is both implicit and given",
-            });
         }
-        kind = next;
     }
-    Ok(kind)
+    Ok(if implicit {
+        MethodKind::Implicit
+    } else if given {
+        MethodKind::Contextual
+    } else {
+        MethodKind::Plain
+    })
 }
 
 #[cfg(test)]

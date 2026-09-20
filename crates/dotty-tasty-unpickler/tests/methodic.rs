@@ -417,12 +417,13 @@ fn a_method_without_parameters_is_valid_and_owns_an_id() {
 
 #[test]
 fn the_modifier_tail_selects_the_clause_kind() {
-    let cases: [(&[u8], MethodKind); 4] = [
+    let cases: [(&[u8], MethodKind); 5] = [
         (&[], MethodKind::Plain),
         (&[IMPLICIT], MethodKind::Implicit),
         (&[GIVEN], MethodKind::Contextual),
         // Dotty reads the tail as a flag set: a repeat is harmless.
         (&[IMPLICIT, IMPLICIT], MethodKind::Implicit),
+        (&[GIVEN, GIVEN], MethodKind::Contextual),
     ];
     for (modifiers, expected) in cases {
         let bytes = file_with(&method_node(&package_ref(), &[package_ref()], modifiers));
@@ -433,27 +434,18 @@ fn the_modifier_tail_selects_the_clause_kind() {
 }
 
 #[test]
-fn implicit_and_given_together_are_malformed() {
+fn implicit_wins_over_given_in_either_order_as_in_dotty() {
+    // `readParamNamesAndMods` collects a flag set and `methodTypeCompanion`
+    // tests `IMPLICIT` first; Dotty's pickler never writes both.
     for modifiers in [[IMPLICIT, GIVEN], [GIVEN, IMPLICIT]] {
         let bytes = file_with(&method_node(&package_ref(), &[package_ref()], &modifiers));
-        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
-        let mut session = Session::new();
-        let mut unpickler = unpickler_for(&file, &mut session);
-        let before = unpickler.index().type_count();
-
-        assert!(
-            matches!(
-                unpickler.unpickle_type(POLY_AT),
-                Err(UnpickleError::MalformedType {
-                    address: POLY_AT,
-                    ..
-                })
-            ),
+        let (session, result) = decode_method(&bytes);
+        let id = result.unwrap_or_else(|error| panic!("{modifiers:?}: {error:?}"));
+        assert_eq!(
+            method(&session.store, id).kind,
+            MethodKind::Implicit,
             "{modifiers:?}"
         );
-        // Refused before reserving: nothing was published.
-        assert_eq!(unpickler.index().type_count(), before);
-        assert_eq!(unpickler.index().type_at(POLY_AT), None);
     }
 }
 
