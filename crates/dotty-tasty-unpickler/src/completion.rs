@@ -104,6 +104,12 @@ impl TastyUnpickler<'_, '_, '_> {
         let tree = match tag {
             VALDEF_TAG | PARAM_TAG | TYPEPARAM_TAG => first_child(ast, at)?,
             TYPEDEF_TAG => {
+                if matches!(
+                    kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) {
+                    return self.complete_class(ast, at, symbol, depth);
+                }
                 if kind != SymbolKind::TypeAlias {
                     return Err(unsupported);
                 }

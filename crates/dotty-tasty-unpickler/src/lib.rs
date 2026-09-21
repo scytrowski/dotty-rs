@@ -22,6 +22,7 @@
 mod annotated;
 mod ast_view;
 mod binders;
+mod class;
 mod completion;
 mod enter;
 mod error;
