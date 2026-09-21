@@ -637,6 +637,62 @@ fn parses_a_simple_type_ascription() {
 }
 
 #[test]
+fn parses_a_literal_type_ascription() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "1: Int",
+        vec![
+            token(TokenKind::IntegerLiteral, 0, 1),
+            token(TokenKind::ColonOp, 1, 2),
+            token(TokenKind::Identifier, 3, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Typed(typed) = parser.ast().get(tree).kind else {
+        panic!("expected a typed literal");
+    };
+    assert!(matches!(
+        parser.ast().get(typed.expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+    let TreeKind::Ident(type_name) = parser.ast().get(typed.tpt).kind else {
+        panic!("expected a type identifier");
+    };
+    assert_eq!(parser.names.resolve(type_name.name.text()), "Int");
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_an_unparenthesized_infix_type_ascription() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "a + b: Int",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::ColonOp, 5, 6),
+            token(TokenKind::Identifier, 7, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Typed(typed) = parser.ast().get(tree).kind else {
+        panic!("expected a typed infix expression");
+    };
+    assert!(matches!(
+        parser.ast().get(typed.expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_an_ascription_on_an_application() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

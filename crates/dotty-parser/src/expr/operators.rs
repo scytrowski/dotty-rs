@@ -91,6 +91,14 @@ where
             return None;
         }
 
+        // A standalone colon after a literal is lexed as `ColonOp` because
+        // the scanner cannot classify it from the preceding token alone.
+        // It is an expression ascription, not an infix operator.  Leave it
+        // for `expr1_rest` so `1: Int` and `a + b: Int` become `Typed` trees.
+        if self.current().kind == TokenKind::ColonOp && self.current_text_is(":") {
+            return None;
+        }
+
         if self.current_is_structural_operator() {
             return None;
         }
