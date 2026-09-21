@@ -43,6 +43,12 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
             return self.parse_object_definition(location);
         }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Import) {
+            return ParsedStatement::Definition(self.parse_import_clause(location));
+        }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Export) {
+            return ParsedStatement::Definition(self.parse_export_clause(location));
+        }
 
         let tree = if is_unsupported_start(self.current().kind) {
             self.parse_unsupported_syntax()
