@@ -103,6 +103,14 @@ where
         is_var: bool,
         location: Location,
     ) -> ParsedStatement {
+        if is_definition_boundary(self.current().kind) {
+            self.report(
+                ParseDiagnosticKind::ExpectedPattern,
+                "expected a pattern after `val` or `var`",
+            );
+            return self.malformed_definition();
+        }
+
         let mut patterns = Vec::new();
         loop {
             patterns.push(self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
@@ -541,5 +549,117 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_a_pattern_definition_without_an_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val (a, b)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    4,
+                    5,
+                ),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(dotty_core::Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected PatDef");
+        };
+        assert!(definition.rhs.is_none());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_definition_rhs_reports_a_diagnostic_and_reaches_eof() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "val x =",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Block(_)
+        ));
+    }
+
+    #[test]
+    fn a_missing_definition_name_does_not_swallow_the_following_statement() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "val\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        let TreeKind::Block(block) = &result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn an_unclosed_pattern_definition_keeps_recovery_bounded() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "val (x,",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    4,
+                    5,
+                ),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(dotty_core::Punctuation::Comma), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Block(_)
+        ));
     }
 }
