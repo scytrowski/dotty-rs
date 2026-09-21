@@ -125,8 +125,9 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
-    /// A full annotation tree under the node (Milestone 4b1: an
-    /// `ANNOTATEDtype` whose payload is a tree, deferred to 4b2).
+    /// A full annotation the pass defers under the node: a tree that is not a
+    /// constructor call (`SHAREDterm`), or a constructor part or argument it
+    /// does not read (Milestone 4b2a).
     deferred_annotation: usize,
     /// A binder reference or parameter that is malformed: an invalid binder
     /// address, kind, parameter index, or a parameter info that is not bounds.
@@ -208,15 +209,50 @@ struct CompactOutcomes {
     parent_full_tree: usize,
 }
 
-/// How the full-tree `ANNOTATEDtype` nodes fared.
+/// How the full-tree `ANNOTATEDtype` nodes with one root tag fared
+/// (Milestone 4b2a: `APPLY` and `NEW` are decoded, anything else is deferred).
 #[derive(Default)]
 struct FullOutcomes {
     total: usize,
-    deferred: usize,
+    decoded: usize,
     /// Failed before the annotation boundary, on the parent.
     parent_failed: usize,
-    /// Decoded although its payload is a tree: a bug, never expected.
-    decoded: usize,
+    /// The annotation's own type (or a class literal argument) is outside the
+    /// entered state.
+    external: usize,
+    local_missing: usize,
+    constructor_unsupported: usize,
+    argument_unsupported: usize,
+    invalid_type: usize,
+    malformed: usize,
+    other_known: usize,
+    /// Refused as a tree whose root is not `APPLY`/`NEW` (`SHAREDterm`, ...).
+    deferred_tree: usize,
+}
+
+/// The shapes of the full `APPLY`/`NEW` annotations, surveyed from the wire.
+#[derive(Default)]
+struct FullShapes {
+    /// The constructor spine, arguments left out.
+    spines: BTreeMap<String, usize>,
+    argument_counts: BTreeMap<usize, usize>,
+    /// Root tag of each term argument, a `NAMEDARG` looked through.
+    argument_roots: BTreeMap<u8, usize>,
+    named_arguments: usize,
+    /// Every tag found anywhere below an annotation root (links not followed).
+    descendant_tags: BTreeMap<u8, usize>,
+}
+
+/// Erased method parameters (Milestone 4b2a).
+#[derive(Default)]
+struct ErasedStats {
+    method_roots: usize,
+    /// `METHODtype` roots with a parameter type that is an `ANNOTATEDtype`
+    /// whose annotation is a `new ErasedParam`.
+    containing: usize,
+    decoded_containing: usize,
+    /// `MethodParam`s with `erased` set, over every decoded `METHODtype`.
+    erased_params: usize,
 }
 
 /// The `ANNOTATEDtype` survey: wire shapes, then decoding outcomes.
@@ -226,7 +262,9 @@ struct AnnotationSurvey {
     compact_heads: BTreeMap<u8, usize>,
     full_roots: BTreeMap<u8, usize>,
     compact: CompactOutcomes,
-    full: FullOutcomes,
+    full: BTreeMap<u8, FullOutcomes>,
+    shapes: FullShapes,
+    erased: ErasedStats,
 }
 
 #[derive(Default)]
@@ -274,25 +312,51 @@ fn full_root_name(tag: u8) -> String {
         60 => "SHAREDterm".to_owned(),
         95 => "NEW".to_owned(),
         136 => "APPLY".to_owned(),
+        137 => "TYPEAPPLY".to_owned(),
+        176 => "SELECTin".to_owned(),
+        119 => "NAMEDARG".to_owned(),
         other => format!("tag {other}"),
     }
 }
 
 /// Files one `ANNOTATEDtype` root under its wire shape and its outcome.
-/// `head` is the first tag of the annotation payload.
+/// `head` is the first tag of the annotation payload; `parent_failed` says the
+/// parent, decoded on its own first, did not decode.
 fn record_annotation(
     survey: &mut AnnotationSurvey,
     head: Option<u8>,
+    parent_failed: bool,
     result: &Result<dotty_core::ids::TypeId, UnpickleError>,
 ) {
     let Some(head) = head else { return };
     if !is_compact_annot_type_tag(head) {
-        let full = &mut survey.full;
+        let full = survey.full.entry(head).or_default();
         full.total += 1;
         match result {
             Ok(_) => full.decoded += 1,
-            Err(UnpickleError::UnsupportedAnnotationTree { .. }) => full.deferred += 1,
-            Err(_) => full.parent_failed += 1,
+            Err(_) if parent_failed => full.parent_failed += 1,
+            Err(UnpickleError::UnsupportedAnnotationTree { .. }) => full.deferred_tree += 1,
+            Err(
+                UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
+            ) => full.external += 1,
+            Err(UnpickleError::MissingReferencedSymbol { .. }) => full.local_missing += 1,
+            Err(UnpickleError::UnsupportedAnnotationConstructor { .. }) => {
+                full.constructor_unsupported += 1;
+            }
+            Err(UnpickleError::UnsupportedAnnotationArgument { .. }) => {
+                full.argument_unsupported += 1;
+            }
+            Err(UnpickleError::InvalidAnnotationType { .. }) => full.invalid_type += 1,
+            Err(UnpickleError::MalformedType { .. } | UnpickleError::Ast(_)) => {
+                full.malformed += 1;
+            }
+            Err(
+                UnpickleError::AmbiguousMember { .. }
+                | UnpickleError::UnsupportedSignedReference { .. }
+                | UnpickleError::UnsupportedResolutionPrefix { .. }
+                | UnpickleError::UnsupportedType { .. },
+            ) => full.other_known += 1,
+            Err(_) => {}
         }
         return;
     }
@@ -323,6 +387,122 @@ fn record_annotation(
         ) => compact.other_known += 1,
         Err(_) => {}
     }
+}
+
+/// The tree rooted at `at`, decoded from the ASTs section (offsets absolute).
+fn tree_from<'a>(file: &TastyFile<'a>, at: u32) -> dotty_tasty::tasty::RawTree<'a> {
+    use dotty_tasty::tasty::{RawTree, Reader, StandardSection};
+    let payload = file.section(StandardSection::Asts).unwrap().payload;
+    let mut reader = Reader::with_range(payload, at as usize, payload.len()).unwrap();
+    RawTree::decode_with_base_offset(&mut reader, 0).unwrap()
+}
+
+/// The constructor spine of a full annotation, arguments left out:
+/// `APPLY(TYPEAPPLY(SELECTin(NEW(<class tag>))))`.
+fn spine_shape(tree: &dotty_tasty::tasty::RawTree<'_>, arguments: &mut Vec<u32>) -> String {
+    use dotty_tasty::tasty::RawTree;
+    match tree {
+        RawTree::LengthNode(node) if node.tag == 136 => {
+            let apply = node.decode_apply().unwrap();
+            arguments.push(u32::try_from(apply.arguments.len()).unwrap());
+            format!("APPLY({})", spine_shape(&apply.function, arguments))
+        }
+        RawTree::LengthNode(node) if node.tag == 137 => {
+            let apply = node.decode_type_apply().unwrap();
+            format!("TYPEAPPLY({})", spine_shape(&apply.function, arguments))
+        }
+        RawTree::LengthNode(node) if node.tag == 176 => {
+            let select = node.decode_select_in().unwrap();
+            format!("SELECTin({})", spine_shape(&select.qualifier, arguments))
+        }
+        RawTree::Ast { tag: 95, child, .. } => match child.as_ref() {
+            RawTree::Leaf(term) => format!("NEW(tag {})", term.tag),
+            RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => format!("NEW(tag {tag})"),
+            RawTree::LengthNode(node) => format!("NEW(tag {})", node.tag),
+        },
+        RawTree::Leaf(term) => format!("tag {}", term.tag),
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => format!("tag {tag}"),
+        RawTree::LengthNode(node) => format!("tag {}", node.tag),
+    }
+}
+
+/// Records the shape of the full `APPLY`/`NEW` annotation at `annotation_at`:
+/// its spine, how many term arguments it applies and their root tags.
+fn survey_shape(
+    shapes: &mut FullShapes,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    annotation_at: u32,
+) {
+    let tree = tree_from(file, annotation_at);
+    let mut layers = Vec::new();
+    *shapes
+        .spines
+        .entry(spine_shape(&tree, &mut layers))
+        .or_default() += 1;
+    *shapes
+        .argument_counts
+        .entry(layers.iter().map(|count| *count as usize).sum())
+        .or_default() += 1;
+
+    // The arguments are the children of each `APPLY` after its function.
+    let mut stack = vec![annotation_at];
+    while let Some(at) = stack.pop() {
+        let below = children.get(&at).map_or(&[][..], Vec::as_slice);
+        for (child, tag) in below {
+            *shapes.descendant_tags.entry(*tag).or_default() += 1;
+            stack.push(*child);
+        }
+    }
+    let mut current = annotation_at;
+    loop {
+        let below = children.get(&current).map_or(&[][..], Vec::as_slice);
+        let tag = tree_from(file, current);
+        let is_apply =
+            matches!(&tag, dotty_tasty::tasty::RawTree::LengthNode(node) if node.tag == 136);
+        let is_spine = matches!(&tag, dotty_tasty::tasty::RawTree::LengthNode(node) if node.tag == 137 || node.tag == 176);
+        if is_apply {
+            for (argument, argument_tag) in below.iter().skip(1) {
+                let mut root = *argument_tag;
+                if root == 119 {
+                    shapes.named_arguments += 1;
+                    root = children[argument][0].1;
+                }
+                *shapes.argument_roots.entry(root).or_default() += 1;
+            }
+        }
+        match below.first() {
+            Some((function, _)) if is_apply || is_spine => current = *function,
+            _ => break,
+        }
+    }
+}
+
+/// Whether the full annotation at `annotation_at` is a constructor call of a
+/// class named `ErasedParam` (a `TYPEREF` with that name below it).
+fn names_erased_param(
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    annotation_at: u32,
+) -> bool {
+    use dotty_tasty::tasty::{RawName, RawTree};
+    let mut stack = vec![annotation_at];
+    while let Some(at) = stack.pop() {
+        for (child, tag) in children.get(&at).map_or(&[][..], Vec::as_slice) {
+            if *tag == 117
+                && let RawTree::NatAst { value, .. } = tree_from(file, *child)
+                && file
+                    .names()
+                    .entries()
+                    .get(usize::try_from(value).unwrap())
+                    .is_some_and(|name| name == &RawName::Utf8("ErasedParam".to_owned()))
+            {
+                return true;
+            }
+            stack.push(*child);
+        }
+    }
+    false
 }
 
 /// Enters the unit and decodes every reference node in it.
@@ -417,23 +597,33 @@ fn run(
         (bounds, sources)
     };
 
-    // Each `ANNOTATEDtype`'s annotation payload: the tag of its second child.
-    let annotation_heads: HashMap<u32, u8> = {
+    // Each `ANNOTATEDtype`'s parent and annotation payload: its two children.
+    let annotated: HashMap<u32, (u32, u32, u8)> = {
         let index = file.ast_address_index().unwrap();
-        let mut heads = HashMap::new();
-        let mut seen: HashMap<u32, usize> = HashMap::new();
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let mut found = HashMap::new();
         for edge in index.iter_tree_edges() {
             if edge.parent.tag == ANNOTATED_TAG {
-                let parent = u32::try_from(edge.parent.offset).unwrap();
-                let position = seen.entry(parent).or_default();
-                if *position == 1 {
-                    heads.insert(parent, edge.child.tag);
+                let annotated = u32::try_from(edge.parent.offset).unwrap();
+                let child = u32::try_from(edge.child.offset).unwrap();
+                match parents.get(&annotated) {
+                    None => {
+                        parents.insert(annotated, child);
+                    }
+                    Some(&parent) => {
+                        found
+                            .entry(annotated)
+                            .or_insert((parent, child, edge.child.tag));
+                    }
                 }
-                *position += 1;
             }
         }
-        heads
+        found
     };
+    let annotation_heads: HashMap<u32, u8> = annotated
+        .iter()
+        .map(|(at, (_, _, head))| (*at, *head))
+        .collect();
 
     tally.annotations.total += file
         .ast_address_index()
@@ -447,6 +637,33 @@ fn run(
             &mut tally.annotations.full_roots
         };
         *heads.entry(*head).or_default() += 1;
+    }
+
+    // The shapes of the full constructor applications, and which annotated
+    // types carry `new ErasedParam`.
+    let all_children: HashMap<u32, Vec<(u32, u8)>> = {
+        let mut children: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+        for edge in file.ast_address_index().unwrap().iter_tree_edges() {
+            children
+                .entry(u32::try_from(edge.parent.offset).unwrap())
+                .or_default()
+                .push((u32::try_from(edge.child.offset).unwrap(), edge.child.tag));
+        }
+        children
+    };
+    let mut erased_annotated: HashSet<u32> = HashSet::new();
+    for (at, (_, annotation_at, head)) in &annotated {
+        if *head == 136 || *head == 95 {
+            survey_shape(
+                &mut tally.annotations.shapes,
+                &file,
+                &all_children,
+                *annotation_at,
+            );
+            if names_erased_param(&file, &all_children, *annotation_at) {
+                erased_annotated.insert(*at);
+            }
+        }
     }
 
     // For each `RECthis`, the binder address it names (its one `Nat`).
@@ -465,7 +682,9 @@ fn run(
     };
     let mut rec_this_ids: HashMap<u32, HashSet<dotty_core::ids::TypeId>> = HashMap::new();
 
-    let mut unpickler = TastyUnpickler::with_packages(&file, store, definitions, packages);
+    let mut decoded_erased_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
+    let mut other_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
+    let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
 
     tally.units += 1;
@@ -493,13 +712,37 @@ fn run(
                 .is_some_and(|param| unpickler.index().type_at(param.binder.address).is_some());
             outcomes.binder_on_demand += usize::from(!binder_known);
         }
+        // An annotated type decodes its parent first; asking for the parent
+        // alone says whether a failure is the parent's.
+        let parent_failed = tag == ANNOTATED_TAG
+            && annotated
+                .get(&at)
+                .is_some_and(|(parent, _, _)| unpickler.unpickle_type(*parent).is_err());
         let result = unpickler.unpickle_type(at);
         if tag == ANNOTATED_TAG {
             record_annotation(
                 &mut tally.annotations,
                 annotation_heads.get(&at).copied(),
+                parent_failed,
                 &result,
             );
+        }
+        if tag == 180 {
+            let erased = &mut tally.annotations.erased;
+            erased.method_roots += 1;
+            let contains = all_children.get(&at).is_some_and(|below| {
+                below
+                    .iter()
+                    .any(|(child, _)| erased_annotated.contains(child))
+            });
+            erased.containing += usize::from(contains);
+            if let (true, Ok(id)) = (contains, &result) {
+                erased.decoded_containing += 1;
+                decoded_erased_methods.push(*id);
+            }
+            if let (false, Ok(id)) = (contains, &result) {
+                other_methods.push(*id);
+            }
         }
         match result {
             Ok(first) => {
@@ -585,7 +828,9 @@ fn run(
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
                     }
-                    UnpickleError::UnsupportedAnnotationTree { .. } => {
+                    UnpickleError::UnsupportedAnnotationTree { .. }
+                    | UnpickleError::UnsupportedAnnotationConstructor { .. }
+                    | UnpickleError::UnsupportedAnnotationArgument { .. } => {
                         outcomes.deferred_annotation += 1;
                     }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
@@ -616,7 +861,26 @@ fn run(
     tally.rec_canonical_ids += rec_this_ids.values().map(HashSet::len).sum::<usize>();
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
-    unpickler.into_parts().1
+    let (_, packages) = unpickler.into_parts();
+    // `erased` on the decoded method types: only the ones that name
+    // `ErasedParam` may have it.
+    let erased_count = |ids: &[dotty_core::ids::TypeId]| -> usize {
+        ids.iter()
+            .map(|id| match store.types.get(*id) {
+                dotty_core::types::Type::Method(method) => {
+                    method.params.iter().filter(|param| param.erased).count()
+                }
+                _ => 0,
+            })
+            .sum()
+    };
+    tally.annotations.erased.erased_params += erased_count(&decoded_erased_methods);
+    assert_eq!(
+        erased_count(&other_methods),
+        0,
+        "{label}: erased without ErasedParam"
+    );
+    packages
 }
 
 #[test]
@@ -768,7 +1032,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 let none = Outcomes::default();
                 let o = tally.compound.get(tag).unwrap_or(&none);
                 println!(
-                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, full annotation tree {}, binder errors {}; binder decoded on demand {}; unexpected {}",
+                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, deferred full annotation {}, binder errors {}; binder decoded on demand {}; unexpected {}",
                     o.nodes,
                     o.decoded,
                     o.needs_external,
@@ -822,12 +1086,13 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 .find(|(t, _)| t == tag)
                 .map_or_else(|| format!("tag {tag}"), |(_, name)| (*name).to_owned())
         };
+        let full_total: usize = survey.full.values().map(|full| full.total).sum();
         println!(
             "ANNOTATEDtype: total {}, compact {}, full tree {}, unclassified {}",
             survey.total,
             survey.compact.total,
-            survey.full.total,
-            survey.total - survey.compact.total - survey.full.total,
+            full_total,
+            survey.total - survey.compact.total - full_total,
         );
         println!(
             "  compact by wire head: {:?}",
@@ -861,10 +1126,38 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             c.other_known,
             c.parent_full_tree,
         );
-        let f = &survey.full;
+        for (root, f) in &survey.full {
+            println!(
+                "  full {} outcomes: total {}, decoded {}, parent failed first {}, external {}, local missing {}, constructor unsupported {}, argument unsupported {}, invalid type {}, malformed {}, other known {}, deferred tree {}",
+                full_root_name(*root),
+                f.total,
+                f.decoded,
+                f.parent_failed,
+                f.external,
+                f.local_missing,
+                f.constructor_unsupported,
+                f.argument_unsupported,
+                f.invalid_type,
+                f.malformed,
+                f.other_known,
+                f.deferred_tree,
+            );
+        }
+        let shapes = &survey.shapes;
+        println!("  APPLY/NEW spines: {:?}", shapes.spines);
+        println!("  argument counts: {:?}", shapes.argument_counts);
         println!(
-            "  full outcomes: total {}, deferred as UnsupportedAnnotationTree {}, parent failed first {}, decoded {}",
-            f.total, f.deferred, f.parent_failed, f.decoded
+            "  argument root tags: {:?}, named arguments {}",
+            shapes.argument_roots, shapes.named_arguments
+        );
+        println!(
+            "  tags below annotation roots: {:?}",
+            shapes.descendant_tags
+        );
+        let e = &survey.erased;
+        println!(
+            "  METHODtype roots {}, naming ErasedParam {}, of which decoded {}; erased MethodParams {}",
+            e.method_roots, e.containing, e.decoded_containing, e.erased_params
         );
         println!(
             "unresolved: members {}, packages {}",
@@ -888,7 +1181,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         assert_eq!(tally.missing_outside_bodies, 0);
         // Every annotated type is either compact or a full tree, and every
         // compact one is filed under an outcome.
-        assert_eq!(survey.total, survey.compact.total + survey.full.total);
+        assert_eq!(survey.total, survey.compact.total + full_total);
         assert_eq!(
             survey.compact.total,
             survey.compact_heads.values().sum::<usize>()
@@ -906,12 +1199,26 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 + c.other_known
                 + c.parent_full_tree
         );
-        // A full tree is never decoded with its tree dropped.
-        assert_eq!(survey.full.decoded, 0);
-        assert_eq!(
-            survey.full.total,
-            survey.full.deferred + survey.full.parent_failed
-        );
+        // Every full annotation is filed under an outcome. Only `APPLY` and
+        // `NEW` are read; any other root is deferred, never decoded.
+        for (root, f) in &survey.full {
+            let filed = f.decoded
+                + f.parent_failed
+                + f.external
+                + f.local_missing
+                + f.constructor_unsupported
+                + f.argument_unsupported
+                + f.invalid_type
+                + f.malformed
+                + f.other_known
+                + f.deferred_tree;
+            assert_eq!(f.total, filed, "root {root}");
+            if *root == 136 || *root == 95 {
+                assert_eq!(f.deferred_tree, 0, "root {root}");
+            } else {
+                assert_eq!(f.decoded, 0, "root {root}");
+            }
+        }
         for tag in survey.compact_heads.keys() {
             assert!(is_compact_annot_type_tag(*tag));
         }

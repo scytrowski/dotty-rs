@@ -23,8 +23,11 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 4a, recursive and refined types (`REFINEDtype`, `RECtype`,
   `RECthis`): implemented (§4, "Recursive and refined types").
 - Milestone 4b1, compact annotated types (`ANNOTATEDtype` whose annotation is a
-  type): implemented (§4, "Annotated types"). Full annotation trees are a typed
-  deferral; Milestone 4b2 decides their boundary.
+  type): implemented (§4, "Annotated types").
+- Milestone 4b2a, full annotation constructor applications (`APPLY`/`NEW`) with
+  semantic literal arguments, and `MethodParam.erased`: implemented (§4,
+  "Full annotation applications"). `SHAREDterm` annotation trees stay deferred
+  for 4b2b.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -74,8 +77,9 @@ function. It follows an enter-before-complete model:
 | 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
 | 3c. Binder rebinding | `dotty_core::rebind_type_lambda`; variance-bearing `TYPEBOUNDS`; `declared_variance: Option<Variance>` | 3c |
 | 4a. Refined and recursive | `Refined`, `Recursive`, `RecThis` | 4a |
-| 4b1. Compact annotated types | `Annotated` with `Annotation { ty, tree: None }`; full trees deferred | 4b1 |
-| 4b2. Full annotation trees | the annotation boundary, `MethodParam.erased` | 4b2 |
+| 4b1. Compact annotated types | `Annotated` with `Annotation::compact(ty)`; full trees deferred | 4b1 |
+| 4b2a. Full annotation applications | `APPLY`/`NEW` annotations with `AnnotationArguments`; `MethodParam.erased` from `ErasedParam` | 4b2a |
+| 4b2b. `SHAREDterm` annotations | term-tree address identity | 4b2b |
 | 4c. `*REFin` | `TYPEREFin` / `TERMREFin` owner-space resolution | 4c |
 | 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
@@ -520,20 +524,22 @@ its `PARAMtype` resolves by address to the OUTER binder while the inner one is
 also pending. The same holds for `Poly -> Method -> Method`, where three
 binders are pending at once and each reference finds its own.
 
-**`MethodParam.erased` and `varargs`.** Both are `false`, by audit, not by
-guess. `varargs` is the JVM `ACC_VARARGS` distinction (a Java `T...`), which
-`METHODtype` does not encode: Scala's repeated parameter is the parameter's
-*type*. It is not inferred from position or name. Dotty derives `erased` from
-an `ErasedParamAnnot` on the parameter *type* (`MethodType.hasErasedParams`),
-not from a clause modifier, and that type is an `ANNOTATEDtype`. Milestone 4b1
-audited the real wire (Scala 3.9.0, `Erased.scala`): the annotation is a *full*
-tree, `new scala.annotation.internal.ErasedParam` (root tag `APPLY`), not a
-compact one, so a method whose parameter is erased still does not decode (it is
-`UnsupportedAnnotationTree`) and `erased` stays `false`. Milestone 4b2 must
-derive `erased` once full trees have a semantic form, if the field stays in the
-core model. The type node is also
-self-contained: a `METHODtype` in a refinement has no `DEFDEF` whose parameter
-flags could be copied, so nothing is read from definition symbols.
+**`MethodParam.erased` and `varargs`.** `varargs` is the JVM `ACC_VARARGS`
+distinction (a Java `T...`), which `METHODtype` does not encode: Scala's
+repeated parameter is the parameter's *type*. It is `false`, never inferred
+from position or name. `erased` is derived as Dotty's `MethodType.hasErasedParams`
+does: a parameter is erased when the outer chain of `Annotated` wrappers on its
+*type* holds an annotation whose class is exactly
+`scala.annotation.internal.ErasedParam` (`defn.ErasedParamAnnot`). Milestone 4b1
+audited the real wire (Scala 3.9.0, `Erased.scala`): that annotation is a full
+tree, `new ErasedParam` (root `APPLY`), which Milestone 4b2a decodes, so
+`(erased z: Int, w: Int) => w` decodes with the first parameter erased and the
+second not, and the `Annotated` wrapper stays on `MethodParam.ty`. The class is
+identified by symbol owner path (`SemanticStore::class_path`: every owner a
+package, so a class nested in an object never matches), not by the text of a
+name. Nothing inside a type argument counts (`List[Int @ErasedParam]` is not
+erased), and no `DEFDEF` flag is read: the type node is self-contained, and a
+`METHODtype` in a function or refinement type has no `DEFDEF`.
 
 `SHAREDtype` to a lambda returns its exact binder id, including one that
 is still pending (as in Dotty, which registers the lambda before reading its
@@ -643,12 +649,12 @@ which is what `CompactAnnotation` asserts. The wire tag only says "a type": a
 keeps its whole type: `Applied { tycon, args }` is stored as such, not reduced
 to its class, because retaining annotations carry their arguments there.
 
-`tree: None` is lossless for a compact annotation because it *is* its type
-(Dotty's `CompactAnnotation.tree` is `TypeTree(tpe)`). It would not be for a
-full annotation, whose constructor, type and term arguments live in the tree:
-the model could no longer tell "a tree we dropped" from "a compact annotation".
-So a full tree is refused, and the semantic unpickler does not build
-`AstArena<Typed>` yet. Note the upstream comment: for Scala 3.9 the only
+A compact annotation is `Annotation::compact(ty)`: `arguments` is
+`Known([])` and `tree` is `None`, which is lossless because it *is* its type
+(Dotty's `CompactAnnotation.tree` is `TypeTree(tpe)`). A full annotation is
+different: its constructor, type and term arguments live in a tree, and the
+semantic unpickler does not build `AstArena<Typed>` yet. See "Full annotation
+applications" for what is decoded of it. Note the upstream comment: for Scala 3.9 the only
 compact annotations are the capture-checking `retains` family, and the
 pickler writes a `CompactAnnotation` as a type only for source version 3.9 or
 later.
@@ -670,6 +676,55 @@ graph and is never stripped.
 `Annotated` inside a `TypeLambda` that a variance marker rebinds is rebound by
 the existing rebinder: the annotation is a new one when its type names the
 lambda, and reused otherwise (tested with real wire shapes).
+
+### Full annotation applications (Milestone 4b2a)
+
+`Annotation` now carries `arguments: AnnotationArguments`:
+
+```text
+Annotation { ty, arguments: Unavailable | Known(Vec<AnnotationArgument>), tree }
+AnnotationArgument { name: Option<TermName>, value: AnnotationValue::Constant(Constant) }
+```
+
+`Unavailable` and `Known(vec![])` are different facts: the producer did not
+reconstruct the arguments, versus there are none. `Annotation::new(ty, tree)`
+keeps meaning `Unavailable` (the classloader and every old call site are
+unchanged), `Annotation::compact(ty)` is known-empty, and `with_arguments`
+gives an ordered list. `Annotation` is no longer `Copy`. `tree: None` now means
+"no reconstructed typed tree is attached", not "no payload"; Milestone 7 may
+attach one without changing the arguments. `rebind_type_lambda` rebinds class
+literals inside arguments (`Constant::Class(TypeId)`) and reuses an annotation
+that names nothing rebound; the only value variant is a constant, because the
+corpora contain nothing else (see the survey).
+
+A full annotation rooted at `APPLY` or `NEW` is read as a constructor call:
+
+```text
+APPLY (TYPEAPPLY (SELECTin <init> (NEW tpt)) targs) args
+APPLY (SELECTin <init> (NEW tpt)) args
+NEW tpt
+```
+
+- The annotation type is `tpt` (a type, or the type child of an `IDENTtpt`),
+  as `Applied { tycon, targs }` when the constructor has type arguments, never
+  reduced to the class; it must be a `TypeRef` or `Applied`
+  (`InvalidAnnotationType`).
+- The arguments are those of every `APPLY` layer, innermost first, as Dotty's
+  `allTermArguments` (`fn` before the `Apply` around it); a `NAMEDARG` gives
+  `Some(name)`; order is kept and duplicate names are not merged.
+- Arguments are literals and class literals only. A `TYPED`, `BLOCK`,
+  `INLINED`, reference or any other form is `UnsupportedAnnotationArgument`:
+  no wrapper is stripped and nothing is evaluated.
+- Any other spine part (a selection that is not the constructor, a second
+  `TYPEAPPLY`, a class tree that is not a type such as `SELECTtpt`) is
+  `UnsupportedAnnotationConstructor`. A root that is not `APPLY`/`NEW`, notably
+  `SHAREDterm`, stays `UnsupportedAnnotationTree`: following it needs a
+  term-tree address identity that is Milestone 4b2b's to design.
+- Children are found by absolute address in the AST index; the structural
+  decoder's node-relative trees are used for names and shape only. Identity
+  and rollback are the annotated type's: one address, one `TypeId`, one
+  `AnnotationId`; a failure at any argument frees everything the call
+  allocated.
 
 ### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 
@@ -865,8 +920,10 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
 4. Advanced types, in steps:
    - 4a: `Refined`, `Recursive`, `RecThis` — complete;
    - 4b1: compact `ANNOTATEDtype` and the annotation corpus survey — complete;
-   - 4b2: the full-annotation-tree boundary, then `MethodParam.erased` from
-     `ErasedParamAnnot`;
+   - 4b2a: full `APPLY`/`NEW` annotations with semantic arguments, and
+     `MethodParam.erased` from `ErasedParam` — complete;
+   - 4b2b: `SHAREDterm` annotation trees (term-tree identity) and whatever
+     else the survey shows;
    - 4c: `TYPEREFin` / `TERMREFin` owner-space resolution;
    - 4d: `Match` / `MatchCase` and whatever else measurement shows.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
@@ -1173,6 +1230,67 @@ other counts are unchanged, apart from a few nodes whose earlier failure was
 errors in any run. The unsupported forms still reached are `TYPEREFin` (13 in
 the library, 12 in the compiler; Milestone 4c) and, in the library, 5
 `REFINEDtpt`.
+
+### Full annotation applications after 4b2a (library / compiler)
+
+Same method, same two runs (each `ANNOTATEDtype` decoded as its own root; the
+parent is asked for first to tell a parent failure from the annotation's own).
+
+Wire shapes of the 1,976 / 5,353 full `APPLY`/`NEW` annotations (spines, with
+the class tree tag under `NEW`): `APPLY(SELECTin(NEW))` with class tree
+`SHAREDtype` 1,258 / 3,911, `TYPEREF` 213 / 839, `IDENTtpt` 249 / 456, `SELECTtpt`
+2 / 0; `APPLY(TYPEAPPLY(SELECTin(NEW)))` with `SHAREDtype` 201 / 0 and `TYPEREF`
+53 / 0; and, in the compiler only, a bare `NEW` with no application: 147
+(`SHAREDtype` 126, `TYPEREF` 21), all of them `@unchecked`. Term arguments per
+annotation: 0 for 1,969 / 5,353 and 1 for 7 / 0; the 7 are all `STRINGconst`,
+positional. There are no named arguments, no `TYPEAPPLY` argument other than
+types, and no nested `APPLY`. Tags found anywhere below an annotation root
+(links not followed): `SHAREDtype`, `TYPEREF`, `TERMREFpkg`, `IDENTtpt`, `NEW`,
+`SELECTin`, `TYPEAPPLY` and `STRINGconst`, plus a few type-argument forms
+(`TERMREFdirect`, `THIS`, `TERMREF`, `ORtype`, `SELECTtpt` with its `SELECT`); nothing that
+needs another value variant.
+
+| root | run | total | decoded | parent failed first | external | local missing | constructor unsupported | argument unsupported |
+|------|-----|-------|---------|---------------------|----------|---------------|-------------------------|----------------------|
+| `APPLY` library | no builtins | 1,976 | 459 | 300 | 1,210 | 5 | 2 | 0 |
+| `APPLY` library | builtins | 1,976 | 631 | 258 | 1,080 | 5 | 2 | 0 |
+| `APPLY` compiler | both | 5,206 | 0 | 3,123 / 3,106 | 2,083 / 2,100 | 0 | 0 | 0 |
+| `NEW` compiler | both | 147 | 0 | 147 | 0 | 0 | 0 | 0 |
+| `SHAREDterm` library | both | 21 | 0 | 1 | 0 | 0 | 0 | 0 (20 deferred) |
+| `SHAREDterm` compiler | both | 56 | 0 | 54 | 0 | 0 | 0 | 0 (2 deferred) |
+
+The 2 constructor failures are the `SELECTtpt` class trees (a selection whose
+type needs its qualifier). The 5 local misses are references to definitions
+pass 1 does not enter. Everything else that fails is an external type: the
+compiler's annotations name library classes (such as `unchecked`) that
+are not entered in the compiler corpus, so no compiler annotation decodes
+here, including all 147 `NEW` roots, whose parent already fails. The `NEW`
+shape is therefore covered by synthetic wire and by the shape survey, not by a
+decoded real one (no small Scala source we tried makes the compiler write a
+bare `NEW`). No argument is ever unsupported in either corpus, and there were
+0 unexpected errors in every run. `SHAREDterm` is measured on its own and
+stays deferred.
+
+Effect on the other forms (library; the compiler is unchanged), decoded before
+-> after 4b2a, no builtins / builtins:
+
+| node | no builtins | builtins |
+|------|-------------|----------|
+| `REFINEDtype` | 18 -> 18 | 23 -> 32 |
+| `APPLIEDtype` | 4,578 -> 4,587 | 5,442 -> 5,471 |
+| `BYNAMEtype` | 6 -> 12 | 8 -> 23 |
+| `ANDtype` | 139 -> 140 | 184 -> 185 |
+| `ORtype` | 25 -> 25 | 173 -> 175 |
+| `FLEXIBLEtype`, `TYPEBOUNDS`, `TYPELAMBDAtype`, `PARAMtype`, `METHODtype` | unchanged | unchanged |
+
+The 9 library refinements that failed on a full annotation now all get past it:
+with builtins all 9 decode, without them all 9 fail on an external type. The
+rest of the deferred full annotations under a compound form (14 `APPLIEDtype`,
+1 `ANDtype`) are the `SELECTtpt` and `SHAREDterm` cases. Erased parameters:
+0 `METHODtype` roots name `ErasedParam` in either corpus (3 / 4 method roots),
+so the corpus decodes 0 erased `MethodParam`s; the real-compiler fixture
+`Erased.scala` carries that coverage, and the survey asserts that no decoded
+method type is erased without naming `ErasedParam`.
 
 ## 9. Review of Milestone 1
 
