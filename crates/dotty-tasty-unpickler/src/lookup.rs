@@ -909,6 +909,82 @@ mod tests {
     }
 
     #[test]
+    fn an_unstable_path_is_an_illegal_prefix_or_a_completed_by_name_parameter() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        let stable = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, info);
+        let mutable = terms.term(SymbolKind::Field, SymbolFlags::MUTABLE, info);
+        let method = terms.term(SymbolKind::Method, SymbolFlags::EMPTY, info);
+        let by_name_info = terms.world.store.types.alloc(Type::ByName {
+            result: terms.box_ty,
+        });
+        let by_name = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(by_name_info),
+        );
+        // Not completed: not known to be by-name.
+        let missing = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let store = &terms.world.store;
+        assert!(!is_unstable_path(store, stable));
+        assert!(!is_unstable_path(store, missing));
+        assert!(!is_unstable_path(store, terms.box_ty));
+        for unstable in [mutable, method, by_name] {
+            assert!(is_unstable_path(store, unstable));
+        }
+    }
+
+    #[test]
+    fn only_a_constant_a_this_and_a_stable_term_are_singleton_types() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        let stable = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, info);
+        let object = terms.term(SymbolKind::Object, SymbolFlags::EMPTY, SymbolInfo::Missing);
+        let mutable = terms.term(SymbolKind::Field, SymbolFlags::MUTABLE, info);
+        let method = terms.term(SymbolKind::Method, SymbolFlags::EMPTY, info);
+        let by_name_info = terms.world.store.types.alloc(Type::ByName {
+            result: terms.box_ty,
+        });
+        let by_name = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(by_name_info),
+        );
+        let constant = terms
+            .world
+            .store
+            .types
+            .alloc(Type::Constant(dotty_core::types::Constant::Boolean(true)));
+        let this = terms.world.store.types.alloc(Type::ThisType {
+            class: terms.box_class,
+        });
+        let applied = terms.world.store.types.alloc(Type::Applied {
+            tycon: terms.box_ty,
+            args: vec![],
+        });
+        let wrapped = annotated(&mut terms.world, stable);
+        let store = &terms.world.store;
+        for singleton in [stable, object, constant, this, wrapped] {
+            assert!(is_singleton_type(store, singleton));
+        }
+        // A class type, an applied type, and every unstable path are not.
+        for other in [
+            terms.box_ty,
+            applied,
+            mutable,
+            method,
+            by_name,
+            by_name_info,
+        ] {
+            assert!(!is_singleton_type(store, other));
+        }
+    }
+
+    #[test]
     fn a_type_alias_prefix_is_not_dealiased() {
         let mut terms = Terms::new();
         let alias_name = terms.world.name("Alias", Namespace::Type);

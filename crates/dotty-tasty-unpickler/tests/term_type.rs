@@ -41,6 +41,7 @@ const INLINED: u8 = 147;
 const TRUECONST: u8 = 4;
 const APPLIEDTPT: u8 = 162;
 const SELECT: u8 = 112;
+const SINGLETONTPT: u8 = 101;
 const SELECTTPT: u8 = 113;
 const THIS: u8 = 90;
 const REFINEDTYPE: u8 = 159;
@@ -249,6 +250,61 @@ fn roots(at: &Addresses<'_>) -> Roots {
             named(SELECTTPT, n("Missing"), &wrap(QUALTHIS, &ident_box())),
         ),
         ("select bad name", named(SELECTTPT, 999, &box_type())),
+        ("singleton stable", wrap(SINGLETONTPT, &term("Holder.x"))),
+        (
+            "singleton stable again",
+            wrap(SINGLETONTPT, &term("Holder.x")),
+        ),
+        (
+            "shared singleton",
+            leaf(SHAREDTERM_TAG, at.of("singleton stable")),
+        ),
+        (
+            "singleton package",
+            wrap(SINGLETONTPT, &leaf(TERMREFPKG_TAG, n("p"))),
+        ),
+        ("singleton constant", wrap(SINGLETONTPT, &[TRUECONST])),
+        (
+            "singleton this",
+            wrap(
+                SINGLETONTPT,
+                &wrap(THIS, &leaf(TYPEREFDIRECT_TAG, at.of("Holder"))),
+            ),
+        ),
+        (
+            "singleton qualthis",
+            wrap(SINGLETONTPT, &wrap(QUALTHIS, &ident_box())),
+        ),
+        (
+            "singleton select",
+            wrap(
+                SINGLETONTPT,
+                &named(
+                    SELECT,
+                    n("x"),
+                    &wrap(THIS, &leaf(TYPEREFDIRECT_TAG, at.of("Holder"))),
+                ),
+            ),
+        ),
+        (
+            "singleton select var",
+            wrap(
+                SINGLETONTPT,
+                &named(
+                    SELECT,
+                    n("v"),
+                    &wrap(THIS, &leaf(TYPEREFDIRECT_TAG, at.of("Holder"))),
+                ),
+            ),
+        ),
+        ("singleton mutable", wrap(SINGLETONTPT, &term("Holder.v"))),
+        ("singleton method", wrap(SINGLETONTPT, &term("Holder.f"))),
+        ("singleton by-name", wrap(SINGLETONTPT, &term("Holder.f.a"))),
+        ("singleton class", wrap(SINGLETONTPT, &box_type())),
+        (
+            "singleton inlined",
+            wrap(SINGLETONTPT, &node(INLINED, &box_type())),
+        ),
         (
             "applied cycle",
             node(
@@ -1014,4 +1070,145 @@ fn a_selection_name_is_validated_before_anything_is_recorded() {
     );
     assert_eq!(unpickler.index().type_tree_count(), 0);
     assert_eq!(unpickler.index().term_tree_count(), 0);
+}
+
+// SINGLETONtpt
+
+#[test]
+fn a_singleton_type_tree_is_exactly_the_tpe_of_its_reference() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let singleton = unpickler
+        .unpickle_type_tree_type(unit.at("singleton stable"))
+        .unwrap();
+    // The reference is the child written right after the `SINGLETONtpt` tag:
+    // its own type node's id, with no wrapper allocated.
+    assert_eq!(
+        unpickler.index().type_at(unit.at("singleton stable") + 1),
+        Some(singleton)
+    );
+    let x = symbol(&unpickler, &unit, "Holder.x");
+    let types = unpickler.index().type_count();
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("singleton stable")),
+        Ok(singleton)
+    );
+    assert_eq!(unpickler.index().type_count(), types);
+    // Written twice, both are the reference's tpe of their own address.
+    let again = unpickler
+        .unpickle_type_tree_type(unit.at("singleton stable again"))
+        .unwrap();
+    assert_ne!(again, singleton);
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("shared singleton")),
+        Ok(singleton)
+    );
+    assert_eq!(
+        unpickler
+            .index()
+            .type_tree_type_at(unit.at("shared singleton")),
+        None
+    );
+    drop(unpickler);
+    assert_eq!(
+        session.store.types.get(singleton).reference_symbol(),
+        Some(x)
+    );
+}
+
+#[test]
+fn a_singleton_of_a_package_a_constant_a_this_and_a_qualified_this_projects() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let mut projected = Vec::new();
+    for label in [
+        "singleton package",
+        "singleton constant",
+        "singleton this",
+        "singleton qualthis",
+        "singleton select",
+    ] {
+        projected.push(unpickler.unpickle_type_tree_type(unit.at(label)).unwrap());
+    }
+    drop(unpickler);
+    let kinds: Vec<&Type> = projected
+        .iter()
+        .map(|ty| session.store.types.get(*ty))
+        .collect();
+    assert!(matches!(kinds[0], Type::TermRef { .. }));
+    assert!(matches!(kinds[1], Type::Constant(_)));
+    assert!(matches!(kinds[2], Type::ThisType { .. }));
+    assert!(matches!(kinds[3], Type::ThisType { .. }));
+    assert!(matches!(kinds[4], Type::TermRef { .. }));
+}
+
+#[test]
+fn a_singleton_of_something_that_is_not_a_stable_singleton_is_invalid() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    complete(&mut unpickler, &unit, "Holder.f.a");
+
+    for label in [
+        "singleton mutable",
+        "singleton method",
+        "singleton by-name",
+        "singleton class",
+    ] {
+        let types = unpickler.index().type_count();
+        let result = unpickler.unpickle_type_tree_type(unit.at(label));
+        assert!(
+            matches!(result, Err(UnpickleError::InvalidSingletonTypeTree { address, .. }) if address == unit.at(label)),
+            "{label}: {result:?}"
+        );
+        assert_eq!(unpickler.index().type_count(), types, "{label}");
+        assert_eq!(unpickler.index().type_tree_type_at(unit.at(label)), None);
+    }
+}
+
+#[test]
+fn a_singleton_that_is_refused_after_its_reference_projected_leaves_nothing_behind() {
+    // `this.v.type` for a `var v`: the qualifier and the selection allocate
+    // and are cached, then the singleton check refuses.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let types = unpickler.index().type_count();
+    let result = unpickler.unpickle_type_tree_type(unit.at("singleton select var"));
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidSingletonTypeTree { .. })),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().term_tree_count(), 0);
+    assert_eq!(unpickler.index().type_tree_count(), 0);
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("singleton select var")),
+        result
+    );
+}
+
+#[test]
+fn a_singleton_of_a_term_that_is_no_path_names_the_term_tree() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("singleton inlined")),
+        Err(UnpickleError::UnsupportedTermTree {
+            address: unit.at("singleton inlined") + 1,
+            tag: INLINED,
+        })
+    );
 }
