@@ -159,6 +159,19 @@ pub(crate) fn lookup_member(
     let Some(owner) = lookup_owner(store, index, packages, prefix) else {
         return LocalLookup::UnsupportedPrefix;
     };
+    lookup_declaration(store, index, packages, owner, name)
+}
+
+/// Looks `name` up among the declarations of `owner` itself: exact
+/// `Name` + `Namespace`, no inheritance. `UnsupportedPrefix` is never the
+/// answer here; the caller has already turned its type into an owner.
+pub(crate) fn lookup_declaration(
+    store: &SemanticStore,
+    index: &TastySemanticIndex,
+    packages: &Packages,
+    owner: SymbolId,
+    name: &Name,
+) -> LocalLookup {
     let Some(scope) = declaration_scope_of(store, index, packages, owner) else {
         return LocalLookup::ScopeUnknown;
     };
@@ -564,6 +577,56 @@ mod tests {
         assert_eq!(
             world.lookup(term_of_field, &inner),
             LocalLookup::UnsupportedPrefix
+        );
+    }
+
+    fn declaration(world: &World, owner: SymbolId, name: &Name) -> LocalLookup {
+        lookup_declaration(&world.store, &world.index, &world.packages, owner, name)
+    }
+
+    #[test]
+    fn a_declaration_lookup_sees_only_the_owners_own_declarations() {
+        let mut world = World::new();
+        let (left, left_scope) = world.class("Left");
+        let (right, right_scope) = world.class("Right");
+        let secret = world.name("secret", Namespace::Term);
+        let left_secret = world.declare(left_scope, left, secret, SymbolKind::Value);
+        let right_secret = world.declare(right_scope, right, secret, SymbolKind::Value);
+
+        assert_eq!(
+            declaration(&world, left, &secret),
+            LocalLookup::Found(left_secret)
+        );
+        assert_eq!(
+            declaration(&world, right, &secret),
+            LocalLookup::Found(right_secret)
+        );
+    }
+
+    #[test]
+    fn a_declaration_lookup_is_exact_in_namespace_and_reports_misses_and_overloads() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let term = world.name("x", Namespace::Term);
+        let ty = world.name("x", Namespace::Type);
+        let only = world.declare(scope, class, term, SymbolKind::Value);
+        let (unfilled, _) = (world.class("Unfilled").0, ());
+        // A class with no scope entered here.
+        let no_scope_name = world.name("Elsewhere", Namespace::Type);
+        let elsewhere = world.symbol(no_scope_name, SymbolKind::Class, None);
+
+        assert_eq!(declaration(&world, class, &term), LocalLookup::Found(only));
+        assert_eq!(declaration(&world, class, &ty), LocalLookup::NotFound);
+        assert_eq!(declaration(&world, unfilled, &term), LocalLookup::NotFound);
+        assert_eq!(
+            declaration(&world, elsewhere, &term),
+            LocalLookup::ScopeUnknown
+        );
+
+        world.declare(scope, class, term, SymbolKind::Method);
+        assert_eq!(
+            declaration(&world, class, &term),
+            LocalLookup::Ambiguous { candidates: 2 }
         );
     }
 }
