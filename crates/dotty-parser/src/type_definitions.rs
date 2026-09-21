@@ -125,6 +125,14 @@ where
         definition_start: u32,
     ) -> TreeId<Untyped> {
         if self.accept_type_operator("=") {
+            if self.at_type_definition_rhs_boundary() {
+                let position = self.current_span();
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type after `=`",
+                );
+                return self.error_type(position);
+            }
             return self.with_location(location, |parser| {
                 parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
             });
@@ -164,6 +172,20 @@ where
         self.with_location(location, |parser| {
             parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
         })
+    }
+
+    fn at_type_definition_rhs_boundary(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::Punctuation(
+                    dotty_core::Punctuation::RightBrace | dotty_core::Punctuation::Semicolon
+                )
+        )
     }
 
     fn accept_type_operator(&mut self, expected: &str) -> bool {
@@ -503,5 +525,94 @@ mod tests {
         assert!(name.as_name().is_type());
         assert_eq!(parser.names.resolve(name.as_name().text()), "match");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_type_definition_without_a_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_type_alias_without_a_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type A =",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+    }
+
+    #[test]
+    fn a_missing_type_alias_rhs_preserves_a_following_statement() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "type A =\nvalue",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Newline, 8, 9),
+                token(TokenKind::Identifier, 9, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        let TreeKind::Block(ref block) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(block.stats[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
     }
 }
