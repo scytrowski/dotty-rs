@@ -5,8 +5,12 @@
 //! `ModuleDef` shapes so those grammar pieces can be added without changing
 //! statement dispatch again.
 
-use dotty_core::ast::{DefDef, Modifier, Modifiers, ModuleDef, Template, TypeDef};
-use dotty_core::{HardKeyword, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped};
+use dotty_core::ast::{
+    Apply, ApplyKind, DefDef, Modifier, Modifiers, ModuleDef, Template, TypeDef,
+};
+use dotty_core::{
+    HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped,
+};
 
 use crate::statements::ParsedStatement;
 use crate::templates::TemplateBody;
@@ -28,13 +32,14 @@ where
         let mark = self.mark();
         self.advance();
         let name = self.parse_object_name();
+        let parents = self.parse_parent_clause();
         let body = self.parse_optional_template_body();
         let constructor = self.synthetic_primary_constructor(mark.start(), Vec::new(), Vec::new());
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents: Vec::new(),
+                parents,
                 self_val: None,
                 body,
                 metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
@@ -62,6 +67,7 @@ where
             Vec::new()
         };
         let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::Class);
+        let parents = self.parse_parent_clause();
         let body = self.parse_optional_template_body();
         let constructor =
             self.synthetic_primary_constructor(mark.start(), type_params, value_param_clauses);
@@ -69,7 +75,7 @@ where
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents: Vec::new(),
+                parents,
                 self_val: None,
                 body,
                 metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
@@ -98,6 +104,60 @@ where
             TokenKind::Indent => self.parse_template_body(TemplateBody::Indented),
             _ => Vec::new(),
         }
+    }
+
+    fn parse_parent_clause(&mut self) -> Vec<TreeId<Untyped>> {
+        self.consume_control_newlines();
+        if !self.accept(TokenKind::Keyword(HardKeyword::Extends)) {
+            return Vec::new();
+        }
+
+        let mut parents = vec![self.parse_parent()];
+        loop {
+            self.consume_control_newlines();
+            let separator = self.accept(TokenKind::Punctuation(Punctuation::Comma))
+                || self.accept(TokenKind::Keyword(HardKeyword::With));
+            if !separator {
+                break;
+            }
+            parents.push(self.parse_parent());
+        }
+        parents
+    }
+
+    fn parse_parent(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut parent =
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
+        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
+            parent = self.parse_type_application(mark, parent);
+        }
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return parent;
+        }
+
+        self.advance();
+        let mut args = Vec::new();
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+            loop {
+                args.push(self.with_location(crate::Location::InArgs, |parser| parser.expr()));
+                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+                    break;
+                }
+                if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                    break;
+                }
+            }
+        }
+        self.alloc_from(
+            mark,
+            TreeKind::Apply(Apply {
+                function: parent,
+                args,
+                kind: ApplyKind::Regular,
+            }),
+        )
     }
 
     fn parse_type_name(&mut self) -> TypeName {
@@ -343,6 +403,79 @@ mod tests {
         assert_eq!(constructor.value_param_clauses.len(), 2);
         assert_eq!(constructor.value_param_clauses[0].len(), 1);
         assert_eq!(constructor.value_param_clauses[1].len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_single_parent_in_an_extends_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Child extends Parent",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Extends), 12, 19),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.parents.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.parents[0]).kind,
+            TreeKind::Ident(identifier) if identifier.name.is_type()
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_parent_constructor_arguments_and_parent_lists() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Child extends Parent(x), Other with Mixin",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Extends), 12, 19),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 26, 27),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Punctuation(Punctuation::Comma), 29, 30),
+                token(TokenKind::Identifier, 31, 36),
+                token(TokenKind::Keyword(HardKeyword::With), 37, 41),
+                token(TokenKind::Identifier, 42, 47),
+                token(TokenKind::Eof, 47, 47),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.parents.len(), 3);
+        assert!(matches!(
+            parser.ast().get(template.parents[0]).kind,
+            TreeKind::Apply(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 }
