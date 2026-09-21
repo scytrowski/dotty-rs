@@ -38,8 +38,10 @@ use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EXPORT_TAG, IMPORT_TAG, NEW_TAG, PACKAGE_TAG, PARAM_TAG,
-    SELECTIN_TAG, SELFDEF_TAG, TEMPLATE_TAG, TYPEAPPLY_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EXPORT_TAG, IDENT_TAG, IF_TAG, IMPORT_TAG, INLINED_TAG,
+    LAMBDA_TAG, MATCH_TAG, NAMEDARG_TAG, NEW_TAG, PACKAGE_TAG, PARAM_TAG, REPEATED_TAG, SELECT_TAG,
+    SELECTIN_TAG, SELFDEF_TAG, TEMPLATE_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+    TYPEPARAM_TAG, VALDEF_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -187,6 +189,24 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::InvalidReferenceTarget { from, to: at });
         };
         if !matches!(tag, APPLY_TAG | BLOCK_TAG | TYPEAPPLY_TAG | SELECTIN_TAG) {
+            // A term that is not a constructor call has no parent type here:
+            // it is named, not sent through the type-tree projection to fail
+            // as some unrelated unsupported tree.
+            if matches!(
+                tag,
+                IDENT_TAG
+                    | SELECT_TAG
+                    | TYPED_TAG
+                    | INLINED_TAG
+                    | IF_TAG
+                    | MATCH_TAG
+                    | TRY_TAG
+                    | LAMBDA_TAG
+                    | NAMEDARG_TAG
+                    | REPEATED_TAG
+            ) {
+                return Err(UnpickleError::UnsupportedParentTree { address: at, tag });
+            }
             return self.type_of_tpt(ast, at, from, depth);
         }
         if let Some(existing) = self.index.type_tree_type_at(at) {

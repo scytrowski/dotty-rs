@@ -372,3 +372,16 @@ fn a_lambda_shared_by_two_classes_is_refused_for_both() {
         assert_eq!(completed.class_state, SymbolInfo::Missing);
     }
 }
+
+#[test]
+fn a_term_that_is_not_a_constructor_call_is_an_unsupported_parent() {
+    // `IDENT p p`: a term identifier where a parent is expected.
+    let ident_term = [&[110u8][..], &nat(n("p")), &p_type()].concat();
+    let completed = complete(&class_unit(&[ident_term], None));
+
+    assert!(matches!(
+        completed.error(),
+        UnpickleError::UnsupportedParentTree { tag: 110, .. }
+    ));
+    assert_eq!(completed.class_state, SymbolInfo::Missing);
+}
