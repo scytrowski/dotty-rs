@@ -1593,14 +1593,9 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
     assert_eq!(tally.unexpected, Vec::<String>::new());
 }
 
-/// Enters `scala.Any`, `scala.Nothing`, `scala.Null` and the special
-/// `scala.&` / `scala.|` aliases, which the compiler
+/// Enters `scala.Any`, `scala.Nothing` and `scala.Null`, which the compiler
 /// defines and no TASTy file declares.
-fn provide_compiler_builtins(
-    store: &mut SemanticStore,
-    packages: &mut Packages,
-    definitions: Definitions,
-) {
+fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages) {
     use dotty_core::names::{Name, Namespace};
     use dotty_core::symbols::{
         Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -1621,13 +1616,6 @@ fn provide_compiler_builtins(
             position: None,
             links: SymbolLinks::default(),
         });
-        store.scopes.get_mut(scala.scope).enter(name, symbol);
-    }
-    // `scala.&` and `scala.|` are the session's canonical special aliases
-    // (`Definitions::and_type` / `or_type`), so an applied `&` is an `And`.
-    for (text, symbol) in [("&", definitions.and_type), ("|", definitions.or_type)] {
-        let name = Name::new(store.names.intern(text), Namespace::Type);
-        store.symbols.get_mut(symbol).owner = Some(scala.symbol);
         store.scopes.get_mut(scala.scope).enter(name, symbol);
     }
 }
@@ -1657,8 +1645,12 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
+        // Declared for every run, with and without completion, so that the
+        // only difference between the two is completion itself: it makes the
+        // `scala` package exist and `scala.&` / `scala.|` resolve.
+        definitions.declare_special_aliases(&mut store, &mut packages);
         if builtins {
-            provide_compiler_builtins(&mut store, &mut packages, definitions);
+            provide_compiler_builtins(&mut store, &mut packages);
         }
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {

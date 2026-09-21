@@ -37,12 +37,13 @@
 use dotty_core::ids::TypeId;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, EXPLICITTPT_TAG, IDENTTPT_TAG, SHAREDTERM_TAG,
-    TYPEBOUNDSTPT_TAG,
+    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, EXPLICITTPT_TAG, IDENTTPT_TAG, RawTree,
+    SHAREDTERM_TAG, TYPEBOUNDSTPT_TAG,
 };
 
 use crate::ast_view::{AstView, address};
 use crate::error::UnpickleError;
+use crate::names::wire_name;
 use crate::unpickler::TastyUnpickler;
 
 impl TastyUnpickler<'_, '_, '_> {
@@ -70,6 +71,11 @@ impl TastyUnpickler<'_, '_, '_> {
         let children = children_of(ast, at);
         let ty = match tag {
             IDENTTPT_TAG => {
+                // Dotty reads the name and never uses it: it is validated
+                // (and dropped), the embedded type is the tree's type.
+                if let RawTree::NatAst { value, .. } = ast.tree_at(at, from)? {
+                    wire_name(self.file.names(), value)?;
+                }
                 let [embedded] = children[..] else {
                     return Err(malformed(at, "an identifier type tree has one type"));
                 };

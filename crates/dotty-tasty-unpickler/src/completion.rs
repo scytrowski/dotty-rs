@@ -45,6 +45,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// calls are untouched.
     pub fn complete_symbol(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
         let ast = self.ast_view()?;
+        self.declare_special_aliases();
         let transaction = self.begin_transaction();
         let result = self.complete_in(&ast, address);
         self.finish_transaction(transaction, result)
@@ -54,6 +55,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// fails, none of them stays completed.
     pub fn complete_symbols(&mut self, addresses: &[u32]) -> Result<Vec<TypeId>, UnpickleError> {
         let ast = self.ast_view()?;
+        self.declare_special_aliases();
         let transaction = self.begin_transaction();
         let result = addresses
             .iter()

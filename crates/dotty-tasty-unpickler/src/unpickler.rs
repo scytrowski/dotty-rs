@@ -69,6 +69,8 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     /// completed it, oldest first. Arena truncation cannot restore a field of
     /// a symbol that already existed, so a failed transaction puts these back.
     pub(crate) info_journal: Vec<(SymbolId, SymbolInfo)>,
+    /// Whether `scala.&` / `scala.|` were declared in the package registry.
+    special_aliases_declared: bool,
     /// The file's AST view, built on first use and shared by both passes.
     ast: Option<Rc<AstView<'bytes>>>,
 }
@@ -112,6 +114,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             rec_this: HashMap::new(),
             rec_this_journal: Vec::new(),
             info_journal: Vec::new(),
+            special_aliases_declared: false,
             ast: None,
         }
     }
@@ -228,9 +231,23 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// of [`unpickle_type`](Self::unpickle_type). Atomic like it.
     pub fn unpickle_type_tree_type(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
         let ast = self.ast_view()?;
+        self.declare_special_aliases();
         let transaction = self.begin_transaction();
         let result = self.type_of_tpt(&ast, address, address);
         self.finish_transaction(transaction, result)
+    }
+
+    /// Declares the compiler-defined `scala.&` / `scala.|` in the package
+    /// registry, once, before a decoding call starts (so a failed call never
+    /// takes them back). No file declares them, and an applied `&` in a type
+    /// tree resolves to them by name and is recognized by identity. Deferred
+    /// to the first decode so that merely entering a unit adds no package.
+    pub(crate) fn declare_special_aliases(&mut self) {
+        if !self.special_aliases_declared {
+            self.special_aliases_declared = true;
+            self.definitions
+                .declare_special_aliases(self.store, &mut self.packages);
+        }
     }
 
     /// Everything a public call may change that is not truncated with the

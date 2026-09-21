@@ -132,7 +132,7 @@ const DEFINITIONS: [&str; 15] = [
 ];
 
 /// The loose type trees and references, in order, appended after the package.
-const ROOTS: [&str; 26] = [
+const ROOTS: [&str; 27] = [
     "ident",
     "applied",
     "applied again",
@@ -159,6 +159,7 @@ const ROOTS: [&str; 26] = [
     "or",
     "and of three",
     "look-alike",
+    "bad name",
 ];
 
 struct Unit {
@@ -279,6 +280,8 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         special(N_AND, N_SCALA, &[ident_any(), ident_any(), ident_any()]),
         // The same text, another owner: the package `p`.
         special(N_AND, N_P, &[ident_any(), ident_any()]),
+        // A name reference past the name table.
+        named(IDENTTPT, 999, &any_type()),
     ];
     assert_eq!(roots.len(), ROOTS.len());
     let holder_payload = roots.concat();
@@ -356,18 +359,8 @@ fn entered<'a>(file: &'a TastyFile<'a>, session: &'a mut Session) -> TastyUnpick
         .enter(&mut session.store, SymbolOrigin::Synthetic, &["p"])
         .pop()
         .unwrap();
-    // `scala.&` and `scala.|` are the session's canonical special aliases;
-    // `p` declares a look-alike `&` of its own.
-    let scala = packages
-        .enter(&mut session.store, SymbolOrigin::Synthetic, &["scala"])
-        .pop()
-        .unwrap();
-    let mut declare = |scope, symbol, text: &str| {
-        let name = Name::new(session.store.names.intern(text), Namespace::Type);
-        session.store.scopes.get_mut(scope).enter(name, symbol);
-    };
-    declare(scala.scope, session.definitions.and_type, "&");
-    declare(scala.scope, session.definitions.or_type, "|");
+    // `scala.&` and `scala.|` are declared by the unpickler itself; `p`
+    // declares a look-alike `&` of its own.
     let look_alike = session.store.symbols.alloc(Symbol {
         name: Name::new(session.store.names.intern("&"), Namespace::Type),
         owner: Some(package.symbol),
@@ -687,6 +680,54 @@ fn a_failing_argument_rolls_back_the_tree_types_built_before_it() {
     }
     drop(unpickler);
     assert_eq!(next_type(&mut session), expected);
+}
+
+#[test]
+fn an_identifier_type_tree_with_a_bad_name_reference_is_refused() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    // The name is never used, but a malformed one is still malformed input.
+    let types = unpickler.index().type_count();
+    let trees = unpickler.index().type_tree_count();
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("bad name")),
+        Err(UnpickleError::InvalidNameReference { reference: 999 })
+    );
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().type_tree_count(), trees);
+}
+
+#[test]
+fn the_unpickler_declares_the_special_aliases_on_its_first_tree_projection_not_before() {
+    // Through the public constructor, with a registry that never heard of
+    // `scala`: entering the unit adds no package, the first projection declares
+    // the canonical symbols and an applied `&` then resolves to them.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
+    unpickler.enter_symbols().unwrap();
+    let (and, or) = (session.definitions.and_type, session.definitions.or_type);
+    let and_tree = unpickler.unpickle_type_tree_type(unit.at("and"));
+    assert!(and_tree.is_ok(), "{and_tree:?}");
+    drop(unpickler);
+
+    for symbol in [and, or] {
+        let owner = session
+            .store
+            .symbols
+            .get(symbol)
+            .owner
+            .expect("declared in scala");
+        assert_eq!(session.store.symbols.get(owner).kind, SymbolKind::Package);
+    }
+    assert!(matches!(
+        session.store.types.get(and_tree.unwrap()),
+        Type::And { .. }
+    ));
 }
 
 #[test]

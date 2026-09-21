@@ -832,7 +832,7 @@ simple symbols. A projected type is a tree's `tpe`, not a typed AST node: no
 | tree | projected type |
 |------|----------------|
 | `SHAREDterm` | the target's projection (`forkAt(readAddr()).readTpt()`); no type or cache entry of its own, bounded like every shared chain |
-| `IDENTtpt` | exactly the embedded type; the name is never resolved |
+| `IDENTtpt` | exactly the embedded type; the name is validated as a name reference (as `readTpt` reads it) and never resolved |
 | `APPLIEDtpt` | `Applied { tycon, args }`; with `Definitions::and_type` / `or_type` and two arguments, `And` / `Or` |
 | `BYNAMEtpt` | `ByName` |
 | `EXPLICITtpt` | exactly its child's type (no wrapper) |
@@ -851,7 +851,7 @@ are two types. `LAMBDAtpt` waits for the entering of type-lambda parameters.
 `scala.|` aliases (1,022 library and 1,072 compiler constructors are named that
 in the wire; upstream's `processAppliedType` canonicalizes them). They are
 recognized by *symbol identity*: `Definitions` mints `and_type` and `or_type`,
-and a session declares those very symbols as `&` / `|` in its `scala` package.
+and the unpickler declares those very symbols as `&` / `|` in its package registry's `scala` package (`Definitions::declare_special_aliases`, on the first tree projection or completion; entering a unit and `unpickle_type` add no package).
 A same-named symbol of another owner stays an application, and so does an
 application with other than two arguments.
 
@@ -1667,10 +1667,15 @@ index (cross-unit scopes are 5c). The remaining prefixes are unchanged term
 paths (`SHAREDtype -> TERMREF` 56, `TERMREF` and `TERMREFdirect` shapes). No
 downstream root (`APPLIEDtype`, `TYPEBOUNDS`, `TYPELAMBDAtype`, `PARAMtype`,
 `ANNOTATEDtype`, `REFINEDtype`) gains a decode. The next blocker is a class's
-declarations being reachable from another unit (5c). Separately, declaring
-`scala.&` / `scala.|` in the builtins run adds 241 named library `TYPEREF`
-decodes (11,684 -> 11,925) and 212 in the compiler (7,409 -> 7,621); that is
-the special aliases resolving, not completion.
+declarations being reachable from another unit (5c). Separately, the
+special aliases: the unpickler declares `scala.&` / `scala.|` on its first
+type-tree projection or completion (`Definitions::declare_special_aliases`;
+no file declares them). That makes the `scala` package exist, which by itself
+adds decodes against the pre-5a numbers (by address 224,977 -> 226,200 in the
+library and 329,361 -> 350,003 in the compiler without builtins; named `TYPEREF`
+10,088 -> 10,329 and 5,435 -> 5,647). The corpus test declares them in every
+run, with and without completion, so the completion figures above are
+completion alone.
 
 ### Match types after 4d (library / compiler)
 
