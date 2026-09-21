@@ -184,6 +184,25 @@ pub(crate) fn lookup_declaration(
     }
 }
 
+/// Whether `prefix` (with proxies looked through) is not a legal prefix as
+/// Dotty's `TypeOps.isLegalPrefix` sees it: a singleton that is not stable, of
+/// which a `TermRef` to a method or a variable is what the semantic graph can
+/// show. Dotty wraps such a prefix in a `QualSkolemType`, which `dotty-core`
+/// does not model, so it must not be passed on as if it were legal. A prefix
+/// whose proxy chain is too deep is reported as illegal too.
+pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
+    let Some(prefix) = look_through_proxies(store, prefix) else {
+        return true;
+    };
+    match store.types.get(prefix) {
+        Type::TermRef { symbol, .. } => matches!(
+            store.symbols.get(*symbol).kind,
+            SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Variable
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,5 +647,34 @@ mod tests {
             declaration(&world, class, &term),
             LocalLookup::Ambiguous { candidates: 2 }
         );
+    }
+
+    #[test]
+    fn only_a_method_or_variable_term_is_an_illegal_prefix() {
+        let mut world = World::new();
+        let (class, _) = world.class("C");
+        let no_prefix = world.no_prefix;
+        let term_ref = |world: &mut World, text: &str, kind| {
+            let name = world.name(text, Namespace::Term);
+            let symbol = world.symbol(name, kind, None);
+            world.store.types.alloc(Type::TermRef {
+                prefix: no_prefix,
+                symbol,
+            })
+        };
+        let method = term_ref(&mut world, "m", SymbolKind::Method);
+        let variable = term_ref(&mut world, "v", SymbolKind::Variable);
+        let value = term_ref(&mut world, "x", SymbolKind::Value);
+        let object = term_ref(&mut world, "o", SymbolKind::Object);
+        let class_ref = world.type_ref(class);
+        let wrapped_method = annotated(&mut world, method);
+
+        assert!(is_illegal_prefix(&world.store, method));
+        assert!(is_illegal_prefix(&world.store, variable));
+        assert!(is_illegal_prefix(&world.store, wrapped_method));
+        assert!(!is_illegal_prefix(&world.store, value));
+        assert!(!is_illegal_prefix(&world.store, object));
+        assert!(!is_illegal_prefix(&world.store, class_ref));
+        assert!(!is_illegal_prefix(&world.store, no_prefix));
     }
 }

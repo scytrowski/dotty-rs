@@ -7,6 +7,7 @@
 use dotty_core::Definitions;
 use dotty_core::Packages;
 use dotty_core::ids::{AnnotationId, TypeId};
+use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
 use dotty_core::types::{AnnotationArguments, AnnotationValue, Constant, Type};
@@ -135,10 +136,11 @@ fn the_parent_is_decoded_first_so_its_error_wins_over_a_full_tree() {
 }
 
 #[test]
-fn a_typerefin_annotation_is_compact_but_its_child_is_still_unsupported() {
-    // `TYPEREFin` is in Scala's compact set, and is decoded in Milestone 4c:
-    // the annotated type is understood, its annotation child is not (yet), so
-    // the error is the child's, never `ANNOTATEDtype`'s.
+fn a_typerefin_annotation_is_compact_and_its_child_is_now_decoded() {
+    // `TYPEREFin` is in Scala's compact set. The annotated type is understood
+    // and so is its annotation child (Milestone 4c1): here the child's own
+    // owner space holds no such member, so the error is that lookup's, not
+    // `ANNOTATEDtype`'s and not "unsupported".
     const TYPEREFIN: u8 = 175;
     let typerefin = length_node(
         TYPEREFIN,
@@ -149,13 +151,15 @@ fn a_typerefin_annotation_is_compact_but_its_child_is_still_unsupported() {
     let mut session = Session::new();
     let mut unpickler = unpickler_for(&file, &mut session);
 
-    assert_eq!(
+    assert!(matches!(
         unpickler.unpickle_type(ANNOTATED_AT),
-        Err(UnpickleError::UnsupportedType {
-            tag: TYPEREFIN,
-            address: UNDERLYING_AT + 2,
-        })
-    );
+        Err(UnpickleError::UnresolvedMember {
+            address,
+            space: Some(_),
+            namespace: Namespace::Type,
+            ..
+        }) if address == UNDERLYING_AT + 2
+    ));
 }
 
 /// The ids the next type and annotation allocations would get: equal for two

@@ -173,16 +173,19 @@ use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, ANNOTATEDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG,
     ConstantValue, FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
-    RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
-    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
-    TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
-    TermValue,
+    RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawNode, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
+    TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
+    TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFIN_TAG,
+    TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::binders::declared_variances;
 use crate::error::UnpickleError;
-use crate::lookup::{LocalLookup, MAX_PROXY_DEPTH, lookup_member, proxy_underlying};
+use crate::lookup::{
+    LocalLookup, MAX_PROXY_DEPTH, is_illegal_prefix, lookup_declaration, lookup_member,
+    lookup_owner, proxy_underlying,
+};
 use crate::names::{is_signed, package_segments, string_value, wire_name};
 use crate::unpickler::TastyUnpickler;
 
@@ -379,6 +382,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 tree.decode_rec_type()?;
                 return self.decode_rec_type(ast, at, depth);
             }
+            RawTree::LengthNode(node) if tag == TYPEREFIN_TAG || tag == TERMREFIN_TAG => {
+                self.decode_in_reference(ast, node, at, depth)?
+            }
             RawTree::LengthNode(node) if tag == REFINEDTYPE_TAG => {
                 self.decode_refined_type(ast, node, at, depth)?
             }
@@ -403,6 +409,34 @@ impl TastyUnpickler<'_, '_, '_> {
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
+    }
+
+    /// `TYPEREFin` / `TERMREFin Length NameRef prefix_Type ownerSpace_Type` at
+    /// `at`. The structural decoder only validates the shape; the two
+    /// children are taken by absolute address, prefix first, so each is keyed
+    /// like any other type. The result is an ordinary `TypeRef` / `TermRef`
+    /// that keeps the prefix: the owner space only identifies the symbol.
+    fn decode_in_reference(
+        &mut self,
+        ast: &AstView<'_>,
+        node: &RawNode<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<Type, UnpickleError> {
+        let shape = node.decode_in_reference()?;
+        let namespace = if node.tag == TYPEREFIN_TAG {
+            Namespace::Type
+        } else {
+            Namespace::Term
+        };
+        let ids = self.decode_children(ast, at, 2, depth)?;
+        let (prefix, space) = (ids[0], ids[1]);
+        let symbol = self.resolved_declaration(at, shape.name, prefix, space, namespace)?;
+        Ok(if namespace == Namespace::Type {
+            Type::TypeRef { prefix, symbol }
+        } else {
+            Type::TermRef { prefix, symbol }
+        })
     }
 
     /// The semantic constant for a wire constant, losslessly: floating-point
@@ -482,6 +516,51 @@ impl TastyUnpickler<'_, '_, '_> {
         prefix: TypeId,
         namespace: Namespace,
     ) -> Result<SymbolId, UnpickleError> {
+        self.resolved_named(at, name_ref, prefix, None, namespace)
+    }
+
+    /// The declaration a `TYPEREFin` / `TERMREFin` at `at` names: `name`
+    /// among the declarations of `space`, the declaring owner, and not among
+    /// the members of `prefix`, which is only how the reference is viewed.
+    /// The name is never resolved against the prefix, not even as a fallback.
+    fn resolved_declaration(
+        &mut self,
+        at: u32,
+        name_ref: u32,
+        prefix: TypeId,
+        space: TypeId,
+        namespace: Namespace,
+    ) -> Result<SymbolId, UnpickleError> {
+        self.resolved_named(at, name_ref, prefix, Some(space), namespace)
+    }
+
+    /// Whether `ty`, or a proxy it wraps, is a binder still being decoded,
+    /// whose arena slot must not be read.
+    fn is_or_wraps_pending(&self, ty: TypeId) -> bool {
+        let mut walk = ty;
+        for _ in 0..=MAX_PROXY_DEPTH {
+            if self.is_pending(walk) {
+                return true;
+            }
+            match proxy_underlying(self.store, walk) {
+                Some(underlying) => walk = underlying,
+                None => break,
+            }
+        }
+        false
+    }
+
+    /// Shared by [`resolved_member`](Self::resolved_member) (`space` is
+    /// `None`: the prefix is searched) and
+    /// [`resolved_declaration`](Self::resolved_declaration).
+    fn resolved_named(
+        &mut self,
+        at: u32,
+        name_ref: u32,
+        prefix: TypeId,
+        space: Option<TypeId>,
+        namespace: Namespace,
+    ) -> Result<SymbolId, UnpickleError> {
         let text = wire_name(self.file.names(), name_ref)?;
         if namespace == Namespace::Term && is_signed(self.file.names(), name_ref) {
             return Err(UnpickleError::UnsupportedSignedReference {
@@ -491,30 +570,46 @@ impl TastyUnpickler<'_, '_, '_> {
         }
         let name = Name::new(self.store.names.intern(&text), namespace);
 
-        // A prefix that is (or wraps) a binder still being decoded has no
-        // readable slot yet, so its members cannot be looked up.
-        let mut walk = prefix;
-        for _ in 0..=MAX_PROXY_DEPTH {
-            if self.is_pending(walk) {
-                return Err(UnpickleError::UnsupportedResolutionPrefix {
+        // A prefix or space that is (or wraps) a binder still being decoded
+        // has no readable slot yet. The two are checked separately: each is
+        // an untrusted graph, and each has its own error.
+        if self.is_or_wraps_pending(prefix) {
+            return Err(UnpickleError::UnsupportedResolutionPrefix {
+                address: at,
+                prefix,
+            });
+        }
+        if let Some(space) = space {
+            if self.is_or_wraps_pending(space) {
+                return Err(UnpickleError::UnsupportedResolutionSpace { address: at, space });
+            }
+            if namespace == Namespace::Type && is_illegal_prefix(self.store, prefix) {
+                return Err(UnpickleError::IllegalTypePrefix {
                     address: at,
                     prefix,
                 });
             }
-            match proxy_underlying(self.store, walk) {
-                Some(underlying) => walk = underlying,
-                None => break,
-            }
         }
 
-        let local = lookup_member(self.store, &self.index, &self.packages, prefix, &name);
-        let unsupported_prefix = local == LocalLookup::UnsupportedPrefix;
+        // The declaring owner an explicit space denotes, when it is one whose
+        // declarations are understood; a resolver answer must belong to it.
+        let owner =
+            space.and_then(|space| lookup_owner(self.store, &self.index, &self.packages, space));
+        let local = match (space, owner) {
+            (None, _) => lookup_member(self.store, &self.index, &self.packages, prefix, &name),
+            (Some(_), Some(owner)) => {
+                lookup_declaration(self.store, &self.index, &self.packages, owner, &name)
+            }
+            (Some(_), None) => LocalLookup::UnsupportedPrefix,
+        };
+        let unsupported = local == LocalLookup::UnsupportedPrefix;
         match local {
             LocalLookup::Found(symbol) => return Ok(symbol),
             LocalLookup::Ambiguous { candidates } => {
                 return Err(UnpickleError::AmbiguousMember {
                     address: at,
                     prefix,
+                    space,
                     name: text,
                     candidates,
                 });
@@ -526,7 +621,7 @@ impl TastyUnpickler<'_, '_, '_> {
             prefix,
             name,
             selector: MemberSelector::Unique,
-            space: MemberSpace::Prefix,
+            space: space.map_or(MemberSpace::Prefix, MemberSpace::Explicit),
         };
         let failure = |error| UnpickleError::ResolverFailure { address: at, error };
         match self
@@ -534,19 +629,32 @@ impl TastyUnpickler<'_, '_, '_> {
             .resolve_member(&*self.store, &request)
             .map_err(failure)?
         {
-            Some(symbol) if self.store.symbols.get(symbol).name.namespace() == namespace => {
-                Ok(symbol)
+            Some(symbol) if self.store.symbols.get(symbol).name.namespace() != namespace => {
+                Err(failure(ResolutionError::Malformed {
+                    reason: format!("the symbol for `{text}` is in the wrong namespace"),
+                }))
             }
-            Some(_) => Err(failure(ResolutionError::Malformed {
-                reason: format!("the symbol for `{text}` is in the wrong namespace"),
-            })),
-            None if unsupported_prefix => Err(UnpickleError::UnsupportedResolutionPrefix {
-                address: at,
-                prefix,
+            // The declaration must be the owner's own: a same-named symbol of
+            // another owner is exactly what an explicit space rules out.
+            Some(symbol) if owner.is_some() && self.store.symbols.get(symbol).owner != owner => {
+                Err(failure(ResolutionError::Malformed {
+                    reason: format!(
+                        "the symbol for `{text}` is not declared by the requested owner"
+                    ),
+                }))
+            }
+            Some(symbol) => Ok(symbol),
+            None if unsupported => Err(match space {
+                Some(space) => UnpickleError::UnsupportedResolutionSpace { address: at, space },
+                None => UnpickleError::UnsupportedResolutionPrefix {
+                    address: at,
+                    prefix,
+                },
             }),
             None => Err(UnpickleError::UnresolvedMember {
                 address: at,
                 prefix,
+                space,
                 name: text,
                 namespace,
             }),
