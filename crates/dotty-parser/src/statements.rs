@@ -31,6 +31,9 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Def) {
             return self.parse_method_definition(location);
         }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
+            return self.parse_type_definition(location);
+        }
 
         let tree = if is_unsupported_start(self.current().kind) {
             self.parse_unsupported_syntax()
@@ -198,7 +201,6 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
                 | HardKeyword::Match
                 | HardKeyword::Val
                 | HardKeyword::Var
-                | HardKeyword::Type
                 | HardKeyword::Object
                 | HardKeyword::Trait
                 | HardKeyword::Enum

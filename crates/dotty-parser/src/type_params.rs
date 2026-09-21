@@ -201,7 +201,7 @@ where
         TypeName::new(self.names.intern(&name))
     }
 
-    fn synthetic_type_bounds(&mut self, start: u32) -> TreeId<Untyped> {
+    pub(crate) fn synthetic_type_bounds(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width type bounds range");
         self.alloc(
             TreeKind::TypeBoundsTree(TypeBoundsTree {
