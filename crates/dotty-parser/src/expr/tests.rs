@@ -935,6 +935,68 @@ fn reports_an_empty_using_argument_list_without_hanging() {
 }
 
 #[test]
+fn parses_a_simple_colon_argument_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo:\n  body",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonEol, 3, 4),
+            token(TokenKind::Indent, 4, 4),
+            token(TokenKind::Identifier, 7, 11),
+            token(TokenKind::Outdent, 11, 11),
+            token(TokenKind::Eof, 11, 11),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected colon application");
+    };
+    assert_eq!(application.kind, ApplyKind::Regular);
+    assert_eq!(application.args.len(), 1);
+    assert!(matches!(
+        parser.ast().get(application.args[0]).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_multiple_colon_argument_statements_as_a_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo:\n  a\n  b",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonEol, 3, 4),
+            token(TokenKind::Indent, 4, 4),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Newline, 8, 9),
+            token(TokenKind::Identifier, 11, 12),
+            token(TokenKind::Outdent, 12, 12),
+            token(TokenKind::Eof, 12, 12),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected colon application");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(application.args[0]).kind else {
+        panic!("expected a block colon argument");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn named_argument_keeps_a_full_expression_rhs() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

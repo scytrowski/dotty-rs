@@ -7,6 +7,31 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(super) fn parse_colon_argument(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(function)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+
+        self.observe_indented();
+        self.advance();
+        let argument = if self.cursor.at(TokenKind::Indent) {
+            self.parse_feedback_indented_block()
+        } else {
+            self.expr()
+        };
+        self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Apply(Apply {
+                function,
+                args: vec![argument],
+                kind: ApplyKind::Regular,
+            }),
+        )
+    }
+
     pub(super) fn parse_application(
         &mut self,
         mark: crate::Mark,

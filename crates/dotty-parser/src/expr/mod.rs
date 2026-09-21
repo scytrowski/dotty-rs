@@ -123,6 +123,9 @@ where
             self.advance();
             return self.parse_ascription(lhs);
         }
+        if self.current().kind == TokenKind::ColonEol {
+            return self.parse_colon_argument(lhs);
+        }
         lhs
     }
 
