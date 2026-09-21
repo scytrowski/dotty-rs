@@ -37,6 +37,9 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 4c2, name-designated references for refined and recursive members:
   implemented (§4, "Name-designated references"). The real `C { type T1; type
   T2 = T1 }` decodes.
+- Milestone 4d, `MATCHtype` / `MATCHCASEtype`, and the regular-TASTy
+  type-language audit: implemented (§4, "Match types"; §8). Milestone 4 is
+  closed; the next work is Milestone 5 (symbol completion).
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -91,7 +94,7 @@ function. It follows an enter-before-complete model:
 | 4b2b. `SHAREDterm` annotations | `AstView::resolve_shared_term`; shared `APPLY`/`NEW` reuse the direct decoder | 4b2b |
 | 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
 | 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
-| 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
+| 4d. Match types | `MATCHtype` / `MATCHCASEtype` to `Match` / `MatchCase`; type-language audit | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
@@ -775,6 +778,41 @@ that counts, not the link. This layer does the same:
 - Typed-tree identity (one `TreeId` per term node) is Milestone 7's concern; it
   is separate from semantic annotation identity, which needs none.
 
+### Match types (Milestone 4d)
+
+```text
+MATCHtype     Length bound_Type scrutinee_Type CaseType*
+MATCHCASEtype Length pattern_Type result_Type
+```
+
+Scala 3.9 reads `MatchType(readType(), readType(), until(end)(readType()))`
+and builds a case as `defn.MatchCaseClass.typeRef.appliedTo(readType(),
+readType())`. Both decode by absolute child address through `type_at`, the
+structural decoder validating the shape only:
+
+- `MATCHCASEtype` is normalized to `Type::MatchCase { pattern, result }`. The
+  wire carries the pattern and the result and nothing else, so nothing is lost,
+  and Dotty's internal `MatchCaseClass` carrier is not added to `Definitions`
+  (no symbol is looked up or made).
+- `MATCHtype` is `Type::Match(MatchType { bound, scrutinee, cases })`: the
+  first child is the bound, the second the scrutinee (never conflated), the rest
+  the cases in wire order, none flattened, reduced or deduplicated. A match
+  type with no case is accepted: the grammar is `CaseType*` and upstream passes
+  the list on unchecked.
+- A case that captures type variables is `[X] =>> MatchCase(p, r)` on the wire
+  and is a `TYPELAMBDAtype` whose result is the `MATCHCASEtype`; it uses the
+  ordinary binder machinery, so its `ParamRef`s name that exact lambda. Every
+  case entry may also be a `SHAREDtype` link to an existing case (exact
+  `TypeId`, no new allocation). The shape of a case is not checked: reduction
+  and legality are the typer's, as upstream's reader does not check them.
+- Failure at any child rolls back every allocation of the call, including the
+  binder of an earlier captured case; `rebind_type_lambda` already walks both
+  forms, and a test rebinds an outer lambda around a match type whose case has
+  its own binder.
+- `MATCHtpt` (191) is the source syntax, a tree; it is not a type and
+  `unpickle_type` does not accept it. Milestone 7 rehydrates it as a typed tree
+  whose `tpe` may be a `Match`.
+
 ### Owner-space references (Milestone 4c1)
 
 ```text
@@ -1110,7 +1148,8 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 4c1: `TYPEREFin` / unsigned `TERMREFin` owner-space resolution — complete;
    - 4c2: name-designated refined / recursive member references and
      `lookup_structural_member` — complete;
-   - 4d: `Match` / `MatchCase` and whatever else measurement shows.
+   - 4d: `Match` / `MatchCase` and the final type-language audit — complete;
+     Milestone 4 is closed.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
@@ -1507,6 +1546,35 @@ Annotation coverage: compact 17 (library), direct full `APPLY`/`NEW` 7,329
 is unsupported. What remains inside supported roots is a `SELECTtpt` class tree
 (2 direct + 3 shared, library) and everything that needs a classpath or symbol
 completion.
+
+### Match types after 4d (library / compiler)
+
+`MATCHtype` and `MATCHCASEtype` occur in neither corpus (0 / 0 in both), so 4d
+changes no decode count; the decoder is covered by synthetic wire only. Real
+match-type source appears as `MATCHtpt`: 27 trees in the library (23 with an
+explicit bound; 6 with one case, 20 with two, 1 with three) and none in the
+compiler. Unexpected errors: 0.
+
+#### Regular-TASTy type-language audit (Scala 3.9.0)
+
+| tags | forms | state |
+|------|-------|-------|
+| `TYPEREFdirect`, `TERMREFdirect`, `TYPEREFsymbol`, `TERMREFsymbol`, `TYPEREFpkg`, `TERMREFpkg`, `THIS`, `SHAREDtype`, `TYPEREF`, `TERMREF` | references and links | decoded; a `TERMREF` with a signed name is `UnsupportedSignedReference` |
+| `TYPEREFin`, `TERMREFin` | owner-space references | decoded; signed `TERMREFin` is `UnsupportedSignedReference` (signature selection deferred) |
+| `RECtype`, `RECthis`, `REFINEDtype`, `SUPERtype`, `ANDtype`, `ORtype`, `APPLIEDtype`, `TYPEBOUNDS`, `ANNOTATEDtype`, `BYNAMEtype`, `FLEXIBLEtype` | compound types | decoded |
+| `POLYtype`, `METHODtype`, `TYPELAMBDAtype`, `PARAMtype` | binders | decoded |
+| constants (`UNITconst` ... `CLASSconst`) | literal types | decoded |
+| `MATCHtype`, `MATCHCASEtype` | match types | decoded (this milestone) |
+| `MATCHtpt`, `SINGLETONtpt`, `IDENTtpt`, `SELECTtpt`, `LAMBDAtpt`, ... | type trees | not `unpickle_type` inputs: typed-tree rehydration (Milestone 7) |
+| (`QualSkolemType`) | Dotty's skolem prefix of a mutable or methodic term | not modeled: such a `REFin` prefix is `IllegalTypePrefix` |
+| `ERRORtype` | error type | Best-Effort TASTy only, not regular TASTy |
+| 166, 168, 184-189 | unassigned | reserved |
+
+No unsigned regular-TASTy semantic `Type` form is left unsupported. This is not
+full TASTy support: signed overload selection, typed trees, symbol completion
+(infos, `ClassInfo`, parents, self types, symbol annotations) and classpath
+resolution are separate milestones (5, 6, 7), and most real nodes still fail
+only because they name symbols outside the entered state.
 
 ### Owner-space references after 4c1 (library / compiler)
 

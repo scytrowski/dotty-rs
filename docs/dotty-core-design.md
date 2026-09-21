@@ -920,6 +920,11 @@ pub enum Type {
     /// value itself — not a separate `Binder`/`BinderId`. See `[BLOCKER 1]`.
     ParamRef { binder: TypeId, index: u32 },
 
+    /// `MatchType.cases` holds, in order, `MatchCase` nodes or `TypeLambda`s
+    /// whose result is a `MatchCase` (Dotty's `[X] =>> MatchCase(p, r)`, a
+    /// case with captures; the captures are ordinary `ParamRef`s to that
+    /// lambda). `MatchCase` is the case itself: Dotty's carrier, an
+    /// `AppliedType` of its internal `MatchCaseClass`, is not modeled.
     Match(MatchType),
     MatchCase { pattern: TypeId, result: TypeId },
 
