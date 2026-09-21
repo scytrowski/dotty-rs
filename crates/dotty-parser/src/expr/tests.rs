@@ -997,6 +997,34 @@ fn parses_multiple_colon_argument_statements_as_a_block() {
 }
 
 #[test]
+fn parses_an_infix_colon_argument_as_the_right_operand() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "left combine:\n  right",
+        vec![
+            token(TokenKind::Identifier, 0, 4),
+            token(TokenKind::Identifier, 5, 12),
+            token(TokenKind::ColonEol, 12, 13),
+            token(TokenKind::Indent, 13, 13),
+            token(TokenKind::Identifier, 16, 21),
+            token(TokenKind::Outdent, 21, 21),
+            token(TokenKind::Eof, 21, 21),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parser.ast().get(tree).kind else {
+        panic!("expected an infix tree");
+    };
+    assert!(matches!(
+        parser.ast().get(infix.right).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn named_argument_keeps_a_full_expression_rhs() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

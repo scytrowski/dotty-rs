@@ -54,8 +54,15 @@ where
                 operator: operator.name,
                 offset: operator.offset,
             });
-            self.consume_infix_newlines();
-            top = self.prefix_expr();
+            if self.current().kind == TokenKind::ColonFollow {
+                self.observe_colon_eol(false);
+            }
+            top = if self.current().kind == TokenKind::ColonEol {
+                self.parse_colon_argument_body()
+            } else {
+                self.consume_infix_newlines();
+                self.prefix_expr()
+            };
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
