@@ -38,12 +38,14 @@ use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
-    DEFDEF_TAG, EXPORT_TAG, IMPORT_TAG, PACKAGE_TAG, PARAM_TAG, SELFDEF_TAG, TEMPLATE_TAG,
-    TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EXPORT_TAG, IMPORT_TAG, NEW_TAG, PACKAGE_TAG, PARAM_TAG,
+    SELECTIN_TAG, SELFDEF_TAG, TEMPLATE_TAG, TYPEAPPLY_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG,
 };
 
-use crate::ast_view::{AstView, address};
+use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
+use crate::mapping::CONSTRUCTOR_NAME;
+use crate::names::wire_name;
 use crate::unpickler::TastyUnpickler;
 
 /// The parts of a template's children that class completion reads.
@@ -141,7 +143,19 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 
     /// The semantic type of the template parent at `at`, in the template at
-    /// `from`.
+    /// `from`: upstream's `readParentType`, which reads only as much of a
+    /// constructor call as its type needs.
+    ///
+    /// | tree | parent type |
+    /// |------|-------------|
+    /// | `SHAREDterm` | that of the tree it names |
+    /// | `APPLY fun args...` | that of `fun`; the term arguments are never read |
+    /// | `BLOCK expr stats...` | that of `expr`; the statements are never read |
+    /// | `TYPEAPPLY fun targs...` | that of `fun` when it is already applied (the compiler writes `New(Parent[A])` and repeats the arguments), else `Applied { fun, targs }` |
+    /// | `SELECTin <init> (NEW tpt) owner` | the projection of `tpt` |
+    /// | any other tree | its type-tree projection (`readTpt`) |
+    ///
+    /// A constructor argument therefore never influences `ClassInfo.parents`.
     pub(crate) fn type_of_parent(
         &mut self,
         ast: &AstView<'_>,
@@ -149,7 +163,90 @@ impl TastyUnpickler<'_, '_, '_> {
         from: u32,
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
-        self.type_of_tpt(ast, at, from, depth)
+        self.type_of_parent_in(ast, at, from, depth, 0)
+    }
+
+    /// `type_of_parent`, with `wrapped` counting the wrappers entered so far.
+    fn type_of_parent_in(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        from: u32,
+        depth: usize,
+        wrapped: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        if wrapped > MAX_SHARED_DEPTH {
+            return Err(UnpickleError::MalformedParentTree {
+                address: at,
+                reason: "a parent constructor call nests too deeply",
+            });
+        }
+        // Dotty reads `SHAREDterm` as the tree at its target.
+        let at = ast.resolve_shared_term(at, from)?;
+        let Some(tag) = ast.tag_at(at) else {
+            return Err(UnpickleError::InvalidReferenceTarget { from, to: at });
+        };
+        if !matches!(tag, APPLY_TAG | BLOCK_TAG | TYPEAPPLY_TAG | SELECTIN_TAG) {
+            return self.type_of_tpt(ast, at, from, depth);
+        }
+        if let Some(existing) = self.index.type_tree_type_at(at) {
+            return Ok(existing);
+        }
+        let children: Vec<u32> = ast
+            .children(at)
+            .iter()
+            .map(|child| address(child.offset))
+            .collect();
+        let Some(first) = children.first().copied() else {
+            return Err(UnpickleError::MalformedParentTree {
+                address: at,
+                reason: "a parent constructor call has a function",
+            });
+        };
+        let ty = match tag {
+            // The arguments and the statements are children after the first.
+            APPLY_TAG | BLOCK_TAG => self.type_of_parent_in(ast, first, at, depth, wrapped + 1)?,
+            TYPEAPPLY_TAG => {
+                let function = self.type_of_parent_in(ast, first, at, depth, wrapped + 1)?;
+                if matches!(self.store.types.get(function), Type::Applied { .. }) {
+                    function
+                } else {
+                    let mut args = Vec::with_capacity(children.len() - 1);
+                    for argument in &children[1..] {
+                        args.push(self.type_of_tpt(ast, *argument, at, depth)?);
+                    }
+                    self.store.types.alloc(Type::Applied {
+                        tycon: function,
+                        args,
+                    })
+                }
+            }
+            _ => {
+                let selection = ast.node(at)?.decode_select_in()?;
+                let name = wire_name(self.file.names(), selection.name)?;
+                if name != CONSTRUCTOR_NAME {
+                    return Err(UnpickleError::MalformedParentTree {
+                        address: at,
+                        reason: "a parent constructor selection selects <init>",
+                    });
+                }
+                if ast.tag_at(first) != Some(NEW_TAG) {
+                    return Err(UnpickleError::MalformedParentTree {
+                        address: at,
+                        reason: "a parent constructor selection is on NEW",
+                    });
+                }
+                let [new_tpt] = ast.children(first) else {
+                    return Err(UnpickleError::MalformedParentTree {
+                        address: first,
+                        reason: "NEW has one type tree",
+                    });
+                };
+                self.type_of_tpt(ast, address(new_tpt.offset), first, depth)?
+            }
+        };
+        self.index.insert_type_tree(at, ty)?;
+        Ok(ty)
     }
 
     /// The self type of the `SELFDEF` at `at`: its type tree, projected.

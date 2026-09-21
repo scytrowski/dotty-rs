@@ -11,6 +11,11 @@ use dotty_tasty::tasty::{DefinitionBody, StructuredNode, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
 const BASE: &[u8] = include_bytes!("fixtures/semantic/InfoBase.tasty");
+const DEP: &[u8] = include_bytes!("fixtures/semantic/InfoDep.tasty");
+const PARENT: &[u8] = include_bytes!("fixtures/semantic/InfoParent.tasty");
+const CHILD: &[u8] = include_bytes!("fixtures/semantic/InfoChild.tasty");
+const HOLDER: &[u8] = include_bytes!("fixtures/semantic/InfoHolder.tasty");
+const WRAPPED: &[u8] = include_bytes!("fixtures/semantic/InfoWrapped.tasty");
 const NEEDS: &[u8] = include_bytes!("fixtures/semantic/InfoNeeds.tasty");
 
 /// A session: the shared store and packages, and the entered units.
@@ -196,4 +201,136 @@ fn a_failed_class_completion_leaves_the_class_missing_and_its_scope_intact() {
     );
     assert_eq!(state, SymbolInfo::Missing);
     assert!(scope.is_some());
+}
+
+// ---- parent projection ---------------------------------------------------
+
+/// The name of the symbol a `TypeRef` type designates.
+fn referenced_name(store: &SemanticStore, ty: TypeId) -> String {
+    let symbol = store
+        .types
+        .get(ty)
+        .reference_symbol()
+        .unwrap_or_else(|| panic!("not a symbol reference: {:?}", store.types.get(ty)));
+    store
+        .names
+        .resolve(store.symbols.get(symbol).name.text())
+        .to_owned()
+}
+
+/// The applied type's constructor name and argument types.
+fn applied(store: &SemanticStore, ty: TypeId) -> (String, Vec<TypeId>) {
+    match store.types.get(ty) {
+        Type::Applied { tycon, args } => (referenced_name(store, *tycon), args.clone()),
+        other => panic!("not an Applied: {other:?}"),
+    }
+}
+
+fn session_with_parents() -> Session {
+    let mut session = Session::new();
+    for unit in [BASE, DEP, PARENT] {
+        session.unit(unit, |_, _| ());
+    }
+    session
+}
+
+#[test]
+fn a_generic_class_keeps_its_ordered_generic_parents() {
+    let mut session = session_with_parents();
+    let (ty, parameter) = session.unit(CHILD, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoChild", SymbolKind::Class);
+        let ty = unpickler.complete_symbol(at).unwrap();
+        let parameter = (0..64)
+            .find_map(|address| {
+                let symbol = unpickler.index().symbol_at(address)?;
+                (unpickler.symbol_state_at(address)?.0 == SymbolKind::TypeParameter)
+                    .then_some(symbol)
+            })
+            .expect("the class type parameter");
+        (ty, parameter)
+    });
+    let info = class_info_of(&session.store, ty);
+    let [parent, base] = info.parents[..] else {
+        panic!("two parents: {:?}", info.parents);
+    };
+    let (parent_name, parent_args) = applied(&session.store, parent);
+    let (base_name, base_args) = applied(&session.store, base);
+    assert_eq!(parent_name, "InfoParent");
+    assert_eq!(base_name, "InfoBase");
+    // The argument is the class's own type parameter symbol, not a ParamRef.
+    for args in [parent_args, base_args] {
+        let [arg] = args[..] else { panic!("one arg") };
+        assert_eq!(
+            session.store.types.get(arg).reference_symbol(),
+            Some(parameter)
+        );
+    }
+}
+
+#[test]
+fn a_type_constructor_parameter_applied_in_a_parent_stays_applied() {
+    let mut session = session_with_parents();
+    let ty = session.unit(WRAPPED, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoWrapped", SymbolKind::Class);
+        unpickler.complete_symbol(at).unwrap()
+    });
+    let info = class_info_of(&session.store, ty);
+    // `Object` (the superclass the compiler adds) precedes the trait.
+    let [object, base] = info.parents[..] else {
+        panic!("two parents");
+    };
+    assert_eq!(referenced_name(&session.store, object), "Object");
+    let (name, args) = applied(&session.store, base);
+    assert_eq!(name, "InfoBase");
+    let [arg] = args[..] else { panic!("one arg") };
+    let (inner, _) = applied(&session.store, arg);
+    assert_eq!(inner, "F");
+}
+
+#[test]
+fn a_class_without_an_extends_clause_has_the_object_parent() {
+    let mut session = session_with_parents();
+    let ty = session.unit(HOLDER, |unpickler, file| {
+        let at = class_named(unpickler, file, "Nested", SymbolKind::Class);
+        unpickler.complete_symbol(at).unwrap()
+    });
+    let info = class_info_of(&session.store, ty);
+    let [parent] = info.parents[..] else {
+        panic!("one parent");
+    };
+    let (name, args) = applied(&session.store, parent);
+    assert_eq!(name, "InfoParent");
+    assert_eq!(args.len(), 1);
+}
+
+#[test]
+fn class_completion_does_not_force_its_members() {
+    let mut session = session_with_parents();
+    let states = session.unit(CHILD, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoChild", SymbolKind::Class);
+        unpickler.complete_symbol(at).unwrap();
+        ["method", "Member"].map(|name| {
+            let member = typedefs_or_defs_named(file, name);
+            unpickler.symbol_state_at(member).unwrap().1
+        })
+    });
+    assert_eq!(states, [SymbolInfo::Missing, SymbolInfo::Missing]);
+}
+
+/// The definition (method or type) named `text`.
+fn typedefs_or_defs_named(file: &TastyFile<'_>, text: &str) -> u32 {
+    let index = file.ast_address_index().unwrap();
+    for node in index.iter_nodes() {
+        let at = u32::try_from(node.offset).unwrap();
+        let Some(raw) = index.get(at) else { continue };
+        let name = match raw.decode_structured() {
+            Ok(StructuredNode::DefDef(body)) => body.name,
+            Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })) => name,
+            _ => continue,
+        };
+        if file.names().get_utf8(name) == Some(text) {
+            return at;
+        }
+    }
+    panic!("no definition named {text}")
 }

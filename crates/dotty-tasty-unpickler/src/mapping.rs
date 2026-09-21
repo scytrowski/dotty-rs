@@ -26,7 +26,7 @@ use dotty_tasty::tasty::{
 use crate::error::UnpickleError;
 
 /// The name TASTy gives every constructor.
-const CONSTRUCTOR_NAME: &str = "<init>";
+pub(crate) const CONSTRUCTOR_NAME: &str = "<init>";
 
 /// What the modifier list of a definition says about its symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
