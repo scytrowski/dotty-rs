@@ -28,6 +28,10 @@ where
                 if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
                     break;
                 }
+                if parser.current_is_unsupported_parameter_clause() {
+                    clauses.push(parser.parse_unsupported_term_param_clause());
+                    continue;
+                }
                 let is_using = parser.current_is_using_parameter_clause();
                 clauses.push(if is_using {
                     parser.parse_term_param_clause_with_modifiers(true)
@@ -37,6 +41,19 @@ where
             }
             clauses
         })
+    }
+
+    fn parse_unsupported_term_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
+        let message =
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit) {
+                "legacy `implicit` parameter clauses are not supported; use a named `using` clause"
+            } else {
+                "anonymous `using` parameter clauses are not supported; name the context parameter"
+            };
+        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+        self.recover_term_param_clause();
+        Vec::new()
     }
 
     /// Consumes layout separators only when they lead to the requested
@@ -163,6 +180,22 @@ where
                 .unwrap_or(false)
     }
 
+    fn current_is_unsupported_parameter_clause(&mut self) -> bool {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return false;
+        }
+        if self.cursor.lookahead(1).kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit) {
+            return true;
+        }
+        if !self.current_is_using_parameter_clause() {
+            return false;
+        }
+        matches!(
+            self.cursor.lookahead(2).kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && !is_parameter_colon_at(self, 3)
+    }
+
     fn parse_param_name(&mut self) -> TermName {
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -206,13 +239,21 @@ where
 }
 
 fn is_parameter_colon<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
+    is_parameter_colon_at(parser, 0)
+}
+
+fn is_parameter_colon_at<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+    offset: usize,
+) -> bool {
+    let token = parser.cursor.lookahead(offset).clone();
     matches!(
-        parser.current().kind,
+        token.kind,
         TokenKind::ColonFollow
             | TokenKind::ColonEol
             | TokenKind::ColonOp
             | TokenKind::Punctuation(Punctuation::Colon)
-    ) && parser.current_text_is(":")
+    ) && parser.token_text(&token).ok() == Some(":")
 }
 
 fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
@@ -442,6 +483,62 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
         );
+    }
+
+    #[test]
+    fn reports_legacy_implicit_clauses_as_explicitly_unsupported() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(implicit ctx: Ctx)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 8),
+                token(TokenKind::Identifier, 9, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses, vec![Vec::new()]);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_anonymous_using_clauses_as_explicitly_unsupported() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using Ctx)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses, vec![Vec::new()]);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

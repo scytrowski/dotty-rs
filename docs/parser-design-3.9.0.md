@@ -194,8 +194,10 @@ Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
 inside a brace or indented `Block`; a typed declaration without `=` has no
 RHS. The parser deliberately does not yet handle definition modifiers,
-annotations, constructors, context-type shorthand, or the remaining
-definition forms.
+annotations, constructors, legacy `(implicit ...)` clauses, anonymous
+`(using T)` clauses, context-type shorthand, or the remaining definition
+forms. Those parameter forms produce an explicit unsupported-syntax
+diagnostic and synchronize at the closing parenthesis.
 
 The current source-level pattern grammar is layered as:
 
