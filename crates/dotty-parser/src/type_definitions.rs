@@ -5,7 +5,7 @@
 //! the source-level abstraction in `LambdaTypeTree`.
 
 use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
-use dotty_core::{TokenKind, TreeId, TreeKind, TypeName, Untyped};
+use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
 use crate::statements::ParsedStatement;
 use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
@@ -32,15 +32,54 @@ where
         let type_params = type_params_mark
             .map(|_| self.parse_type_param_clause(crate::ParamOwner::Hk))
             .unwrap_or_default();
-        let rhs = self.parse_type_definition_rhs(location);
+        let empty_bounds_start = type_params
+            .last()
+            .and_then(|param| {
+                self.ast
+                    .get(*param)
+                    .position
+                    .map(|position| position.span().range().end())
+            })
+            .unwrap_or(mark.start);
+        let rhs = self.parse_type_definition_rhs(location, empty_bounds_start);
         let rhs = if let Some(mark) = type_params_mark {
-            self.alloc_from(
-                mark,
+            let lambda_start = type_params
+                .first()
+                .and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .unwrap_or(mark.start());
+            let lambda = self.alloc_from(
+                crate::Mark {
+                    start: lambda_start,
+                },
                 TreeKind::LambdaTypeTree(LambdaTypeTree {
                     type_params,
                     body: rhs,
                 }),
-            )
+            );
+            if matches!(
+                self.ast.get(rhs).kind,
+                TreeKind::TypeBoundsTree(TypeBoundsTree {
+                    low: None,
+                    high: None,
+                    alias: None,
+                })
+            ) {
+                let end = self
+                    .ast
+                    .get(rhs)
+                    .position
+                    .map(|position| position.span().range().end())
+                    .unwrap_or(lambda_start);
+                let range = TextRange::new(lambda_start, end).expect("lambda span is ordered");
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+            lambda
         } else {
             rhs
         };
@@ -80,7 +119,11 @@ where
         TypeName::new(self.names.intern("$missing_type"))
     }
 
-    fn parse_type_definition_rhs(&mut self, location: Location) -> TreeId<Untyped> {
+    fn parse_type_definition_rhs(
+        &mut self,
+        location: Location,
+        definition_start: u32,
+    ) -> TreeId<Untyped> {
         if self.accept_type_operator("=") {
             return self.with_location(location, |parser| {
                 parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
@@ -100,7 +143,9 @@ where
         };
 
         if low.is_none() && high.is_none() {
-            return self.synthetic_type_bounds(self.last_real_token_end);
+            // Dotty represents an abstract declaration's empty bounds at the
+            // start of the type definition, rather than after its name.
+            return self.synthetic_type_bounds(definition_start);
         }
 
         self.alloc_from(
@@ -365,7 +410,7 @@ mod tests {
         assert!(low.is_none() && high.is_none() && alias.is_none());
         assert_eq!(
             parser.ast().get(rhs).position.unwrap().span().range(),
-            TextRange::new(6, 6).unwrap()
+            TextRange::new(0, 0).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }

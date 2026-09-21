@@ -1,0 +1,4 @@
+{
+  type F[A]
+  value
+}
