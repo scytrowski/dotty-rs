@@ -108,7 +108,7 @@ where
         )
     }
 
-    fn pattern2(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn pattern2(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let pattern = self.infix_pattern();
         if !self.current_text_is("@") {

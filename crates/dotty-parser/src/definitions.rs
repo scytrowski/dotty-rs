@@ -5,7 +5,7 @@
 //! and `var` do not get mistaken for unsupported top-level expressions while
 //! the shared statement-sequence machinery remains grammar-agnostic.
 
-use dotty_core::ast::{Modifier, Modifiers, TypeTree, ValDef};
+use dotty_core::ast::{Modifier, Modifiers, PatDef, TypeTree, UntypedNode, ValDef};
 use dotty_core::{HardKeyword, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::statements::ParsedStatement;
@@ -20,6 +20,19 @@ where
         let is_var = self.current().kind == TokenKind::Keyword(HardKeyword::Var);
         self.advance();
 
+        if !starts_simple_value_definition(self) {
+            return self.parse_pattern_definition(mark, is_var, location);
+        }
+
+        self.parse_simple_value_definition(mark, is_var, location)
+    }
+
+    fn parse_simple_value_definition(
+        &mut self,
+        mark: crate::Mark,
+        is_var: bool,
+        location: Location,
+    ) -> ParsedStatement {
         let name = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 match self.intern_current_term_name() {
@@ -84,6 +97,59 @@ where
         ParsedStatement::Definition(definition)
     }
 
+    fn parse_pattern_definition(
+        &mut self,
+        mark: crate::Mark,
+        is_var: bool,
+        location: Location,
+    ) -> ParsedStatement {
+        let mut patterns = Vec::new();
+        loop {
+            patterns.push(self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
+                parser.with_location(Location::InPattern, |parser| parser.pattern2())
+            }));
+            if !self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Comma)) {
+                break;
+            }
+        }
+
+        let type_start = self.current().span.start();
+        let tpt = if is_definition_colon(self) {
+            self.advance();
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+        } else {
+            synthetic_type_tree(self, type_start)
+        };
+
+        let rhs = if is_bare_assignment(self) {
+            self.advance();
+            Some(self.with_location(location, |parser| parser.expr()))
+        } else {
+            if !is_definition_boundary(self.current().kind) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `=` after a pattern definition",
+                );
+            }
+            None
+        };
+
+        let mut modifiers = Modifiers::default();
+        if is_var {
+            modifiers.modifiers.push(Modifier::Var);
+        }
+        let definition = self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(PatDef {
+                modifiers,
+                patterns,
+                tpt,
+                rhs,
+            })),
+        );
+        ParsedStatement::Definition(definition)
+    }
+
     fn malformed_definition(&mut self) -> ParsedStatement {
         let position = self.current_span();
         if !is_definition_boundary(self.current().kind) {
@@ -101,6 +167,39 @@ fn is_definition_colon<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S
             | TokenKind::ColonOp
             | TokenKind::Punctuation(dotty_core::Punctuation::Colon)
     ) && parser.current_text_is(":")
+}
+
+fn starts_simple_value_definition<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> bool {
+    if !matches!(
+        parser.current().kind,
+        TokenKind::Identifier | TokenKind::BackquotedIdentifier
+    ) {
+        return false;
+    }
+
+    let next = parser.cursor.lookahead(1).kind;
+    is_definition_boundary(next)
+        || is_definition_colon_at(parser, 1)
+        || (next == TokenKind::Operator && {
+            let token = parser.cursor.lookahead(1).clone();
+            parser.token_text(&token).ok() == Some("=")
+        })
+}
+
+fn is_definition_colon_at<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+    offset: usize,
+) -> bool {
+    let token = parser.cursor.lookahead(offset).clone();
+    matches!(
+        token.kind,
+        TokenKind::ColonFollow
+            | TokenKind::ColonEol
+            | TokenKind::ColonOp
+            | TokenKind::Punctuation(dotty_core::Punctuation::Colon)
+    ) && parser.token_text(&token).ok() == Some(":")
 }
 
 fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
@@ -282,5 +381,165 @@ mod tests {
             TreeKind::Literal(_)
         ));
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_tuple_pattern_definition_as_a_pat_def() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val (a, b) = pair",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    4,
+                    5,
+                ),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(dotty_core::Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected PatDef");
+        };
+        assert_eq!(definition.patterns.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.patterns[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert!(definition.rhs.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_an_extractor_pattern_definition_as_a_source_apply() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val Some(x) = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    8,
+                    9,
+                ),
+                token(TokenKind::Identifier, 9, 10),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    10,
+                    11,
+                ),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Identifier, 14, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected PatDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.patterns[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_binder_pattern_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val x @ Some(y) = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    12,
+                    13,
+                ),
+                token(TokenKind::Identifier, 13, 14),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    14,
+                    15,
+                ),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::Identifier, 18, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected PatDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.patterns[0]).kind,
+            TreeKind::Bind(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_infix_pattern_definition_with_a_right_associative_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val head :: tail = xs",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::Identifier, 19, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected PatDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.patterns[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 }
