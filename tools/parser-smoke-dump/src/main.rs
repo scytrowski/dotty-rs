@@ -326,6 +326,18 @@ fn render_tree(
     {
         rendered_children.push(render_synthetic_ident(names.resolve(qual.text()), span));
     }
+    if let TreeKind::Import(import) = &tree.kind
+        && import.selectors.len() == 1
+        && matches!(
+            arena.get(import.expr).kind,
+            TreeKind::Ident(ident)
+                if names.resolve(ident.name.text()) == "<empty>"
+                    && !has_non_empty_span(arena, import.expr)
+        )
+        && !rendered_children.is_empty()
+    {
+        rendered_children[0] = "{\"kind\":\"EmptyTree\",\"span\":null,\"children\":[]}".to_owned();
+    }
     fields.push(format!("\"children\":[{}]", rendered_children.join(",")));
     format!("{{{}}}", fields.join(","))
 }

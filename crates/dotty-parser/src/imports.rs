@@ -47,6 +47,29 @@ where
         let path_mark = self.mark();
         let mut qualifier = self.parse_import_name(path_mark);
 
+        if self.current_is_as() {
+            let imported = match self.ast.get(qualifier).kind {
+                TreeKind::Ident(ident) => ident.name,
+                _ => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an importable name before `as`",
+                    );
+                    return (qualifier, Vec::new());
+                }
+            };
+            let selector = self.parse_named_selector(imported);
+            let empty_name_id = self.names.intern("<empty>");
+            let empty_expr = self.alloc(
+                TreeKind::Ident(Ident {
+                    name: *dotty_core::TermName::new(empty_name_id).as_name(),
+                    backquoted: false,
+                }),
+                Some(self.zero_width_span(path_mark.start())),
+            );
+            return (empty_expr, vec![selector]);
+        }
+
         loop {
             if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
                 self.report(
@@ -345,6 +368,36 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(imported.text()), "bar");
+    }
+
+    #[test]
+    fn parses_a_direct_alias_import_without_a_qualifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo as bar",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Identifier, 11, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        assert_eq!(import.selectors.len(), 1);
+        assert!(import.selectors[0].renamed.is_some());
+        let empty_name = match parser.ast().get(import.expr).kind {
+            TreeKind::Ident(ident) => ident.name,
+            _ => panic!("expected a synthetic empty import expression"),
+        };
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(empty_name.text()), "<empty>");
     }
 
     #[test]
