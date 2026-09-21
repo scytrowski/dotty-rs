@@ -965,4 +965,36 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
+
+    #[test]
+    fn class_accessor_parameter_clause_is_unsupported_but_bounded() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A(val x: X)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Val), 8, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::Colon), 13, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(
+            parser
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
+                .count(),
+            1
+        );
+    }
 }
