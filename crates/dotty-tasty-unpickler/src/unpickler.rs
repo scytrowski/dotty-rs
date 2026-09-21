@@ -22,6 +22,7 @@ pub(crate) struct Transaction {
     checkpoint: StoreCheckpoint,
     types: usize,
     type_trees: usize,
+    term_trees: usize,
     rec_this: usize,
     infos: usize,
 }
@@ -233,7 +234,19 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let ast = self.ast_view()?;
         self.declare_special_aliases();
         let transaction = self.begin_transaction();
-        let result = self.type_of_tpt(&ast, address, address);
+        let result = self.type_of_tpt(&ast, address, address, 0);
+        self.finish_transaction(transaction, result)
+    }
+
+    /// Pass 5b: the semantic type of the *term* tree at `address`, for the
+    /// paths a `SELECTtpt` qualifier or a `SINGLETONtpt` reference is made of.
+    /// See the `term_type` module. Cached by term address, apart from both
+    /// other caches. Atomic like the others.
+    pub fn unpickle_term_type(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
+        let ast = self.ast_view()?;
+        self.declare_special_aliases();
+        let transaction = self.begin_transaction();
+        let result = self.type_of_term(&ast, address, address, 0);
         self.finish_transaction(transaction, result)
     }
 
@@ -257,6 +270,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             checkpoint: self.store.checkpoint(),
             types: self.index.mark_types(),
             type_trees: self.index.mark_type_trees(),
+            term_trees: self.index.mark_term_trees(),
             rec_this: self.rec_this_journal.len(),
             infos: self.info_journal.len(),
         }
@@ -280,6 +294,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             self.store.rollback_to(transaction.checkpoint);
             self.index.roll_back_types(transaction.types);
             self.index.roll_back_type_trees(transaction.type_trees);
+            self.index.roll_back_term_trees(transaction.term_trees);
             self.roll_back_rec_this(transaction.rec_this);
         } else if transaction.infos == 0 {
             // Committed and outermost: nothing left to undo.

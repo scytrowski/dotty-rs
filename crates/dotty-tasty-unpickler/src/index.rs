@@ -45,6 +45,13 @@ pub struct TastySemanticIndex {
     type_trees: HashMap<u32, TypeId>,
     /// Tree addresses in recording order, to roll back.
     type_tree_order: Vec<u32>,
+    /// The semantic `tpe` of the *term tree* at an address (Milestone 5b), for
+    /// the paths a `SELECTtpt` qualifier or `SINGLETONtpt` reference is made of.
+    /// Apart from both maps above: several term addresses may denote one
+    /// `TypeId`, and a `SHAREDterm` has no entry of its own.
+    term_trees: HashMap<u32, TypeId>,
+    /// Term addresses in recording order, to roll back.
+    term_tree_order: Vec<u32>,
 }
 
 impl TastySemanticIndex {
@@ -72,6 +79,16 @@ impl TastySemanticIndex {
     /// Not a [`type_at`](Self::type_at): that is keyed by type-node address.
     pub fn type_tree_type_at(&self, address: u32) -> Option<TypeId> {
         self.type_trees.get(&address).copied()
+    }
+
+    /// The semantic type projected for the term tree at `address`, if any.
+    pub fn term_tree_type_at(&self, address: u32) -> Option<TypeId> {
+        self.term_trees.get(&address).copied()
+    }
+
+    /// The number of term-tree addresses that have a projected type.
+    pub fn term_tree_count(&self) -> usize {
+        self.term_trees.len()
     }
 
     /// The number of type-tree addresses that have a projected type.
@@ -142,6 +159,39 @@ impl TastySemanticIndex {
                 slot.insert(ty);
                 self.type_tree_order.push(address);
                 Ok(())
+            }
+        }
+    }
+
+    /// Records the type projected for a term-tree address; a second one for
+    /// the address is rejected and the existing entry kept.
+    pub(crate) fn insert_term_tree(
+        &mut self,
+        address: u32,
+        ty: TypeId,
+    ) -> Result<(), UnpickleError> {
+        match self.term_trees.entry(address) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(UnpickleError::DuplicateType { address })
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(ty);
+                self.term_tree_order.push(address);
+                Ok(())
+            }
+        }
+    }
+
+    /// A position to [`roll_back_term_trees`](Self::roll_back_term_trees).
+    pub(crate) fn mark_term_trees(&self) -> usize {
+        self.term_tree_order.len()
+    }
+
+    /// Forgets every term-tree address recorded after `mark`.
+    pub(crate) fn roll_back_term_trees(&mut self, mark: usize) {
+        while self.term_tree_order.len() > mark {
+            if let Some(address) = self.term_tree_order.pop() {
+                self.term_trees.remove(&address);
             }
         }
     }

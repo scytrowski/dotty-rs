@@ -47,8 +47,9 @@
 //! ```
 //!
 //! The annotation type is `tpt`, applied to `targs` when there are any
-//! (`Applied`, never reduced to the class). `tpt` is a type, or an `IDENTtpt`
-//! whose type child is used; any other type tree is refused
+//! (`Applied`, never reduced to the class). `tpt` is a type, an `IDENTtpt`
+//! whose type child is used, or a `SELECTtpt` (its projection, Milestone 5b);
+//! any other type tree is refused
 //! (`UnsupportedAnnotationConstructor`). Each argument is a literal or class
 //! literal, optionally under a `NAMEDARG`; those are `AnnotationValue::Constant`
 //! and are the only values the corpora contain. No wrapper (`TYPED`, `BLOCK`,
@@ -68,7 +69,7 @@ use dotty_core::names::TermName;
 use dotty_core::types::{Annotation, AnnotationArgument, AnnotationValue, Type};
 use dotty_tasty::tasty::{
     APPLY_TAG, AstError, CLASSCONST_TAG, IDENTTPT_TAG, NAMEDARG_TAG, NEW_TAG, RawNode, RawTree,
-    SELECTIN_TAG, SHAREDTERM_TAG, TYPEAPPLY_TAG, is_compact_annot_type_tag,
+    SELECTIN_TAG, SELECTTPT_TAG, SHAREDTERM_TAG, TYPEAPPLY_TAG, is_compact_annot_type_tag,
 };
 
 use crate::ast_view::{AstView, address};
@@ -87,7 +88,67 @@ fn tree_head(tree: &RawTree<'_>) -> (u8, u32) {
     }
 }
 
+/// What a full annotation tree is, once its `SHAREDterm` links are followed.
+pub(crate) enum FullAnnotation {
+    /// A constructor application (`APPLY` / `NEW`), decoded.
+    Constructor(AnnotationId),
+    /// Any other tree: the address and tag the chain of links ends at.
+    Other { at: u32, tag: u8 },
+}
+
 impl TastyUnpickler<'_, '_, '_> {
+    /// The root of the annotation tree at `annotation_at`, inside the
+    /// annotated node at `at`: Dotty reads `SHAREDterm` as
+    /// `forkAt(readAddr()).readTree()`, so the chain of links is followed
+    /// (bounded, every target a visible node) and the address and tag it ends
+    /// at are returned. Nothing is cached by that address.
+    fn annotation_tree_root(
+        &self,
+        ast: &AstView<'_>,
+        at: u32,
+        annotation_at: u32,
+    ) -> Result<(u32, u8), UnpickleError> {
+        let Some(tag) = ast.tag_at(annotation_at) else {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the annotation of an annotated type is not a node",
+            });
+        };
+        if tag != SHAREDTERM_TAG {
+            return Ok((annotation_at, tag));
+        }
+        let target = ast.resolve_shared_term(annotation_at, at)?;
+        let Some(tag) = ast.tag_at(target) else {
+            return Err(UnpickleError::InvalidReferenceTarget {
+                from: at,
+                to: target,
+            });
+        };
+        Ok((target, tag))
+    }
+
+    /// The one decoder of a full annotation tree, for both `ANNOTATEDtype`
+    /// and `ANNOTATEDtpt`: the annotation tree at `annotation_at` of the
+    /// annotated node at `at`, decoded when it is a constructor application
+    /// (directly written or reached through `SHAREDterm` links). The
+    /// `AnnotationId` belongs to the enclosing annotated node, never to the
+    /// tree the links end at.
+    pub(crate) fn decode_annotation_tree(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        annotation_at: u32,
+        depth: usize,
+    ) -> Result<FullAnnotation, UnpickleError> {
+        let (tree_at, tag) = self.annotation_tree_root(ast, at, annotation_at)?;
+        if tag == APPLY_TAG || tag == NEW_TAG {
+            return self
+                .decode_constructor_annotation(ast, at, tree_at, depth)
+                .map(FullAnnotation::Constructor);
+        }
+        Ok(FullAnnotation::Other { at: tree_at, tag })
+    }
+
     /// The `Annotated` type for the `ANNOTATEDtype` at `at`.
     pub(crate) fn decode_annotated_type(
         &mut self,
@@ -116,29 +177,18 @@ impl TastyUnpickler<'_, '_, '_> {
                 reason: "the annotation of an annotated type is not a node",
             });
         };
-        // Dotty reads `SHAREDterm` as `forkAt(readAddr()).readTree()`: the
-        // annotation tree is whatever the chain of links ends at. The link
-        // is followed, nothing is cached by its target, and the annotation
-        // below belongs to this `ANNOTATEDtype` alone.
-        let (tree_at, tree_tag) = if annotation_tag == SHAREDTERM_TAG {
-            let target = ast.resolve_shared_term(annotation_at, at)?;
-            let Some(tag) = ast.tag_at(target) else {
-                return Err(UnpickleError::InvalidReferenceTarget {
-                    from: at,
-                    to: target,
-                });
+        // The full form, shared with `ANNOTATEDtpt`: a constructor call, or
+        // the tree the chain of links ends at.
+        let (tree_at, tree_tag) =
+            match self.decode_annotation_tree(ast, at, annotation_at, depth)? {
+                FullAnnotation::Constructor(annotation) => {
+                    return Ok(Type::Annotated {
+                        underlying,
+                        annotation,
+                    });
+                }
+                FullAnnotation::Other { at, tag } => (at, tag),
             };
-            (target, tag)
-        } else {
-            (annotation_at, annotation_tag)
-        };
-        if tree_tag == APPLY_TAG || tree_tag == NEW_TAG {
-            let annotation = self.decode_constructor_annotation(ast, at, tree_at, depth)?;
-            return Ok(Type::Annotated {
-                underlying,
-                annotation,
-            });
-        }
         if tree_at != annotation_at {
             // A shared target that is no constructor call: the tree's own
             // address and tag are the ones reported.
@@ -346,6 +396,11 @@ impl TastyUnpickler<'_, '_, '_> {
         at: u32,
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
+        // A selected class (`pkg.Name`) is a type tree the projection owns;
+        // its type is what the selection makes of it.
+        if ast.tag_at(tree_at) == Some(SELECTTPT_TAG) {
+            return self.type_of_tpt(ast, tree_at, at, depth);
+        }
         let type_at = if ast.tag_at(tree_at) == Some(IDENTTPT_TAG) {
             let [type_at] = child_addresses(ast, tree_at)[..] else {
                 return Err(UnpickleError::MalformedType {

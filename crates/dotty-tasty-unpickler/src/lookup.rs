@@ -275,6 +275,52 @@ pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
     }
 }
 
+/// Whether `ty` is an unstable path, one Dotty's `widenIfUnstable` would widen
+/// and this model cannot: an illegal prefix ([`is_illegal_prefix`]: a method,
+/// a mutable member, a constructor) or a reference to a by-name parameter
+/// (`Complete` with a `ByName` type). A reference whose type is not yet
+/// completed is not known to be by-name and is not counted here.
+pub(crate) fn is_unstable_path(store: &SemanticStore, ty: TypeId) -> bool {
+    if is_illegal_prefix(store, ty) {
+        return true;
+    }
+    let Some(ty) = look_through_proxies(store, ty) else {
+        return true;
+    };
+    let Some(symbol) = store
+        .types
+        .get(ty)
+        .reference_symbol()
+        .filter(|_| matches!(store.types.get(ty), Type::TermRef { .. }))
+    else {
+        return false;
+    };
+    let symbol = store.symbols.get(symbol);
+    symbol.kind == SymbolKind::Parameter
+        && matches!(symbol.info, SymbolInfo::Complete(declared)
+            if matches!(store.types.get(declared), Type::ByName { .. }))
+}
+
+/// Whether `ty` is a stable singleton type as `SINGLETONtpt` needs: a
+/// constant, a `this`, a super reference, a recursive `this`, or a term
+/// reference that is a stable path (a package, an object, a stable member; a
+/// name-designated one of a structural prefix). Proxies (annotated, flexible)
+/// are looked through. Everything else, a class type, an applied type, a
+/// method, and any unstable path, is not.
+pub(crate) fn is_singleton_type(store: &SemanticStore, ty: TypeId) -> bool {
+    let Some(inner) = look_through_proxies(store, ty) else {
+        return false;
+    };
+    match store.types.get(inner) {
+        Type::Constant(_)
+        | Type::ThisType { .. }
+        | Type::SuperType { .. }
+        | Type::RecThis { .. } => true,
+        Type::TermRef { .. } => !is_unstable_path(store, inner),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +906,82 @@ mod tests {
         assert!(is_illegal_prefix(&terms.world.store, mutable));
         assert!(is_illegal_prefix(&terms.world.store, method));
         assert!(!is_illegal_prefix(&terms.world.store, by_name));
+    }
+
+    #[test]
+    fn an_unstable_path_is_an_illegal_prefix_or_a_completed_by_name_parameter() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        let stable = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, info);
+        let mutable = terms.term(SymbolKind::Field, SymbolFlags::MUTABLE, info);
+        let method = terms.term(SymbolKind::Method, SymbolFlags::EMPTY, info);
+        let by_name_info = terms.world.store.types.alloc(Type::ByName {
+            result: terms.box_ty,
+        });
+        let by_name = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(by_name_info),
+        );
+        // Not completed: not known to be by-name.
+        let missing = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let store = &terms.world.store;
+        assert!(!is_unstable_path(store, stable));
+        assert!(!is_unstable_path(store, missing));
+        assert!(!is_unstable_path(store, terms.box_ty));
+        for unstable in [mutable, method, by_name] {
+            assert!(is_unstable_path(store, unstable));
+        }
+    }
+
+    #[test]
+    fn only_a_constant_a_this_and_a_stable_term_are_singleton_types() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        let stable = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, info);
+        let object = terms.term(SymbolKind::Object, SymbolFlags::EMPTY, SymbolInfo::Missing);
+        let mutable = terms.term(SymbolKind::Field, SymbolFlags::MUTABLE, info);
+        let method = terms.term(SymbolKind::Method, SymbolFlags::EMPTY, info);
+        let by_name_info = terms.world.store.types.alloc(Type::ByName {
+            result: terms.box_ty,
+        });
+        let by_name = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(by_name_info),
+        );
+        let constant = terms
+            .world
+            .store
+            .types
+            .alloc(Type::Constant(dotty_core::types::Constant::Boolean(true)));
+        let this = terms.world.store.types.alloc(Type::ThisType {
+            class: terms.box_class,
+        });
+        let applied = terms.world.store.types.alloc(Type::Applied {
+            tycon: terms.box_ty,
+            args: vec![],
+        });
+        let wrapped = annotated(&mut terms.world, stable);
+        let store = &terms.world.store;
+        for singleton in [stable, object, constant, this, wrapped] {
+            assert!(is_singleton_type(store, singleton));
+        }
+        // A class type, an applied type, and every unstable path are not.
+        for other in [
+            terms.box_ty,
+            applied,
+            mutable,
+            method,
+            by_name,
+            by_name_info,
+        ] {
+            assert!(!is_singleton_type(store, other));
+        }
     }
 
     #[test]
