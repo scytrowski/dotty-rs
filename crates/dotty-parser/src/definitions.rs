@@ -132,13 +132,11 @@ where
             self.advance();
             Some(self.with_location(location, |parser| parser.expr()))
         } else {
-            if !is_definition_boundary(self.current().kind) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `=` after a pattern definition",
-                );
-            }
-            None
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=` after a pattern definition",
+            );
+            Some(self.error_expr(self.current_span()))
         };
 
         let mut modifiers = Modifiers::default();
@@ -551,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_a_pattern_definition_without_an_rhs() {
+    fn rejects_a_pattern_definition_without_an_rhs() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "val (a, b)",
@@ -583,8 +581,14 @@ mod tests {
         else {
             panic!("expected PatDef");
         };
-        assert!(definition.rhs.is_none());
-        assert!(parser.diagnostics().is_empty());
+        assert!(matches!(
+            parser.ast().get(*definition.rhs.as_ref().unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
     }
 
     #[test]
