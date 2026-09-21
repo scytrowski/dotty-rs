@@ -177,7 +177,7 @@ use dotty_tasty::tasty::{
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::binders::declared_variances;
 use crate::error::UnpickleError;
-use crate::lookup::{LocalLookup, lookup_member};
+use crate::lookup::{LocalLookup, MAX_PROXY_DEPTH, lookup_member, proxy_underlying};
 use crate::names::{is_signed, package_segments, string_value, wire_name};
 use crate::unpickler::TastyUnpickler;
 
@@ -489,16 +489,16 @@ impl TastyUnpickler<'_, '_, '_> {
         // A prefix that is (or wraps) a binder still being decoded has no
         // readable slot yet, so its members cannot be looked up.
         let mut walk = prefix;
-        loop {
+        for _ in 0..=MAX_PROXY_DEPTH {
             if self.is_pending(walk) {
                 return Err(UnpickleError::UnsupportedResolutionPrefix {
                     address: at,
                     prefix,
                 });
             }
-            match self.store.types.get(walk) {
-                Type::Flexible { underlying } => walk = *underlying,
-                _ => break,
+            match proxy_underlying(self.store, walk) {
+                Some(underlying) => walk = underlying,
+                None => break,
             }
         }
 

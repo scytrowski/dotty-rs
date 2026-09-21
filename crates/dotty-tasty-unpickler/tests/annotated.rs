@@ -416,6 +416,83 @@ fn an_annotation_that_links_to_its_own_annotated_type_is_an_error_not_a_stack_ov
     assert_eq!(unpickler.index().type_at(ANNOTATED_AT), None);
 }
 
+// Annotated as a member-lookup proxy
+
+const TYPEREF: u8 = 117;
+
+/// `FLEXIBLE (TYPEREF p (ANNOTATED p @p))`: a name-based reference to the
+/// member `p` whose prefix is an annotated package type. The reference is at
+/// address 2, its prefix at 4.
+fn reference_through_annotated_prefix() -> Vec<u8> {
+    let prefix = length_node(ANNOTATED, &[package_ref(), shared(6)].concat());
+    let mut reference = vec![TYPEREF, nat(1)];
+    reference.extend(prefix);
+    file_with_ast(&length_node(FLEXIBLE, &reference))
+}
+
+#[test]
+fn a_member_is_looked_up_through_an_annotated_prefix_that_stays_in_the_graph() {
+    let bytes = reference_through_annotated_prefix();
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    // The package `p` declares a class `p`, which the reference names.
+    enter_stub_classes(&mut session, &mut packages, &["p"], &["p"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+
+    let id = unpickler.unpickle_type(2).unwrap();
+    let prefix = unpickler.index().type_at(4).unwrap();
+    drop(unpickler);
+
+    let Type::TypeRef {
+        prefix: found,
+        symbol,
+    } = session.store.types.get(id)
+    else {
+        panic!("not a type reference");
+    };
+    // The prefix is the annotated type, not its underlying package.
+    assert_eq!(*found, prefix);
+    assert!(matches!(
+        session.store.types.get(prefix),
+        Type::Annotated { .. }
+    ));
+    let member = session.store.symbols.get(*symbol);
+    assert_eq!(session.store.names.resolve(member.name.text()), "p");
+    assert_eq!(member.kind, dotty_core::SymbolKind::Class);
+}
+
+#[test]
+fn an_annotated_prefix_around_a_binder_still_being_decoded_is_refused_not_read() {
+    // `POLYtype` at 0 (result `p` at 2) whose one alias bound is
+    // `TYPEREF p (ANNOTATED <the poly> @p)`: the reference's prefix wraps a
+    // binder that has no readable slot yet.
+    let prefix = length_node(ANNOTATED, &[shared(0), shared(2)].concat());
+    let mut reference = vec![TYPEREF, nat(1)];
+    reference.extend(prefix);
+    let mut param = length_node(TYPEBOUNDS, &reference);
+    param.push(nat(1));
+    let poly = length_node(POLY, &[package_ref(), param].concat());
+    let bytes = file_with_ast(&poly);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    enter_stub_classes(&mut session, &mut packages, &["p"], &["p"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+
+    let result = unpickler.unpickle_type(0);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedResolutionPrefix { address: 6, .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_at(0), None);
+}
+
 // Real Scala 3.9.0 output.
 
 const ANNOTATIONS: &[u8] = include_bytes!("fixtures/semantic/Annotated.tasty");
