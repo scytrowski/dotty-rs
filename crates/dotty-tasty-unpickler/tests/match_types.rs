@@ -213,7 +213,10 @@ fn a_match_type_short_of_its_scrutinee_is_a_structural_error() {
     let bytes = holder(&[length_node(MATCH, &package_ref())]);
     let (_, result) = decode(&bytes, 2);
 
-    assert!(result.is_err(), "{result:?}");
+    assert_eq!(
+        format!("{result:?}"),
+        "Err(Ast(Term(Read(UnexpectedEof { offset: 2, needed: 1, remaining: 0 }))))"
+    );
 }
 
 #[test]
@@ -221,7 +224,10 @@ fn a_case_with_one_child_is_a_structural_error() {
     let bytes = holder(&[length_node(MATCHCASE, &package_ref())]);
     let (_, result) = decode(&bytes, 2);
 
-    assert!(result.is_err(), "{result:?}");
+    assert_eq!(
+        format!("{result:?}"),
+        "Err(Ast(Term(Read(UnexpectedEof { offset: 2, needed: 1, remaining: 0 }))))"
+    );
 }
 
 #[test]
@@ -375,6 +381,8 @@ fn a_failing_later_case_rolls_back_the_earlier_ones_and_their_binders() {
     // The first case is captured (a lambda, a binder); the second fails.
     let good = lambda(&match_case(&param_type(8, 0), &param_type(8, 0)));
     let bad = vec![UNSUPPORTED, nat(1)];
+    // Bound at 4, scrutinee at 6, the good case at 8, the bad one after it.
+    let bad_at = 8 + u32::try_from(good.len()).unwrap();
     let bytes = holder(&[match_type(&package_ref(), &package_ref(), &[good, bad])]);
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
 
@@ -387,9 +395,12 @@ fn a_failing_later_case_rolls_back_the_earlier_ones_and_their_binders() {
     let before = unpickler.index().type_count();
     for _ in 0..2 {
         let result = unpickler.unpickle_type(2);
-        assert!(
-            matches!(result, Err(UnpickleError::UnsupportedType { .. })),
-            "{result:?}"
+        assert_eq!(
+            result,
+            Err(UnpickleError::UnsupportedType {
+                tag: UNSUPPORTED,
+                address: bad_at
+            })
         );
         assert_eq!(unpickler.index().type_count(), before);
         for at in [4, 6, 8, 10] {
@@ -412,7 +423,13 @@ fn a_case_whose_result_fails_rolls_back_its_pattern() {
     let mut session = Session::new();
     let mut unpickler = unpickler_for(&file, &mut session);
     let before = unpickler.index().type_count();
-    assert!(unpickler.unpickle_type(2).is_err());
+    assert_eq!(
+        unpickler.unpickle_type(2),
+        Err(UnpickleError::UnsupportedType {
+            tag: UNSUPPORTED,
+            address: 6
+        })
+    );
     assert_eq!(unpickler.index().type_count(), before);
     assert_eq!(unpickler.index().type_at(4), None);
     drop(unpickler);
