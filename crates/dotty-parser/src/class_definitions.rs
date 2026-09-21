@@ -128,14 +128,14 @@ where
     }
 
     fn parse_parent_clause(&mut self) -> Vec<TreeId<Untyped>> {
-        self.consume_control_newlines();
+        self.consume_newlines_before_parent_keyword();
         if !self.accept(TokenKind::Keyword(HardKeyword::Extends)) {
             return Vec::new();
         }
 
         let mut parents = vec![self.parse_parent()];
         loop {
-            self.consume_control_newlines();
+            self.consume_newlines_before_parent_separator();
             let separator = self.accept(TokenKind::Punctuation(Punctuation::Comma))
                 || self.accept(TokenKind::Keyword(HardKeyword::With));
             if !separator {
@@ -144,6 +144,38 @@ where
             parents.push(self.parse_parent());
         }
         parents
+    }
+
+    fn consume_newlines_before_parent_keyword(&mut self) {
+        let count = self.newlines_before(|kind| kind == TokenKind::Keyword(HardKeyword::Extends));
+        for _ in 0..count {
+            self.advance();
+        }
+    }
+
+    fn consume_newlines_before_parent_separator(&mut self) {
+        let count = self.newlines_before(|kind| {
+            matches!(
+                kind,
+                TokenKind::Punctuation(Punctuation::Comma) | TokenKind::Keyword(HardKeyword::With)
+            )
+        });
+        for _ in 0..count {
+            self.advance();
+        }
+    }
+
+    fn newlines_before(&mut self, follows: impl Fn(TokenKind) -> bool) -> usize {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        follows(self.cursor.lookahead(count).kind)
+            .then_some(count)
+            .unwrap_or(0)
     }
 
     fn parse_parent(&mut self) -> TreeId<Untyped> {
@@ -534,5 +566,109 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nested_class_like_definitions_stay_in_the_outer_template_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Outer:\n  class Inner\n  object Companion",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::ColonEol, 11, 12),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Keyword(HardKeyword::Class), 15, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Newline, 26, 27),
+                token(TokenKind::Keyword(HardKeyword::Object), 29, 35),
+                token(TokenKind::Identifier, 36, 45),
+                token(TokenKind::Outdent, 45, 45),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected outer TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected outer Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_class_name_recovers_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn malformed_constructor_parameter_recovers_at_the_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A(x:)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_parent_recovers_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A extends",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Extends), 8, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 }
