@@ -31,7 +31,9 @@ use std::rc::Rc;
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
-use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError, SymbolResolver};
+use dotty_core::resolution::{
+    MemberRequest, MemberSelector, MemberSpace, ResolutionError, SymbolResolver,
+};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
     Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -483,6 +485,7 @@ fn the_resolver_is_asked_a_semantic_question_when_the_scope_has_no_answer() {
     assert_eq!(log.members.len(), 1);
     let request = &log.members[0];
     assert_eq!(request.selector, MemberSelector::Unique);
+    assert_eq!(request.space, MemberSpace::Prefix);
     assert_eq!(request.name.namespace(), Namespace::Type);
     assert_eq!(store.names.resolve(request.name.text()), "make");
     // The prefix is the decoded `THIS(Left)`, a `TypeId`, not a path.

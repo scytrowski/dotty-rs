@@ -167,7 +167,7 @@
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
-use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
+use dotty_core::resolution::{MemberRequest, MemberSelector, MemberSpace, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
@@ -526,6 +526,7 @@ impl TastyUnpickler<'_, '_, '_> {
             prefix,
             name,
             selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
         };
         let failure = |error| UnpickleError::ResolverFailure { address: at, error };
         match self
