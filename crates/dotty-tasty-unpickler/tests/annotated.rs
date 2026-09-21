@@ -9,7 +9,7 @@ use dotty_core::Packages;
 use dotty_core::ids::{AnnotationId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
-use dotty_core::types::Type;
+use dotty_core::types::{AnnotationArguments, Type};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -255,6 +255,8 @@ fn a_compact_annotation_type_is_stored_whole_with_no_tree() {
     let annotation = session.store.annotations.get(annotation);
     assert_eq!(annotation.ty, package);
     assert_eq!(annotation.tree, None);
+    // Known to have no term arguments, which is not "unavailable".
+    assert_eq!(annotation.arguments, AnnotationArguments::Known(Vec::new()));
 }
 
 #[test]

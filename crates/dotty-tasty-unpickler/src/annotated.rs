@@ -85,7 +85,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let annotation = self
             .store
             .annotations
-            .alloc(Annotation::new(annotation_type, None));
+            .alloc(Annotation::compact(annotation_type));
         Ok(Type::Annotated {
             underlying,
             annotation,
