@@ -493,6 +493,141 @@ fn an_annotated_prefix_around_a_binder_still_being_decoded_is_refused_not_read()
     assert_eq!(unpickler.index().type_at(0), None);
 }
 
+// Rebinding (`TYPEBOUNDS` with a variance marker rebinds its lambda)
+
+const LAMBDA: u8 = 170;
+const PARAM: u8 = 172;
+const COVARIANT: u8 = 28;
+
+/// `PARAMtype Length binder_ASTRef paramNum_Nat`.
+fn param_type(binder: u8, number: u8) -> Vec<u8> {
+    length_node(PARAM, &[nat(binder), nat(number)])
+}
+
+/// `+[p] =>> (<result>)` as the alias of a `TYPEBOUNDS` with a covariant
+/// marker, inside a `FLEXIBLE` wrapper: the bounds are at 2 and the lambda at
+/// 4, so the lambda's result starts at 6.
+fn covariant_alias_of(result: &[u8]) -> Vec<u8> {
+    let mut payload = result.to_vec();
+    payload.extend(length_node(TYPEBOUNDS, &package_ref()));
+    payload.push(nat(1));
+    let lambda = length_node(LAMBDA, &payload);
+    let mut bounds = lambda;
+    bounds.push(COVARIANT);
+    file_with_ast(&length_node(FLEXIBLE, &length_node(TYPEBOUNDS, &bounds)))
+}
+
+const BOUNDS_AT: u32 = 2;
+const LAMBDA_AT: u32 = 4;
+
+/// Every binder a `ParamRef` reachable from `root` names, looking through the
+/// annotated, applied and alias forms these tests build.
+fn binders_named(session: &Session, root: TypeId) -> Vec<TypeId> {
+    let store = &session.store;
+    match store.types.get(root) {
+        Type::ParamRef { binder, .. } => vec![*binder],
+        Type::Annotated {
+            underlying,
+            annotation,
+        } => {
+            let mut named = binders_named(session, *underlying);
+            named.extend(binders_named(
+                session,
+                store.annotations.get(*annotation).ty,
+            ));
+            named
+        }
+        Type::Applied { tycon, args } => {
+            let mut named = binders_named(session, *tycon);
+            for arg in args {
+                named.extend(binders_named(session, *arg));
+            }
+            named
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn lambda_result(store: &SemanticStore, id: TypeId) -> TypeId {
+    match store.types.get(id) {
+        Type::TypeLambda(lambda) => lambda.result,
+        other => panic!("not a type lambda: {other:?}"),
+    }
+}
+
+#[test]
+fn a_compact_annotation_naming_the_rebound_binder_gets_a_new_annotation() {
+    // `+[p] =>> (p @Applied[p])`: parent and annotation both name the lambda.
+    let annotation = length_node(APPLIED, &[package_ref(), param_type(4, 0)].concat());
+    let annotated = length_node(ANNOTATED, &[param_type(4, 0), annotation].concat());
+    let bytes = covariant_alias_of(&annotated);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let bounds = unpickler.unpickle_type(BOUNDS_AT).unwrap();
+    let original = unpickler.index().type_at(LAMBDA_AT).unwrap();
+    drop(unpickler);
+
+    let Type::AliasingBounds { alias: derived } = *session.store.types.get(bounds) else {
+        panic!("not alias bounds");
+    };
+    assert_ne!(derived, original);
+
+    let (old_underlying, old_annotation) =
+        annotated_parts(&session.store, lambda_result(&session.store, original));
+    let (new_underlying, new_annotation) =
+        annotated_parts(&session.store, lambda_result(&session.store, derived));
+    // The annotation changed, so it is a new one; the stored one is intact.
+    assert_ne!(new_annotation, old_annotation);
+    assert_eq!(session.store.annotations.get(new_annotation).tree, None);
+    assert_ne!(new_underlying, old_underlying);
+
+    // Nothing the derived lambda reaches names the old binder, and the old
+    // lambda still names only itself.
+    let mut derived_names = binders_named(&session, new_underlying);
+    derived_names.extend(binders_named(
+        &session,
+        session.store.annotations.get(new_annotation).ty,
+    ));
+    assert_eq!(derived_names, vec![derived, derived]);
+    let mut original_names = binders_named(&session, old_underlying);
+    original_names.extend(binders_named(
+        &session,
+        session.store.annotations.get(old_annotation).ty,
+    ));
+    assert_eq!(original_names, vec![original, original]);
+}
+
+#[test]
+fn a_compact_annotation_that_names_no_binder_is_reused_by_the_rebound_type() {
+    // `+[p] =>> (p @Applied[p, p])`: only the parent names the lambda; the
+    // annotation is `Applied` over a package and is independent of it.
+    let annotation = length_node(APPLIED, &[package_ref(), package_ref()].concat());
+    let annotated = length_node(ANNOTATED, &[param_type(4, 0), annotation].concat());
+    let bytes = covariant_alias_of(&annotated);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let bounds = unpickler.unpickle_type(BOUNDS_AT).unwrap();
+    let original = unpickler.index().type_at(LAMBDA_AT).unwrap();
+    drop(unpickler);
+
+    let Type::AliasingBounds { alias: derived } = *session.store.types.get(bounds) else {
+        panic!("not alias bounds");
+    };
+    let (old_underlying, old_annotation) =
+        annotated_parts(&session.store, lambda_result(&session.store, original));
+    let (new_underlying, new_annotation) =
+        annotated_parts(&session.store, lambda_result(&session.store, derived));
+    // The underlying names the binder, so it is rebound; the annotation does
+    // not, so the same annotation is kept.
+    assert_ne!(new_underlying, old_underlying);
+    assert_eq!(new_annotation, old_annotation);
+    assert_eq!(binders_named(&session, new_underlying), vec![derived]);
+}
+
 // Real Scala 3.9.0 output.
 
 const ANNOTATIONS: &[u8] = include_bytes!("fixtures/semantic/Annotated.tasty");
