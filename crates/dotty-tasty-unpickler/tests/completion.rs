@@ -862,7 +862,7 @@ fn a_type_parameter_and_a_type_definition_get_bounds() {
 }
 
 #[test]
-fn an_opaque_alias_a_class_a_method_and_a_package_are_explicit_deferrals() {
+fn an_opaque_alias_and_a_package_are_explicit_deferrals() {
     let unit = Unit::new();
     let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
     let mut session = Session::new();
@@ -875,16 +875,6 @@ fn an_opaque_alias_a_class_a_method_and_a_package_are_explicit_deferrals() {
             address: unit.at("Holder.Op")
         })
     );
-    for (label, kind) in [("Box", SymbolKind::Class), ("Holder", SymbolKind::Class)] {
-        assert_eq!(
-            unpickler.complete_symbol(unit.at(label)),
-            Err(UnpickleError::UnsupportedSymbolCompletion {
-                address: unit.at(label),
-                kind
-            }),
-            "{label}"
-        );
-    }
     assert_eq!(
         unpickler.complete_symbol(0),
         Err(UnpickleError::UnsupportedSymbolCompletion {
@@ -897,14 +887,12 @@ fn an_opaque_alias_a_class_a_method_and_a_package_are_explicit_deferrals() {
         Err(UnpickleError::MissingEnteredSymbol { address: 1 })
     );
     drop(unpickler);
-    for label in ["Holder.Op", "Box", "Holder"] {
-        // No empty class info or placeholder is written.
-        assert_eq!(
-            info(&session, symbols[label]),
-            SymbolInfo::Missing,
-            "{label}"
-        );
-    }
+    // No placeholder info is written.
+    assert_eq!(
+        info(&session, symbols["Holder.Op"]),
+        SymbolInfo::Missing,
+        "Holder.Op"
+    );
 }
 
 #[test]
@@ -1190,7 +1178,7 @@ fn stub_classes(session: &mut Session, packages: &mut Packages, path: &[&str], n
 }
 
 #[test]
-fn real_simple_definitions_complete_and_classes_stay_missing() {
+fn real_simple_definitions_complete() {
     let file = TastyFile::parse_scala_3_9(HOLDER).unwrap();
     let defs = definitions_by_name(&file);
     let mut session = Session::new();
@@ -1215,17 +1203,6 @@ fn real_simple_definitions_complete_and_classes_stay_missing() {
     let alias = unpickler.complete_symbol(defs["Alias"]).unwrap();
     let abstract_ = unpickler.complete_symbol(defs["Abstract"]).unwrap();
     let mutable = unpickler.complete_symbol(defs["mutable"]).unwrap();
-    // Classes are a later milestone (methods are 5c, tested apart).
-    for name in ["CompletionHolder", "CBox"] {
-        let Some(at) = defs.get(name) else { continue };
-        assert!(
-            matches!(
-                unpickler.complete_symbol(*at),
-                Err(UnpickleError::UnsupportedSymbolCompletion { .. })
-            ),
-            "{name}"
-        );
-    }
     // A type tree is not a symbol.
     assert_eq!(unpickler.index().symbol_count(), symbol_count);
     drop(unpickler);

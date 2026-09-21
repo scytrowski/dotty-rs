@@ -294,10 +294,73 @@ struct CompletionOutcomes {
     by_bucket: BTreeMap<&'static str, usize>,
 }
 
+/// Which symbols the corpus completes before decoding references.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    Off,
+    /// Everything but class-like symbols (the 5c behavior).
+    WithoutClasses,
+    All,
+}
+
+/// A class-like symbol completed to a `ClassInfo`, queued until the unit's
+/// store is free to read (Milestone 5d1).
+struct CompletedClass {
+    kind: String,
+    symbol: dotty_core::ids::SymbolId,
+    info: dotty_core::ids::TypeId,
+    /// The scope pass 1 entered for it.
+    scope: Option<dotty_core::ids::ScopeId>,
+    /// The number of parent trees and whether a `SELFDEF` exists, on the wire.
+    wire_parents: usize,
+    wire_self: bool,
+}
+
+/// The class completion and parent / self survey (Milestone 5d1).
+#[derive(Default)]
+struct ClassSurvey {
+    /// (kind, phase, failure) -> count. The phase is the part of the class the
+    /// failing reference lies in (header parameter, parent, self type, or
+    /// elsewhere: a shared link's target).
+    failures: BTreeMap<(String, &'static str, String), usize>,
+    /// The name every unresolved member / package failure of a class asked for.
+    external_names: BTreeMap<String, usize>,
+    /// Classes by kind and number of parents.
+    parent_counts: BTreeMap<(String, usize), usize>,
+    /// (kind, root) -> count of parent trees; a `SHAREDterm` is named by the
+    /// tag its chain ends at.
+    parent_roots: BTreeMap<(String, String), usize>,
+    /// The constructor-call spine of every parent tree, e.g.
+    /// `APPLY>TYPEAPPLY>SELECTin>NEW>APPLIEDtpt`.
+    spines: BTreeMap<String, usize>,
+    /// Term arguments of each `APPLY` in a parent spine.
+    argument_counts: BTreeMap<usize, usize>,
+    /// `TYPEAPPLY` in a parent: whether the constructor selection's `NEW` type
+    /// tree is already applied (upstream then skips the arguments) or not.
+    type_apply: BTreeMap<&'static str, usize>,
+    /// `BLOCK` parents: the statement count and their spine.
+    blocks: BTreeMap<String, usize>,
+    /// Ordinary (non-call) parent trees by root tag.
+    direct_roots: BTreeMap<String, usize>,
+    /// Completed parents by semantic result shape: (kind, shape) -> count.
+    parent_shapes: BTreeMap<(String, &'static str), usize>,
+    /// `SELFDEF`: (kind, what, value) -> count.
+    selfs: BTreeMap<(String, &'static str, String), usize>,
+    /// Why each class that failed to complete failed, by symbol (the last
+    /// attempt), for explaining the `REFin` owners that never completed.
+    failure_of: HashMap<dotty_core::ids::SymbolId, String>,
+    /// Completed classes not yet checked against the store.
+    pending: Vec<CompletedClass>,
+    /// `ClassInfo` field sanity checks passed.
+    checked: usize,
+}
+
 /// The completion measurement (Milestone 5a) and the type-tree survey it is
 /// scoped by.
 #[derive(Default)]
 struct CompletionSurvey {
+    /// Class-like completion (Milestone 5d1).
+    classes: ClassSurvey,
     /// Outcomes by symbol kind.
     outcomes: BTreeMap<String, CompletionOutcomes>,
     /// `SymbolInfo` per kind after completion: kind -> state -> count.
@@ -521,6 +584,10 @@ struct OwnerOracle {
     none: usize,
     one: usize,
     several: usize,
+    /// Of those with a scope, the owner ended the corpus with a `ClassInfo`.
+    owner_completed: usize,
+    /// Why the owners without one failed: reason -> queries.
+    owner_failures: BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -644,6 +711,7 @@ fn complete_unit(
     file: &TastyFile<'_>,
     label: &str,
     survey: &mut CompletionSurvey,
+    complete_classes: bool,
 ) {
     const VALDEF: u8 = 129;
     const TYPEDEF: u8 = 131;
@@ -754,6 +822,7 @@ fn complete_unit(
     survey_type_trees(&index, file, &children, survey);
     survey_lambdas(&index, file, &children, unpickler, survey);
     survey_methods(&index, file, &children, unpickler, survey);
+    survey_classes(&index, file, &children, unpickler, &mut survey.classes);
 
     // Completion itself: every simple symbol first, in document order (so the
     // simple-symbol figures stay comparable), then the methods.
@@ -762,6 +831,16 @@ fn complete_unit(
         let Some((kind, before)) = unpickler.symbol_state_at(at) else {
             continue;
         };
+        let class_like = tag == TYPEDEF
+            && matches!(
+                kind,
+                dotty_core::symbols::SymbolKind::Class
+                    | dotty_core::symbols::SymbolKind::Trait
+                    | dotty_core::symbols::SymbolKind::ModuleClass
+            );
+        if class_like && !complete_classes {
+            continue;
+        }
         let name = format!("{kind:?} ({})", full_root_name_of_definition(tag));
         let outcomes = survey.outcomes.entry(name).or_default();
         outcomes.entered += 1;
@@ -770,7 +849,11 @@ fn complete_unit(
             continue;
         }
         let trees = new_trees_below(&children, below(at).first().copied());
-        let bucket = match unpickler.complete_symbol(at) {
+        let result = unpickler.complete_symbol(at);
+        if class_like {
+            record_class_outcome(&result, &children, at, kind, unpickler, &mut survey.classes);
+        }
+        let bucket = match result {
             Ok(_) => "completed",
             Err(
                 UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
@@ -800,6 +883,12 @@ fn complete_unit(
             Err(UnpickleError::SharedLambdaOwnerConflict { .. }) => "shared lambda owner conflict",
             Err(UnpickleError::ParameterAbstraction { .. }) => "abstraction failed",
             Err(UnpickleError::UnsupportedSymbolCompletion { .. }) => "kind deferred (5d)",
+            Err(UnpickleError::MissingClassScope { .. }) => "missing class scope",
+            Err(UnpickleError::UnsupportedParentTree { .. }) => "unsupported parent wrapper",
+            Err(
+                UnpickleError::MalformedParentTree { .. }
+                | UnpickleError::InvalidSelfTypeTree { .. },
+            ) => "malformed template",
             Err(UnpickleError::InvalidCompletedBounds { .. }) => "invalid bounds",
             // An annotation inside the type (4b's deferrals).
             Err(
@@ -851,6 +940,332 @@ fn complete_unit(
                 .infos
                 .entry((format!("{kind:?}"), info_state(info)))
                 .or_default() += 1;
+        }
+    }
+}
+
+/// The parts of the class at `class_at`, on the wire alone: its template, the
+/// header parameter nodes, the parent trees and the `SELFDEF`. This applies
+/// `decode_template_structure`'s rule (independently of the crate's own
+/// splitting): leading parameters, then parents and the self definition, then
+/// statements.
+struct WireClass {
+    params: Vec<u32>,
+    parents: Vec<u32>,
+    self_def: Option<u32>,
+}
+
+fn wire_class(children: &HashMap<u32, Vec<(u32, u8)>>, class_at: u32) -> Option<WireClass> {
+    use dotty_tasty::tasty::{EXPORT_TAG, IMPORT_TAG};
+    const TEMPLATE: u8 = 156;
+    const SELFDEF: u8 = 118;
+    let (template, tag) = children.get(&class_at)?.first().copied()?;
+    if tag != TEMPLATE {
+        return None;
+    }
+    let mut parts = WireClass {
+        params: Vec::new(),
+        parents: Vec::new(),
+        self_def: None,
+    };
+    let (mut past_header, mut in_stats) = (false, false);
+    for (at, tag) in children.get(&template).map_or(&[][..], Vec::as_slice) {
+        if matches!(*tag, 133 | 134) {
+            parts.params.push(*at);
+            in_stats |= past_header;
+            continue;
+        }
+        past_header = true;
+        if in_stats {
+            continue;
+        }
+        match *tag {
+            SELFDEF => parts.self_def = Some(*at),
+            128..=131 => in_stats = true,
+            tag if tag == IMPORT_TAG || tag == EXPORT_TAG => in_stats = true,
+            _ => parts.parents.push(*at),
+        }
+    }
+    Some(parts)
+}
+
+/// Every node at or below `root`.
+fn subtree(children: &HashMap<u32, Vec<(u32, u8)>>, root: u32) -> HashSet<u32> {
+    let mut found = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(at) = stack.pop() {
+        if found.insert(at) {
+            stack.extend(
+                children
+                    .get(&at)
+                    .map_or(&[][..], Vec::as_slice)
+                    .iter()
+                    .map(|(child, _)| *child),
+            );
+        }
+    }
+    found
+}
+
+/// The address a failure names, when it names one.
+fn error_address(error: &UnpickleError) -> Option<u32> {
+    match error {
+        UnpickleError::UnresolvedMember { address, .. }
+        | UnpickleError::UnresolvedPackage { address, .. }
+        | UnpickleError::UnsupportedTypeTree { address, .. }
+        | UnpickleError::UnsupportedTermTree { address, .. }
+        | UnpickleError::UnsupportedType { address, .. }
+        | UnpickleError::UnsupportedResolutionPrefix { address, .. }
+        | UnpickleError::UnsupportedResolutionSpace { address, .. }
+        | UnpickleError::SharedLambdaOwnerConflict { address }
+        | UnpickleError::UnsupportedParentTree { address, .. }
+        | UnpickleError::MalformedParentTree { address, .. }
+        | UnpickleError::InvalidSelfTypeTree { address, .. }
+        | UnpickleError::MalformedType { address, .. } => Some(*address),
+        UnpickleError::MissingReferencedSymbol { from, .. } => Some(*from),
+        _ => None,
+    }
+}
+
+/// Records how one class completion ended: the failing part and reason, or
+/// the completed class for the later field checks.
+fn record_class_outcome(
+    result: &Result<dotty_core::ids::TypeId, UnpickleError>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    at: u32,
+    kind: dotty_core::symbols::SymbolKind,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut ClassSurvey,
+) {
+    let kind = format!("{kind:?}");
+    let wire = wire_class(children, at);
+    match result {
+        Ok(info) => {
+            let symbol = unpickler.index().symbol_at(at).unwrap();
+            survey.pending.push(CompletedClass {
+                kind,
+                symbol,
+                info: *info,
+                scope: unpickler.index().scope_of(symbol),
+                wire_parents: wire.as_ref().map_or(0, |wire| wire.parents.len()),
+                wire_self: wire.as_ref().is_some_and(|wire| wire.self_def.is_some()),
+            });
+        }
+        Err(error) => {
+            let phase = match (error_address(error), &wire) {
+                (Some(address), Some(wire)) => {
+                    let within = |roots: &[u32]| {
+                        roots
+                            .iter()
+                            .any(|root| subtree(children, *root).contains(&address))
+                    };
+                    if within(&wire.params) {
+                        "header parameter"
+                    } else if within(&wire.parents) {
+                        "parent"
+                    } else if wire
+                        .self_def
+                        .is_some_and(|self_def| subtree(children, self_def).contains(&address))
+                    {
+                        "self type"
+                    } else {
+                        "elsewhere (a shared link's target)"
+                    }
+                }
+                (None, _) => "no address",
+                (Some(_), None) => "not a template",
+            };
+            let failure = match error {
+                UnpickleError::UnsupportedTypeTree { tag, .. } => {
+                    format!("UnsupportedTypeTree({})", full_root_name(*tag))
+                }
+                other => format!("{other:?}")
+                    .split([' ', '{'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+            };
+            match error {
+                UnpickleError::UnresolvedMember { name, .. } => {
+                    *survey
+                        .external_names
+                        .entry(format!("member {name}"))
+                        .or_default() += 1;
+                }
+                UnpickleError::UnresolvedPackage { package, .. } => {
+                    *survey
+                        .external_names
+                        .entry(format!("package {package}"))
+                        .or_default() += 1;
+                }
+                _ => {}
+            }
+            if let Some(symbol) = unpickler.index().symbol_at(at) {
+                let detail = match error {
+                    UnpickleError::UnresolvedMember { name, .. } => format!("member {name}"),
+                    UnpickleError::UnresolvedPackage { package, .. } => {
+                        format!("package {package}")
+                    }
+                    _ => String::new(),
+                };
+                survey
+                    .failure_of
+                    .insert(symbol, format!("{phase}: {failure} {detail}"));
+            }
+            *survey.failures.entry((kind, phase, failure)).or_default() += 1;
+        }
+    }
+}
+
+/// Surveys the parents and the self definition of every class-like symbol on
+/// the wire, whatever completion later makes of them.
+fn survey_classes(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    unpickler: &mut TastyUnpickler<'_, '_, '_>,
+    survey: &mut ClassSurvey,
+) {
+    use dotty_core::symbols::SymbolKind;
+    for node in index.iter_nodes_with_tag(131) {
+        let at = u32::try_from(node.offset).unwrap();
+        let Some((kind, _)) = unpickler.symbol_state_at(at) else {
+            continue;
+        };
+        if !matches!(
+            kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            continue;
+        }
+        let Some(wire) = wire_class(children, at) else {
+            continue;
+        };
+        let kind = format!("{kind:?}");
+        *survey
+            .parent_counts
+            .entry((kind.clone(), wire.parents.len()))
+            .or_default() += 1;
+        for parent in &wire.parents {
+            *survey
+                .parent_roots
+                .entry((kind.clone(), tree_root_name(index, file, *parent)))
+                .or_default() += 1;
+            let mut spine = Vec::new();
+            describe_parent(index, file, children, *parent, false, &mut spine, survey);
+            *survey.spines.entry(spine.join(">")).or_default() += 1;
+        }
+        if let Some(self_def) = wire.self_def {
+            let mut record = |what: &'static str, value: String| {
+                *survey.selfs.entry((kind.clone(), what, value)).or_default() += 1;
+            };
+            record("SELFDEF", String::new());
+            if let Some((tree, tag)) = children.get(&self_def).and_then(|below| below.first()) {
+                record("root", tree_root_name(index, file, *tree));
+                record("5b trees", new_trees_below(children, Some((*tree, *tag))));
+                let lambdas = subtree(children, *tree)
+                    .iter()
+                    .filter(|at| index.get_node(**at).is_some_and(|node| node.tag == 171))
+                    .count();
+                record("nested LAMBDAtpt", lambdas.to_string());
+                let projection = match unpickler.unpickle_type_tree_type(*tree) {
+                    Ok(_) => "decoded",
+                    Err(
+                        UnpickleError::UnresolvedMember { .. }
+                        | UnpickleError::UnresolvedPackage { .. },
+                    ) => "external",
+                    Err(UnpickleError::UnsupportedTypeTree { .. }) => "deferred",
+                    Err(_) => "other",
+                };
+                record("projection", projection.to_owned());
+            }
+        }
+    }
+}
+
+/// Follows one parent tree the way `readParentType` does, on the wire alone,
+/// recording the spine it reads.
+fn describe_parent(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    at: u32,
+    under_type_apply: bool,
+    spine: &mut Vec<String>,
+    survey: &mut ClassSurvey,
+) {
+    if spine.len() > 32 {
+        spine.push("(too deep)".to_owned());
+        return;
+    }
+    let Some((_, at, tag, _)) = follow_shared_terms_in(index, file, at, 16) else {
+        spine.push("SHAREDterm (invalid)".to_owned());
+        return;
+    };
+    let below = children.get(&at).map_or(&[][..], Vec::as_slice);
+    match tag {
+        136 | 140 | 137 => {
+            let name = match tag {
+                136 => "APPLY",
+                140 => "BLOCK",
+                _ => "TYPEAPPLY",
+            };
+            spine.push(name.to_owned());
+            match tag {
+                136 => {
+                    *survey
+                        .argument_counts
+                        .entry(below.len().saturating_sub(1))
+                        .or_default() += 1;
+                }
+                140 => {
+                    *survey
+                        .blocks
+                        .entry(format!("{} statements", below.len().saturating_sub(1)))
+                        .or_default() += 1;
+                }
+                _ => {}
+            }
+            if let Some((first, _)) = below.first() {
+                describe_parent(
+                    index,
+                    file,
+                    children,
+                    *first,
+                    under_type_apply || tag == 137,
+                    spine,
+                    survey,
+                );
+            }
+        }
+        176 => {
+            spine.push("SELECTin".to_owned());
+            match below.first() {
+                Some((new, 95)) => {
+                    spine.push("NEW".to_owned());
+                    if let Some((tpt, _)) = children.get(new).and_then(|below| below.first()) {
+                        let root = tree_root_name(index, file, *tpt);
+                        if under_type_apply {
+                            let applied = root.ends_with("APPLIEDtpt");
+                            *survey
+                                .type_apply
+                                .entry(if applied {
+                                    "NEW type already applied (arguments skipped)"
+                                } else {
+                                    "NEW type bare (arguments applied)"
+                                })
+                                .or_default() += 1;
+                        }
+                        spine.push(root);
+                    }
+                }
+                _ => spine.push("(qualifier is not NEW)".to_owned()),
+            }
+        }
+        other => {
+            let root = full_root_name(other);
+            *survey.direct_roots.entry(root.clone()).or_default() += 1;
+            spine.push(root);
         }
     }
 }
@@ -1581,7 +1996,7 @@ fn run(
     definitions: Definitions,
     packages: Packages,
     tally: &mut Tally,
-    complete_first: bool,
+    completion: Completion,
 ) -> Packages {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
     let addresses: Vec<(u32, u8)> = {
@@ -1789,8 +2204,14 @@ fn run(
     let mut other_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
-    if complete_first {
-        complete_unit(&mut unpickler, &file, label, &mut tally.completion);
+    if completion != Completion::Off {
+        complete_unit(
+            &mut unpickler,
+            &file,
+            label,
+            &mut tally.completion,
+            completion == Completion::All,
+        );
     }
 
     tally.units += 1;
@@ -2063,6 +2484,52 @@ fn run(
             tally.class_scopes.insert(symbol, scope);
         }
     }
+    // The completed classes of this unit: `ClassInfo` field sanity, and the
+    // semantic shape of every parent.
+    for done in std::mem::take(&mut tally.completion.classes.pending) {
+        let dotty_core::types::Type::ClassInfo(info) = store.types.get(done.info) else {
+            panic!("{label}: a completed class is not a ClassInfo");
+        };
+        assert_eq!(info.class, done.symbol, "{label}");
+        assert_eq!(info.prefix, definitions.no_prefix, "{label}");
+        assert_eq!(Some(info.declarations), done.scope, "{label}");
+        assert_eq!(
+            store.scopes.get(info.declarations).owner,
+            Some(done.symbol),
+            "{label}"
+        );
+        assert_eq!(info.parents.len(), done.wire_parents, "{label}");
+        assert_eq!(info.self_type.is_some(), done.wire_self, "{label}");
+        for parent in &info.parents {
+            let shape = match store.types.get(*parent) {
+                ty @ dotty_core::types::Type::TypeRef { .. } => {
+                    let aliased = ty.reference_symbol().is_some_and(|symbol| {
+                        matches!(
+                            store.symbols.get(symbol).info,
+                            dotty_core::symbols::SymbolInfo::Complete(target)
+                                if matches!(
+                                    store.types.get(target),
+                                    dotty_core::types::Type::AliasingBounds { .. }
+                                )
+                        )
+                    });
+                    if aliased { "alias TypeRef" } else { "TypeRef" }
+                }
+                dotty_core::types::Type::Applied { .. } => "Applied",
+                dotty_core::types::Type::Annotated { .. } => "Annotated",
+                dotty_core::types::Type::Refined { .. }
+                | dotty_core::types::Type::Recursive { .. } => "Refined / Recursive",
+                _ => "other",
+            };
+            *tally
+                .completion
+                .classes
+                .parent_shapes
+                .entry((done.kind.clone(), shape))
+                .or_default() += 1;
+        }
+        tally.completion.classes.checked += 1;
+    }
     // `erased` on the decoded method types: only the ones that name
     // `ErasedParam` may have it.
     let erased_count = |ids: &[dotty_core::ids::TypeId]| -> usize {
@@ -2121,7 +2588,7 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
             definitions,
             Packages::new(),
             &mut tally,
-            true,
+            Completion::All,
         );
     }
 
@@ -2133,6 +2600,14 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
 
 /// Enters `scala.Any`, `scala.Nothing` and `scala.Null`, which the compiler
 /// defines and no TASTy file declares.
+/// The `n` most frequent entries of `counts`.
+fn top(counts: &BTreeMap<String, usize>, n: usize) -> Vec<(&String, &usize)> {
+    let mut all: Vec<_> = counts.iter().collect();
+    all.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    all.truncate(n);
+    all
+}
+
 fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages) {
     use dotty_core::names::{Name, Namespace};
     use dotty_core::symbols::{
@@ -2158,6 +2633,39 @@ fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages)
     }
 }
 
+/// Stub `java.lang.Object` and `scala.AnyRef` classes (the classpath and the
+/// compiler supply the real ones), so that a class's implicit parents do not
+/// hide what else its completion needs. The primitive classes are not stubbed:
+/// the library corpus defines them, later in path order.
+fn provide_java_object(store: &mut SemanticStore, packages: &mut Packages) {
+    use dotty_core::names::{Name, Namespace};
+    use dotty_core::symbols::{
+        Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+    };
+    let stubs = [
+        (&["java", "lang"][..], "Object"),
+        (&["scala"][..], "AnyRef"),
+    ];
+    for (path, class) in stubs {
+        let chain = packages.enter(store, SymbolOrigin::Synthetic, path);
+        let package = chain.last().unwrap();
+        let name = Name::new(store.names.intern(class), Namespace::Type);
+        let symbol = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(package.symbol),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package.scope).enter(name, symbol);
+    }
+}
+
 #[test]
 #[ignore = "walks the whole scala3-library and scala3-compiler corpora"]
 fn measure_the_type_pass_over_the_scala3_corpora() {
@@ -2167,16 +2675,35 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
     // so without them no lambda can decode, and the binder path would go
     // unmeasured. The second pass provides just those (and `Null`), nothing
     // else, so the remaining failures are still real external references.
-    for (corpus, builtins, complete) in [
-        ("scala3-library", false, false),
-        ("scala3-compiler", false, false),
-        ("scala3-library", true, false),
-        ("scala3-compiler", true, false),
+    //
+    // The last two flags are Milestone 5d1's: whether class-like symbols are
+    // completed (`false` is the ablation, the 5c behavior), and whether a
+    // `java.lang.Object` / `scala.AnyRef` stub pair is provided (the corpus has
+    // neither, so without them nearly every class parent is external before
+    // anything else is reached).
+    for (corpus, builtins, complete, classes, object, reverse) in [
+        ("scala3-library", false, false, true, false, false),
+        ("scala3-compiler", false, false, true, false, false),
+        ("scala3-library", true, false, true, false, false),
+        ("scala3-compiler", true, false, true, false, false),
         // The same, with every eligible symbol completed first (Milestone 5a).
-        ("scala3-library", false, true),
-        ("scala3-compiler", false, true),
-        ("scala3-library", true, true),
-        ("scala3-compiler", true, true),
+        ("scala3-library", false, true, true, false, false),
+        ("scala3-compiler", false, true, true, false, false),
+        ("scala3-library", true, true, true, false, false),
+        ("scala3-compiler", true, true, true, false, false),
+        // Completion without class-like symbols (the 5c baseline), and with
+        // `Object` provided, with and without them.
+        ("scala3-library", true, true, false, false, false),
+        ("scala3-compiler", true, true, false, false, false),
+        ("scala3-library", true, true, true, true, false),
+        ("scala3-compiler", true, true, true, true, false),
+        ("scala3-library", true, true, false, true, false),
+        ("scala3-compiler", true, true, false, true, false),
+        // The same completion in the reverse of path order: a class can only
+        // benefit from units entered before it, so the order matters, and the
+        // two orders bracket what a smarter schedule could reach.
+        ("scala3-library", true, true, true, true, true),
+        ("scala3-compiler", true, true, true, true, true),
     ] {
         // One store and one package registry per corpus, as a classpath
         // would have.
@@ -2190,8 +2717,15 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         if builtins {
             provide_compiler_builtins(&mut store, &mut packages);
         }
+        if object {
+            provide_java_object(&mut store, &mut packages);
+        }
         let mut tally = Tally::default();
-        for path in tasty_files(&root.join(corpus)) {
+        let mut paths = tasty_files(&root.join(corpus));
+        if reverse {
+            paths.reverse();
+        }
+        for path in paths {
             let bytes = fs::read(&path).unwrap();
             packages = run(
                 &path.display().to_string(),
@@ -2200,7 +2734,11 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 definitions,
                 packages,
                 &mut tally,
-                complete,
+                match (complete, classes) {
+                    (false, _) => Completion::Off,
+                    (true, false) => Completion::WithoutClasses,
+                    (true, true) => Completion::All,
+                },
             );
         }
 
@@ -2232,6 +2770,30 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 1 => oracle.one += 1,
                 _ => oracle.several += 1,
             }
+            // Whether the owner class ended the corpus with a `ClassInfo`
+            // anywhere in the shared store (the order-independent bound).
+            let owner_completed = store
+                .types
+                .get(*space)
+                .reference_symbol()
+                .is_some_and(|symbol| {
+                    matches!(
+                        store.symbols.get(symbol).info,
+                        dotty_core::symbols::SymbolInfo::Complete(info)
+                            if matches!(store.types.get(info), dotty_core::types::Type::ClassInfo(_))
+                    )
+                });
+            oracle.owner_completed += usize::from(owner_completed);
+            if !owner_completed && let Some(symbol) = store.types.get(*space).reference_symbol() {
+                let why = tally
+                    .completion
+                    .classes
+                    .failure_of
+                    .get(&symbol)
+                    .cloned()
+                    .unwrap_or_else(|| "never attempted".to_owned());
+                *oracle.owner_failures.entry(why).or_default() += 1;
+            }
         }
 
         let mut unsupported: Vec<_> = tally.unsupported.iter().collect();
@@ -2243,12 +2805,20 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             } else {
                 "no builtins"
             },
-            if complete {
-                ", simple symbols completed first"
-            } else {
+            if !complete {
                 ""
+            } else if classes {
+                ", simple symbols and classes completed first"
+            } else {
+                ", simple symbols completed first, classes NOT completed (ablation)"
             }
         );
+        if object {
+            println!("java.lang.Object and scala.AnyRef provided (empty stub classes)");
+        }
+        if reverse {
+            println!("units processed in the REVERSE of path order");
+        }
         println!("units: {}", tally.units);
         println!(
             "units with a decoded type: {}",
@@ -2322,6 +2892,14 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         println!(
             "REFin owner-space oracle (both children decoded; the owner class's own scope, from the unit that entered it): no scope known {}, name is not text {}, no declaration {}, exactly one declaration {}, several {}",
             oracle.no_scope, oracle.name_not_text, oracle.none, oracle.one, oracle.several
+        );
+        println!(
+            "  of the REFin queries with an owner scope, the owner class ends the corpus with a ClassInfo: {}",
+            oracle.owner_completed
+        );
+        println!(
+            "  owners without a ClassInfo, by why (top 8): {:?}",
+            top(&oracle.owner_failures, 8)
         );
         println!(
             "name-designated references created, by kind and prefix variant: {:?}",
@@ -2548,6 +3126,33 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             );
             println!("  LAMBDAtpt survey: {:?}", survey.lambdas);
             println!("  method survey: {:?}", survey.methods);
+            let classes = &survey.classes;
+            println!(
+                "  class completion (5d1): {} ClassInfo values checked (class, no_prefix, exact scope, scope owner, parent count, self)",
+                classes.checked
+            );
+            println!("    failures (kind, phase, error): {:?}", classes.failures);
+            println!(
+                "    unresolved names by class failures: {:?}",
+                top(&classes.external_names, 15)
+            );
+            println!(
+                "    parent count per class (kind, n): {:?}",
+                classes.parent_counts
+            );
+            println!("    parent roots (kind, root): {:?}", classes.parent_roots);
+            println!("    parent constructor spines: {:?}", classes.spines);
+            println!("    APPLY argument counts: {:?}", classes.argument_counts);
+            println!("    TYPEAPPLY parents: {:?}", classes.type_apply);
+            println!(
+                "    BLOCK parents: {:?}, ordinary roots: {:?}",
+                classes.blocks, classes.direct_roots
+            );
+            println!(
+                "    completed parents by semantic shape: {:?}",
+                classes.parent_shapes
+            );
+            println!("    self definitions: {:?}", classes.selfs);
             println!("  completion unexpected: {}", survey.unexpected.len());
             for error in survey.unexpected.iter().take(10) {
                 println!("    {error}");

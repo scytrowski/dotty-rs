@@ -59,6 +59,19 @@ pub enum UnpickleError {
     /// build a type for (Milestone 5b): a `SELECTtpt` qualifier or
     /// `SINGLETONtpt` reference that is not a path.
     UnsupportedTermTree { address: u32, tag: u8 },
+    /// The class `symbol` entered for the definition at `address` has no
+    /// declaration scope in this unit's index, so no `ClassInfo` can name it
+    /// (Milestone 5d1). Pass 1 allocates one for every template.
+    MissingClassScope { address: u32, symbol: SymbolId },
+    /// The template parent at `address` (tag `tag`) is a wrapper form
+    /// `type_of_parent` does not read (Milestone 5d1).
+    UnsupportedParentTree { address: u32, tag: u8 },
+    /// The template parent at `address` has the right wrapper but not the
+    /// shape it requires (Milestone 5d1).
+    MalformedParentTree { address: u32, reason: &'static str },
+    /// The self definition at `address` does not have the shape
+    /// `SELFDEF name type_tree` (Milestone 5d1).
+    InvalidSelfTypeTree { address: u32, reason: &'static str },
     /// The definition at `address` has a header that does not agree with its
     /// nodes (a parameter clause sequence that cannot be aligned with the
     /// parameter nodes, or a missing result type).
@@ -302,6 +315,23 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the term tree at address {address} has tag {tag}, which is not projected"
             ),
+            Self::MissingClassScope { address, symbol } => write!(
+                formatter,
+                "the class {} defined at address {address} has no declaration scope",
+                symbol.index()
+            ),
+            Self::UnsupportedParentTree { address, tag } => write!(
+                formatter,
+                "the template parent at address {address} has tag {tag}, which is not a parent form this pass reads"
+            ),
+            Self::MalformedParentTree { address, reason } => write!(
+                formatter,
+                "the template parent at address {address} is malformed: {reason}"
+            ),
+            Self::InvalidSelfTypeTree { address, reason } => write!(
+                formatter,
+                "the self definition at address {address} is malformed: {reason}"
+            ),
             Self::MalformedDefinition { address, reason } => write!(
                 formatter,
                 "the definition at address {address} is malformed: {reason}"
@@ -519,6 +549,10 @@ impl std::error::Error for UnpickleError {
             | Self::UnstableSelectQualifier { .. }
             | Self::SharedLambdaOwnerConflict { .. }
             | Self::MalformedDefinition { .. }
+            | Self::MissingClassScope { .. }
+            | Self::UnsupportedParentTree { .. }
+            | Self::MalformedParentTree { .. }
+            | Self::InvalidSelfTypeTree { .. }
             | Self::UnsupportedMethodParameterSemantics { .. }
             | Self::ConstructorCompletionDeferred { .. }
             | Self::ParameterAbstraction { .. }

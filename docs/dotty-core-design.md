@@ -1318,6 +1318,19 @@ Symbol -> SymbolInfo::Complete(TypeId) -> Type::ClassInfo -> ScopeId
 of semantic structure. A symbol that is not (yet, or ever) a class simply has
 no `ClassInfo` and therefore no declarations to look through.
 
+`ClassInfo` is therefore also the *publication boundary* between compilation
+units. The TASTy adapter enters a class's scope in pass 1 and keeps it in its
+unit-local index (a fast path); once the class is completed, `ClassInfo.declarations`
+is that exact `ScopeId` (never a copy), and any other unit sharing the store finds
+the members through the symbol's completed info, with no registry of class scopes
+anywhere. Completing a class does not complete its members (they stay `Missing`,
+as upstream's `unforcedDecls`) or its parents. Every adapter builds
+`ClassInfo.prefix` as `Definitions::no_prefix` (not upstream's `owner.thisType`),
+`class` as the class's own symbol, `declarations` as a scope owned by that class,
+and `self_type` as `None` unless the source states one; parents are ordered,
+direct-only semantic types and may differ in richness between adapters (TASTy
+keeps `Applied` parents, a classfile only erased classes).
+
 A term's `SymbolInfo::Complete(TypeId)` is its declared type. Member lookup
 may read it (read-only, never completing) to find the declaration scope of a
 *stable* term prefix (`x.T`): an immutable field, value or by-name-free

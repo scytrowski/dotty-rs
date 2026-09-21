@@ -30,19 +30,32 @@
 //! lambda reached through a `SHAREDterm` from a second owner keeps its first
 //! owner; the conflict is recorded (`has_lambda_owner_conflict`) and refused
 //! when the tree is projected.
+//!
+//! ## Lambdas in parents and self types (Milestone 5d1)
+//!
+//! A class's template parents and its `SELFDEF` type tree are scanned too, with
+//! the class as the owner. A parent is scanned only along the paths
+//! `type_of_parent` reads (a call's function, a type application's function
+//! and, only when its constructor type is not already applied, its type
+//! arguments, a constructor selection's `NEW` type), never through a
+//! constructor argument. Upstream reads parents in a compiler-internal dummy
+//! context; that owner is not a declaration, so the parameters are owned by the
+//! class, and, being entered as non-members, never reach its declaration scope.
 
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;
 use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
 use dotty_tasty::tasty::{
-    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, DEFDEF_TAG, DefinitionBody, EMPTYCLAUSE_TAG,
-    EXPLICITTPT_TAG, LAMBDATPT_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RawTree, SHAREDTERM_TAG,
-    SHAREDTYPE_TAG, SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG,
+    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, APPLY_TAG, BLOCK_TAG, BYNAMETPT_TAG, DEFDEF_TAG,
+    DefinitionBody, EMPTYCLAUSE_TAG, EXPLICITTPT_TAG, LAMBDATPT_TAG, NEW_TAG, PACKAGE_TAG,
+    PARAM_TAG, ParameterNode, RawTree, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
+    SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
     TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
     VALDEF_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
+use crate::class::{parent_constructor_is_applied, template_parts};
 use crate::error::UnpickleError;
 use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
@@ -253,9 +266,86 @@ impl TastyUnpickler<'_, '_, '_> {
                 self.enter_definition(ast, address(child.offset), child.tag, class)?;
             }
             // Parents, the self definition and non-definition statements
-            // declare no symbol.
+            // declare no symbol of their own; a lambda type inside a parent
+            // or the self type does (below).
+        }
+        let parts = template_parts(ast, template_at);
+        for parent in parts.parents {
+            self.enter_parent_lambdas(ast, parent, class, 0)?;
+        }
+        if let Some(self_def) = parts.self_def
+            && let Some(tree) = ast.children(self_def).first()
+        {
+            self.enter_lambdas_in(ast, address(tree.offset), class, 0)?;
         }
         Ok(())
+    }
+
+    /// Enters the `LAMBDAtpt` parameters in the parent tree at `at`, owned by
+    /// `class`, following exactly the child paths
+    /// [`type_of_parent`](TastyUnpickler::type_of_parent) reads: a call's
+    /// function only (never its arguments or statements), a type application's
+    /// function and type arguments, a constructor selection's `NEW` type.
+    ///
+    /// Upstream reads parents in a compiler-internal `localDummy` context; that
+    /// owner is not a semantic declaration, so a parent's lambda parameters are
+    /// owned by the class. They are entered as non-members, so they never reach
+    /// the class scope.
+    fn enter_parent_lambdas(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        class: SymbolId,
+        depth: usize,
+    ) -> Result<(), UnpickleError> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "a parent tree nests too deeply",
+            });
+        }
+        // A link that cannot be followed is reported when the parent is
+        // projected, not when symbols are entered.
+        let Ok(at) = ast.resolve_shared_term(at, at) else {
+            return Ok(());
+        };
+        let children: Vec<u32> = ast
+            .children(at)
+            .iter()
+            .map(|child| address(child.offset))
+            .collect();
+        match ast.tag_at(at) {
+            Some(APPLY_TAG | BLOCK_TAG) => match children.first() {
+                Some(function) => self.enter_parent_lambdas(ast, *function, class, depth + 1),
+                None => Ok(()),
+            },
+            Some(TYPEAPPLY_TAG) => {
+                let Some((function, arguments)) = children.split_first() else {
+                    return Ok(());
+                };
+                self.enter_parent_lambdas(ast, *function, class, depth + 1)?;
+                // The arguments are read only when the constructor type is not
+                // already applied (the same test `type_of_parent` makes); a
+                // lambda in a skipped argument is never entered, so it cannot
+                // take ownership from, or conflict with, a parent that is read.
+                if !parent_constructor_is_applied(ast, *function) {
+                    for argument in arguments {
+                        self.enter_lambdas_in(ast, *argument, class, depth + 1)?;
+                    }
+                }
+                Ok(())
+            }
+            Some(SELECTIN_TAG) => match children.first() {
+                Some(new) if ast.tag_at(*new) == Some(NEW_TAG) => {
+                    for tpt in ast.children(*new) {
+                        self.enter_lambdas_in(ast, address(tpt.offset), class, depth + 1)?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            _ => self.enter_lambdas_in(ast, at, class, depth + 1),
+        }
     }
 
     /// Enters the `TYPEPARAM`/`PARAM` nodes directly under `parent_at`, in

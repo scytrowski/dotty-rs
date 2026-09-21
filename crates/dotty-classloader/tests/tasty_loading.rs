@@ -323,3 +323,97 @@ fn val_and_var_constructor_parameters_are_entered_as_fields() {
     assert_eq!(entered_fields("Q", &["d", "e"]), vec!["d", "e"]);
     assert_eq!(entered_fields("Body", &["x", "inBody"]), vec!["inBody"]);
 }
+
+/// The `ClassInfo` contract both adapters build (docs/dotty-core-design.md):
+/// the canonical `no_prefix`, the class itself, and a declaration scope owned
+/// by that class. Parent graphs may differ (TASTy keeps richer types).
+fn assert_core_class_info_contract(
+    store: &SemanticStore,
+    definitions: dotty_core::Definitions,
+    class: SymbolId,
+) {
+    let info = class_info(store, class);
+    assert_eq!(info.prefix, definitions.no_prefix);
+    assert_eq!(info.class, class);
+    assert_eq!(store.scopes.get(info.declarations).owner, Some(class));
+    for parent in &info.parents {
+        assert!(store.types.get(*parent).reference_symbol().is_some());
+    }
+    assert_eq!(info.self_type, None);
+}
+
+/// Declares `names` as unresolved-until-needed classes of the package `path`,
+/// as the unpickler's own tests do for the classes a fixture mentions.
+fn stub_classes(
+    store: &mut SemanticStore,
+    packages: &mut dotty_core::Packages,
+    path: &[&str],
+    names: &[&str],
+) {
+    use dotty_core::{Symbol, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility};
+    let package = packages
+        .enter(store, SymbolOrigin::Synthetic, path)
+        .pop()
+        .unwrap();
+    for class in names {
+        let name = Name::new(store.names.intern(class), Namespace::Type);
+        let symbol = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(package.symbol),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package.scope).enter(name, symbol);
+    }
+}
+
+#[test]
+fn classloader_and_tasty_unpickler_class_infos_share_one_core_contract() {
+    // `InfoBase` is a parameterized trait with no self type; `Dog` is loaded
+    // by the classloader from its own `.tasty`.
+    const INFO_BASE: &[u8] =
+        include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoBase.tasty");
+
+    let mut store = SemanticStore::new();
+    let (mut loader, _synthetic_jdk) =
+        class_loader_over_tasty_sample("tasty-loading-convergence-synthetic-jdk", &mut store);
+    let dog = loader
+        .load_class(&BinaryName::from_internal("Dog"))
+        .expect("Dog should load");
+    let definitions = loader.definitions();
+    drop(loader);
+
+    let mut packages = dotty_core::Packages::new();
+    stub_classes(&mut store, &mut packages, &["scala"], &["Any", "Nothing"]);
+    stub_classes(&mut store, &mut packages, &["java", "lang"], &["Object"]);
+    let file = dotty_tasty::tasty::TastyFile::parse_scala_3_9(INFO_BASE).unwrap();
+    let mut unpickler = dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler::with_packages(
+        &file,
+        &mut store,
+        definitions,
+        packages,
+    );
+    unpickler.enter_symbols().unwrap();
+    let definition = file
+        .ast_address_index()
+        .unwrap()
+        .iter_nodes()
+        .filter(|node| node.tag == 131)
+        .map(|node| u32::try_from(node.offset).unwrap())
+        .min()
+        .unwrap();
+    unpickler
+        .complete_symbol(definition)
+        .expect("InfoBase completes");
+    let base = unpickler.index().symbol_at(definition).unwrap();
+    drop(unpickler);
+
+    assert_core_class_info_contract(&store, definitions, dog);
+    assert_core_class_info_contract(&store, definitions, base);
+}
