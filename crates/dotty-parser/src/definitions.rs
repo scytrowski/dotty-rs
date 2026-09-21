@@ -45,7 +45,12 @@ where
         };
 
         let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::Def);
-        if self.current().kind == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket) {
+        self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+            dotty_core::Punctuation::LeftBracket,
+        ));
+        let has_interleaved_type_params =
+            self.current().kind == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket);
+        if has_interleaved_type_params {
             self.report(
                 ParseDiagnosticKind::UnsupportedSyntax,
                 "interleaved type parameter clauses are not supported; put type parameters before term clauses",
@@ -53,7 +58,7 @@ where
             self.recover_until(RecoverySet::Statement);
         }
         let return_type_start = self.last_real_token_end;
-        let has_explicit_return_type = is_definition_colon(self);
+        let has_explicit_return_type = !has_interleaved_type_params && is_definition_colon(self);
         let tpt = if has_explicit_return_type {
             self.advance();
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
@@ -61,7 +66,9 @@ where
             synthetic_type_tree(self, return_type_start)
         };
 
-        let rhs = if is_bare_assignment(self) {
+        let rhs = if has_interleaved_type_params {
+            None
+        } else if is_bare_assignment(self) {
             self.advance();
             Some(self.parse_method_rhs(location))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
@@ -953,6 +960,90 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
         );
+    }
+
+    #[test]
+    fn reports_interleaved_type_parameters_after_a_newline_as_unsupported() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f[A](x: A)\n[B](y: B) = x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    5,
+                    6,
+                ),
+                token(TokenKind::Identifier, 6, 7),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    7,
+                    8,
+                ),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    8,
+                    9,
+                ),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    13,
+                    14,
+                ),
+                token(TokenKind::Newline, 14, 15),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    15,
+                    16,
+                ),
+                token(TokenKind::Identifier, 16, 17),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    17,
+                    18,
+                ),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    18,
+                    19,
+                ),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::ColonFollow, 20, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    23,
+                    24,
+                ),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::DefDef(_)));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+        assert!(
+            !parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedToken })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
