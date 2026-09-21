@@ -1,7 +1,7 @@
 //! The semantic type model.
 
 use crate::ids::{AnnotationId, NameId, SymbolId, TypeId};
-use crate::names::Name;
+use crate::names::{Name, TermName, TypeName};
 use crate::types::class_info::ClassInfo;
 use crate::types::constant::Constant;
 use crate::types::method::{MethodType, PolyType, TypeLambda};
@@ -25,10 +25,56 @@ pub struct MatchType {
     pub cases: Vec<TypeId>,
 }
 
+/// What a [`Type::TypeRef`] designates: Dotty's `NamedType` designator,
+/// `Symbol | Name`.
+///
+/// * `Symbol` is a stable declaration identity, used whenever a declaration
+///   symbol exists (every direct, symbol, package, resolved and `REFin`
+///   reference).
+/// * `Name` is the selection `prefix.name` where the member has no `SymbolId`,
+///   such as a member of a structural refinement. It is a real semantic
+///   reference, not `Error`, `NoType`, a placeholder or an unresolved string.
+///   It carries no copy of the member's info: the source of truth stays the
+///   `Refined` graph, which [`crate::types::lookup_structural_member`] reads.
+///
+/// The two are different targets even when the symbol's text is the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeRefTarget {
+    Symbol(SymbolId),
+    Name(TypeName),
+}
+
+/// What a [`Type::TermRef`] designates. See [`TypeRefTarget`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TermRefTarget {
+    Symbol(SymbolId),
+    Name(TermName),
+}
+
+impl TypeRefTarget {
+    /// The declaration symbol, or `None` for a name-designed target.
+    pub const fn symbol(&self) -> Option<SymbolId> {
+        match self {
+            Self::Symbol(symbol) => Some(*symbol),
+            Self::Name(_) => None,
+        }
+    }
+}
+
+impl TermRefTarget {
+    /// The declaration symbol, or `None` for a name-designed target.
+    pub const fn symbol(&self) -> Option<SymbolId> {
+        match self {
+            Self::Symbol(symbol) => Some(*symbol),
+            Self::Name(_) => None,
+        }
+    }
+}
+
 /// The semantic type model.
 ///
-/// `TermRef`/`TypeRef` reference symbols via [`SymbolId`], not [`Name`], so a
-/// symbol rename does not require walking every type that references it.
+/// `TermRef`/`TypeRef` designate a [`SymbolId`] when the declaration has one,
+/// and a [`TermName`]/[`TypeName`] when it has none (see [`TypeRefTarget`]).
 /// `ParamRef`/`RecThis` reference their binder via the binder's own
 /// [`TypeId`] rather than a separate `BinderId` — see
 /// `docs/dotty-core-design.md` §8, `[BLOCKER 1]`.
@@ -40,11 +86,11 @@ pub enum Type {
 
     TermRef {
         prefix: TypeId,
-        symbol: SymbolId,
+        target: TermRefTarget,
     },
     TypeRef {
         prefix: TypeId,
-        symbol: SymbolId,
+        target: TypeRefTarget,
     },
 
     /// `C.this`. `class` is a class, trait or module class, or a package:
@@ -145,6 +191,34 @@ pub enum Type {
     ClassInfo(ClassInfo),
 }
 
+impl Type {
+    /// A `TypeRef` to the declaration `symbol`.
+    pub const fn type_ref(prefix: TypeId, symbol: SymbolId) -> Self {
+        Self::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        }
+    }
+
+    /// A `TermRef` to the declaration `symbol`.
+    pub const fn term_ref(prefix: TypeId, symbol: SymbolId) -> Self {
+        Self::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(symbol),
+        }
+    }
+
+    /// The declaration symbol of a symbol-designated `TypeRef` / `TermRef`.
+    /// `None` for a name-designated reference and for every other type.
+    pub const fn reference_symbol(&self) -> Option<SymbolId> {
+        match self {
+            Self::TypeRef { target, .. } => target.symbol(),
+            Self::TermRef { target, .. } => target.symbol(),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,9 +255,36 @@ mod tests {
         let symbol = SymbolId::new(2);
 
         assert_ne!(
-            Type::TermRef { prefix, symbol },
-            Type::TypeRef { prefix, symbol }
+            Type::term_ref(prefix, symbol),
+            Type::type_ref(prefix, symbol)
         );
+        assert_eq!(
+            Type::type_ref(prefix, symbol).reference_symbol(),
+            Some(symbol)
+        );
+    }
+
+    #[test]
+    fn a_name_target_is_not_a_symbol_target_even_when_the_text_matches() {
+        let prefix = TypeId::new(1);
+        let text = NameId::new(2);
+        let by_name = Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Name(TypeName::new(text)),
+        };
+
+        assert_ne!(by_name, Type::type_ref(prefix, SymbolId::new(2)));
+        assert_eq!(by_name.reference_symbol(), None);
+        assert_ne!(
+            TypeRefTarget::Name(TypeName::new(text)),
+            TypeRefTarget::Name(TypeName::new(NameId::new(3)))
+        );
+        let term = Type::TermRef {
+            prefix,
+            target: TermRefTarget::Name(TermName::new(text)),
+        };
+        assert_eq!(term.reference_symbol(), None);
+        assert_ne!(term, by_name);
     }
 
     #[test]

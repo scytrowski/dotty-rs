@@ -107,8 +107,9 @@ impl SemanticStore {
             }
             ty = *tycon;
         }
+        // A name-designated `TypeRef` has no class symbol: no text is compared.
         match self.types.get(ty) {
-            Type::TypeRef { symbol, .. } => Some(*symbol),
+            ty @ Type::TypeRef { .. } => ty.reference_symbol(),
             _ => None,
         }
     }
@@ -320,10 +321,9 @@ mod tests {
         }
 
         fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
-            self.store.types.alloc(Type::TypeRef {
-                prefix: self.no_prefix,
-                symbol,
-            })
+            self.store
+                .types
+                .alloc(Type::type_ref(self.no_prefix, symbol))
         }
 
         fn annotate(&mut self, underlying: TypeId, class: TypeId) -> TypeId {
@@ -338,6 +338,26 @@ mod tests {
             let class = self.class(&["scala", "annotation", "internal"], "ErasedParam", None);
             self.type_ref(class)
         }
+    }
+
+    #[test]
+    fn a_name_designated_annotation_type_has_no_class_and_is_never_erased() {
+        use crate::names::TypeName;
+        use crate::types::TypeRefTarget;
+        let mut world = World::new();
+        // Named like the real class, but designated by name: no symbol, and no
+        // comparison of text stands in for one.
+        let text = world.store.names.intern("ErasedParam");
+        let by_name = world.store.types.alloc(Type::TypeRef {
+            prefix: world.no_prefix,
+            target: TypeRefTarget::Name(TypeName::new(text)),
+        });
+        let annotation = Annotation::new(by_name, None);
+        let underlying = world.no_prefix;
+        let annotated = world.annotate(underlying, by_name);
+
+        assert_eq!(world.store.annotation_class(&annotation), None);
+        assert!(!world.store.has_annotation(annotated, &ERASED));
     }
 
     #[test]

@@ -14,7 +14,7 @@ fn show(store: &SemanticStore, id: TypeId) -> String {
         store.names.resolve(symbol.name.text()).to_string()
     };
     match store.types.get(id) {
-        Type::TypeRef { symbol, .. } => name(*symbol),
+        ty @ Type::TypeRef { .. } => name(ty.reference_symbol().unwrap()),
         Type::Applied { tycon, args } => {
             let args: Vec<_> = args.iter().map(|arg| show(store, *arg)).collect();
             format!("{}[{}]", show(store, *tycon), args.join(", "))

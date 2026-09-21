@@ -129,13 +129,13 @@ fn a_class_constant_holds_the_type_of_its_child() {
         session.store.types.get(id),
         &Type::Constant(Constant::Class(child))
     );
-    let Type::TermRef { symbol, .. } = session.store.types.get(child) else {
+    let Some(symbol) = session.store.types.get(child).reference_symbol() else {
         panic!(
             "expected a term reference, got {:?}",
             session.store.types.get(child)
         );
     };
-    let name = session.store.symbols.get(*symbol).name.text();
+    let name = session.store.symbols.get(symbol).name.text();
     assert_eq!(session.store.names.resolve(name), "Constants");
 }
 

@@ -93,16 +93,21 @@ pub(crate) fn lookup_owner(
     // A flexible or annotated type has the members of its underlying type;
     // nothing else is looked through.
     let prefix = look_through_proxies(store, prefix)?;
+    let ty_symbol = store.types.get(prefix).reference_symbol();
     match store.types.get(prefix) {
         Type::ThisType { class } => Some(*class),
-        Type::TypeRef { symbol, .. } if is_scope_owner(*symbol) => Some(*symbol),
+        // A name-designated reference has no symbol, so no declaration scope.
+        Type::TypeRef { .. } => ty_symbol.filter(|symbol| is_scope_owner(*symbol)),
         // A term reference is a searchable prefix when it names a package, or
         // an object, whose declarations are those of its module class.
-        Type::TermRef { symbol, .. } => match store.symbols.get(*symbol).kind {
-            SymbolKind::Package => Some(*symbol),
-            SymbolKind::Object => module_class_of(store, index, packages, *symbol),
-            _ => None,
-        },
+        Type::TermRef { .. } => {
+            let symbol = ty_symbol?;
+            match store.symbols.get(symbol).kind {
+                SymbolKind::Package => Some(symbol),
+                SymbolKind::Object => module_class_of(store, index, packages, symbol),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -189,6 +194,19 @@ pub(crate) fn lookup_declaration(
     }
 }
 
+/// Whether `prefix`, with proxies looked through, is a structural prefix: a
+/// `Refined`, `Recursive` or `RecThis` type, whose members may be refinements
+/// with no declaration symbol. A `RecThis` is not read further (its binder
+/// may still be being decoded), and nothing else is structural.
+pub(crate) fn is_structural_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
+    look_through_proxies(store, prefix).is_some_and(|prefix| {
+        matches!(
+            store.types.get(prefix),
+            Type::Refined { .. } | Type::Recursive { .. } | Type::RecThis { .. }
+        )
+    })
+}
+
 /// Whether `prefix` (with proxies looked through) is not a legal prefix as
 /// Dotty's `TypeOps.isLegalPrefix` sees it: a singleton that is not stable, of
 /// which a `TermRef` to a method or a mutable member is what the semantic graph can
@@ -200,8 +218,12 @@ pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
         return true;
     };
     match store.types.get(prefix) {
-        Type::TermRef { symbol, .. } => {
-            let symbol = store.symbols.get(*symbol);
+        ty @ Type::TermRef { .. } => {
+            // A name-designated reference has no symbol to be unstable.
+            let Some(symbol) = ty.reference_symbol() else {
+                return false;
+            };
+            let symbol = store.symbols.get(symbol);
             // A `var` member is a `Field` with the `MUTABLE` flag (see
             // `val_def_kind`), so the flag decides, not the kind.
             symbol.flags.contains(SymbolFlags::MUTABLE)
@@ -281,10 +303,9 @@ mod tests {
         }
 
         fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
-            self.store.types.alloc(Type::TypeRef {
-                prefix: self.no_prefix,
-                symbol,
-            })
+            self.store
+                .types
+                .alloc(Type::type_ref(self.no_prefix, symbol))
         }
 
         fn lookup(&self, prefix: TypeId, name: &Name) -> LocalLookup {
@@ -539,10 +560,10 @@ mod tests {
             class_name,
             SymbolKind::Class,
         );
-        let term = world.store.types.alloc(Type::TermRef {
-            prefix: world.no_prefix,
-            symbol: chain[0].symbol,
-        });
+        let term = world
+            .store
+            .types
+            .alloc(Type::term_ref(world.no_prefix, chain[0].symbol));
         let ty = world.type_ref(chain[0].symbol);
 
         // Neither this index nor `ClassInfo` knows the package.
@@ -566,10 +587,10 @@ mod tests {
             .unwrap();
         let inner = world.name("Inner", Namespace::Type);
         let member = world.declare(module_scope, module_class, inner, SymbolKind::Class);
-        let prefix = world.store.types.alloc(Type::TermRef {
-            prefix: world.no_prefix,
-            symbol: object,
-        });
+        let prefix = world
+            .store
+            .types
+            .alloc(Type::term_ref(world.no_prefix, object));
 
         assert_eq!(world.lookup(prefix, &inner), LocalLookup::Found(member));
     }
@@ -581,10 +602,10 @@ mod tests {
         let object_name = world.name("Obj", Namespace::Term);
         let object = world.declare(owner_scope, owner, object_name, SymbolKind::Object);
         let inner = world.name("Inner", Namespace::Type);
-        let prefix = world.store.types.alloc(Type::TermRef {
-            prefix: world.no_prefix,
-            symbol: object,
-        });
+        let prefix = world
+            .store
+            .types
+            .alloc(Type::term_ref(world.no_prefix, object));
 
         assert_eq!(world.lookup(prefix, &inner), LocalLookup::UnsupportedPrefix);
     }
@@ -595,10 +616,10 @@ mod tests {
         let field_name = world.name("v", Namespace::Term);
         let field = world.symbol(field_name, SymbolKind::Field, None);
         let inner = world.name("Inner", Namespace::Type);
-        let term_of_field = world.store.types.alloc(Type::TermRef {
-            prefix: world.no_prefix,
-            symbol: field,
-        });
+        let term_of_field = world
+            .store
+            .types
+            .alloc(Type::term_ref(world.no_prefix, field));
 
         assert_eq!(
             world.lookup(world.no_prefix, &inner),
@@ -668,10 +689,7 @@ mod tests {
         let term_ref = |world: &mut World, text: &str, kind| {
             let name = world.name(text, Namespace::Term);
             let symbol = world.symbol(name, kind, None);
-            world.store.types.alloc(Type::TermRef {
-                prefix: no_prefix,
-                symbol,
-            })
+            world.store.types.alloc(Type::term_ref(no_prefix, symbol))
         };
         let method = term_ref(&mut world, "m", SymbolKind::Method);
         let variable = term_ref(&mut world, "v", SymbolKind::Variable);
@@ -681,10 +699,10 @@ mod tests {
         let var_name = world.name("w", Namespace::Term);
         let var_symbol = world.symbol(var_name, SymbolKind::Field, None);
         world.store.symbols.get_mut(var_symbol).flags = SymbolFlags::MUTABLE;
-        let mutable_field = world.store.types.alloc(Type::TermRef {
-            prefix: no_prefix,
-            symbol: var_symbol,
-        });
+        let mutable_field = world
+            .store
+            .types
+            .alloc(Type::term_ref(no_prefix, var_symbol));
         let plain_field = term_ref(&mut world, "g", SymbolKind::Field);
         let class_ref = world.type_ref(class);
         let wrapped_method = annotated(&mut world, method);
