@@ -63,8 +63,9 @@
 //! to a `TypeRef` or `Applied`, else
 //! [`InvalidCompactAnnotationType`](UnpickleError::InvalidCompactAnnotationType).
 //! A full constructor application (`APPLY`/`NEW`) becomes an annotation with its
-//! type and its ordered literal arguments; any other root, `SHAREDterm` for
-//! one, is refused rather than dropped. See the `annotated` module.
+//! type and its ordered literal arguments, also when written as a `SHAREDterm`
+//! link to one; any other tree is refused rather than dropped. See the
+//! `annotated` module.
 //!
 //! ## Recursive and refined types (Milestone 4a)
 //!

@@ -127,8 +127,8 @@ struct Outcomes {
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
     /// A full annotation the pass defers under the node: a tree that is not a
-    /// constructor call (`SHAREDterm`), or a constructor part or argument it
-    /// does not read (Milestone 4b2a).
+    /// constructor call (also behind a `SHAREDterm`), or a constructor part or
+    /// argument it does not read (Milestones 4b2a, 4b2b).
     deferred_annotation: usize,
     /// A binder reference or parameter that is malformed: an invalid binder
     /// address, kind, parameter index, or a parameter info that is not bounds.
@@ -227,8 +227,31 @@ struct FullOutcomes {
     invalid_type: usize,
     malformed: usize,
     other_known: usize,
-    /// Refused as a tree whose root is not `APPLY`/`NEW` (`SHAREDterm`, ...).
+    /// Refused as a tree whose root is not `APPLY`/`NEW` (or a `SHAREDterm`
+    /// that ends at no such tree).
     deferred_tree: usize,
+    /// A `SHAREDterm` chain that could not be followed: an invalid target, a
+    /// cycle or an overlong chain (Milestone 4b2b).
+    invalid_reference: usize,
+}
+
+/// The wire shape of the full annotations rooted at `SHAREDterm` (Milestone
+/// 4b2b), independent of whether they decode.
+#[derive(Default)]
+struct SharedShapes {
+    roots: usize,
+    /// The link to a node that is not a node, or a chain that never ends.
+    invalid_chains: usize,
+    /// Number of links followed, from the annotation's own to the tree.
+    depths: BTreeMap<usize, usize>,
+    /// Links whose target is another `SHAREDterm`.
+    links_to_links: usize,
+    /// Root tag of the tree each valid chain ends at.
+    target_tags: BTreeMap<u8, usize>,
+    /// Per unit, the outer annotations naming each target address.
+    per_target: HashMap<(usize, u32), usize>,
+    /// Outcomes by the tag the chain ends at: total, decoded.
+    outcomes_by_target: BTreeMap<u8, (usize, usize)>,
 }
 
 /// The shapes of the full `APPLY`/`NEW` annotations, surveyed from the wire.
@@ -265,6 +288,10 @@ struct AnnotationSurvey {
     compact: CompactOutcomes,
     full: BTreeMap<u8, FullOutcomes>,
     shapes: FullShapes,
+    shared: SharedShapes,
+    /// The unit being walked, to tell target addresses of different units
+    /// apart.
+    unit: usize,
     erased: ErasedStats,
 }
 
@@ -501,9 +528,15 @@ fn record_annotation(
     survey: &mut AnnotationSurvey,
     head: Option<u8>,
     parent_failed: bool,
+    shared_target: Option<u8>,
     result: &Result<dotty_core::ids::TypeId, UnpickleError>,
 ) {
     let Some(head) = head else { return };
+    if let Some(tag) = shared_target {
+        let entry = survey.shared.outcomes_by_target.entry(tag).or_default();
+        entry.0 += 1;
+        entry.1 += usize::from(result.is_ok());
+    }
     if !is_compact_annot_type_tag(head) {
         let full = survey.full.entry(head).or_default();
         full.total += 1;
@@ -511,6 +544,7 @@ fn record_annotation(
             Ok(_) => full.decoded += 1,
             Err(_) if parent_failed => full.parent_failed += 1,
             Err(UnpickleError::UnsupportedAnnotationTree { .. }) => full.deferred_tree += 1,
+            Err(UnpickleError::InvalidReferenceTarget { .. }) => full.invalid_reference += 1,
             Err(
                 UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
             ) => full.external += 1,
@@ -650,6 +684,39 @@ fn survey_shape(
             Some((function, _)) if is_apply || is_spine => current = *function,
             _ => break,
         }
+    }
+}
+
+/// Follows the `SHAREDterm` links from `at` on the wire alone: the number of
+/// links followed and the address the chain ends at, or `None` when a link
+/// names no node or the chain does not end within `bound` links.
+fn follow_shared_terms(
+    file: &TastyFile<'_>,
+    at: u32,
+    bound: usize,
+) -> Option<(usize, u32, u8, bool)> {
+    use dotty_tasty::tasty::{RawTree, TermValue};
+    let index = file.ast_address_index().unwrap();
+    let mut current = at;
+    let mut links = 0;
+    let mut link_to_link = false;
+    loop {
+        let tag = index.get_node(current)?.tag;
+        if tag != 60 {
+            return Some((links, current, tag, link_to_link));
+        }
+        let RawTree::Leaf(term) = tree_from(file, current) else {
+            return None;
+        };
+        let TermValue::AstRef(target) = term.value else {
+            return None;
+        };
+        links += 1;
+        if links > bound {
+            return None;
+        }
+        link_to_link |= index.get_node(target).is_some_and(|node| node.tag == 60);
+        current = target;
     }
 }
 
@@ -831,7 +898,24 @@ fn run(
         children
     };
     let mut erased_annotated: HashSet<u32> = HashSet::new();
+    tally.annotations.unit += 1;
+    let unit = tally.annotations.unit;
+    let mut shared_targets: HashMap<u32, u8> = HashMap::new();
     for (at, (_, annotation_at, head)) in &annotated {
+        if *head == 60 {
+            let shared = &mut tally.annotations.shared;
+            shared.roots += 1;
+            match follow_shared_terms(&file, *annotation_at, 16) {
+                None => shared.invalid_chains += 1,
+                Some((links, target, tag, link_to_link)) => {
+                    *shared.depths.entry(links).or_default() += 1;
+                    shared.links_to_links += usize::from(link_to_link);
+                    *shared.target_tags.entry(tag).or_default() += 1;
+                    *shared.per_target.entry((unit, target)).or_default() += 1;
+                    shared_targets.insert(*at, tag);
+                }
+            }
+        }
         if *head == 136 || *head == 95 {
             survey_shape(
                 &mut tally.annotations.shapes,
@@ -961,6 +1045,7 @@ fn run(
                 &mut tally.annotations,
                 annotation_heads.get(&at).copied(),
                 parent_failed,
+                shared_targets.get(&at).copied(),
                 &result,
             );
         }
@@ -1467,7 +1552,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         );
         for (root, f) in &survey.full {
             println!(
-                "  full {} outcomes: total {}, decoded {}, parent failed first {}, external {}, local missing {}, constructor unsupported {}, argument unsupported {}, invalid type {}, malformed {}, other known {}, deferred tree {}",
+                "  full {} outcomes: total {}, decoded {}, parent failed first {}, external {}, local missing {}, constructor unsupported {}, argument unsupported {}, invalid type {}, malformed {}, other known {}, deferred tree {}, invalid reference {}",
                 full_root_name(*root),
                 f.total,
                 f.decoded,
@@ -1480,8 +1565,40 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 f.malformed,
                 f.other_known,
                 f.deferred_tree,
+                f.invalid_reference,
             );
         }
+        let shared = &survey.shared;
+        let mut reuse: BTreeMap<usize, usize> = BTreeMap::new();
+        for count in shared.per_target.values() {
+            *reuse.entry(*count).or_default() += 1;
+        }
+        println!(
+            "  SHAREDterm roots {}: invalid chains {}, link depths {:?}, links whose target is another SHAREDterm {}, final target tags {:?}, outer annotations per target (count -> targets) {:?}, targets reused by more than one annotation {}",
+            shared.roots,
+            shared.invalid_chains,
+            shared.depths,
+            shared.links_to_links,
+            shared
+                .target_tags
+                .iter()
+                .map(|(tag, count)| (full_root_name(*tag), *count))
+                .collect::<Vec<_>>(),
+            reuse,
+            reuse
+                .iter()
+                .filter(|(count, _)| **count > 1)
+                .map(|(_, n)| n)
+                .sum::<usize>(),
+        );
+        println!(
+            "  SHAREDterm outcomes by target tag (total, decoded): {:?}",
+            shared
+                .outcomes_by_target
+                .iter()
+                .map(|(tag, counts)| (full_root_name(*tag), *counts))
+                .collect::<Vec<_>>()
+        );
         let shapes = &survey.shapes;
         println!("  APPLY/NEW spines: {:?}", shapes.spines);
         println!("  argument counts: {:?}", shapes.argument_counts);
@@ -1539,7 +1656,8 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 + c.parent_full_tree
         );
         // Every full annotation is filed under an outcome. Only `APPLY` and
-        // `NEW` are read; any other root is deferred, never decoded.
+        // `NEW` are read, directly or at the end of a `SHAREDterm` chain; any
+        // other tree is deferred, never decoded.
         for (root, f) in &survey.full {
             let filed = f.decoded
                 + f.parent_failed
@@ -1550,13 +1668,27 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 + f.invalid_type
                 + f.malformed
                 + f.other_known
-                + f.deferred_tree;
+                + f.deferred_tree
+                + f.invalid_reference;
             assert_eq!(f.total, filed, "root {root}");
             if *root == 136 || *root == 95 {
                 assert_eq!(f.deferred_tree, 0, "root {root}");
+                assert_eq!(f.invalid_reference, 0, "root {root}");
+            } else if *root == 60 {
+                // A shared root fails to follow exactly when its chain is
+                // invalid on the wire (unless its parent failed first).
+                assert!(f.invalid_reference <= survey.shared.invalid_chains);
             } else {
                 assert_eq!(f.decoded, 0, "root {root}");
             }
+        }
+        assert_eq!(
+            survey.shared.roots,
+            survey.shared.invalid_chains + survey.shared.target_tags.values().sum::<usize>()
+        );
+        // Only a constructor tree at the end of the chain ever decodes.
+        for (tag, (_, decoded)) in &survey.shared.outcomes_by_target {
+            assert!(*tag == 136 || *tag == 95 || *decoded == 0, "target {tag}");
         }
         for tag in survey.compact_heads.keys() {
             assert!(is_compact_annot_type_tag(*tag));

@@ -15,10 +15,25 @@
 //! * **full**: the payload is an annotation tree. A directly written
 //!   constructor application (`APPLY` or `NEW`, the shape of nearly every
 //!   annotation in the corpora) is read into an `Annotation` with its type and
-//!   its ordered term arguments and no typed tree. Any other root (notably
-//!   `SHAREDterm`, which needs a term-tree identity design) stays
+//!   its ordered term arguments and no typed tree. Any other root stays
 //!   `UnsupportedAnnotationTree`; nothing is ever stored as if it had no
 //!   arguments.
+//!
+//! ## Shared annotation trees
+//!
+//! A full annotation may be a `SHAREDterm` naming a tree written earlier.
+//! Scala 3.9 reads it as `forkAt(readAddr()).readTree()`: it follows the
+//! address and reads the tree again, with no cache keyed by tree address. So
+//! does this decoder: the chain of `SHAREDterm` links is followed to its end
+//! (`AstView::resolve_shared_term`, bounded, every target a visible node) and
+//! a constructor application there is decoded by the same code as a directly
+//! written one. The `AnnotationId` belongs to the enclosing `ANNOTATEDtype`:
+//! two of them sharing one tree get two annotations with equal payloads, and
+//! the term tree's address never enters the type index (it is not a type
+//! address). Errors name the enclosing `ANNOTATEDtype` as `address` and the
+//! tree the link ended at as the annotation address; a link that cannot be
+//! followed is `InvalidReferenceTarget { from: the ANNOTATEDtype, to }`.
+//! Typed-tree identity is Milestone 7's business, not this layer's.
 //!
 //! ## Full annotation constructor applications
 //!
@@ -53,7 +68,7 @@ use dotty_core::names::TermName;
 use dotty_core::types::{Annotation, AnnotationArgument, AnnotationValue, Type};
 use dotty_tasty::tasty::{
     APPLY_TAG, AstError, CLASSCONST_TAG, IDENTTPT_TAG, NAMEDARG_TAG, NEW_TAG, RawNode, RawTree,
-    SELECTIN_TAG, TYPEAPPLY_TAG, is_compact_annot_type_tag,
+    SELECTIN_TAG, SHAREDTERM_TAG, TYPEAPPLY_TAG, is_compact_annot_type_tag,
 };
 
 use crate::ast_view::{AstView, address};
@@ -101,11 +116,36 @@ impl TastyUnpickler<'_, '_, '_> {
                 reason: "the annotation of an annotated type is not a node",
             });
         };
-        if annotation_tag == APPLY_TAG || annotation_tag == NEW_TAG {
-            let annotation = self.decode_constructor_annotation(ast, at, annotation_at, depth)?;
+        // Dotty reads `SHAREDterm` as `forkAt(readAddr()).readTree()`: the
+        // annotation tree is whatever the chain of links ends at. The link
+        // is followed, nothing is cached by its target, and the annotation
+        // below belongs to this `ANNOTATEDtype` alone.
+        let (tree_at, tree_tag) = if annotation_tag == SHAREDTERM_TAG {
+            let target = ast.resolve_shared_term(annotation_at, at)?;
+            let Some(tag) = ast.tag_at(target) else {
+                return Err(UnpickleError::InvalidReferenceTarget {
+                    from: at,
+                    to: target,
+                });
+            };
+            (target, tag)
+        } else {
+            (annotation_at, annotation_tag)
+        };
+        if tree_tag == APPLY_TAG || tree_tag == NEW_TAG {
+            let annotation = self.decode_constructor_annotation(ast, at, tree_at, depth)?;
             return Ok(Type::Annotated {
                 underlying,
                 annotation,
+            });
+        }
+        if tree_at != annotation_at {
+            // A shared target that is no constructor call: the tree's own
+            // address and tag are the ones reported.
+            return Err(UnpickleError::UnsupportedAnnotationTree {
+                address: at,
+                annotation_address: tree_at,
+                tag: tree_tag,
             });
         }
         if !is_compact_annot_type_tag(annotation_tag) {
