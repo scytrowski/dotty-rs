@@ -777,12 +777,12 @@ macro_rules! unit {
 
 /// The simple name of the class a `TypeRef` points at.
 fn class_name(store: &SemanticStore, id: TypeId) -> String {
-    let Type::TypeRef { symbol, .. } = store.types.get(id) else {
+    let Some(symbol) = store.types.get(id).reference_symbol() else {
         panic!("not a type reference: {:?}", store.types.get(id));
     };
     store
         .names
-        .resolve(store.symbols.get(*symbol).name.text())
+        .resolve(store.symbols.get(symbol).name.text())
         .to_string()
 }
 
@@ -911,9 +911,10 @@ fn a_dependent_result_names_the_exact_method_binder() {
     // method's own first parameter.
     let method = method(&session.store, id);
     assert_eq!(class_name(&session.store, method.params[0].ty), "Box");
-    let Type::TypeRef { prefix, symbol } = session.store.types.get(method.result) else {
+    let Type::TypeRef { prefix, target } = session.store.types.get(method.result) else {
         panic!("not a type reference");
     };
+    let symbol = &target.symbol().unwrap();
     assert_eq!(session.store.types.get(*prefix), &param_ref(id, 0));
     assert_eq!(
         session

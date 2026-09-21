@@ -120,10 +120,7 @@ impl Definitions {
 
     fn primitive(store: &mut SemanticStore, no_prefix: TypeId, name: &str) -> TypeId {
         let symbol = Self::builtin_symbol(store, name);
-        store.types.alloc(Type::TypeRef {
-            prefix: no_prefix,
-            symbol,
-        })
+        store.types.alloc(Type::type_ref(no_prefix, symbol))
     }
 }
 
@@ -172,12 +169,13 @@ mod tests {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
 
-        let Type::TypeRef { symbol, .. } = store.types.get(definitions.int) else {
-            panic!("expected Int to lower to a Type::TypeRef");
+        let int = store.types.get(definitions.int);
+        let (Type::TypeRef { .. }, Some(symbol)) = (int, int.reference_symbol()) else {
+            panic!("expected Int to lower to a symbol-designated Type::TypeRef");
         };
 
-        assert_eq!(store.symbols.get(*symbol).origin, SymbolOrigin::Builtin);
-        assert_eq!(store.symbols.get(*symbol).kind, SymbolKind::Class);
+        assert_eq!(store.symbols.get(symbol).origin, SymbolOrigin::Builtin);
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
     }
 
     /// `bootstrap` mints real identities against whatever store it is given,
@@ -191,29 +189,23 @@ mod tests {
         let definitions_a = Definitions::bootstrap(&mut store_a);
         let definitions_b = Definitions::bootstrap(&mut store_b);
 
-        let Type::TypeRef {
-            symbol: symbol_a, ..
-        } = store_a.types.get(definitions_a.int)
-        else {
+        let Some(symbol_a) = store_a.types.get(definitions_a.int).reference_symbol() else {
             panic!("expected Int to lower to a Type::TypeRef");
         };
-        let Type::TypeRef {
-            symbol: symbol_b, ..
-        } = store_b.types.get(definitions_b.int)
-        else {
+        let Some(symbol_b) = store_b.types.get(definitions_b.int).reference_symbol() else {
             panic!("expected Int to lower to a Type::TypeRef");
         };
 
         assert_eq!(
             store_a
                 .names
-                .resolve(store_a.symbols.get(*symbol_a).name.text()),
+                .resolve(store_a.symbols.get(symbol_a).name.text()),
             "Int"
         );
         assert_eq!(
             store_b
                 .names
-                .resolve(store_b.symbols.get(*symbol_b).name.text()),
+                .resolve(store_b.symbols.get(symbol_b).name.text()),
             "Int"
         );
     }

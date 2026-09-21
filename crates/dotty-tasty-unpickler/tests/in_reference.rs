@@ -455,8 +455,8 @@ fn add_symbol(
 
 fn reference_parts(store: &SemanticStore, ty: TypeId) -> (TypeId, SymbolId, bool) {
     match store.types.get(ty) {
-        Type::TypeRef { prefix, symbol } => (*prefix, *symbol, true),
-        Type::TermRef { prefix, symbol } => (*prefix, *symbol, false),
+        Type::TypeRef { prefix, target } => (*prefix, target.symbol().unwrap(), true),
+        Type::TermRef { prefix, target } => (*prefix, target.symbol().unwrap(), false),
         other => panic!("not a reference: {other:?}"),
     }
 }
@@ -470,7 +470,7 @@ fn decode(unit: &Unit, root: &str) -> (Result<TypeId, UnpickleError>, SemanticSt
 
 fn prefix_symbol(store: &SemanticStore, prefix: TypeId) -> SymbolId {
     match store.types.get(prefix) {
-        Type::TypeRef { symbol, .. } => *symbol,
+        ty @ Type::TypeRef { .. } => ty.reference_symbol().unwrap(),
         other => panic!("not a class reference: {other:?}"),
     }
 }

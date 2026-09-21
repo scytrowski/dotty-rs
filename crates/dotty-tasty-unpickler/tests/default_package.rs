@@ -154,10 +154,10 @@ fn the_package_reference_of_the_unit_is_the_root_with_the_canonical_prefix() {
     let ty = unpickler.unpickle_type(2).unwrap();
     let root = unpickler.index().symbol_at(PACKAGE_ADDRESS).unwrap();
     drop(unpickler);
-
-    let Type::TermRef { prefix, symbol } = session.store.types.get(ty) else {
+    let Type::TermRef { prefix, target } = session.store.types.get(ty) else {
         panic!("expected a TermRef");
     };
+    let symbol = &target.symbol().unwrap();
     assert_eq!(*symbol, root);
     assert_eq!(*prefix, session.definitions.no_prefix);
 }
@@ -191,7 +191,9 @@ fn a_name_based_reference_to_a_default_package_class_of_another_unit_resolves() 
     let widgets: Vec<_> = resolved
         .iter()
         .filter_map(|&ty| match session.store.types.get(ty) {
-            Type::TypeRef { prefix, symbol } if *symbol == widget => Some(*prefix),
+            ty @ Type::TypeRef { prefix, .. } if ty.reference_symbol() == Some(widget) => {
+                Some(*prefix)
+            }
             _ => None,
         })
         .collect();
@@ -199,8 +201,8 @@ fn a_name_based_reference_to_a_default_package_class_of_another_unit_resolves() 
     for prefix in widgets {
         // The compiler writes a package prefix as `THIS`; both name the root.
         match session.store.types.get(prefix) {
-            Type::TermRef { symbol, .. } | Type::TypeRef { symbol, .. } => {
-                assert_eq!(*symbol, root);
+            ty @ (Type::TermRef { .. } | Type::TypeRef { .. }) => {
+                assert_eq!(ty.reference_symbol(), Some(root));
             }
             Type::ThisType { class } => assert_eq!(*class, root),
             other => panic!("expected a package prefix, got {other:?}"),

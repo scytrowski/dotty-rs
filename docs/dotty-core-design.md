@@ -887,8 +887,8 @@ pub enum Type {
     Error(ErrorType),
     NoPrefix,
 
-    TermRef { prefix: TypeId, symbol: SymbolId },
-    TypeRef { prefix: TypeId, symbol: SymbolId },
+    TermRef { prefix: TypeId, target: TermRefTarget },
+    TypeRef { prefix: TypeId, target: TypeRefTarget },
 
     ThisType { class: SymbolId },
     SuperType { this_type: TypeId, super_type: TypeId },
@@ -933,8 +933,32 @@ pub enum Type {
 }
 ```
 
-`TermRef`/`TypeRef` use `SymbolId`, not the symbol's `Name`, so a symbol
-rename doesn't require walking every type that references it.
+`TermRef`/`TypeRef` designate their member the way Dotty's `NamedType`
+designator does, `Symbol | Name`:
+
+```rust
+pub enum TypeRefTarget { Symbol(SymbolId), Name(TypeName) }
+pub enum TermRefTarget { Symbol(SymbolId), Name(TermName) }
+```
+
+A `Symbol` target is a stable declaration identity, used whenever a
+declaration symbol exists, and not the symbol's `Name`, so a symbol rename
+doesn't require walking every type that references it. A `Name` target is
+the selection `prefix.name` where the member has no `SymbolId`, such as a
+member of a structural refinement (`C { type T1; type T2 = T1 }`, where `T1`
+is selected from the `RecThis`). It is a real semantic reference: not `Error`,
+`NoType`, a placeholder or an unresolved string. It carries no copy of the
+member's info; the source of truth stays the `Refined` graph, which
+`lookup_structural_member` reads once the graph is complete (`Refined`,
+`Recursive`, `RecThis`, `Flexible`/`Annotated` proxies; outer refinement wins;
+namespace is part of the `Name`; an unfilled binder, a bad `RecThis` binder and
+a cyclic path are typed errors). `Symbol(S)` and `Name(N)` are different
+targets even when `S` is called `N`. Consumers that need a symbol use
+`Type::reference_symbol()`, which is `None` for a name target
+(`annotation_class` and the unpickler's `lookup_owner` answer `None`, never
+by comparing text); rebinding rebinds the prefix and keeps the target. No
+synthetic symbol is ever allocated for a refinement member. A name target is
+not a substitute for `SymbolResolver`.
 
 `Bounds` is a genuine `>: low <: high` range; `AliasingBounds` is the info of
 an alias (`= alias`) and is deliberately not `Bounds { low: alias, high: alias }`,
@@ -1639,8 +1663,9 @@ crate; no new CI job is needed for the foundation PR.
   hard-codes a reference into the other phase's arena.
 - A tree's source position is `Option<SourceSpan>`; nothing depends on a
   `SourceId` sentinel value to mean "no source."
-- `TermRef`/`TypeRef` reference symbols via `SymbolId`, and every `Type`
-  variant that needs one carries a `prefix`.
+- `TermRef`/`TypeRef` designate a `SymbolId` or, for a member with no
+  symbol, a `Name`, and every `Type` variant that needs one carries a
+  `prefix`.
 - `MethodType`, `PolyType`, and `TypeLambda` are binders via their own
   `TypeId`; `ParamRef` identifies `(binder: TypeId, index)` and resolves back
   to the exact bound parameter, with a test proving it.

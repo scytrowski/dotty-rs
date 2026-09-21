@@ -8,9 +8,12 @@ use dotty_core::Definitions;
 use dotty_core::Packages;
 use dotty_core::ids::TypeId;
 use dotty_core::names::Namespace;
+use dotty_core::names::TypeName;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
-use dotty_core::types::Type;
+use dotty_core::types::{
+    StructuralMemberLookup, TermRefTarget, Type, TypeRefTarget, lookup_structural_member,
+};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -1000,47 +1003,114 @@ fn a_real_rec_this_decoded_first_builds_the_same_graph() {
     assert_eq!(rec_this_binder(&session.store, this), recursive);
 }
 
-#[test]
-fn a_real_member_selected_by_name_from_a_rec_this_is_an_unsupported_prefix() {
-    // `T2 = T1`: the `T1` is a name-based reference whose prefix is a
-    // `RecThis`. A refinement member has no symbol, so it cannot be looked up,
-    // and no synthetic symbol is invented for it.
-    real_unit!(file, session, unpickler);
-    let before = unpickler.index().type_count();
+/// The address and type of every node of the real unit decoded so far.
+fn decoded_types(unpickler: &TastyUnpickler<'_, '_, '_>) -> Vec<(u32, TypeId)> {
+    let file = TastyFile::parse_scala_3_9(REAL).unwrap();
+    let index = file.ast_address_index().unwrap();
+    index
+        .iter_nodes()
+        .filter_map(|node| {
+            let at = u32::try_from(node.offset).unwrap();
+            Some((at, unpickler.index().type_at(at)?))
+        })
+        .collect()
+}
 
-    for at in [RECURSIVE, RECURSIVE_THIS] {
-        let result = unpickler.unpickle_type(at);
-        assert!(
+/// Those of `decoded` whose reference is name-designated.
+fn name_designated(store: &SemanticStore, decoded: &[(u32, TypeId)]) -> Vec<(u32, TypeId)> {
+    decoded
+        .iter()
+        .copied()
+        .filter(|(_, id)| {
             matches!(
-                result,
-                Err(UnpickleError::UnsupportedResolutionPrefix { .. })
-            ),
-            "{at}: {result:?}"
-        );
-        // Everything, including the recursive binder and the `RecThis`, is
-        // rolled back.
-        assert_eq!(unpickler.index().type_count(), before, "{at}");
-        assert_eq!(unpickler.index().type_at(RECURSIVE), None, "{at}");
-    }
+                store.types.get(*id),
+                Type::TypeRef {
+                    target: TypeRefTarget::Name(_),
+                    ..
+                }
+            )
+        })
+        .collect()
 }
 
 #[test]
-fn a_real_failure_after_a_rec_this_was_made_leaves_the_next_recursive_type_correct() {
-    // Decoding `RECURSIVE` creates its binder and its canonical `RecThis`
-    // before failing on the member selection. A different recursive type
-    // decoded afterwards gets the freed ids and must get its own `RecThis`.
+fn a_real_member_selected_by_name_from_a_rec_this_is_a_name_designated_reference() {
+    // `C { type T1; type T2 = T1 }`: the `T1` on the right is a name-based
+    // reference whose prefix is the `RecThis`. A refinement member has no
+    // symbol, so the reference is `prefix + Name`, and no symbol is invented.
     real_unit!(file, session, unpickler);
-    assert!(unpickler.unpickle_type(RECURSIVE).is_err());
+    let symbols = unpickler.index().symbol_count();
 
-    let recursive = unpickler.unpickle_type(SELF_TYPE).unwrap();
-    let this = unpickler.index().type_at(SELF_TYPE_THIS).unwrap();
+    let recursive = unpickler.unpickle_type(RECURSIVE).unwrap();
+    let this = unpickler.index().type_at(RECURSIVE_THIS).unwrap();
+    let decoded = decoded_types(&unpickler);
+    let symbols_after = unpickler.index().symbol_count();
     drop(unpickler);
+    let store = &session.store;
+    let refs = name_designated(store, &decoded);
 
-    assert_eq!(rec_this_binder(&session.store, this), recursive);
-    assert!(matches!(
-        session.store.types.get(recursive),
-        Type::Recursive { .. }
-    ));
+    assert_eq!(symbols_after, symbols);
+    // Recursive R { Refined T2 (Refined T1 C, bounds) = Alias(T1 ref) }
+    let t2 = recursive_parent(store, recursive);
+    let (t1_refined, t2_name, t2_info) = refined_parts(store, t2);
+    assert_eq!(member_name(store, t2_name), "T2");
+    let (class, t1_name, t1_info) = refined_parts(store, t1_refined);
+    assert_eq!(member_name(store, t1_name), "T1");
+    assert!(matches!(store.types.get(class), Type::TypeRef { .. }));
+    let Type::AliasingBounds { alias } = *store.types.get(t2_info) else {
+        panic!("alias bounds expected, got {:?}", store.types.get(t2_info));
+    };
+    // The reference: RecThis(R) prefix, Name(T1) target, no symbol.
+    let Type::TypeRef { prefix, target } = *store.types.get(alias) else {
+        panic!("a type ref expected, got {:?}", store.types.get(alias));
+    };
+    assert_eq!(prefix, this);
+    assert_eq!(rec_this_binder(store, prefix), recursive);
+    let TypeRefTarget::Name(name) = target else {
+        panic!("a name designator expected");
+    };
+    assert_eq!(name.as_name(), &t1_name);
+    assert_eq!(store.types.get(alias).reference_symbol(), None);
+    // The single name-designated reference of the unit is this one.
+    assert_eq!(refs.iter().map(|(_, id)| *id).collect::<Vec<_>>(), [alias]);
+    // Not replaced by the bounds it names.
+    assert_ne!(alias, t1_info);
+
+    // After construction, structural lookup recovers the T1 refinement's info.
+    assert_eq!(
+        lookup_structural_member(store, prefix, t1_name),
+        Ok(StructuralMemberLookup::Found {
+            name: t1_name,
+            info: t1_info
+        })
+    );
+}
+
+#[test]
+fn both_decode_orders_of_the_real_recursive_refinement_build_one_graph() {
+    real_unit!(file, session, unpickler);
+    let recursive = unpickler.unpickle_type(RECURSIVE).unwrap();
+    let this = unpickler.index().type_at(RECURSIVE_THIS).unwrap();
+    let count = unpickler.index().type_count();
+    let decoded = decoded_types(&unpickler);
+    drop(unpickler);
+    let refs = name_designated(&session.store, &decoded);
+
+    real_unit!(file, session2, unpickler2);
+    // The `RECthis` first: its binder is decoded on demand.
+    let this2 = unpickler2.unpickle_type(RECURSIVE_THIS).unwrap();
+    let recursive2 = unpickler2.index().type_at(RECURSIVE).unwrap();
+    assert_eq!(unpickler2.unpickle_type(RECURSIVE), Ok(recursive2));
+    assert_eq!(unpickler2.unpickle_type(RECURSIVE_THIS), Ok(this2));
+    let decoded2 = decoded_types(&unpickler2);
+    let count2 = unpickler2.index().type_count();
+    drop(unpickler2);
+    let refs2 = name_designated(&session2.store, &decoded2);
+
+    // The same ids, in the same numbering, whichever entry point built it.
+    assert_eq!((recursive2, this2, count2), (recursive, this, count));
+    assert_eq!(refs2, refs);
+    assert_eq!(rec_this_binder(&session2.store, this2), recursive2);
 }
 
 #[test]
@@ -1075,4 +1145,306 @@ fn a_rec_this_naming_a_shared_link_to_a_recursive_type_is_refused_in_either_orde
     unpickler.unpickle_type(2).unwrap();
     unpickler.unpickle_type(u32::from(link_at)).unwrap();
     assert_eq!(unpickler.unpickle_type(this_at), expected);
+}
+
+// Name-designated references (Milestone 4c2), over synthetic wire
+
+const TYPEREF: u8 = 117;
+const TERMREF: u8 = 115;
+const TYPEREFIN: u8 = 175;
+const NAME_M: u8 = 2;
+const NAME_SIGNED: u8 = 3;
+
+/// `TYPEREF m prefix` or `TERMREF m prefix`.
+fn named(tag: u8, name: u8, prefix: &[u8]) -> Vec<u8> {
+    let mut node = vec![tag, nat(name)];
+    node.extend(prefix);
+    node
+}
+
+/// `RECtype (REFINED m package {info: TYPEBOUNDS reference})`, with the
+/// reference to build, in a file whose `RECtype` is at 2 and whose reference
+/// is at [`REFERENCE_AT`]. The reference names the `RECtype` through a
+/// `RECthis` while that type is still being decoded.
+fn recursive_holding(reference: &[u8]) -> Vec<u8> {
+    let info = length_node(TYPEBOUNDS, reference);
+    rec_type(&refined(NAME_M, &package_ref(), &info))
+}
+
+/// `RECtype` at 2, `REFINED` at 3, its info `TYPEBOUNDS` at 8, the reference
+/// at 10.
+const REFERENCE_AT: u32 = 10;
+
+fn this_of_rec() -> Vec<u8> {
+    rec_this(u8::try_from(REC_AT).unwrap())
+}
+
+/// The reference inside the one refinement of `recursive`.
+fn reference_of(store: &SemanticStore, recursive: TypeId) -> TypeId {
+    let (_, _, info) = refined_parts(store, recursive_parent(store, recursive));
+    match store.types.get(info) {
+        Type::AliasingBounds { alias } => *alias,
+        // A term member's info is the type itself.
+        _ => info,
+    }
+}
+
+#[test]
+fn a_name_designated_reference_is_built_while_its_recursive_type_is_still_pending() {
+    let bytes = file_with(&recursive_holding(&named(TYPEREF, NAME_M, &this_of_rec())));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let symbols = unpickler.index().symbol_count();
+
+    let recursive = unpickler.unpickle_type(REC_AT).unwrap();
+    let reference = unpickler.index().type_at(REFERENCE_AT).unwrap();
+    assert_eq!(unpickler.index().symbol_count(), symbols);
+    drop(unpickler);
+
+    let store = &session.store;
+    let (_, name, _) = refined_parts(store, recursive_parent(store, recursive));
+    assert_eq!(reference_of(store, recursive), reference);
+    let Type::TypeRef { prefix, target } = *store.types.get(reference) else {
+        panic!("a type ref expected");
+    };
+    assert_eq!(rec_this_binder(store, prefix), recursive);
+    assert_eq!(target, TypeRefTarget::Name(TypeName::new(name.text())));
+    assert_eq!(name.namespace(), Namespace::Type);
+}
+
+#[test]
+fn a_shared_link_to_a_name_designated_reference_is_the_same_type_in_either_order() {
+    let reference = named(TYPEREF, NAME_M, &this_of_rec());
+    let rec = recursive_holding(&reference);
+    let link_at = 2 + u8::try_from(rec.len()).unwrap();
+    let bytes = file_with_two(&rec, &[SHARED, nat(u8::try_from(REFERENCE_AT).unwrap())]);
+    let ids = |link_first: bool| {
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let mut session = Session::new();
+        let mut unpickler = unpickler_for(&file, &mut session);
+        let (recursive, linked) = if link_first {
+            let linked = unpickler.unpickle_type(u32::from(link_at)).unwrap();
+            (unpickler.unpickle_type(REC_AT).unwrap(), linked)
+        } else {
+            let recursive = unpickler.unpickle_type(REC_AT).unwrap();
+            (
+                recursive,
+                unpickler.unpickle_type(u32::from(link_at)).unwrap(),
+            )
+        };
+        let direct = unpickler.index().type_at(REFERENCE_AT).unwrap();
+        let count = unpickler.index().type_count();
+        drop(unpickler);
+        assert_eq!(linked, direct, "link first: {link_first}");
+        assert_eq!(reference_of(&session.store, recursive), direct);
+        (recursive, direct, count)
+    };
+
+    assert_eq!(ids(false), ids(true));
+}
+
+#[test]
+fn a_term_reference_through_a_rec_this_is_name_designated_too() {
+    let bytes = file_with(&recursive_holding(&named(TERMREF, NAME_M, &this_of_rec())));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let recursive = unpickler.unpickle_type(REC_AT).unwrap();
+    drop(unpickler);
+
+    let store = &session.store;
+    let reference = reference_of(store, recursive);
+    let Type::TermRef { prefix, target } = *store.types.get(reference) else {
+        panic!("a term ref expected");
+    };
+    assert_eq!(rec_this_binder(store, prefix), recursive);
+    let TermRefTarget::Name(name) = target else {
+        panic!("a name designator expected");
+    };
+    assert_eq!(name.as_name().namespace(), Namespace::Term);
+    assert_eq!(store.names.resolve(name.as_name().text()), "m");
+    // A `TypeRef` to the same text would be a different reference.
+    assert_eq!(store.types.get(reference).reference_symbol(), None);
+}
+
+#[test]
+fn a_refined_prefix_designates_a_member_by_name_as_well() {
+    // `(p { type m }).m`.
+    let prefix = refined(NAME_M, &package_ref(), &alias_bounds());
+    let bytes = file_with(&named(TYPEREF, NAME_M, &prefix));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(REC_AT).unwrap();
+    drop(unpickler);
+
+    let Type::TypeRef { prefix, target } = *session.store.types.get(id) else {
+        panic!("a type ref expected");
+    };
+    assert!(matches!(
+        session.store.types.get(prefix),
+        Type::Refined { .. }
+    ));
+    assert!(matches!(target, TypeRefTarget::Name(_)));
+}
+
+#[test]
+fn a_signed_term_reference_through_a_rec_this_is_still_deferred() {
+    let bytes = file_with(&recursive_holding(&named(
+        TERMREF,
+        NAME_SIGNED,
+        &this_of_rec(),
+    )));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::UnsupportedSignedReference { .. })
+    ));
+}
+
+#[test]
+fn an_owner_space_reference_never_falls_back_to_a_name_designator() {
+    // `TYPEREFin m (RECthis) p`: the declaration is looked for in the package
+    // `p`, which has none, so it is unresolved, not `RecThis.m`.
+    let reference = length_node(
+        TYPEREFIN,
+        &[vec![nat(NAME_M)], this_of_rec(), package_ref()].concat(),
+    );
+    let bytes = file_with(&recursive_holding(&reference));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::UnresolvedMember { space: Some(_), .. })
+    ));
+}
+
+#[test]
+fn an_owner_space_without_declarations_is_a_space_error_even_under_a_structural_prefix() {
+    // `TYPEREFin m (RECthis) (RECthis)`: a `RecThis` is not a declaration
+    // space, and the structural prefix must not turn that into a name.
+    let reference = length_node(
+        TYPEREFIN,
+        &[vec![nat(NAME_M)], this_of_rec(), this_of_rec()].concat(),
+    );
+    let bytes = file_with(&recursive_holding(&reference));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::UnsupportedResolutionSpace { .. })
+    ));
+}
+
+#[test]
+fn a_prefix_that_is_not_structural_stays_an_unresolved_member() {
+    // `p.m`: the package `p` is entered and has no `m`; a name is not a
+    // fallback for missing resolution.
+    let bytes = file_with(&named(TYPEREF, NAME_M, &package_ref()));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type(REC_AT),
+        Err(UnpickleError::UnresolvedMember { space: None, .. })
+    ));
+}
+
+/// A resolver that answers every request with `answer`.
+struct Answering(Option<dotty_core::SymbolId>);
+
+impl dotty_core::SymbolResolver for Answering {
+    fn resolve_member(
+        &mut self,
+        _store: &SemanticStore,
+        _request: &dotty_core::MemberRequest,
+    ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
+        Ok(self.0)
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &SemanticStore,
+        _path: &[&str],
+    ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_symbol_the_resolver_knows_wins_over_a_name_designator() {
+    let bytes = file_with(&recursive_holding(&named(TYPEREF, NAME_M, &this_of_rec())));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let name = dotty_core::Name::new(session.store.names.intern("m"), Namespace::Type);
+    let answer = session.store.symbols.alloc(dotty_core::Symbol {
+        name,
+        owner: None,
+        kind: dotty_core::SymbolKind::Class,
+        flags: dotty_core::SymbolFlags::EMPTY,
+        visibility: dotty_core::Visibility::Public,
+        info: dotty_core::SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::SymbolLinks::default(),
+    });
+    let mut unpickler =
+        unpickler_for(&file, &mut session).with_resolver(Box::new(Answering(Some(answer))));
+
+    let recursive = unpickler.unpickle_type(REC_AT).unwrap();
+    drop(unpickler);
+
+    let reference = reference_of(&session.store, recursive);
+    assert_eq!(
+        session.store.types.get(reference).reference_symbol(),
+        Some(answer)
+    );
+}
+
+#[test]
+fn a_failure_after_a_name_designated_reference_was_built_leaves_nothing_behind() {
+    // The left operand builds the recursive type, its `RecThis` and the
+    // name-designated reference; the right one fails.
+    let rec = recursive_holding(&named(TYPEREF, NAME_M, &this_of_rec()));
+    let bytes = file_with_two(&rec, &[UNSUPPORTED, nat(1)]);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let (types, symbols) = (
+        unpickler.index().type_count(),
+        unpickler.index().symbol_count(),
+    );
+    let checkpoint_before = unpickler.index().type_count();
+
+    // The failing operand is decoded after the recursive one.
+    assert!(unpickler.unpickle_type(0).is_err());
+
+    assert_eq!(unpickler.index().type_count(), checkpoint_before);
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().symbol_count(), symbols);
+    assert_eq!(unpickler.index().type_at(REC_AT), None);
+    assert_eq!(unpickler.index().type_at(REFERENCE_AT), None);
+
+    // The retry builds a clean graph with its own `RecThis`.
+    let recursive = unpickler.unpickle_type(REC_AT).unwrap();
+    let reference = unpickler.index().type_at(REFERENCE_AT).unwrap();
+    drop(unpickler);
+    let store = &session.store;
+    assert_eq!(reference_of(store, recursive), reference);
+    let Type::TypeRef { prefix, .. } = *store.types.get(reference) else {
+        panic!("a type ref expected");
+    };
+    assert_eq!(rec_this_binder(store, prefix), recursive);
 }

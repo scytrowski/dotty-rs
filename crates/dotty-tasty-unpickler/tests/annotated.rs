@@ -518,20 +518,17 @@ fn a_member_is_looked_up_through_an_annotated_prefix_that_stays_in_the_graph() {
     let prefix = unpickler.index().type_at(4).unwrap();
     drop(unpickler);
 
-    let Type::TypeRef {
-        prefix: found,
-        symbol,
-    } = session.store.types.get(id)
-    else {
+    let Type::TypeRef { prefix: found, .. } = session.store.types.get(id) else {
         panic!("not a type reference");
     };
+    let symbol = session.store.types.get(id).reference_symbol().unwrap();
     // The prefix is the annotated type, not its underlying package.
     assert_eq!(*found, prefix);
     assert!(matches!(
         session.store.types.get(prefix),
         Type::Annotated { .. }
     ));
-    let member = session.store.symbols.get(*symbol);
+    let member = session.store.symbols.get(symbol);
     assert_eq!(session.store.names.resolve(member.name.text()), "p");
     assert_eq!(member.kind, dotty_core::SymbolKind::Class);
 }
@@ -1117,10 +1114,10 @@ const NESTED_OUTER: u32 = 86;
 const NESTED_INNER: u32 = 88;
 
 fn class_name(session: &Session, ty: TypeId) -> String {
-    let Type::TypeRef { symbol, .. } = session.store.types.get(ty) else {
+    let Some(symbol) = session.store.types.get(ty).reference_symbol() else {
         panic!("not a type reference: {:?}", session.store.types.get(ty));
     };
-    let name = session.store.symbols.get(*symbol).name.text();
+    let name = session.store.symbols.get(symbol).name.text();
     session.store.names.resolve(name).to_string()
 }
 
@@ -1375,9 +1372,9 @@ fn a_real_compact_annotation_decodes_to_an_annotation_without_a_tree() {
     let annotation = session.store.annotations.get(annotation);
     assert_eq!(annotation.ty, annotation_type);
     assert_eq!(annotation.tree, None);
-    let Type::TypeRef { symbol, .. } = session.store.types.get(annotation.ty) else {
+    let Some(symbol) = session.store.types.get(annotation.ty).reference_symbol() else {
         panic!("the annotation is not a type reference");
     };
-    let class = session.store.symbols.get(*symbol).name.text();
+    let class = session.store.symbols.get(symbol).name.text();
     assert_eq!(session.store.names.resolve(class), "retainsCap");
 }

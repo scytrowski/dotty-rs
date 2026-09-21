@@ -201,36 +201,24 @@ fn path_dependent_type() {
 
     // The parameter `x: Foo`.
     let x_symbol = synthetic_symbol(&mut store, *x_name.as_name(), SymbolKind::Parameter);
-    let foo_type_ref = store.types.alloc(Type::TypeRef {
-        prefix: no_prefix,
-        symbol: trait_symbol,
-    });
+    let foo_type_ref = store.types.alloc(Type::type_ref(no_prefix, trait_symbol));
     store
         .symbols
         .set_info(x_symbol, SymbolInfo::Complete(foo_type_ref));
 
     // `x.T`: a TypeRef whose prefix is `x`'s own singleton (TermRef) type.
-    let x_singleton = store.types.alloc(Type::TermRef {
-        prefix: no_prefix,
-        symbol: x_symbol,
-    });
-    let path_dependent = store.types.alloc(Type::TypeRef {
-        prefix: x_singleton,
-        symbol: t_symbol,
-    });
+    let x_singleton = store.types.alloc(Type::term_ref(no_prefix, x_symbol));
+    let path_dependent = store.types.alloc(Type::type_ref(x_singleton, t_symbol));
 
-    let Type::TypeRef { prefix, symbol } = *store.types.get(path_dependent) else {
+    let Type::TypeRef { prefix, .. } = *store.types.get(path_dependent) else {
         panic!("expected a TypeRef");
     };
-    assert_eq!(symbol, t_symbol);
-    let Type::TermRef {
-        symbol: prefix_symbol,
-        ..
-    } = *store.types.get(prefix)
-    else {
-        panic!("expected the prefix to be x's singleton TermRef");
-    };
-    assert_eq!(prefix_symbol, x_symbol);
+    assert_eq!(
+        store.types.get(path_dependent).reference_symbol(),
+        Some(t_symbol)
+    );
+    assert!(matches!(store.types.get(prefix), Type::TermRef { .. }));
+    assert_eq!(store.types.get(prefix).reference_symbol(), Some(x_symbol));
     assert_eq!(store.symbols.get(t_symbol).owner, Some(trait_symbol));
 }
 
@@ -304,10 +292,7 @@ fn contextual_parameter() {
 
     let show_symbol = synthetic_symbol(&mut store, *show_name.as_name(), SymbolKind::Trait);
     let no_prefix = placeholder(&mut store);
-    let show_tycon = store.types.alloc(Type::TypeRef {
-        prefix: no_prefix,
-        symbol: show_symbol,
-    });
+    let show_tycon = store.types.alloc(Type::type_ref(no_prefix, show_symbol));
     let show_of_a = store.types.alloc(Type::Applied {
         tycon: show_tycon,
         args: vec![param_ref],
@@ -383,10 +368,7 @@ fn type_lambda() {
 
     let either_symbol = synthetic_symbol(&mut store, *either_name.as_name(), SymbolKind::Class);
     let no_prefix = placeholder(&mut store);
-    let either_tycon = store.types.alloc(Type::TypeRef {
-        prefix: no_prefix,
-        symbol: either_symbol,
-    });
+    let either_tycon = store.types.alloc(Type::type_ref(no_prefix, either_symbol));
     let string_arg = placeholder(&mut store);
     let either_applied = store.types.alloc(Type::Applied {
         tycon: either_tycon,
@@ -442,10 +424,9 @@ fn match_type() {
 
     let iterable_symbol = synthetic_symbol(&mut store, *iterable_name.as_name(), SymbolKind::Class);
     let no_prefix = placeholder(&mut store);
-    let iterable_tycon = store.types.alloc(Type::TypeRef {
-        prefix: no_prefix,
-        symbol: iterable_symbol,
-    });
+    let iterable_tycon = store
+        .types
+        .alloc(Type::type_ref(no_prefix, iterable_symbol));
     let t_placeholder = placeholder(&mut store);
     let pattern = store.types.alloc(Type::Applied {
         tycon: iterable_tycon,
@@ -506,10 +487,9 @@ fn annotated_symbol() {
     let deprecated_symbol =
         synthetic_symbol(&mut store, *deprecated_name.as_name(), SymbolKind::Class);
     let no_prefix = placeholder(&mut store);
-    let deprecated_type = store.types.alloc(Type::TypeRef {
-        prefix: no_prefix,
-        symbol: deprecated_symbol,
-    });
+    let deprecated_type = store
+        .types
+        .alloc(Type::type_ref(no_prefix, deprecated_symbol));
     let annotation_id = store
         .annotations
         .alloc(Annotation::new(deprecated_type, None));

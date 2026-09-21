@@ -106,10 +106,10 @@ fn class_info(store: &SemanticStore, id: SymbolId) -> &ClassInfo {
 
 /// The `SymbolId` a `Type::TypeRef` (a `ClassInfo` parent) points at.
 fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
-    let Type::TypeRef { symbol, .. } = store.types.get(ty) else {
+    let Some(symbol) = store.types.get(ty).reference_symbol() else {
         panic!("expected a TypeRef");
     };
-    *symbol
+    symbol
 }
 
 /// `Dog.tasty`'s `Animal` mixin is a real, post-typecheck reference
