@@ -341,6 +341,26 @@ mod tests {
     }
 
     #[test]
+    fn a_name_designated_annotation_type_has_no_class_and_is_never_erased() {
+        use crate::names::TypeName;
+        use crate::types::TypeRefTarget;
+        let mut world = World::new();
+        // Named like the real class, but designated by name: no symbol, and no
+        // comparison of text stands in for one.
+        let text = world.store.names.intern("ErasedParam");
+        let by_name = world.store.types.alloc(Type::TypeRef {
+            prefix: world.no_prefix,
+            target: TypeRefTarget::Name(TypeName::new(text)),
+        });
+        let annotation = Annotation::new(by_name, None);
+        let underlying = world.no_prefix;
+        let annotated = world.annotate(underlying, by_name);
+
+        assert_eq!(world.store.annotation_class(&annotation), None);
+        assert!(!world.store.has_annotation(annotated, &ERASED));
+    }
+
+    #[test]
     fn the_class_path_is_the_packages_then_the_class() {
         let mut world = World::new();
         let class = world.class(&["scala", "annotation", "internal"], "ErasedParam", None);

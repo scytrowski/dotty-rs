@@ -32,6 +32,9 @@ Status (`crates/dotty-tasty-unpickler`):
   implemented (§4, "Owner-space references"). It decodes 0 real nodes from the
   corpora, because the declaring classes belong to other units; see the
   measurement in §8.
+- Milestone 4c2, name-designated references for refined and recursive members:
+  implemented (§4, "Name-designated references"). The real `C { type T1; type
+  T2 = T1 }` decodes.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -85,7 +88,7 @@ function. It follows an enter-before-complete model:
 | 4b2a. Full annotation applications | `APPLY`/`NEW` annotations with `AnnotationArguments`; `MethodParam.erased` from `ErasedParam` | 4b2a |
 | 4b2b. `SHAREDterm` annotations | term-tree address identity | 4b2b |
 | 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
-| 4c2. Symbol-less refined members | by-name references through `Refined` / `Recursive` / `RecThis` | 4c2 |
+| 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
 | 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
@@ -610,17 +613,12 @@ stripped. Nested refinements keep the order and nesting TASTy writes: the inner
 one is the outer's parent, nothing is flattened. `Method`, `Poly`, `Bounds` and
 `TypeLambda` infos compose (Methodic.scala and RecursiveRefined.scala).
 
-**No member lookup.** `Refined` holds a parent, a `Name` and an info, but no
-`SymbolId` for the member, and TypeRef/TermRef are symbol-based, so a member of
-a refined or recursive type cannot be found here, and no synthetic symbol or
-text search was added. A by-name reference through such a prefix keeps the
-existing `UnsupportedResolutionPrefix` (4c1 does not change this: `REFin`
-is an owner-space reference to a real symbol, not a refinement member; that
-is 4c2). In
-practice this is the common case for a *recursive* refinement: in
-`C { type T1; type T2 = T1 }` the `T1` is named through a `RECthis`, so that
-whole type decodes only with a resolver that can search refinements. The
-self-referential shape that needs no lookup does decode: `Base { def me: this.type }`
+**Refinement members (Milestone 4c2).** `Refined` holds a parent, a `Name` and
+an info, with no `SymbolId` for the member, so a by-name reference to it is not
+a symbol reference: see "Name-designated references". No synthetic symbol and
+no text search is used.
+The
+self-referential shape does decode: `Base { def me: this.type }`
 is `Recursive -> Refined -> ByName -> RecThis`, the `RecThis` naming the exact
 `Recursive` id, in either decode order.
 
@@ -824,6 +822,50 @@ symbol-based. A by-name reference through a `RecThis` or a `Refined` therefore
 cannot be an owner-space declaration, and no synthetic symbol or text search
 was added: that is Milestone 4c2.
 
+### Name-designated references (Milestone 4c2)
+
+`TypeRef`/`TermRef` hold a `target`: `Symbol(SymbolId)` or `Name(TypeName |
+TermName)`, Dotty's `NamedType` designator `Symbol | Name` (see
+`dotty-core-design.md`). Every producer of a resolved reference keeps creating
+`Symbol` targets: `*direct`, `*symbol`, `*pkg`, resolved ordinary named refs,
+resolver answers, builtins, the classloader and `TYPEREFin`/`TERMREFin`.
+`REFin` never falls back to a name: an unresolved owner-space reference stays
+`UnresolvedMember`/`UnsupportedResolutionSpace`.
+
+An ordinary `TYPEREF`/`TERMREF name prefix` is resolved in this order, unchanged
+by 4c2: local unique symbol, `AmbiguousMember`, resolver symbol. Only when the
+prefix is *structural*, that is `Refined`, `Recursive` or `RecThis` (looked
+through `Flexible`/`Annotated`), and neither the local scope nor the resolver
+knows the member, does the reference become `prefix + Name`. Everything else
+keeps its error: a missing external class member is still `UnresolvedMember`
+(a name is not a fallback for missing classpath data), a prefix with no lookup
+semantics is still `UnsupportedResolutionPrefix`, and a signed `TERMREF` is
+still `UnsupportedSignedReference` (its signature is semantic, so a plain
+`TermName` cannot carry it).
+
+**Pending binders.** In `C { type T1; type T2 = T1 }` the `T1` is
+`TYPEREF T1 (RECthis R)` and is read while `R` is still being decoded (Scala's
+`RecType(rt => registeringType(rt, readType()))` registers first). Building
+`prefix + Name` needs nothing from `R`'s slot: only the type of the prefix
+(the canonical `RecThis`, already allocated) is inspected, and the binder is
+never read. The `Refined` graph is the only place the member lives, and
+`lookup_structural_member(RecThis(R), T1)` reads it after construction. A `Refined`
+or `Recursive` prefix that is itself a slot still being decoded keeps
+`UnsupportedResolutionPrefix`.
+
+**Identity.** One address owns one `TypeId`, and target kind is part of a
+reference's identity. A `SHAREDtype` to a name-designated reference returns that
+exact id in either decode order. Decoding the `RECthis` first reaches the
+reference through the binder decoded on demand, so an outer node reached again
+while its own child decodes the binder now returns the inner decode's type
+instead of allocating a second one (`DuplicateType` before this milestone,
+unreachable then).
+
+**Real result.** `C { type T1; type T2 = T1 }` decodes to
+`Recursive R { Refined T2 (Refined T1 C, bounds) = AliasingBounds(TypeRef
+{ prefix: RecThis(R), target: Name(T1) }) }`; `T1` is not replaced by its
+bounds and `lookup_structural_member` recovers the `T1` refinement's info.
+
 ### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 
 `TYPEBOUNDS Length Type Type? Variance*`, with `STABLE`, `COVARIANT` or
@@ -1022,8 +1064,8 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 4b2b: `SHAREDterm` annotation trees (term-tree identity) and whatever
      else the survey shows;
    - 4c1: `TYPEREFin` / unsigned `TERMREFin` owner-space resolution — complete;
-   - 4c2: symbol-less refined / recursive member references and `RecThis`
-     member lookup;
+   - 4c2: name-designated refined / recursive member references and
+     `lookup_structural_member` — complete;
    - 4d: `Match` / `MatchCase` and whatever else measurement shows.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -1267,7 +1309,7 @@ The real corpus has very few recursive types: 2 `RECtype` and 2 `RECthis` in the
 library, none in the compiler. All four fail the same way, as the prefix of a
 by-name member (`UnsupportedResolutionPrefix`, see "No member lookup"), so no
 `RECthis` decodes there: unique recursive binders named 0, canonical `RecThis`
-ids 0, and the two `RECthis` roots are asked for before their binder has a type
+ids 0 (as measured after 4a; Milestone 4c2 makes both roots decode, see "Name-designated references after 4c2"), and the two `RECthis` roots are asked for before their binder has a type
 (binder decoded on demand 2). The corpus test also asserts the canonicalization
 invariant (one `TypeId` per binder) for every decoded `RECthis`, which the
 fixtures exercise instead. The 9 library refinements with an unsupported form
@@ -1439,6 +1481,41 @@ the `REFin` prefixes that reach an external class (library +9, compiler +7).
 The two library `RECtype`/`RECthis` roots still fail on
 `UnsupportedResolutionPrefix`: that is input for 4c2. 0 unexpected errors in any
 run.
+
+### Name-designated references after 4c2 (library / compiler)
+
+Same four runs. `UnsupportedResolutionPrefix` is surveyed on the wire shape of
+the prefix of each name-based `TYPEREF`/`TERMREF` root (before / after 4c2):
+
+| prefix shape | library before | library after | compiler |
+|--------------|----------------|---------------|----------|
+| `RECthis` (direct + through `SHAREDtype`) | 3 | 0 | 0 |
+| `TERMREF`, `TERMREFdirect`, `TERMREFsymbol` (direct or shared) | 91 | 91 | 296 |
+| `TYPEREF` | 0 | 0 | 2 |
+| `APPLIEDtype` (builtins only) | 1 | 1 | 0 |
+| `Refined`, `Recursive`, `ParamRef`, `SuperType`, `And`/`Or`, binders, bounds, `NoPrefix` | 0 | 0 | 0 |
+
+Only `RecThis` was a structural prefix in the data, so `ParamRef` support was
+not needed and none was added. The remaining prefixes are term paths (`x.T`
+where `x` is a `val`, object or parameter): those have symbols, and finding a
+member through the *type* of `x` needs symbol completion (Milestone 5), not a
+name designator. Name targets created: `TypeRef` over `RecThis` 3 in the
+library (with and without builtins), 0 `TermRef`, 0 in the compiler. External
+failures are unchanged (`need external` identical in all four runs).
+
+Roots (library, no builtins -> builtins; the compiler is unchanged):
+
+| node | no builtins | builtins |
+|------|-------------|----------|
+| `RECtype` | 0 -> 2 | 0 -> 2 |
+| `RECthis` | 0 -> 2 | 0 -> 2 |
+| `REFINEDtype` | 18 -> 20 | 32 -> 34 |
+| `TYPEBOUNDS` | 36 -> 38 | 717 -> 719 |
+| `APPLIEDtype` | 4,587 -> 4,590 | 5,471 -> 5,474 |
+| named `TYPEREF` | 10,085 -> 10,088 | 11,681 -> 11,684 |
+| `BYNAMEtype`, `ANNOTATEDtype`, `TYPELAMBDAtype`, `PARAMtype`, `FLEXIBLEtype`, named `TERMREF` | unchanged | unchanged |
+
+Both real `RECtype`/`RECthis` roots now decode. 0 unexpected errors in any run.
 
 ## 9. Review of Milestone 1
 

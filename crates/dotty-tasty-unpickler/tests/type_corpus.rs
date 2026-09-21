@@ -436,6 +436,9 @@ struct Tally {
     /// `REFin` nodes whose two children decoded: the owner space, the
     /// declaration name and its namespace, for the [`OwnerOracle`].
     oracle_queries: Vec<(dotty_core::ids::TypeId, Option<String>, Namespace)>,
+    /// Name-designated references created (Milestone 4c2), by reference kind
+    /// and the semantic variant of their prefix.
+    name_targets: BTreeMap<(&'static str, &'static str), usize>,
     /// Name-based `TYPEREF` / `TERMREF` roots that failed on an unsupported
     /// prefix (Milestone 4c2 survey), by tag and the prefix's wire shape.
     unsupported_prefix_shapes: BTreeMap<(&'static str, String), usize>,
@@ -858,6 +861,7 @@ fn run(
     };
     let mut rec_this_ids: HashMap<u32, HashSet<dotty_core::ids::TypeId>> = HashMap::new();
 
+    let mut named_roots: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut decoded_erased_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut other_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
@@ -979,6 +983,9 @@ fn run(
         }
         match result {
             Ok(first) => {
+                if matches!(tag, 115 | 117) {
+                    named_roots.push(first);
+                }
                 decoded += 1;
                 outcomes.decoded += 1;
                 // Identity: decoding again never allocates a second type.
@@ -1098,6 +1105,29 @@ fn run(
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
     let (index, packages) = unpickler.into_parts();
+    for id in named_roots {
+        use dotty_core::types::{TermRefTarget, TypeRefTarget};
+        let (kind, prefix) = match store.types.get(id) {
+            dotty_core::types::Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Name(_),
+            } => ("TypeRef", *prefix),
+            dotty_core::types::Type::TermRef {
+                prefix,
+                target: TermRefTarget::Name(_),
+            } => ("TermRef", *prefix),
+            _ => continue,
+        };
+        let variant = match store.types.get(prefix) {
+            dotty_core::types::Type::RecThis { .. } => "RecThis",
+            dotty_core::types::Type::Refined { .. } => "Refined",
+            dotty_core::types::Type::Recursive { .. } => "Recursive",
+            dotty_core::types::Type::Flexible { .. } => "Flexible (proxy)",
+            dotty_core::types::Type::Annotated { .. } => "Annotated (proxy)",
+            _ => "other",
+        };
+        *tally.name_targets.entry((kind, variant)).or_default() += 1;
+    }
     for (at, tag) in &tags {
         if *tag == 131
             && let Some(symbol) = index.symbol_at(*at)
@@ -1348,6 +1378,10 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         println!(
             "REFin owner-space oracle (both children decoded; the owner class's own scope, from the unit that entered it): no scope known {}, name is not text {}, no declaration {}, exactly one declaration {}, several {}",
             oracle.no_scope, oracle.name_not_text, oracle.none, oracle.one, oracle.several
+        );
+        println!(
+            "name-designated references created, by kind and prefix variant: {:?}",
+            tally.name_targets
         );
         println!(
             "unsupported-prefix name references by prefix wire shape: {:?}",

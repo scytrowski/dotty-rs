@@ -80,8 +80,8 @@
 //! shares one `RecThis` `TypeId`, as Dotty's `RecType` has one `recThis`. A
 //! `REFINEDtype` name is a term name unless the info, after `SHAREDtype` links,
 //! is `TYPEBOUNDS` (see the `refined` module). A refinement member has no
-//! symbol, so a by-name reference through a refined or recursive prefix stays
-//! `UnsupportedResolutionPrefix`.
+//! symbol, so a by-name reference through a refined or recursive prefix is a
+//! name-designated `TypeRef`/`TermRef` (Milestone 4c2, below).
 //!
 //! ## Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 //!
@@ -160,6 +160,16 @@
 //! it is cached, shared and resolved like any other, and a child's error is
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
+//!
+//! ## Name-designated references (Milestone 4c2)
+//!
+//! An ordinary `TYPEREF`/`TERMREF` is a `Symbol` target when the local scope
+//! or the resolver knows the member. Only when neither does and the prefix is
+//! `Refined`, `Recursive` or `RecThis` (through proxies) is it `prefix + Name`:
+//! the refinement's member has no symbol, and the `Refined` graph stays its
+//! only source (`dotty_core::lookup_structural_member`). Nothing is read from a
+//! `Recursive` still being decoded. `REFin`, signed terms and external
+//! failures are unchanged.
 //!
 //! ## Owner-space references (Milestone 4c1)
 //!
