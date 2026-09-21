@@ -116,7 +116,9 @@ where
             return self.alloc_assign(lhs, rhs);
         }
 
-        self.observe_colon_eol(false);
+        if self.current().kind == TokenKind::ColonFollow {
+            self.observe_colon_eol(false);
+        }
         if self.current_is_ascription_colon() {
             self.advance();
             return self.parse_ascription(lhs);
