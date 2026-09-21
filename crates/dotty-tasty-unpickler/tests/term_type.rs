@@ -11,13 +11,15 @@ use std::rc::Rc;
 
 use dotty_core::Definitions;
 use dotty_core::Packages;
-use dotty_core::ids::SymbolId;
 use dotty_core::ids::TypeId;
+use dotty_core::ids::{AnnotationId, SymbolId};
 use dotty_core::names::Namespace;
 use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolOrigin};
-use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
+use dotty_core::types::{
+    Annotation, AnnotationArguments, AnnotationValue, Constant, TermRefTarget, Type, TypeRefTarget,
+};
 use dotty_tasty::tasty::{
     APPLY_TAG, DEFDEF_TAG, Header, MUTABLE_TAG, NameTable, PACKAGE_TAG, PARAM_TAG, RawName,
     SHAREDTERM_TAG, SHAREDTYPE_TAG, Section, SectionTable, TEMPLATE_TAG, TERMREFDIRECT_TAG,
@@ -26,8 +28,9 @@ use dotty_tasty::tasty::{
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
-const NAMES: [&str; 12] = [
-    "ASTs", "p", "Box", "Out", "Holder", "x", "v", "f", "a", "Missing", "Twins", "Dup",
+const NAMES: [&str; 15] = [
+    "ASTs", "p", "Box", "Out", "Holder", "x", "v", "f", "a", "Missing", "Twins", "Dup", "Tag",
+    "<init>", "hello",
 ];
 
 fn n(text: &str) -> u32 {
@@ -45,6 +48,12 @@ const SINGLETONTPT: u8 = 101;
 const SELECTTPT: u8 = 113;
 const THIS: u8 = 90;
 const REFINEDTYPE: u8 = 159;
+const ANNOTATEDTPT: u8 = 154;
+const ANNOTATEDTYPE: u8 = 153;
+const NEW: u8 = 95;
+const SELECTIN: u8 = 176;
+const STRINGCONST: u8 = 74;
+const LAMBDATPT: u8 = 171;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -109,7 +118,7 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
 }
 
 /// The definitions of the unit, in document order.
-const DEFINITIONS: [&str; 10] = [
+const DEFINITIONS: [&str; 11] = [
     "Box",
     "Box.Out",
     "Holder",
@@ -120,6 +129,7 @@ const DEFINITIONS: [&str; 10] = [
     "Twins",
     "Twins.Dup1",
     "Twins.Dup2",
+    "Tag",
 ];
 
 type Roots = Vec<(&'static str, Vec<u8>)>;
@@ -139,6 +149,24 @@ fn roots(at: &Addresses<'_>) -> Roots {
     let box_type = || leaf(TYPEREFDIRECT_TAG, at.of("Box"));
     let ident_box = || named(IDENTTPT, n("Box"), &box_type());
     let term = |label: &str| leaf(TERMREFDIRECT_TAG, at.of(label));
+    let ident_tag = || named(IDENTTPT, n("Tag"), &leaf(TYPEREFDIRECT_TAG, at.of("Tag")));
+    // `APPLY (SELECTin <init> (NEW class) owner) arguments`: `new Tag(args)`.
+    let annotation = |class: &[u8], arguments: &[Vec<u8>]| {
+        let constructor = node(
+            SELECTIN,
+            &[
+                nat(n("<init>")),
+                wrap(NEW, class),
+                leaf(TYPEREFDIRECT_TAG, at.of("Tag")),
+            ]
+            .concat(),
+        );
+        node(
+            APPLY_TAG,
+            &[vec![constructor], arguments.to_vec()].concat().concat(),
+        )
+    };
+    let string = || leaf(STRINGCONST, n("hello"));
     vec![
         ("ident", named(IDENT, n("x"), &box_type())),
         ("bad ident name", named(IDENT, 999, &box_type())),
@@ -305,6 +333,162 @@ fn roots(at: &Addresses<'_>) -> Roots {
             "singleton inlined",
             wrap(SINGLETONTPT, &node(INLINED, &box_type())),
         ),
+        ("annotation tree", annotation(&ident_tag(), &[])),
+        (
+            "annotation tree with argument",
+            annotation(&ident_tag(), &[string()]),
+        ),
+        (
+            "annotated direct",
+            node(
+                ANNOTATEDTPT,
+                &[ident_box(), annotation(&ident_tag(), &[])].concat(),
+            ),
+        ),
+        (
+            "annotated direct again",
+            node(
+                ANNOTATEDTPT,
+                &[ident_box(), annotation(&ident_tag(), &[])].concat(),
+            ),
+        ),
+        (
+            "annotated shared",
+            node(
+                ANNOTATEDTPT,
+                &[ident_box(), leaf(SHAREDTERM_TAG, at.of("annotation tree"))].concat(),
+            ),
+        ),
+        (
+            "annotated shared again",
+            node(
+                ANNOTATEDTPT,
+                &[ident_box(), leaf(SHAREDTERM_TAG, at.of("annotation tree"))].concat(),
+            ),
+        ),
+        (
+            "annotated shared chain",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    ident_box(),
+                    leaf(SHAREDTERM_TAG, at.of("shared annotation link")),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "shared annotation link",
+            leaf(SHAREDTERM_TAG, at.of("annotation tree")),
+        ),
+        (
+            "annotated type",
+            node(
+                ANNOTATEDTYPE,
+                &[box_type(), leaf(SHAREDTERM_TAG, at.of("annotation tree"))].concat(),
+            ),
+        ),
+        (
+            "annotated type with argument",
+            node(
+                ANNOTATEDTYPE,
+                &[
+                    box_type(),
+                    leaf(SHAREDTERM_TAG, at.of("annotation tree with argument")),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated with argument",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    ident_box(),
+                    leaf(SHAREDTERM_TAG, at.of("annotation tree with argument")),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated by select",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    ident_box(),
+                    annotation(
+                        &named(SELECTTPT, n("Tag"), &leaf(TERMREFPKG_TAG, n("p"))),
+                        &[],
+                    ),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated nested",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    node(
+                        ANNOTATEDTPT,
+                        &[ident_box(), annotation(&ident_tag(), &[])].concat(),
+                    ),
+                    annotation(&ident_tag(), &[string()]),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated over selection",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    named(SELECTTPT, n("Out"), &box_type()),
+                    annotation(&ident_tag(), &[]),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated not a constructor",
+            node(ANNOTATEDTPT, &[ident_box(), ident_any()].concat()),
+        ),
+        (
+            "annotated shared not a constructor",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    ident_box(),
+                    leaf(SHAREDTERM_TAG, at.of("tpt in term position")),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated bad link",
+            node(
+                ANNOTATEDTPT,
+                &[ident_box(), leaf(SHAREDTERM_TAG, 1)].concat(),
+            ),
+        ),
+        (
+            "annotated late failure",
+            node(
+                ANNOTATEDTPT,
+                &[
+                    node(APPLIEDTPT, &[ident_box(), ident_any()].concat()),
+                    annotation(&ident_tag(), &[string(), ident_any()]),
+                ]
+                .concat(),
+            ),
+        ),
+        (
+            "annotated bad base",
+            node(
+                ANNOTATEDTPT,
+                &[node(LAMBDATPT, &any_type()), annotation(&ident_tag(), &[])].concat(),
+            ),
+        ),
         (
             "applied cycle",
             node(
@@ -400,9 +584,13 @@ fn assemble(at: &Addresses<'_>) -> (Vec<u8>, HashMap<&'static str, u32>) {
         ]
         .concat(),
     );
+    let tag = node(
+        TYPEDEF_TAG,
+        &[nat(n("Tag")), node(TEMPLATE_TAG, &any_type())].concat(),
+    );
     let package = node(
         PACKAGE_TAG,
-        &[leaf(TERMREFPKG_TAG, n("p")), box_class, holder, twins].concat(),
+        &[leaf(TERMREFPKG_TAG, n("p")), box_class, holder, twins, tag].concat(),
     );
 
     let loose = roots(at);
@@ -1211,4 +1399,302 @@ fn a_singleton_of_a_term_that_is_no_path_names_the_term_tree() {
             tag: INLINED,
         })
     );
+}
+
+// ANNOTATEDtpt
+
+/// `(underlying, annotation)` of an `Annotated` type.
+fn annotated_parts(session: &Session, ty: TypeId) -> (TypeId, AnnotationId) {
+    match session.store.types.get(ty) {
+        Type::Annotated {
+            underlying,
+            annotation,
+        } => (*underlying, *annotation),
+        other => panic!("not an annotated type: {other:?}"),
+    }
+}
+
+#[test]
+fn an_annotated_type_tree_is_the_projected_base_with_its_own_annotation() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = unpickler
+        .unpickle_type_tree_type(unit.at("annotated direct"))
+        .unwrap();
+    let tag = symbol(&unpickler, &unit, "Tag");
+    let box_class = symbol(&unpickler, &unit, "Box");
+    drop(unpickler);
+    let (underlying, annotation) = annotated_parts(&session, ty);
+    assert_eq!(
+        session.store.types.get(underlying).reference_symbol(),
+        Some(box_class)
+    );
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(
+        session.store.types.get(annotation.ty).reference_symbol(),
+        Some(tag)
+    );
+    // No typed tree is built, and there are no arguments (not "unknown").
+    assert_eq!(annotation.tree, None);
+    assert_eq!(annotation.arguments, AnnotationArguments::Known(vec![]));
+}
+
+#[test]
+fn an_annotated_type_tree_keeps_its_arguments() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = unpickler
+        .unpickle_type_tree_type(unit.at("annotated with argument"))
+        .unwrap();
+    drop(unpickler);
+    let (_, annotation) = annotated_parts(&session, ty);
+    let AnnotationArguments::Known(arguments) =
+        &session.store.annotations.get(annotation).arguments
+    else {
+        panic!("arguments are unknown");
+    };
+    assert_eq!(arguments.len(), 1);
+    assert!(matches!(
+        &arguments[0].value,
+        AnnotationValue::Constant(Constant::String(_))
+    ));
+}
+
+#[test]
+fn annotated_type_and_annotated_type_tree_decode_one_annotation_the_same_way() {
+    // The same shared annotation tree (with an argument) under an
+    // `ANNOTATEDtype` and under an `ANNOTATEDtpt` gives equal annotations:
+    // one decoder, not two copies of the constructor-spine parsing.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let through_type = unpickler
+        .unpickle_type(unit.at("annotated type with argument"))
+        .unwrap();
+    let through_tree = unpickler
+        .unpickle_type_tree_type(unit.at("annotated with argument"))
+        .unwrap();
+    drop(unpickler);
+    let (_, type_annotation) = annotated_parts(&session, through_type);
+    let (_, tree_annotation) = annotated_parts(&session, through_tree);
+    assert_ne!(type_annotation, tree_annotation);
+    assert_eq!(
+        session.store.annotations.get(type_annotation),
+        session.store.annotations.get(tree_annotation)
+    );
+}
+
+#[test]
+fn an_annotation_reached_through_shared_terms_is_followed_and_owned_by_the_annotated_tree() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let direct = unpickler
+        .unpickle_type_tree_type(unit.at("annotated direct"))
+        .unwrap();
+    let shared = unpickler
+        .unpickle_type_tree_type(unit.at("annotated shared"))
+        .unwrap();
+    let again = unpickler
+        .unpickle_type_tree_type(unit.at("annotated shared again"))
+        .unwrap();
+    let chain = unpickler
+        .unpickle_type_tree_type(unit.at("annotated shared chain"))
+        .unwrap();
+    // Nothing is cached by the annotation tree's address.
+    assert_eq!(unpickler.index().type_at(unit.at("annotation tree")), None);
+    assert_eq!(
+        unpickler
+            .index()
+            .type_tree_type_at(unit.at("annotation tree")),
+        None
+    );
+    drop(unpickler);
+
+    let ids: Vec<AnnotationId> = [direct, shared, again, chain]
+        .into_iter()
+        .map(|ty| annotated_parts(&session, ty).1)
+        .collect();
+    // Four annotated trees, four annotations; the three that share the tree
+    // have equal payloads (the class type is the shared tree's own).
+    for (index, id) in ids.iter().enumerate() {
+        for other in &ids[index + 1..] {
+            assert_ne!(id, other);
+        }
+    }
+    for id in &ids[2..] {
+        assert_eq!(
+            session.store.annotations.get(*id),
+            session.store.annotations.get(ids[1])
+        );
+    }
+}
+
+#[test]
+fn projecting_an_annotated_tree_again_is_the_same_type_and_the_same_annotation() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let first = unpickler
+        .unpickle_type_tree_type(unit.at("annotated direct"))
+        .unwrap();
+    let types = unpickler.index().type_count();
+    let second = unpickler
+        .unpickle_type_tree_type(unit.at("annotated direct"))
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(unpickler.index().type_count(), types);
+    // Two written trees, two types, two annotations; no structural interning.
+    let other = unpickler
+        .unpickle_type_tree_type(unit.at("annotated direct again"))
+        .unwrap();
+    drop(unpickler);
+    assert_ne!(first, other);
+    assert_eq!(
+        annotated_parts(&session, first),
+        annotated_parts(&session, second)
+    );
+    assert_ne!(
+        annotated_parts(&session, first).1,
+        annotated_parts(&session, other).1
+    );
+}
+
+#[test]
+fn an_annotation_class_written_as_a_selection_is_projected() {
+    // `new p.Tag`: the class tree is a `SELECTtpt`.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = unpickler
+        .unpickle_type_tree_type(unit.at("annotated by select"))
+        .unwrap();
+    let tag = symbol(&unpickler, &unit, "Tag");
+    drop(unpickler);
+    let (_, annotation) = annotated_parts(&session, ty);
+    let class = session.store.annotations.get(annotation).ty;
+    assert_eq!(session.store.types.get(class).reference_symbol(), Some(tag));
+}
+
+#[test]
+fn the_base_is_projected_and_an_annotation_can_wrap_an_annotation_or_a_selection() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let nested = unpickler
+        .unpickle_type_tree_type(unit.at("annotated nested"))
+        .unwrap();
+    let selection = unpickler
+        .unpickle_type_tree_type(unit.at("annotated over selection"))
+        .unwrap();
+    let out = symbol(&unpickler, &unit, "Box.Out");
+    drop(unpickler);
+    let (inner, _) = annotated_parts(&session, nested);
+    assert!(matches!(
+        session.store.types.get(inner),
+        Type::Annotated { .. }
+    ));
+    let (base, _) = annotated_parts(&session, selection);
+    assert_eq!(session.store.types.get(base).reference_symbol(), Some(out));
+}
+
+#[test]
+fn an_annotation_that_is_no_constructor_call_is_a_typed_deferral() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let result = unpickler.unpickle_type_tree_type(unit.at("annotated not a constructor"));
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationTree { address, annotation_address, tag })
+                if address == unit.at("annotated not a constructor")
+                    && annotation_address > address
+                    && tag == IDENTTPT
+        ),
+        "{result:?}"
+    );
+    // Through a link, the tree the links end at is reported.
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("annotated shared not a constructor")),
+        Err(UnpickleError::UnsupportedAnnotationTree {
+            address: unit.at("annotated shared not a constructor"),
+            annotation_address: unit.at("tpt in term position"),
+            tag: IDENTTPT,
+        })
+    );
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("annotated bad link")),
+        Err(UnpickleError::InvalidReferenceTarget {
+            from: unit.at("annotated bad link"),
+            to: 1,
+        })
+    );
+}
+
+#[test]
+fn a_base_that_is_not_projected_fails_before_the_annotation_is_read() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    assert!(matches!(
+        unpickler.unpickle_type_tree_type(unit.at("annotated bad base")),
+        Err(UnpickleError::UnsupportedTypeTree { tag: LAMBDATPT, .. })
+    ));
+}
+
+#[test]
+fn an_annotation_that_fails_late_rolls_back_the_base_the_class_and_the_first_argument() {
+    // The base (`Box[p]`, an applied tree) projects, the annotation class and
+    // the first argument decode, the second argument is refused.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let probe = |session: &mut Session| {
+        let ty = session.store.types.alloc(Type::NoType);
+        let annotation = session.store.annotations.alloc(Annotation::new(ty, None));
+        (ty.index(), annotation.index())
+    };
+    let before = probe(&mut session);
+    let mut unpickler = entered(&file, &mut session);
+    let trees = unpickler.index().type_tree_count();
+    let result = unpickler.unpickle_type_tree_type(unit.at("annotated late failure"));
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationArgument { .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_tree_count(), trees);
+    // Retrying behaves as if the failed call never happened.
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("annotated late failure")),
+        result
+    );
+    drop(unpickler);
+    let after = probe(&mut session);
+    // Entering the unit allocates symbols only, no type and no annotation.
+    assert_eq!(after.1, before.1 + 1);
+    assert!(after.0 > before.0);
 }

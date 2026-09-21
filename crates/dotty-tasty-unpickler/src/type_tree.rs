@@ -42,6 +42,7 @@ use dotty_tasty::tasty::{
     SELECTTPT_TAG, SHAREDTERM_TAG, SINGLETONTPT_TAG, TYPEBOUNDSTPT_TAG,
 };
 
+use crate::annotated::FullAnnotation;
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
 use crate::lookup::is_singleton_type;
@@ -197,6 +198,35 @@ impl TastyUnpickler<'_, '_, '_> {
                 }
                 ty
             }
+            ANNOTATEDTPT_TAG => {
+                // `ANNOTATEDtpt tpt annotation`: `AnnotatedType(tpt.tpe,
+                // Annotation(tree))`. The base is projected first, then the
+                // annotation tree is decoded by the decoder `ANNOTATEDtype`
+                // uses; the `AnnotationId` belongs to this tree.
+                ast.node(at)?.decode_annotated()?;
+                let [base, annotation] = children[..] else {
+                    return Err(malformed(
+                        at,
+                        "an annotated type tree has a type tree and an annotation",
+                    ));
+                };
+                let underlying = self.type_of_tpt(ast, base, at, depth)?;
+                match self.decode_annotation_tree(ast, at, annotation, depth)? {
+                    FullAnnotation::Constructor(annotation) => {
+                        self.store.types.alloc(Type::Annotated {
+                            underlying,
+                            annotation,
+                        })
+                    }
+                    FullAnnotation::Other { at: tree, tag } => {
+                        return Err(UnpickleError::UnsupportedAnnotationTree {
+                            address: at,
+                            annotation_address: tree,
+                            tag,
+                        });
+                    }
+                }
+            }
             // A dedicated tree with no projection yet.
             tag if is_deferred_tree(tag) => {
                 return Err(UnpickleError::UnsupportedTypeTree { address: at, tag });
@@ -221,7 +251,7 @@ fn is_deferred_tree(tag: u8) -> bool {
     use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, LAMBDATPT_TAG, MATCHTPT_TAG, REFINEDTPT_TAG};
     matches!(
         tag,
-        REFINEDTPT_TAG | LAMBDATPT_TAG | ANNOTATEDTPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG
+        REFINEDTPT_TAG | LAMBDATPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG
     )
 }
 
