@@ -10,6 +10,7 @@
 
 use crate::ids::{SymbolId, TypeId};
 use crate::names::{Name, Namespace};
+use crate::packages::Packages;
 use crate::store::SemanticStore;
 use crate::symbols::{
     Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -57,6 +58,15 @@ pub struct Definitions {
     /// Scala's bottom type, the lower bound the same lowering uses when a
     /// wildcard does not specify one (e.g. `? extends Number`).
     pub nothing_class: SymbolId,
+    /// The identity of `scala.&`, Dotty's `defn.andType`: the special type
+    /// alias an applied source-level intersection `A & B` names. No file
+    /// declares it, so [`declare_special_aliases`](Self::declare_special_aliases)
+    /// binds this very symbol as `&` in the `scala` package; a TASTy type tree applying it is normalized to
+    /// [`Type::And`], as upstream's `processAppliedType` does. Identity, never
+    /// the text `&`: a same-named symbol of another owner is not this one.
+    pub and_type: SymbolId,
+    /// The identity of `scala.|`, `defn.orType`; see [`and_type`](Self::and_type).
+    pub or_type: SymbolId,
 }
 
 impl Definitions {
@@ -82,6 +92,8 @@ impl Definitions {
         let object_class = Self::builtin_symbol(store, "Object");
         let any_class = Self::builtin_symbol(store, "Any");
         let nothing_class = Self::builtin_symbol(store, "Nothing");
+        let and_type = Self::builtin_alias(store, "&");
+        let or_type = Self::builtin_alias(store, "|");
 
         Self {
             no_prefix,
@@ -97,7 +109,40 @@ impl Definitions {
             object_class,
             any_class,
             nothing_class,
+            and_type,
+            or_type,
         }
+    }
+
+    /// Declares [`and_type`](Self::and_type) and [`or_type`](Self::or_type) as
+    /// `&` and `|` in the `scala` package of `packages`, entering that package
+    /// if needed. No TASTy or class file declares them (the compiler does), so
+    /// a session must; `TastyUnpickler` calls this for its package registry.
+    /// Idempotent: a symbol already declared is left alone.
+    pub fn declare_special_aliases(&self, store: &mut SemanticStore, packages: &mut Packages) {
+        let chain = packages.enter(store, SymbolOrigin::Builtin, &["scala"]);
+        let scala = chain
+            .last()
+            .unwrap_or_else(|| unreachable!("a non-empty path enters a package"));
+        for (text, symbol) in [("&", self.and_type), ("|", self.or_type)] {
+            let name = Name::new(store.names.intern(text), Namespace::Type);
+            if store
+                .scopes
+                .get(scala.scope)
+                .lookup_all(&name)
+                .contains(&symbol)
+            {
+                continue;
+            }
+            store.symbols.get_mut(symbol).owner = Some(scala.symbol);
+            store.scopes.get_mut(scala.scope).enter(name, symbol);
+        }
+    }
+
+    fn builtin_alias(store: &mut SemanticStore, name: &str) -> SymbolId {
+        let id = Self::builtin_symbol(store, name);
+        store.symbols.get_mut(id).kind = SymbolKind::TypeAlias;
+        id
     }
 
     fn builtin_symbol(store: &mut SemanticStore, name: &str) -> SymbolId {
@@ -151,6 +196,41 @@ mod tests {
                     assert_ne!(a, b, "primitives {i} and {j} share a TypeId");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bootstrap_mints_the_special_intersection_and_union_aliases() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        assert_ne!(definitions.and_type, definitions.or_type);
+        for (symbol, text) in [(definitions.and_type, "&"), (definitions.or_type, "|")] {
+            let symbol = store.symbols.get(symbol);
+            assert_eq!(symbol.kind, SymbolKind::TypeAlias);
+            assert_eq!(symbol.origin, SymbolOrigin::Builtin);
+            assert_eq!(store.names.resolve(symbol.name.text()), text);
+        }
+    }
+
+    #[test]
+    fn declaring_the_special_aliases_binds_them_in_the_scala_package_once() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+
+        definitions.declare_special_aliases(&mut store, &mut packages);
+        definitions.declare_special_aliases(&mut store, &mut packages);
+
+        let scala = packages.enter(&mut store, SymbolOrigin::Synthetic, &["scala"]);
+        let scope = scala.last().unwrap().scope;
+        for (text, symbol) in [("&", definitions.and_type), ("|", definitions.or_type)] {
+            let name = Name::new(store.names.intern(text), Namespace::Type);
+            assert_eq!(store.scopes.get(scope).lookup_all(&name), [symbol]);
+            assert_eq!(
+                store.symbols.get(symbol).owner,
+                Some(scala.last().unwrap().symbol)
+            );
         }
     }
 
