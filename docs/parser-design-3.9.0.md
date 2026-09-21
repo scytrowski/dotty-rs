@@ -175,9 +175,10 @@ without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
 method definitions with a leading type-parameter clause, ordered term
 parameter clauses, simple return types, declarations, and expression RHSs
-parameter nodes are represented as `ValDef`; interleaved type/term parameter
-clauses are explicitly deferred because the current `DefDef` model keeps the
-leading type clause separate
+parameter nodes are represented as `ValDef`; ordinary and named `using`
+clauses, default parameter expressions, and indented method bodies are
+supported. Interleaved type/term parameter clauses are explicitly deferred
+because the current `DefDef` model keeps the leading type clause separate.
 explicit function literals with empty, named, wildcard, and typed parameters
 context-function literals using `?=>`, represented with `Given` parameter
 metadata
@@ -188,6 +189,13 @@ subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles only
 the simple type names needed by these ascriptions and type applications.
+
+Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
+a complete expression, so local `val`/`var` and `def` statements can be kept
+inside a brace or indented `Block`; a typed declaration without `=` has no
+RHS. The parser deliberately does not yet handle definition modifiers,
+annotations, constructors, context-type shorthand, or the remaining
+definition forms.
 
 The current source-level pattern grammar is layered as:
 
@@ -304,7 +312,8 @@ emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 It invokes the compiler parser in expression mode by default, the real
 `Parser.pattern()` entry in pattern mode, or expression-mode block fixtures in
 `block` mode, and emits a deterministic JSON view containing
-`kind`, `span`, `name`, `literal`, `operator`, `apply_kind`, and `children`. It does not compare
+`kind`, `span`, `name`, `literal`, `operator`, `apply_kind`, parameter-clause
+boundaries, and `children`. It does not compare
 compiler `Tree.show` output. Nodes without a source span are omitted from the
 normalized child list; this removes compiler-only synthetic qualifiers such as
 the implicit qualifier of `this`. The empty compiler tuple is normalized to
@@ -325,7 +334,8 @@ purpose and cover the implemented simple-, operator-, initial `Expr1`, and
 source-pattern subsets, including `super`, `new`, type applications, suffix
 chains, brace blocks, prefix operators, negative literals, infix
 precedence/associativity, assignment, named arguments, `if`/`while`,
-for-comprehensions, match and case clauses, value and pattern definitions,
+for-comprehensions, match and case clauses, value, pattern, and method
+definitions,
 binders,
 typed patterns, extractor applications, infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
