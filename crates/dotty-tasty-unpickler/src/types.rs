@@ -148,9 +148,9 @@ use dotty_core::resolution::{MemberRequest, MemberSelector, ResolutionError};
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, Type};
 use dotty_tasty::tasty::{
-    ANDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG, ConstantValue,
-    FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG,
-    RECTYPE_TAG, REFINEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
+    ANDTYPE_TAG, ANNOTATEDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG,
+    ConstantValue, FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
+    RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG,
     TERMREFDIRECT_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG,
     TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
     TermValue,
@@ -358,6 +358,9 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             RawTree::LengthNode(node) if tag == REFINEDTYPE_TAG => {
                 self.decode_refined_type(ast, node, at, depth)?
+            }
+            RawTree::LengthNode(node) if tag == ANNOTATEDTYPE_TAG => {
+                self.decode_annotated_type(ast, node, at, depth)?
             }
             RawTree::LengthNode(node) if tag == PARAMTYPE_TAG => {
                 return self.decode_param_type(ast, node, at, depth);

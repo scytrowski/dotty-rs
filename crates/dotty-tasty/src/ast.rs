@@ -4469,6 +4469,24 @@ impl<'a> TypeBoundsNode<'a> {
     }
 }
 
+/// Whether `tag` starts the compact form of an annotation payload.
+///
+/// Scala 3.9.0 `TreeUnpickler.isCompactAnnotTypeTag`: an annotation whose first
+/// tag is one of these is a `CompactAnnotation` (a type), anything else is a
+/// full annotation tree. The set is exactly upstream's: `TYPEREFpkg`,
+/// `TERMREF*`, `THIS` and the binder types are not in it.
+pub const fn is_compact_annot_type_tag(tag: u8) -> bool {
+    matches!(
+        tag,
+        APPLIEDTYPE_TAG
+            | SHAREDTYPE_TAG
+            | TYPEREF_TAG
+            | TYPEREFDIRECT_TAG
+            | TYPEREFSYMBOL_TAG
+            | TYPEREFIN_TAG
+    )
+}
+
 impl<'a> AnnotatedNode<'a> {
     pub fn encode(&self, writer: &mut Writer) -> Result<(), TermEncodeError> {
         if !matches!(self.tag, ANNOTATEDTYPE_TAG | ANNOTATEDTPT_TAG) {
@@ -5890,11 +5908,12 @@ mod tests {
         RawNode, RawNodes, RawTree, SELECT_TAG, SELECTIN_TAG, SELECTOUTER_TAG, SELECTTPT_TAG,
         SELFDEF_TAG, SHAREDTYPE_TAG, SINGLETONTPT_TAG, SPLICE_TAG, SPLICEPATTERN_TAG,
         SPLITCLAUSE_TAG, STABLE_TAG, SUBMATCH_TAG, SUPER_TAG, SUPERTYPE_TAG, StructuredNode,
-        StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
-        TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPEBOUNDS_TAG,
-        TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
-        TYPEREFIN_TAG, TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG,
-        WHILE_TAG,
+        StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG,
+        TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, THROW_TAG, TRY_TAG, TYPEAPPLY_TAG,
+        TYPEBOUNDS_TAG, TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG,
+        TYPEPARAM_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG,
+        TYPEREFSYMBOL_TAG, TypeApplyNode, TypedNode, UNAPPLY_TAG, VALDEF_TAG, WHILE_TAG,
+        is_compact_annot_type_tag,
     };
     use crate::reader::{ReadError, Reader};
     use crate::term::{AstRef, AstTreeNode, TermEncodeError};
@@ -7560,6 +7579,38 @@ mod tests {
             assert_eq!(node.tag, tag);
             assert!(matches!(node.underlying, RawTree::Leaf(_)));
             assert!(matches!(node.annotation, RawTree::Leaf(_)));
+        }
+    }
+
+    #[test]
+    fn compact_annotation_tags_are_exactly_scala_3_9s() {
+        let compact: Vec<u8> = (0..=u8::MAX)
+            .filter(|tag| is_compact_annot_type_tag(*tag))
+            .collect();
+        let mut expected = vec![
+            APPLIEDTYPE_TAG,
+            SHAREDTYPE_TAG,
+            TYPEREF_TAG,
+            TYPEREFDIRECT_TAG,
+            TYPEREFSYMBOL_TAG,
+            TYPEREFIN_TAG,
+        ];
+        expected.sort_unstable();
+        assert_eq!(compact, expected);
+    }
+
+    #[test]
+    fn compact_annotation_tags_exclude_look_alike_type_tags() {
+        for tag in [
+            TYPEREFPKG_TAG,
+            TERMREF_TAG,
+            TERMREFDIRECT_TAG,
+            TERMREFSYMBOL_TAG,
+            TERMREFIN_TAG,
+            THIS_TAG,
+            TYPELAMBDATYPE_TAG,
+        ] {
+            assert!(!is_compact_annot_type_tag(tag), "tag {tag}");
         }
     }
 

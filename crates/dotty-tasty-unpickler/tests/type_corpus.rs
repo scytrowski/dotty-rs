@@ -111,6 +111,9 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
+    /// A full annotation tree under the node (Milestone 4b1: an
+    /// `ANNOTATEDtype` whose payload is a tree, deferred to 4b2).
+    deferred_annotation: usize,
     /// A binder reference or parameter that is malformed: an invalid binder
     /// address, kind, parameter index, or a parameter info that is not bounds.
     binder_errors: usize,
@@ -433,6 +436,9 @@ fn run(
                         outcomes.binder_errors += 1;
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
+                    }
+                    UnpickleError::UnsupportedAnnotationTree { .. } => {
+                        outcomes.deferred_annotation += 1;
                     }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
                     UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
