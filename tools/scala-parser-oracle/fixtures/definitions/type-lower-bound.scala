@@ -1,0 +1,4 @@
+{
+  type A >: Lower
+  value
+}
