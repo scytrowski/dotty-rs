@@ -1,6 +1,8 @@
 use super::*;
 use crate::compilation_unit::tests::{parser_for, token};
-use dotty_core::ast::{Block, Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode};
+use dotty_core::ast::{
+    ApplyKind, Block, Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode,
+};
 use dotty_core::{
     Constant, HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
     TokenSource,
@@ -790,6 +792,146 @@ fn normalizes_a_bare_identifier_assignment_to_a_named_argument() {
     assert!(parser.diagnostics().is_empty());
     drop(parser);
     assert_eq!(names.resolve(name.text()), "x");
+}
+
+#[test]
+fn parses_a_using_argument_list() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(using ctx)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Identifier, 10, 13),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+            token(TokenKind::Eof, 14, 14),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+        panic!("expected application tree");
+    };
+    assert_eq!(application.kind, ApplyKind::Using);
+    assert_eq!(application.args.len(), 1);
+    assert!(matches!(
+        parser.ast().get(application.args[0]).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_multiple_using_arguments() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(using a, b)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Identifier, 10, 11),
+            token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+            token(TokenKind::Identifier, 13, 14),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+            token(TokenKind::Eof, 15, 15),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+        panic!("expected application tree");
+    };
+    assert_eq!(application.kind, ApplyKind::Using);
+    assert_eq!(application.args.len(), 2);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn preserves_using_and_regular_application_nesting() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(x)(using ctx)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+            token(TokenKind::Identifier, 7, 12),
+            token(TokenKind::Identifier, 13, 16),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+            token(TokenKind::Eof, 17, 17),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Apply(ref outer) = parser.ast().get(id).kind else {
+        panic!("expected outer application tree");
+    };
+    assert_eq!(outer.kind, ApplyKind::Using);
+    let inner_id = outer.function;
+    let TreeKind::Apply(ref inner) = parser.ast().get(inner_id).kind else {
+        panic!("expected inner application tree");
+    };
+    assert_eq!(inner.kind, ApplyKind::Regular);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn normalizes_named_arguments_inside_using_lists() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(using name = value)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Identifier, 10, 14),
+            token(TokenKind::Operator, 15, 16),
+            token(TokenKind::Identifier, 17, 22),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 22, 23),
+            token(TokenKind::Eof, 23, 23),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+        panic!("expected application tree");
+    };
+    let TreeKind::NamedArg(named) = parser.ast().get(application.args[0]).kind else {
+        panic!("expected named argument tree");
+    };
+    let name = named.name;
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "name");
+}
+
+#[test]
+fn reports_an_empty_using_argument_list_without_hanging() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(using)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Apply(_)));
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]

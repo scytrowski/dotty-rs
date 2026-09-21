@@ -1,6 +1,6 @@
 use std::{env, fs, process};
 
-use dotty_core::ast::{AstArena, Untyped, UntypedNode};
+use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{parse_compilation_unit, parse_pattern_fragment};
@@ -107,6 +107,15 @@ fn render_tree(
             fields.push(format!(
                 "\"name\":{}",
                 quote(names.resolve(named.name.text()))
+            ));
+        }
+        TreeKind::Apply(application) => {
+            fields.push(format!(
+                "\"apply_kind\":{}",
+                quote(match application.kind {
+                    ApplyKind::Regular => "Regular",
+                    ApplyKind::Using => "Using",
+                })
             ));
         }
         TreeKind::Bind(bind) => {

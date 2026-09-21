@@ -18,6 +18,22 @@ where
         } else {
             function
         };
+        let kind = if self.current_is_using_marker() {
+            self.advance();
+            ApplyKind::Using
+        } else {
+            ApplyKind::Regular
+        };
+        if kind == ApplyKind::Using
+            && self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::RightParen))
+        {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected an argument after `using`",
+            );
+        }
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
@@ -44,9 +60,16 @@ where
             TreeKind::Apply(Apply {
                 function,
                 args,
-                kind: ApplyKind::Regular,
+                kind,
             }),
         )
+    }
+
+    fn current_is_using_marker(&mut self) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self
+                .current_is_known_name(self.known_names().using)
+                .unwrap_or(false)
     }
 
     fn argument_expr(&mut self) -> TreeId<Untyped> {
