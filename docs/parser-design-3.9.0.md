@@ -111,7 +111,7 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `class`, `def`, `for`, `try`,
+Valid but not yet implemented constructs such as `class`, `for`, `try`,
 and `match`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
@@ -173,6 +173,11 @@ for-comprehensions with generators, case generators, aliases, guards, and
 simple `val`/`var` definitions with inferred or explicit types, declarations
 without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
+method definitions with a leading type-parameter clause, ordered term
+parameter clauses, simple return types, declarations, and expression RHSs
+parameter nodes are represented as `ValDef`; interleaved type/term parameter
+clauses are explicitly deferred because the current `DefDef` model keeps the
+leading type clause separate
 explicit function literals with empty, named, wildcard, and typed parameters
 context-function literals using `?=>`, represented with `Given` parameter
 metadata
