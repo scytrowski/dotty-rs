@@ -7,40 +7,82 @@ use dotty_parser::{parse_compilation_unit, parse_pattern_fragment};
 
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
+    if let [flag, manifest] = args.as_slice()
+        && flag == "--batch"
+    {
+        run_batch(manifest);
+        return;
+    }
+
     let (mode, path) = match args.as_slice() {
         [path] => ("expr", path.as_str()),
         [flag, mode, path] if flag == "--mode" && mode == "pattern" => ("pattern", path.as_str()),
         _ => {
-            eprintln!("usage: dotty-parser-smoke-dump [--mode pattern] <source-file>");
+            eprintln!(
+                "usage: dotty-parser-smoke-dump [--mode pattern] <source-file> | --batch manifest"
+            );
             process::exit(2);
         }
     };
 
     if path.is_empty() {
-        eprintln!("usage: dotty-parser-smoke-dump [--mode pattern] <source-file>");
+        eprintln!(
+            "usage: dotty-parser-smoke-dump [--mode pattern] <source-file> | --batch manifest"
+        );
         process::exit(2);
     }
 
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
+    match dump_fixture(mode, path) {
+        Ok(output) => println!("{output}"),
         Err(error) => {
-            eprintln!("failed to read {path}: {error}");
+            eprintln!("{error}");
             process::exit(1);
         }
+    }
+}
+
+fn run_batch(manifest: &str) {
+    let contents = match fs::read_to_string(manifest) {
+        Ok(contents) => contents,
+        Err(error) => {
+            eprintln!("failed to read batch manifest {manifest}: {error}");
+            process::exit(1);
+        }
+    };
+
+    for (line_number, line) in contents.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((mode, path)) = line.split_once('\t') else {
+            eprintln!("invalid batch manifest entry at line {}", line_number + 1);
+            process::exit(2);
+        };
+        match dump_fixture(mode, path) {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                process::exit(1);
+            }
+        }
+    }
+}
+
+fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => return Err(format!("failed to read {path}: {error}")),
     };
     let scanner = match ContextualScanner::new(&source) {
         Ok(scanner) => scanner,
-        Err(error) => {
-            eprintln!("failed to scan {path}: {error}");
-            process::exit(1);
-        }
+        Err(error) => return Err(format!("failed to scan {path}: {error}")),
     };
     if !scanner.diagnostics().is_empty() {
-        eprintln!("scanner reported diagnostics for {path}");
-        process::exit(1);
+        return Err(format!("scanner reported diagnostics for {path}"));
     }
 
-    let source_text = SourceText::new(&source).expect("fixture source must fit in 32-bit offsets");
+    let source_text = SourceText::new(&source)
+        .map_err(|error| format!("failed to create source text for {path}: {error}"))?;
     let mut names = NameInterner::new();
     let result = if mode == "pattern" {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
@@ -48,11 +90,10 @@ fn main() {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
     };
     if !result.diagnostics.is_empty() {
-        eprintln!(
+        return Err(format!(
             "parser reported diagnostics for {path}: {:?}",
             result.diagnostics
-        );
-        process::exit(1);
+        ));
     }
 
     let tree = if mode == "pattern" {
@@ -61,12 +102,13 @@ fn main() {
         match &result.ast.get(result.root).kind {
             TreeKind::Block(block) if block.stats.is_empty() => block.expr,
             _ => {
-                eprintln!("expression dump requires a single expression in {path}");
-                process::exit(1);
+                return Err(format!(
+                    "expression dump requires a single expression in {path}"
+                ));
             }
         }
     };
-    println!("{}", render_tree(tree, &result.ast, &names, &source));
+    Ok(render_tree(tree, &result.ast, &names, &source))
 }
 
 fn render_tree(

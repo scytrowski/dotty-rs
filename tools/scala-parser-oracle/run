@@ -23,15 +23,23 @@ cleanup() {
 trap cleanup EXIT
 
 mode_args=()
-if [[ "$#" -eq 3 && "$1" == "--mode" && "$2" == "pattern" ]]; then
+batch_manifest=''
+if [[ "$#" -eq 2 && "$1" == "--batch" ]]; then
+  batch_manifest=$2
+elif [[ "$#" -eq 3 && "$1" == "--mode" && "$2" == "pattern" ]]; then
   mode_args=("$1" "$2")
   shift 2
 elif [[ "$#" -gt 1 ]]; then
-  echo "usage: $0 [--mode pattern] [source-file]" >&2
+  echo "usage: $0 [--mode pattern] [source-file] | --batch manifest" >&2
   exit 2
 fi
 
-if [[ "$#" -eq 1 ]]; then
+if [[ -n "${batch_manifest}" ]]; then
+  if [[ "${batch_manifest}" != /* ]]; then
+    batch_manifest="$(cd "$(dirname "${batch_manifest}")" && pwd)/$(basename "${batch_manifest}")"
+  fi
+  source_path=''
+elif [[ "$#" -eq 1 ]]; then
   source_path=$1
   if [[ "${source_path}" != /* ]]; then
     source_path="$(cd "$(dirname "${source_path}")" && pwd)/$(basename "${source_path}")"
@@ -49,17 +57,27 @@ fi
 
 cd "${script_dir}"
 sbt_output=$(mktemp "${TMPDIR:-/tmp}/scala-parser-oracle.XXXXXX.log")
-run_command="run"
-if [[ "${#mode_args[@]}" -eq 2 ]]; then
+if [[ -n "${batch_manifest}" ]]; then
+  run_command="run --batch ${batch_manifest}"
+else
+  run_command="run"
+fi
+if [[ -z "${batch_manifest}" && "${#mode_args[@]}" -eq 2 ]]; then
   run_command+=" ${mode_args[*]}"
 fi
-run_command+=" ${source_path}"
+if [[ -z "${batch_manifest}" ]]; then
+  run_command+=" ${source_path}"
+fi
 if ! sbt --server --error "${run_command}" >"${sbt_output}" 2>&1; then
   cat "${sbt_output}" >&2
   exit 1
 fi
 
-json=$(grep '^{' "${sbt_output}" | tail -n 1 || true)
+if [[ -n "${batch_manifest}" ]]; then
+  json=$(grep '^{' "${sbt_output}" || true)
+else
+  json=$(grep '^{' "${sbt_output}" | tail -n 1 || true)
+fi
 if [[ -z "${json}" ]]; then
   cat "${sbt_output}" >&2
   echo "scala-parser-oracle did not produce JSON" >&2
