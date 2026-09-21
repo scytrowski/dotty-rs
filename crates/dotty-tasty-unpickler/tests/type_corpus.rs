@@ -1222,7 +1222,9 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         let mut oracle = OwnerOracle::default();
         for (space, name, namespace) in &tally.oracle_queries {
             let scope = match store.types.get(*space) {
-                dotty_core::types::Type::TypeRef { symbol, .. } => tally.class_scopes.get(symbol),
+                ty @ dotty_core::types::Type::TypeRef { .. } => ty
+                    .reference_symbol()
+                    .and_then(|symbol| tally.class_scopes.get(&symbol)),
                 _ => None,
             };
             let (Some(scope), Some(text)) = (scope, name) else {

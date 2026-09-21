@@ -88,8 +88,8 @@ fn name(store: &SemanticStore, symbol: SymbolId) -> &str {
 /// The `(prefix, symbol)` of a `TypeRef` or `TermRef`.
 fn reference(store: &SemanticStore, ty: TypeId) -> (TypeId, SymbolId, bool) {
     match store.types.get(ty) {
-        Type::TypeRef { prefix, symbol } => (*prefix, *symbol, true),
-        Type::TermRef { prefix, symbol } => (*prefix, *symbol, false),
+        Type::TypeRef { prefix, target } => (*prefix, target.symbol().unwrap(), true),
+        Type::TermRef { prefix, target } => (*prefix, target.symbol().unwrap(), false),
         other => panic!("not a reference: {other:?}"),
     }
 }

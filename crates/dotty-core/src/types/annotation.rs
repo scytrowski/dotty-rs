@@ -107,8 +107,9 @@ impl SemanticStore {
             }
             ty = *tycon;
         }
+        // A name-designated `TypeRef` has no class symbol: no text is compared.
         match self.types.get(ty) {
-            Type::TypeRef { symbol, .. } => Some(*symbol),
+            ty @ Type::TypeRef { .. } => ty.reference_symbol(),
             _ => None,
         }
     }
@@ -320,10 +321,9 @@ mod tests {
         }
 
         fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
-            self.store.types.alloc(Type::TypeRef {
-                prefix: self.no_prefix,
-                symbol,
-            })
+            self.store
+                .types
+                .alloc(Type::type_ref(self.no_prefix, symbol))
         }
 
         fn annotate(&mut self, underlying: TypeId, class: TypeId) -> TypeId {

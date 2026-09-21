@@ -299,25 +299,27 @@ impl<'a> Rebinder<'a> {
             }
             Type::Constant(_) => id,
 
-            Type::TermRef { prefix, symbol } => {
+            // Only the prefix is rebound; a symbol or a name designator stays
+            // as it is.
+            Type::TermRef { prefix, target } => {
                 let new = self.ty(prefix)?;
                 self.keep_or_alloc(
                     id,
                     new == prefix,
                     Type::TermRef {
                         prefix: new,
-                        symbol,
+                        target,
                     },
                 )
             }
-            Type::TypeRef { prefix, symbol } => {
+            Type::TypeRef { prefix, target } => {
                 let new = self.ty(prefix)?;
                 self.keep_or_alloc(
                     id,
                     new == prefix,
                     Type::TypeRef {
                         prefix: new,
-                        symbol,
+                        target,
                     },
                 )
             }
@@ -1124,8 +1126,8 @@ mod tests {
             let leaf = f.leaf;
             let symbol = SymbolId::new(1);
             let members = [
-                Type::TermRef { prefix: a, symbol },
-                Type::TypeRef { prefix: a, symbol },
+                Type::term_ref(a, symbol),
+                Type::type_ref(a, symbol),
                 Type::SuperType {
                     this_type: a,
                     super_type: leaf,

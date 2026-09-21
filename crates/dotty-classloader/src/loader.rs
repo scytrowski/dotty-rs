@@ -414,10 +414,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
-        self.store.types.alloc(Type::TypeRef {
-            prefix: self.definitions.no_prefix,
-            symbol,
-        })
+        self.store
+            .types
+            .alloc(Type::type_ref(self.definitions.no_prefix, symbol))
     }
 
     /// Allocates a field's `Symbol` and enters it into the class's
@@ -2200,10 +2199,10 @@ mod tests {
 
     /// The `SymbolId` a `Type::TypeRef` (a `ClassInfo` parent) points at.
     fn parent_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
-        let Type::TypeRef { symbol, .. } = store.types.get(ty) else {
+        let Some(symbol) = store.types.get(ty).reference_symbol() else {
             panic!("expected a TypeRef");
         };
-        *symbol
+        symbol
     }
 
     /// The resolved `TypeId` of the field or method named `member_name`,
@@ -4407,13 +4406,13 @@ mod tests {
         // (registered on this test's classpath below), so `x`'s type is
         // a genuine `Type::TypeRef` now, not a `Type::Error` guess.
         let x_type = member_type_id(&mut store, point, "x");
-        let Type::TypeRef { symbol, .. } = store.types.get(x_type) else {
+        let Some(symbol) = store.types.get(x_type).reference_symbol() else {
             panic!(
                 "expected x's type to be a real Type::TypeRef, got {:?}",
                 store.types.get(x_type)
             );
         };
-        assert_eq!(symbol_name(&store, *symbol), "Int");
+        assert_eq!(symbol_name(&store, symbol), "Int");
 
         let init_type = member_type_id(&mut store, point, "<init>");
         let Type::Method(init_method) = store.types.get(init_type) else {

@@ -18,4 +18,4 @@ pub use class_info::ClassInfo;
 pub use constant::Constant;
 pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
 pub use rebind::{TypeRebindError, rebind_type_lambda};
-pub use ty::{ErrorType, MatchType, Type};
+pub use ty::{ErrorType, MatchType, TermRefTarget, Type, TypeRefTarget};

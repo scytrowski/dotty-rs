@@ -70,12 +70,12 @@ fn session_with_string() -> (Session, Packages) {
 }
 
 fn name_of(store: &SemanticStore, id: TypeId) -> String {
-    let Type::TypeRef { symbol, .. } = store.types.get(id) else {
+    let Some(symbol) = store.types.get(id).reference_symbol() else {
         panic!("expected a type reference, got {:?}", store.types.get(id));
     };
     store
         .names
-        .resolve(store.symbols.get(*symbol).name.text())
+        .resolve(store.symbols.get(symbol).name.text())
         .to_string()
 }
 
@@ -219,10 +219,10 @@ fn a_named_reference_through_a_flexible_prefix_is_found_in_the_wrapped_prefix() 
         TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
     let id = unpickler.unpickle_type(2).unwrap();
     drop(unpickler);
-
-    let Type::TypeRef { prefix, symbol } = session.store.types.get(id) else {
+    let Type::TypeRef { prefix, target } = session.store.types.get(id) else {
         panic!("expected a type reference");
     };
+    let symbol = &target.symbol().unwrap();
     assert!(matches!(
         session.store.types.get(*prefix),
         Type::Flexible { .. }

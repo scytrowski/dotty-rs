@@ -269,7 +269,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 (TYPEREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Type)?;
                     let prefix = self.definitions.no_prefix;
-                    Type::TypeRef { prefix, symbol }
+                    Type::type_ref(prefix, symbol)
                 }
                 (RECTHIS_TAG, TermValue::AstRef(target)) => {
                     return self.decode_rec_this(ast, at, *target, depth);
@@ -277,17 +277,17 @@ impl TastyUnpickler<'_, '_, '_> {
                 (TERMREFDIRECT_TAG, TermValue::AstRef(target)) => {
                     let symbol = self.referenced_symbol(ast, at, *target, Namespace::Term)?;
                     let prefix = self.definitions.no_prefix;
-                    Type::TermRef { prefix, symbol }
+                    Type::term_ref(prefix, symbol)
                 }
                 (TYPEREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
                     let prefix = self.definitions.no_prefix;
-                    Type::TypeRef { prefix, symbol }
+                    Type::type_ref(prefix, symbol)
                 }
                 (TERMREFPKG_TAG, TermValue::NameRef(name)) => {
                     let symbol = self.referenced_package(at, *name)?;
                     let prefix = self.definitions.no_prefix;
-                    Type::TermRef { prefix, symbol }
+                    Type::term_ref(prefix, symbol)
                 }
                 _ => match term.constant_value().map_err(AstError::from)? {
                     Some(value) => Type::Constant(self.constant(value)?),
@@ -307,9 +307,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 };
                 let symbol = self.referenced_symbol(ast, at, *target, namespace)?;
                 if tag == TYPEREFSYMBOL_TAG {
-                    Type::TypeRef { prefix, symbol }
+                    Type::type_ref(prefix, symbol)
                 } else {
-                    Type::TermRef { prefix, symbol }
+                    Type::term_ref(prefix, symbol)
                 }
             }
             RawTree::NatAst {
@@ -323,9 +323,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 };
                 let symbol = self.resolved_member(at, *name, prefix, namespace)?;
                 if tag == TYPEREF_TAG {
-                    Type::TypeRef { prefix, symbol }
+                    Type::type_ref(prefix, symbol)
                 } else {
-                    Type::TermRef { prefix, symbol }
+                    Type::term_ref(prefix, symbol)
                 }
             }
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
@@ -453,9 +453,9 @@ impl TastyUnpickler<'_, '_, '_> {
         let (prefix, space) = (ids[0], ids[1]);
         let symbol = self.resolved_declaration(at, shape.name, prefix, space, namespace)?;
         Ok(if namespace == Namespace::Type {
-            Type::TypeRef { prefix, symbol }
+            Type::type_ref(prefix, symbol)
         } else {
-            Type::TermRef { prefix, symbol }
+            Type::term_ref(prefix, symbol)
         })
     }
 
