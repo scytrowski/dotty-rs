@@ -27,6 +27,8 @@ where
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
+    pub(crate) next_wildcard_type_param: u32,
+    pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -59,6 +61,8 @@ where
             diagnostics: Vec::new(),
             known_names,
             next_wildcard_param: 0,
+            next_wildcard_type_param: 0,
+            placeholder_params: Vec::new(),
         }
     }
 
@@ -233,10 +237,46 @@ where
 
     /// Adds a parser diagnostic at the current token.
     pub fn report(&mut self, kind: ParseDiagnosticKind, message: impl Into<String>) {
-        let token_span = self.current().span;
-        let span = SourceSpan::new(self.source_id, Span::without_point(token_span));
+        let span = self.current_span();
+        self.report_at(kind, span, message);
+    }
+
+    /// Adds a parser diagnostic at an explicitly selected source span.
+    pub(crate) fn report_at(
+        &mut self,
+        kind: ParseDiagnosticKind,
+        span: SourceSpan,
+        message: impl Into<String>,
+    ) {
         self.diagnostics
             .push(ParseDiagnostic::error(kind, span, message));
+    }
+
+    /// Checks and clears placeholders that escaped a complete expression
+    /// sequence, preserving any placeholder scope owned by an enclosing
+    /// expression.
+    pub(crate) fn with_placeholder_scope<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = std::mem::take(&mut self.placeholder_params);
+        let result = parse(self);
+        self.report_escaping_placeholders();
+        self.placeholder_params = saved;
+        result
+    }
+
+    pub(crate) fn report_escaping_placeholders(&mut self) {
+        if let Some(parameter) = self.placeholder_params.last().copied() {
+            let span = self
+                .ast
+                .get(parameter)
+                .position
+                .unwrap_or_else(|| self.current_span());
+            self.report_at(
+                ParseDiagnosticKind::UnboundPlaceholderParameter,
+                span,
+                "unbound placeholder parameter",
+            );
+        }
+        self.placeholder_params.clear();
     }
 
     /// Consumes input until a synchronization token or EOF is reached.

@@ -30,13 +30,14 @@ object Main:
       case _ =>
         tree.getClass.getSimpleName.stripSuffix("$") match
           case "WhileDo" => "While"
+          case "WildcardFunction" => "Function"
           case name => name
     fields += field("kind", quote(normalizedKind))
     fields += field("span", span(tree))
 
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
-        fields += field("name", quote(ident.name.toString))
+        fields += field("name", quote(normalizePlaceholderName(ident.name.toString, slice(ident, source))))
         if isBackquotedIdent(ident, source) then
           fields += field("backquoted", "true")
       case select: dotty.tools.dotc.ast.Trees.Select[?] =>
@@ -49,6 +50,9 @@ object Main:
         fields += field("check_mode", quote(generator.checkMode.toString))
       case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
         fields += field("name", quote(bind.name.toString))
+      case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
+        val name = tdef.name.toString
+        fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] if vdef.mods.is(Given) =>
         fields += field("given", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
@@ -98,6 +102,24 @@ object Main:
     slice(tree, source) match
       case text if text.startsWith("`") && text.endsWith("`") => text.drop(1).dropRight(1)
       case text => text
+
+  private def normalizePlaceholderName(name: String, sourceText: String): String =
+    if sourceText == "_" then
+      name match
+        case suffix if suffix.startsWith("_$") =>
+          suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - 1}").getOrElse(name)
+        case _ => name
+    else name
+
+  private def isWildcardTypeParamSource(sourceText: String): Boolean =
+    val text = sourceText.trim
+    if !text.startsWith("_") then false
+    else
+      text.drop(1).headOption match
+        case None | Some(',') | Some(']') => true
+        case Some(character) if character.isWhitespace => true
+        case Some('<' | '>') => text.drop(2).startsWith(":")
+        case _ => false
 
   private def isBackquotedIdent(ident: dotty.tools.dotc.ast.Trees.Ident[?], source: String): Boolean =
     val text = slice(ident, source)

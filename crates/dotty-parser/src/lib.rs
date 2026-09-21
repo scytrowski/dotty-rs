@@ -21,6 +21,7 @@ mod parser;
 mod patterns;
 mod recovery;
 mod spans;
+mod type_params;
 mod types;
 
 pub use compilation_unit::{ParseResult, parse_compilation_unit};

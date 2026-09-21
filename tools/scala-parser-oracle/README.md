@@ -36,6 +36,12 @@ The lambda fixtures cover explicit function literals with single, empty,
 multiple, typed, wildcard, and context-function parameters, plus nested,
 applied, argument, block, and indented bodies. Context-function parameters are
 compared through their normalized `given` marker on `ValDef`.
+The polyfunction fixtures cover type-parameter clauses with lower and upper
+bounds, wildcard type parameters, and value-parameter function bodies. The
+placeholder fixtures cover synthetic-function lowering for infix expressions,
+selections, applications, multiple parameters, and nested placeholder scopes;
+the oracle normalizes Dotty's `WildcardFunction` and generated names to the
+shared Rust representation.
 It intentionally does not claim coverage for the rest of Scala's expression,
 type, or argument grammar.
 

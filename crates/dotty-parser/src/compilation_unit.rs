@@ -69,6 +69,8 @@ where
             }
         }
 
+        self.report_escaping_placeholders();
+
         let (stats, expr) = match trees.pop() {
             Some(expr) => (trees, expr),
             None => {
@@ -277,6 +279,81 @@ pub(crate) mod tests {
         assert_eq!(
             result.ast.get(expr).position.unwrap().span().range(),
             TextRange::new(1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn compilation_unit_reports_an_escaping_placeholder() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "_",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnboundPlaceholderParameter
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(0, 0).unwrap());
+    }
+
+    #[test]
+    fn placeholder_does_not_leak_to_a_following_compilation_unit_statement() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "_\nvalue",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnboundPlaceholderParameter
+        );
+        let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(result.ast.get(expr).kind, TreeKind::Ident(_)));
+    }
+
+    #[test]
+    fn block_reports_an_escaping_placeholder() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "{ _; value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 3, 4),
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnboundPlaceholderParameter
         );
     }
 

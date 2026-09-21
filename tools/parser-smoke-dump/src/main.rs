@@ -82,9 +82,13 @@ fn render_tree(
 
     match &tree.kind {
         TreeKind::Ident(ident) => {
+            let name = names.resolve(ident.name.text());
             fields.push(format!(
                 "\"name\":{}",
-                quote(names.resolve(ident.name.text()))
+                quote(normalize_placeholder_name(
+                    name,
+                    &source_slice(tree, source)
+                ))
             ));
             if ident.backquoted {
                 fields.push("\"backquoted\":true".to_owned());
@@ -109,6 +113,18 @@ fn render_tree(
             fields.push(format!(
                 "\"name\":{}",
                 quote(names.resolve(bind.name.text()))
+            ));
+        }
+        TreeKind::TypeDef(definition) => {
+            let name = names.resolve(definition.name.as_name().text());
+            let source_text = source_slice(tree, source);
+            fields.push(format!(
+                "\"name\":{}",
+                quote(if is_wildcard_type_param_source(&source_text) {
+                    "$type_wildcard"
+                } else {
+                    name
+                })
             ));
         }
         TreeKind::ValDef(definition) => {
@@ -196,6 +212,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
         TreeKind::ValDef(_) => "ValDef",
+        TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::If(_) => "If",
         TreeKind::While(_) => "While",
@@ -213,6 +231,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
+        TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
         TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
         TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
         TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
@@ -227,6 +246,16 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::Error(_)) => "Error",
         _ => "Unsupported",
     }
+}
+
+fn normalize_placeholder_name(name: &str, source_text: &str) -> String {
+    if source_text == "_" {
+        return name
+            .strip_prefix("$lambda_wildcard_")
+            .map(|index| format!("$placeholder_{index}"))
+            .unwrap_or_else(|| name.to_owned());
+    }
+    name.to_owned()
 }
 
 fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<Untyped>> {
@@ -298,6 +327,13 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             }
             children
         }
+        TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::TypeBoundsTree(bounds) => bounds
+            .low
+            .into_iter()
+            .chain(bounds.high)
+            .chain(bounds.alias)
+            .collect(),
         TreeKind::TypeTree(_) => Vec::new(),
         TreeKind::Block(block) => {
             let mut children = Vec::with_capacity(block.stats.len() + 1);
@@ -321,6 +357,11 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
         TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
             let mut children = function.params.clone();
+            children.push(function.body);
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::PolyFunction(function)) => {
+            let mut children = function.type_params.clone();
             children.push(function.body);
             children
         }
@@ -371,6 +412,20 @@ fn source_slice(tree: &Tree<Untyped>, source: &str) -> String {
         .get(range.start() as usize..range.end() as usize)
         .unwrap_or("")
         .to_owned()
+}
+
+fn is_wildcard_type_param_source(source: &str) -> bool {
+    let mut chars = source.trim_start().chars();
+    if chars.next() != Some('_') {
+        return false;
+    }
+
+    match chars.next() {
+        None | Some(',') | Some(']') => true,
+        Some(character) if character.is_whitespace() => true,
+        Some('<' | '>') => chars.next() == Some(':'),
+        Some(_) => false,
+    }
 }
 
 fn find_name_span(tree: &Tree<Untyped>, name: &str, source: &str) -> Option<(u32, u32)> {

@@ -54,7 +54,7 @@ if [[ "${#mode_args[@]}" -eq 2 ]]; then
   run_command+=" ${mode_args[*]}"
 fi
 run_command+=" ${source_path}"
-if ! sbt --error "${run_command}" >"${sbt_output}" 2>&1; then
+if ! sbt --server --error "${run_command}" >"${sbt_output}" 2>&1; then
   cat "${sbt_output}" >&2
   exit 1
 fi
