@@ -1111,7 +1111,25 @@ that operation, and it is format-agnostic: it knows nothing of AST addresses.
   differs from the arity, an unfilled slot, a cycle, or a graph deeper than 512.
   Nothing panics for a caller's semantic mismatch.
 
-The TASTy adapter uses it for `TYPEBOUNDS` variance markers (Milestone 3c),
+**Abstracting parameter symbols.** The same traversal builds binders from
+*symbols*: `method_type_from_symbols(store, params, result, kind)`,
+`poly_type_from_symbols` and `type_lambda_from_symbols` (`MethodParamSpec` /
+`TypeParamSpec` carry the symbol and what the parameter says) are Dotty's
+`MethodType.fromSymbols`, `PolyType.fromParams` and `HKTypeLambda.fromParams`.
+The new binder id is reserved first; every `TypeRef` / `TermRef` whose target is
+an exact parameter `SymbolId` (never a name, whatever its prefix, as `subst`
+does) becomes `ParamRef { binder, index }` of it, in the parameters' own types
+or bounds (so an F-bound names the binder) and in the result. An already built
+nested binder that mentions a parameter is copied and rebound under a reserved
+id, so building clauses from last to first needs no mutation of the inner one;
+a type that mentions no parameter keeps its id; shared subgraphs are transformed
+once; annotations are replaced, never mutated. The distinction is deliberate: a
+parameter *symbol* is source identity (a definition), a `ParamRef` is identity
+inside a binder, and a parameter's own info keeps naming symbols. A symbol given
+for two positions is `DuplicateParameterSymbol`; the call is atomic. It knows
+nothing of TASTy, so a namer can reuse it.
+
+The TASTy adapter uses `rebind_type_lambda` for `TYPEBOUNDS` variance markers (Milestone 3c),
 keeping the wire lambda cached at its own address and putting the derived
 lambda in the bounds.
 

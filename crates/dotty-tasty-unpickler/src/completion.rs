@@ -10,10 +10,12 @@
 //! | `VALDEF`, `PARAM` | the projected type of its type tree, as is (a by-name parameter stays `ByName`) |
 //! | `TYPEPARAM` | its bounds tree, projected: `Bounds`/`AliasingBounds` as is, any other type wrapped in a fresh `AliasingBounds` |
 //! | `TYPEDEF` without a template | the same `toBounds`: `type A = String` has info `AliasingBounds(String)` while its right-hand side still projects to `String` |
+//! | ordinary `DEFDEF` (Milestone 5c) | `Poly` / `Method` / `ByName` from its clauses and result type: see the [`method`](crate::method) module |
 //!
 //! Deferred, each with its own typed error and no info written: opaque
-//! aliases (`OpaqueAliasDeferred`), methods and constructors (5c), and
-//! classes, traits and modules (5d) (`UnsupportedSymbolCompletion`). No empty
+//! aliases (`OpaqueAliasDeferred`), constructors
+//! (`ConstructorCompletionDeferred`, 5d), and classes, traits and modules (5d)
+//! (`UnsupportedSymbolCompletion`). No empty
 //! `ClassInfo` is made to mark a class complete.
 //!
 //! Completion is *per symbol*: each public call is its own transaction, so an
