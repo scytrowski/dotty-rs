@@ -125,17 +125,29 @@ where
         definition_start: u32,
     ) -> TreeId<Untyped> {
         if self.accept_type_operator("=") {
+            let owns_layout = self.current().kind == TokenKind::Indent;
+            if owns_layout {
+                self.advance();
+            }
             if self.at_type_definition_rhs_boundary() {
                 let position = self.current_span();
                 self.report(
                     ParseDiagnosticKind::ExpectedType,
                     "expected a type after `=`",
                 );
-                return self.error_type(position);
+                let error = self.error_type(position);
+                if owns_layout && self.current().kind == TokenKind::Outdent {
+                    self.advance();
+                }
+                return error;
             }
-            return self.with_location(location, |parser| {
+            let rhs = self.with_location(location, |parser| {
                 parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
             });
+            if owns_layout && self.current().kind == TokenKind::Outdent {
+                self.advance();
+            }
+            return rhs;
         }
 
         let bounds_start = self.current().span.start();
@@ -180,7 +192,6 @@ where
             TokenKind::Eof
                 | TokenKind::Newline
                 | TokenKind::Newlines
-                | TokenKind::Indent
                 | TokenKind::Outdent
                 | TokenKind::Punctuation(
                     dotty_core::Punctuation::RightBrace | dotty_core::Punctuation::Semicolon
@@ -614,5 +625,37 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
         );
+    }
+
+    #[test]
+    fn parses_a_type_alias_inside_a_layout_region() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type A =\n  B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Indent, 8, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Outdent, 9, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        assert!(matches!(
+            parser.ast().get(rhs).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
     }
 }
