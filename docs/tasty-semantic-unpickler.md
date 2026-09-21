@@ -26,8 +26,10 @@ Status (`crates/dotty-tasty-unpickler`):
   type): implemented (§4, "Annotated types").
 - Milestone 4b2a, full annotation constructor applications (`APPLY`/`NEW`) with
   semantic literal arguments, and `MethodParam.erased`: implemented (§4,
-  "Full annotation applications"). `SHAREDterm` annotation trees stay deferred
-  for 4b2b.
+  "Full annotation applications").
+- Milestone 4b2b, `SHAREDterm` annotation roots: implemented (§4, "Shared
+  annotation trees"). No term-tree identity was needed: the link is followed
+  and the tree read again, as Dotty does.
 - Milestone 4c1, owner-space references (`TYPEREFin`, unsigned `TERMREFin`):
   implemented (§4, "Owner-space references"). It decodes 0 real nodes from the
   corpora, because the declaring classes belong to other units; see the
@@ -86,7 +88,7 @@ function. It follows an enter-before-complete model:
 | 4a. Refined and recursive | `Refined`, `Recursive`, `RecThis` | 4a |
 | 4b1. Compact annotated types | `Annotated` with `Annotation::compact(ty)`; full trees deferred | 4b1 |
 | 4b2a. Full annotation applications | `APPLY`/`NEW` annotations with `AnnotationArguments`; `MethodParam.erased` from `ErasedParam` | 4b2a |
-| 4b2b. `SHAREDterm` annotations | term-tree address identity | 4b2b |
+| 4b2b. `SHAREDterm` annotations | `AstView::resolve_shared_term`; shared `APPLY`/`NEW` reuse the direct decoder | 4b2b |
 | 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
 | 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
 | 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
@@ -635,7 +637,9 @@ the **first tag of the payload** (`isCompactAnnotTypeTag`, mirrored exactly by
 | first tag | form | result |
 |-----------|------|--------|
 | `APPLIEDtype`, `SHAREDtype`, `TYPEREF`, `TYPEREFdirect`, `TYPEREFsymbol`, `TYPEREFin` | compact: a type | `Type::Annotated { underlying, annotation }`, `Annotation { ty, tree: None }` |
-| anything else (`APPLY`, `NEW`, `SHAREDterm`, ...) | full: an annotation tree | `UnsupportedAnnotationTree { address, annotation_address, tag }` |
+| `APPLY`, `NEW` | full: a constructor application | `Annotation` with type and arguments (below) |
+| `SHAREDterm` | full: a link to an annotation tree | the tree at the end of the link chain, read as above (below) |
+| anything else | full: an annotation tree | `UnsupportedAnnotationTree { address, annotation_address, tag }` |
 
 The set is upstream's and no wider: `TYPEREFpkg`, `TERMREF*`, `THIS` and the
 binder types look like types and are not in it, so they mean a tree (a test
@@ -722,14 +726,54 @@ NEW tpt
   no wrapper is stripped and nothing is evaluated.
 - Any other spine part (a selection that is not the constructor, a second
   `TYPEAPPLY`, a class tree that is not a type such as `SELECTtpt`) is
-  `UnsupportedAnnotationConstructor`. A root that is not `APPLY`/`NEW`, notably
-  `SHAREDterm`, stays `UnsupportedAnnotationTree`: following it needs a
-  term-tree address identity that is Milestone 4b2b's to design.
+  `UnsupportedAnnotationConstructor`. A root that is neither `APPLY`/`NEW` nor
+  a `SHAREDterm` ending at one stays `UnsupportedAnnotationTree`.
 - Children are found by absolute address in the AST index; the structural
   decoder's node-relative trees are used for names and shape only. Identity
   and rollback are the annotated type's: one address, one `TypeId`, one
   `AnnotationId`; a failure at any argument frees everything the call
   allocated.
+
+### Shared annotation trees (Milestone 4b2b)
+
+```text
+ANNOTATEDtype Length parent_Type SHAREDterm target_ASTRef
+```
+
+The old roadmap said these needed a term-tree identity design. They do not.
+Scala 3.9's `TreeUnpickler` reads
+
+```scala
+case SHAREDterm => forkAt(readAddr()).readTree()
+```
+
+so the reader follows the address and reads the tree again; nothing is cached
+by tree address. The annotation is `Annotation(readTree())`, so it is the tree
+that counts, not the link. This layer does the same:
+
+- `AstView::resolve_shared_term(start, from)` follows `SHAREDterm` links (only
+  those) to the first other tree. Every link target must be a visible node and
+  the chain is bounded by `MAX_SHARED_DEPTH` (16 links, the annotation's own
+  included). A self link, a cycle, a non-node target or an overlong chain is
+  `InvalidReferenceTarget { from: the ANNOTATEDtype, to: the address that could
+  not be followed }`, never a recursion.
+- A constructor application (`APPLY`/`NEW`) at the end is decoded by the same
+  function as a directly written one; only the tree address differs. Errors
+  report the enclosing `ANNOTATEDtype` as `address` and the tree the chain ended
+  at as `annotation_address`.
+- Any other target tree is `UnsupportedAnnotationTree { address: the
+  ANNOTATEDtype, annotation_address: the target, tag: the target's tag }`. No
+  `TYPED`, `BLOCK`, `SELECT` or other expression is stripped or evaluated, and
+  a type-like target is not reclassified as a compact annotation (the tree path
+  is `Annotation(readTree())`, and no corpus target has that shape).
+- The `AnnotationId` belongs to the enclosing `ANNOTATEDtype`. It is not cached
+  by target address: two `ANNOTATEDtype` nodes linking to one tree get two
+  annotations with equal payloads, while one `ANNOTATEDtype` decoded twice (or
+  reached through a `SHAREDtype`) is one `TypeId` and one `AnnotationId`. The
+  term tree's address is not in the type index, and `Annotation.tree` stays
+  `None`.
+- Typed-tree identity (one `TreeId` per term node) is Milestone 7's concern; it
+  is separate from semantic annotation identity, which needs none.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1061,8 +1105,8 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 4b1: compact `ANNOTATEDtype` and the annotation corpus survey — complete;
    - 4b2a: full `APPLY`/`NEW` annotations with semantic arguments, and
      `MethodParam.erased` from `ErasedParam` — complete;
-   - 4b2b: `SHAREDterm` annotation trees (term-tree identity) and whatever
-     else the survey shows;
+   - 4b2b: `SHAREDterm` annotation roots, followed to their constructor tree
+     — complete;
    - 4c1: `TYPEREFin` / unsigned `TERMREFin` owner-space resolution — complete;
    - 4c2: name-designated refined / recursive member references and
      `lookup_structural_member` — complete;
@@ -1397,8 +1441,8 @@ needs another value variant.
 | `APPLY` library | builtins | 1,976 | 631 | 258 | 1,080 | 5 | 2 | 0 |
 | `APPLY` compiler | both | 5,206 | 0 | 3,123 / 3,106 | 2,083 / 2,100 | 0 | 0 | 0 |
 | `NEW` compiler | both | 147 | 0 | 147 | 0 | 0 | 0 | 0 |
-| `SHAREDterm` library | both | 21 | 0 | 1 | 0 | 0 | 0 | 0 (20 deferred) |
-| `SHAREDterm` compiler | both | 56 | 0 | 54 | 0 | 0 | 0 | 0 (2 deferred) |
+| `SHAREDterm` library | both | 21 | 17 | 1 | 0 | 0 | 3 | 0 |
+| `SHAREDterm` compiler | both | 56 | 0 | 54 | 2 | 0 | 0 | 0 |
 
 The 2 constructor failures are the `SELECTtpt` class trees (a selection whose
 type needs its qualifier). The 5 local misses are references to definitions
@@ -1409,8 +1453,8 @@ here, including all 147 `NEW` roots, whose parent already fails. The `NEW`
 shape is therefore covered by synthetic wire and by the shape survey, not by a
 decoded real one (no small Scala source we tried makes the compiler write a
 bare `NEW`). No argument is ever unsupported in either corpus, and there were
-0 unexpected errors in every run. `SHAREDterm` is measured on its own and
-stays deferred.
+0 unexpected errors in every run. (`SHAREDterm` rows: Milestone 4b2b, see
+"Shared annotation trees".)
 
 Effect on the other forms (library; the compiler is unchanged), decoded before
 -> after 4b2a, no builtins / builtins:
@@ -1432,6 +1476,37 @@ rest of the deferred full annotations under a compound form (14 `APPLIEDtype`,
 so the corpus decodes 0 erased `MethodParam`s; the real-compiler fixture
 `Erased.scala` carries that coverage, and the survey asserts that no decoded
 method type is erased without naming `ErasedParam`.
+
+### Shared annotation trees after 4b2b (library / compiler)
+
+All 77 `SHAREDterm` roots follow one link to an `APPLY` (library 21, compiler
+56): link depth 1 for all, no link whose target is another `SHAREDterm`, no
+invalid chain, no target other than `APPLY`. Targets are reused: in the library
+11 distinct trees serve 21 annotations (8 trees once, 2 three times, 1 seven
+times); in the compiler 40 serve 56 (29 once, 7 twice, 3 three times, 1 four
+times). Each outer annotation keeps its own `AnnotationId`.
+
+| root | total | decoded | parent failed first | external | constructor unsupported |
+|------|-------|---------|---------------------|----------|-------------------------|
+| `SHAREDterm` library | 21 | 17 | 1 | 0 | 3 |
+| `SHAREDterm` compiler | 56 | 0 | 54 | 2 | 0 |
+
+The 3 constructor failures are the two `SELECTtpt` class trees already counted
+for direct `APPLY` roots, reached through links; the compiler's 54 + 2 fail on
+external parents or classes, as its direct annotations do. Both runs (with and
+without builtins) agree, invalid reference 0, unexpected 0.
+
+Decoded before -> after (library; the compiler is unchanged): `APPLIEDtype`
+4,590 -> 4,604 without builtins and 5,474 -> 5,488 with; `ANDtype` 140 -> 141
+and 185 -> 186. `ANNOTATEDtype`, `ORtype`, `BYNAMEtype`, `TYPEBOUNDS`,
+`REFINEDtype`, `RECtype`, `RECthis` are unchanged: the 14 `APPLIEDtype` and 1
+`ANDtype` that had deferred on a shared annotation now decode.
+
+Annotation coverage: compact 17 (library), direct full `APPLY`/`NEW` 7,329
+(1,976 + 5,206 + 147), `SHAREDterm` to `APPLY` 77. No real annotation root form
+is unsupported. What remains inside supported roots is a `SELECTtpt` class tree
+(2 direct + 3 shared, library) and everything that needs a classpath or symbol
+completion.
 
 ### Owner-space references after 4c1 (library / compiler)
 
