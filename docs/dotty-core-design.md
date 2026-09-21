@@ -1549,9 +1549,11 @@ touches code that already exists.
   classfile` actually has a decoder to adapt.
 - **`dotty-parser`** produces `AstArena<Untyped>` directly — no intermediate
   representation. Per `[MINOR 3]`, it needs a `NameInterner` and the
-  `Span`/`SourceSpan` types, but nothing else from `SemanticStore`. Its current
-  grammar is intentionally limited; later parser increments expand it without
-  changing this semantic boundary.
+  `Span`/`SourceSpan` types, but nothing else from `SemanticStore`. Its source
+  grammar is incremental: the current frontend reaches from simple/operator
+  expressions and control flow through source-level definitions and initial
+  class/trait/object template structure. Later parser increments expand that
+  grammar without changing this semantic boundary.
 - **The future typer** is the first component to touch every part of
   `dotty-core` at once: it reads `AstArena<Untyped>`, populates `symbols`/
   `types`/`scopes`/`annotations` on a `SemanticStore`, and produces

@@ -111,7 +111,7 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `class`, `for`, `try`,
+Valid but not yet implemented constructs such as `enum`, `for`, `try`,
 and `match`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
@@ -179,6 +179,10 @@ parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
+class, trait, and object definitions with type parameters, primary constructor
+clauses, simple `extends` parent applications, and braced or indented template
+bodies. The class/trait distinction is preserved in `TypeDef` metadata; the
+synthetic primary constructor and template body remain parser-level structure.
 simple type aliases and abstract type declarations with lower and/or upper
 bounds
 parameterized type aliases and abstract declarations using the shared
@@ -212,6 +216,32 @@ shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. Applied, refined,
 opaque, match, and other full type forms remain deferred.
 
+### Class-like definitions and templates
+
+The initial class-like definition layer parses `class`, `trait`, and `object`
+statements into the existing untyped AST. Classes and traits use
+`TypeDef(Template(...))`; objects use `ModuleDef(Template(...))`. A trait is
+marked with the parser-level `Modifier::Trait`, so the source distinction is
+not inferred from constructor shape or body contents.
+
+The supported subset preserves class type parameters, primary constructor
+term-parameter clauses, simple `extends` parent types, constructor arguments,
+and comma/`with` parent lists. Parent constructor syntax remains source-level
+`Apply(Select(New(parent), <init>), args)`; resolving the parent or its
+constructor is a later semantic phase. When the shared AST requires a
+constructor for an otherwise empty class-like template, the parser allocates
+a synthetic `<init>` `DefDef` and preserves the source parameter structure
+there.
+
+Braced and scanner-provided indented template bodies retain every member in
+source order, including nested definitions and expressions. This is
+deliberately different from an expression block, whose last expression is its
+result. Layout classification remains owned by the scanner; the parser only
+feeds back the `ColonEol`, `Indented`, and `Outdented` events needed to close a
+template region. Case classes/objects, enum definitions, general modifiers,
+self types, auxiliary constructors, and semantic template processing remain
+future work.
+
 The current source-level pattern grammar is layered as:
 
 ```text
@@ -225,7 +255,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms, remaining control flow (`do`/`while`), templates,
+`RefinedType`, remaining definition forms (including modifiers, case classes,
+enums, and full template semantics), remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
