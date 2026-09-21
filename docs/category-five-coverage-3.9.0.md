@@ -27,9 +27,9 @@ also checked by `matches_the_complete_scala_3_9_tag_assignment_matrix` in the
 | 174 | `TERMREFin` | Synthetic only | No current corpus case; focused parser tests cover the grammar |
 | 175–183 | `TYPEREFin` … `SPLICEPATTERN` | Real corpus | Baseline and local fixtures |
 | 184–189 | — | Reserved | Unassigned in Scala 3.9.0 |
-| 190 | `MATCHtype` | Synthetic only | Rich semantic match-type representation; source syntax normally emits `MATCHtpt` |
-| 191 | `MATCHtpt` | Real corpus | Match-type syntax in baseline and local fixtures |
-| 192 | `MATCHCASEtype` | Synthetic only | Internal match-case type representation |
+| 190 | `MATCHtype` | Synthetic only | Rich semantic match-type representation; source syntax normally emits `MATCHtpt`. Decoded to `Type::Match` since Milestone 4d |
+| 191 | `MATCHtpt` | Real corpus | Match-type syntax in baseline and local fixtures (27 trees in the library, 0 in the compiler); a tree, not an `unpickle_type` input |
+| 192 | `MATCHCASEtype` | Synthetic only | Internal match-case type representation. Decoded to `Type::MatchCase` since Milestone 4d |
 | 193 | `FLEXIBLEtype` | Real corpus | Baseline corpus |
 | 255 | `HOLE` | Synthetic only | Used for pickled quote trees rather than ordinary TASTy files |
 

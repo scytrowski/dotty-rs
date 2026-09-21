@@ -16,8 +16,19 @@ pub struct ErrorType {
     pub message: NameId,
 }
 
-/// `[bound] scrutinee match { cases }`, where each case is itself a
-/// `Type::MatchCase` allocated in the same arena.
+/// `[bound] scrutinee match { cases }`.
+///
+/// Each case is a type in the same arena, in source order, one of:
+///
+/// * a `Type::MatchCase { pattern, result }`, or
+/// * a `Type::TypeLambda` whose result is a `Type::MatchCase`: Dotty's
+///   `[X1, ..., Xn] =>> MatchCase(pattern, result)`, how a case that captures
+///   type variables (`case Iterable[t] => t`) is written. The captures are that
+///   lambda's parameters, named by ordinary `ParamRef`s; there is no
+///   match-specific binder.
+///
+/// Either shape may sit behind sharing. Nothing checks the shape: a match type
+/// is rebuilt as written, and reduction is not this model's concern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchType {
     pub bound: TypeId,
