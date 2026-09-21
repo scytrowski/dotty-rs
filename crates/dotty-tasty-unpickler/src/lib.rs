@@ -14,7 +14,10 @@
 //! gives each type node address at most one `TypeId` and resolves reference
 //! types (`TypeRef`, `TermRef`, `ThisType`, `SHAREDtype`) through the index by
 //! address, never by name; other type forms are an explicit
-//! `UnpickleError::UnsupportedType`.
+//! `UnpickleError::UnsupportedType`. Pass 5a projects type trees
+//! (`unpickle_type_tree_type`) and completes simple symbols
+//! (`complete_symbol`): `VALDEF`, `PARAM`, `TYPEPARAM` and plain `TYPEDEF`
+//! become `SymbolInfo::Complete`; methods and classes stay `Missing`.
 
 mod annotated;
 mod ast_view;

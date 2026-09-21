@@ -8,7 +8,7 @@
 //! |------|----------------|
 //! | `SHAREDterm target` | the projection of the target tree (`forkAt(readAddr()).readTpt()`): no type of its own |
 //! | `IDENTtpt name Type` | exactly the embedded type; the name is syntax and is never resolved |
-//! | `APPLIEDtpt tycon args` | `Applied { tycon, args }` of the projected parts, in wire order |
+//! | `APPLIEDtpt tycon args` | `Applied { tycon, args }` of the projected parts, in wire order; with the constructor `Definitions::and_type` / `or_type` and two arguments, `And` / `Or` |
 //! | `BYNAMEtpt result` | `ByName { result }` |
 //! | `EXPLICITtpt tpt` | exactly the projection of its child; no wrapper |
 //! | `TYPEBOUNDStpt lo` | `AliasingBounds { alias: lo }` (upstream's `lo eq hi`) |
@@ -100,7 +100,26 @@ impl TastyUnpickler<'_, '_, '_> {
                 for argument in arguments {
                     args.push(self.type_of_tpt(ast, *argument, at)?);
                 }
-                self.store.types.alloc(Type::Applied { tycon, args })
+                // Upstream's `processAppliedType`: the special `&` and `|`
+                // aliases of the `scala` package become intersections and
+                // unions. They are told apart by symbol identity
+                // ([`Definitions::and_type`]), never by their name.
+                let special = self.store.types.get(tycon).reference_symbol();
+                match (&args[..], special) {
+                    ([left, right], Some(symbol)) if symbol == self.definitions.and_type => {
+                        self.store.types.alloc(Type::And {
+                            left: *left,
+                            right: *right,
+                        })
+                    }
+                    ([left, right], Some(symbol)) if symbol == self.definitions.or_type => {
+                        self.store.types.alloc(Type::Or {
+                            left: *left,
+                            right: *right,
+                        })
+                    }
+                    _ => self.store.types.alloc(Type::Applied { tycon, args }),
+                }
             }
             TYPEBOUNDSTPT_TAG => {
                 let shape = ast.node(at)?.decode_type_bounds()?;

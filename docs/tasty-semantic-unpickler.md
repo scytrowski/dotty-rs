@@ -40,9 +40,14 @@ Status (`crates/dotty-tasty-unpickler`):
 - Milestone 4d, `MATCHtype` / `MATCHCASEtype`, and the regular-TASTy
   type-language audit: implemented (§4, "Match types"; §8). Milestone 4 is
   closed; the next work is Milestone 5 (symbol completion).
+- Milestone 5a, type-tree projection and simple symbol completion: implemented
+  (§4, "Type trees and simple completion"; §8). `VALDEF`, `PARAM`, `TYPEPARAM`
+  and non-opaque non-template `TYPEDEF` symbols can now be completed; methods,
+  constructors and classes stay `Missing`.
 
-Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
-request by address and are not yet attached to symbols.
+Entered symbols start `SymbolInfo::Missing`; only an explicit
+`complete_symbol` (the simple kinds above) changes that. Types are otherwise
+decoded on request by address.
 
 Target: Scala 3.9.0 / TASTy 28.9.0. The wire format is documented in
 [`tasty-format-3.9.0.md`](tasty-format-3.9.0.md) and the decoding API in
@@ -95,7 +100,8 @@ function. It follows an enter-before-complete model:
 | 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
 | 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
 | 4d. Match types | `MATCHtype` / `MATCHCASEtype` to `Match` / `MatchCase`; type-language audit | 4d |
-| 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
+| 5a. Simple completion | type-tree projection; `Complete` for `VALDEF`/`PARAM`/`TYPEPARAM`/plain `TYPEDEF`; stable-term prefixes | 5a |
+| 3. Complete | `SymbolInfo::Complete(TypeId)` for methods, `ClassInfo`, annotations | 5b-5d |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
 ## 3. Identity invariant
@@ -813,6 +819,74 @@ structural decoder validating the shape only:
   `unpickle_type` does not accept it. Milestone 7 rehydrates it as a typed tree
   whose `tpe` may be a `Match`.
 
+### Type trees and simple completion (Milestone 5a)
+
+Pass boundary: pass 1 enters symbol identity and scopes; passes 2-4 decode
+semantic `Type` wire nodes lazily; pass 5a projects type *trees* and completes
+simple symbols. A projected type is a tree's `tpe`, not a typed AST node: no
+`TreeId`, no `AstArena<Typed>`.
+
+**Projection** (`TastyUnpickler::unpickle_type_tree_type`, module
+`type_tree`) follows `TreeUnpickler.readTpt`:
+
+| tree | projected type |
+|------|----------------|
+| `SHAREDterm` | the target's projection (`forkAt(readAddr()).readTpt()`); no type or cache entry of its own, bounded like every shared chain |
+| `IDENTtpt` | exactly the embedded type; the name is never resolved |
+| `APPLIEDtpt` | `Applied { tycon, args }`; with `Definitions::and_type` / `or_type` and two arguments, `And` / `Or` |
+| `BYNAMEtpt` | `ByName` |
+| `EXPLICITtpt` | exactly its child's type (no wrapper) |
+| `TYPEBOUNDStpt` | one child `AliasingBounds` (`lo eq hi`), two `Bounds`, three the alias' own type |
+| a semantic type node | that type, through `type_at` (`readTpt` falls back to `readType`) |
+| `SELECTtpt`, `SINGLETONtpt`, `REFINEDtpt`, `LAMBDAtpt`, `ANNOTATEDtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
+
+*Identity.* The projection is cached by tree address in its own map
+(`type_tree_type_at`), never in the type-node map: a tree address is not a
+type address, several tree addresses may project to one `TypeId` (an
+`IDENTtpt` shares its embedded type's), and derived types are owned by the
+projection. Derived types are not interned: equal `APPLIEDtpt` at two addresses
+are two types. `LAMBDAtpt` waits for the entering of type-lambda parameters.
+
+*The special `&` / `|`.* Real `APPLIEDtpt` trees apply the `scala.&` and
+`scala.|` aliases (1,022 library and 1,072 compiler constructors are named that
+in the wire; upstream's `processAppliedType` canonicalizes them). They are
+recognized by *symbol identity*: `Definitions` mints `and_type` and `or_type`,
+and a session declares those very symbols as `&` / `|` in its `scala` package.
+A same-named symbol of another owner stays an application, and so does an
+application with other than two arguments.
+
+**Completion** (`complete_symbol`, `complete_symbols`, module `completion`):
+
+| definition | info |
+|------------|------|
+| `VALDEF`, `PARAM` | the projected type of its declared tree, as is (a by-name parameter stays `ByName`) |
+| `TYPEPARAM` | its bounds tree; bounds are reused, another type is wrapped in a fresh `AliasingBounds` |
+| non-template, non-opaque `TYPEDEF` | `toBounds` of the right-hand side: `type A = Int` is `AliasingBounds(Int)` while its right-hand side still projects to `Int` |
+
+Opaque aliases are `OpaqueAliasDeferred`; methods, constructors, classes,
+traits, modules and packages are `UnsupportedSymbolCompletion { kind }`, with no
+info written and no empty `ClassInfo`. A body is never inspected, and a
+`ByName` or methodic right-hand side of a type definition is
+`InvalidCompletedBounds`. `suppressIntoIfParam` (upstream) is not applied; no
+real case was measured, so nothing was guessed.
+
+Each public call is one atomic transaction (the store checkpoint, the type and
+tree caches, the `RecThis` journal and a **`SymbolInfo` journal**: arena
+truncation cannot restore a field of a symbol that already existed, so the old
+info is recorded before each write and put back on failure). Completion is per
+symbol: an unsupported definition never undoes another symbol's completion.
+`complete_symbols` is the one batch, all or nothing. Completion never forces
+another symbol: a stable term takes part in lookup only if the caller completed
+it first.
+
+**Stable term prefixes.** `lookup_owner` follows, in one bounded chain of
+`MAX_PROXY_DEPTH` steps, proxies, `Applied` to its constructor (type arguments
+ignored, the prefix untouched) and a stable term to its *completed* info: a
+`Field` that is not `MUTABLE`, a `Value`, or a `Parameter` whose type is not
+`ByName`. Not followed: mutable fields, variables, methods, constructors,
+by-name parameters and type aliases (no dealiasing). `is_illegal_prefix` is
+unchanged. A cycle ends as `UnsupportedResolutionPrefix`.
+
 ### Owner-space references (Milestone 4c1)
 
 ```text
@@ -1150,7 +1224,14 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      `lookup_structural_member` — complete;
    - 4d: `Match` / `MatchCase` and the final type-language audit — complete;
      Milestone 4 is closed.
-5. Symbol completion (signatures, parents, self types, `ClassInfo`).
+5. Symbol completion, in steps:
+   - 5a: type-tree projection, simple symbol infos and completed stable-term
+     prefixes — complete;
+   - 5b: `DEFDEF` method and constructor signatures, `LAMBDAtpt` and its local
+     type parameters;
+   - 5c: `ClassInfo`, parents, self types, cross-unit declaration scopes;
+   - 5d: symbol annotations, companion links, opaque aliases and the
+     remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
 
@@ -1546,6 +1627,50 @@ Annotation coverage: compact 17 (library), direct full `APPLY`/`NEW` 7,329
 is unsupported. What remains inside supported roots is a `SELECTtpt` class tree
 (2 direct + 3 shared, library) and everything that needs a classpath or symbol
 completion.
+
+### Simple completion after 5a (library / compiler)
+
+Completion was measured by completing every eligible symbol of a unit, in
+document order, before decoding its reference nodes (`type_corpus`, "simple
+symbols completed first"), sharing one store per corpus. Results, library (no
+builtins / builtins) and compiler, per symbol kind:
+
+| kind (definition) | entered | completed (no builtins -> builtins) | main failures |
+|-------------------|---------|-------------------------------------|---------------|
+| `Object` (`VALDEF`) | 944 / 2,170 | 944 / 2,170 | none |
+| `Field` (`VALDEF`) | 1,180 / 7,433 | 726 -> 829 / 3,463 -> 3,497 | external 383 / 3,725; unsupported tree 71 / 244 |
+| `Field` (`PARAM`) | 1,507 / 1,914 | 971 -> 1,005 / 535 -> 545 | external |
+| `Parameter` (`PARAM`) | 19,152 / 38,708 | 11,296 -> 12,408 / 5,941 -> 7,618 | external; unsupported tree 1,556-1,566 / 1,413-1,425; prefix 43 (compiler) |
+| `TypeParameter` | 15,165 / 1,308 | 2 -> 14,684 / 2 -> 956 | external without `Any`/`Nothing` |
+| `TypeAlias` (`TYPEDEF`) | 437 / 1,119 | 15 -> 135 / 627 -> 654 | unsupported tree 269 / 338; opaque 4 / 24 |
+| `Class`, `Trait`, `ModuleClass`, `Method`, `Constructor` | 1,234, 669, 944, 15,645, 2,921 (library) | 0 | kind deferred (5b/5c), all still `Missing` |
+
+0 unexpected errors; `Package` symbols stay `Missing` too. Type trees the pass
+refuses, by tag, library (no builtins): `SELECTtpt` 843, `ANNOTATEDtpt` 807,
+`LAMBDAtpt` 353, `SINGLETONtpt` 40, `REFINEDtpt` 11; compiler: `SELECTtpt` 1,786,
+`LAMBDAtpt` 78, `SINGLETONtpt` 67, `ANNOTATEDtpt` 62, `REFINEDtpt` 2. Type-tree
+roots by definition context (all tags, the `SHAREDterm` ones by their target)
+are in the corpus report; the dominant roots are `IDENTtpt` (7,962 `PARAM`,
+6,071 `DEFDEF` results in the library), `APPLIEDtpt`, and `SHAREDtype`. The
+library's 4,008 `DEFDEF` result trees that are `APPLIEDtpt` and 15,739
+`IDENTtpt` constructors show what 5b must project: `SELECTtpt` (`x.T` written
+as a tree) and `ANNOTATEDtpt` are the two largest refusals, `LAMBDAtpt` the
+third.
+
+Member resolution. The measurement did not change any decode count: with
+completion the named `TYPEREF`/`TERMREF` roots that fail with an unsupported
+prefix fall from 91 to 73 (library, both runs) and from 298 to 291 (compiler)
+so 18 and 7 references get past the prefix, and every one of them becomes an
+`UnresolvedMember` / external failure instead: their prefix's class is declared
+in another unit, and a declaration scope is known only through the unit's own
+index (cross-unit scopes are 5c). The remaining prefixes are unchanged term
+paths (`SHAREDtype -> TERMREF` 56, `TERMREF` and `TERMREFdirect` shapes). No
+downstream root (`APPLIEDtype`, `TYPEBOUNDS`, `TYPELAMBDAtype`, `PARAMtype`,
+`ANNOTATEDtype`, `REFINEDtype`) gains a decode. The next blocker is a class's
+declarations being reachable from another unit (5c). Separately, declaring
+`scala.&` / `scala.|` in the builtins run adds 241 named library `TYPEREF`
+decodes (11,684 -> 11,925) and 212 in the compiler (7,409 -> 7,621); that is
+the special aliases resolving, not completion.
 
 ### Match types after 4d (library / compiler)
 

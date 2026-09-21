@@ -286,6 +286,34 @@ struct ErasedStats {
     erased_params: usize,
 }
 
+/// What became of the symbols of one kind when completion was tried.
+#[derive(Default)]
+struct CompletionOutcomes {
+    entered: usize,
+    already_complete: usize,
+    by_bucket: BTreeMap<&'static str, usize>,
+}
+
+/// The completion measurement (Milestone 5a) and the type-tree survey it is
+/// scoped by.
+#[derive(Default)]
+struct CompletionSurvey {
+    /// Outcomes by symbol kind.
+    outcomes: BTreeMap<String, CompletionOutcomes>,
+    /// `SymbolInfo` per kind after completion: kind -> state -> count.
+    infos: BTreeMap<(String, &'static str), usize>,
+    /// Type-tree root by definition context; a `SHAREDterm` is reported by
+    /// the tag its chain ends at.
+    tree_roots: BTreeMap<(&'static str, String), usize>,
+    /// Tags of the type trees completion refused.
+    unsupported_trees: BTreeMap<u8, usize>,
+    /// Root tag of each `APPLIEDtpt` constructor, and how many are named `&`
+    /// or `|` (the special constructors upstream canonicalizes).
+    applied_constructors: BTreeMap<String, usize>,
+    applied_and_or: usize,
+    unexpected: Vec<String>,
+}
+
 /// The wire shape of `MATCHtpt`, measured for context (Milestone 4d).
 #[derive(Default)]
 struct MatchTptSurvey {
@@ -473,6 +501,8 @@ struct OwnerOracle {
 
 #[derive(Default)]
 struct Tally {
+    /// Simple symbol completion (Milestone 5a).
+    completion: CompletionSurvey,
     /// `MATCHtpt` trees: total, those with an explicit bound, and how many
     /// have each number of cases. Never given to `unpickle_type`.
     match_tpt: MatchTptSurvey,
@@ -535,7 +565,238 @@ fn full_root_name(tag: u8) -> String {
         137 => "TYPEAPPLY".to_owned(),
         176 => "SELECTin".to_owned(),
         119 => "NAMEDARG".to_owned(),
+        61 => "SHAREDtype".to_owned(),
+        101 => "SINGLETONtpt".to_owned(),
+        111 => "IDENTtpt".to_owned(),
+        113 => "SELECTtpt".to_owned(),
+        116 => "TERMREFpkg".to_owned(),
+        117 => "TYPEREF".to_owned(),
+        94 => "BYNAMEtpt".to_owned(),
+        103 => "EXPLICITtpt".to_owned(),
+        140 => "BLOCK".to_owned(),
+        153 => "ANNOTATEDtype".to_owned(),
+        154 => "ANNOTATEDtpt".to_owned(),
+        160 => "REFINEDtpt".to_owned(),
+        161 => "APPLIEDtype".to_owned(),
+        162 => "APPLIEDtpt".to_owned(),
+        164 => "TYPEBOUNDStpt".to_owned(),
+        167 => "ORtype".to_owned(),
+        171 => "LAMBDAtpt".to_owned(),
+        191 => "MATCHtpt".to_owned(),
+        193 => "FLEXIBLEtype".to_owned(),
         other => format!("tag {other}"),
+    }
+}
+
+fn info_state(info: dotty_core::symbols::SymbolInfo) -> &'static str {
+    use dotty_core::symbols::SymbolInfo;
+    match info {
+        SymbolInfo::Missing => "Missing",
+        SymbolInfo::Deferred(_) => "Deferred",
+        SymbolInfo::Complete(_) => "Complete",
+        SymbolInfo::Error => "Error",
+    }
+}
+
+/// The name of a tree root for the survey: a `SHAREDterm` is followed to its
+/// end.
+fn tree_root_name(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    at: u32,
+) -> String {
+    match follow_shared_terms_in(index, file, at, 16) {
+        Some((links, _, tag, _)) if links > 0 => format!("SHAREDterm -> {}", full_root_name(tag)),
+        Some((_, _, tag, _)) => full_root_name(tag),
+        None => "SHAREDterm (invalid)".to_owned(),
+    }
+}
+
+/// Completes every eligible symbol of the unit, in document order, and
+/// records what happened, and surveys the type trees each definition context
+/// carries (whether or not completion supports them).
+fn complete_unit(
+    unpickler: &mut TastyUnpickler<'_, '_, '_>,
+    file: &TastyFile<'_>,
+    label: &str,
+    survey: &mut CompletionSurvey,
+) {
+    const VALDEF: u8 = 129;
+    const TYPEDEF: u8 = 131;
+    const DEFDEF: u8 = 130;
+    const TYPEPARAM: u8 = 133;
+    const PARAM: u8 = 134;
+    const TEMPLATE: u8 = 156;
+    const SELFDEF: u8 = 118;
+    let index = file.ast_address_index().unwrap();
+    let mut definitions: Vec<(u32, u8)> = index
+        .iter_nodes()
+        .filter(|node| matches!(node.tag, VALDEF | TYPEDEF | DEFDEF | TYPEPARAM | PARAM))
+        .map(|node| (u32::try_from(node.offset).unwrap(), node.tag))
+        .collect();
+    definitions.sort_unstable();
+    let mut children: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
+    for edge in index.iter_tree_edges() {
+        children
+            .entry(u32::try_from(edge.parent.offset).unwrap())
+            .or_default()
+            .push((u32::try_from(edge.child.offset).unwrap(), edge.child.tag));
+    }
+    let below = |at: u32| children.get(&at).map_or(&[][..], Vec::as_slice);
+
+    // The tree survey, for every definition the pass entered a symbol for.
+    for (at, tag) in &definitions {
+        if unpickler.symbol_state_at(*at).is_none() {
+            continue;
+        }
+        let mut record = |context: &'static str, tree: u32| {
+            *survey
+                .tree_roots
+                .entry((context, tree_root_name(&index, file, tree)))
+                .or_default() += 1;
+        };
+        match *tag {
+            VALDEF => {
+                if let Some((tree, _)) = below(*at).first() {
+                    record("VALDEF type tree", *tree);
+                }
+            }
+            PARAM => {
+                if let Some((tree, _)) = below(*at).first() {
+                    record("PARAM type tree", *tree);
+                }
+            }
+            TYPEPARAM => {
+                if let Some((tree, _)) = below(*at).first() {
+                    record("TYPEPARAM bounds tree", *tree);
+                }
+            }
+            TYPEDEF => match below(*at).first() {
+                Some((template, tag)) if *tag == TEMPLATE => {
+                    // Parents come after the parameters, before the self
+                    // definition and the statements.
+                    let mut parents = below(*template)
+                        .iter()
+                        .skip_while(|(_, tag)| matches!(*tag, TYPEPARAM | PARAM));
+                    for (parent, tag) in parents.by_ref() {
+                        if matches!(*tag, SELFDEF | VALDEF | TYPEDEF | DEFDEF) {
+                            break;
+                        }
+                        record("class parent tree", *parent);
+                    }
+                    for (self_def, tag) in below(*template) {
+                        if *tag == SELFDEF
+                            && let Some((tree, _)) = below(*self_def).first()
+                        {
+                            record("SELFDEF type tree", *tree);
+                        }
+                    }
+                }
+                Some((rhs, _)) => record("TYPEDEF rhs tree (non-template)", *rhs),
+                None => {}
+            },
+            DEFDEF => {
+                if let Some((result, _)) = below(*at)
+                    .iter()
+                    .find(|(_, tag)| !matches!(*tag, TYPEPARAM | PARAM))
+                {
+                    record("DEFDEF result tree", *result);
+                }
+            }
+            _ => {}
+        }
+    }
+    // The constructors of every `APPLIEDtpt`.
+    for node in index.iter_nodes_with_tag(162) {
+        let at = u32::try_from(node.offset).unwrap();
+        let Some((tycon, _)) = below(at).first() else {
+            continue;
+        };
+        *survey
+            .applied_constructors
+            .entry(tree_root_name(&index, file, *tycon))
+            .or_default() += 1;
+        // A textual name, for the survey only: it decides nothing.
+        if let dotty_tasty::tasty::RawTree::NatAst { value, .. } = tree_from(file, *tycon)
+            && file
+                .names()
+                .get_utf8(value)
+                .is_some_and(|name| name == "&" || name == "|")
+        {
+            survey.applied_and_or += 1;
+        }
+    }
+
+    // Completion itself.
+    for (at, tag) in definitions {
+        let Some((kind, before)) = unpickler.symbol_state_at(at) else {
+            continue;
+        };
+        let name = format!("{kind:?} ({})", full_root_name_of_definition(tag));
+        let outcomes = survey.outcomes.entry(name).or_default();
+        outcomes.entered += 1;
+        if matches!(before, dotty_core::symbols::SymbolInfo::Complete(_)) {
+            outcomes.already_complete += 1;
+            continue;
+        }
+        let bucket = match unpickler.complete_symbol(at) {
+            Ok(_) => "completed",
+            Err(
+                UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
+            ) => "external child failure",
+            Err(UnpickleError::MissingReferencedSymbol { .. }) => "local missing reference",
+            Err(UnpickleError::UnsupportedTypeTree { tag, .. }) => {
+                *survey.unsupported_trees.entry(tag).or_default() += 1;
+                "unsupported type tree"
+            }
+            Err(UnpickleError::UnsupportedType { .. }) => "unsupported type node",
+            Err(UnpickleError::OpaqueAliasDeferred { .. }) => "opaque alias",
+            Err(UnpickleError::UnsupportedSymbolCompletion { .. }) => "kind deferred (5b/5c)",
+            Err(UnpickleError::InvalidCompletedBounds { .. }) => "invalid bounds",
+            // An annotation inside the type (4b's deferrals).
+            Err(
+                UnpickleError::UnsupportedAnnotationTree { .. }
+                | UnpickleError::UnsupportedAnnotationConstructor { .. }
+                | UnpickleError::UnsupportedAnnotationArgument { .. },
+            ) => "deferred annotation",
+            Err(
+                UnpickleError::UnsupportedResolutionPrefix { .. }
+                | UnpickleError::UnsupportedResolutionSpace { .. },
+            ) => "dependency prefix unsupported or still Missing",
+            Err(
+                UnpickleError::AmbiguousMember { .. }
+                | UnpickleError::UnsupportedSignedReference { .. }
+                | UnpickleError::IllegalTypePrefix { .. },
+            ) => "other known",
+            Err(UnpickleError::MalformedType { .. } | UnpickleError::Ast(_)) => "malformed",
+            Err(other) => {
+                survey.unexpected.push(format!("{label} @{at}: {other:?}"));
+                "unexpected"
+            }
+        };
+        *outcomes.by_bucket.entry(bucket).or_default() += 1;
+    }
+    // The info distribution after completion.
+    let index = file.ast_address_index().unwrap();
+    for node in index.iter_nodes() {
+        let at = u32::try_from(node.offset).unwrap();
+        if let Some((kind, info)) = unpickler.symbol_state_at(at) {
+            *survey
+                .infos
+                .entry((format!("{kind:?}"), info_state(info)))
+                .or_default() += 1;
+        }
+    }
+}
+
+fn full_root_name_of_definition(tag: u8) -> &'static str {
+    match tag {
+        129 => "VALDEF",
+        131 => "TYPEDEF",
+        130 => "DEFDEF",
+        133 => "TYPEPARAM",
+        134 => "PARAM",
+        _ => "?",
     }
 }
 
@@ -713,8 +974,17 @@ fn follow_shared_terms(
     at: u32,
     bound: usize,
 ) -> Option<(usize, u32, u8, bool)> {
+    follow_shared_terms_in(&file.ast_address_index().unwrap(), file, at, bound)
+}
+
+/// [`follow_shared_terms`] over an index built once by the caller.
+fn follow_shared_terms_in(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    at: u32,
+    bound: usize,
+) -> Option<(usize, u32, u8, bool)> {
     use dotty_tasty::tasty::{RawTree, TermValue};
-    let index = file.ast_address_index().unwrap();
     let mut current = at;
     let mut links = 0;
     let mut link_to_link = false;
@@ -773,6 +1043,7 @@ fn run(
     definitions: Definitions,
     packages: Packages,
     tally: &mut Tally,
+    complete_first: bool,
 ) -> Packages {
     let file = TastyFile::parse_compatible_with(bytes, 28, 9, 0).unwrap();
     let addresses: Vec<(u32, u8)> = {
@@ -980,6 +1251,9 @@ fn run(
     let mut other_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
+    if complete_first {
+        complete_unit(&mut unpickler, &file, label, &mut tally.completion);
+    }
 
     tally.units += 1;
     let (mut decoded, mut failed) = (0, 0);
@@ -1309,17 +1583,24 @@ fn the_type_pass_never_fails_unexpectedly_on_the_small_fixtures() {
             definitions,
             Packages::new(),
             &mut tally,
+            true,
         );
     }
 
+    assert_eq!(tally.completion.unexpected, Vec::<String>::new());
     assert!(tally.units > 20, "found {} units", tally.units);
     assert!(tally.by_address.decoded > 0);
     assert_eq!(tally.unexpected, Vec::<String>::new());
 }
 
-/// Enters `scala.Any`, `scala.Nothing` and `scala.Null`, which the compiler
+/// Enters `scala.Any`, `scala.Nothing`, `scala.Null` and the special
+/// `scala.&` / `scala.|` aliases, which the compiler
 /// defines and no TASTy file declares.
-fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages) {
+fn provide_compiler_builtins(
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+    definitions: Definitions,
+) {
     use dotty_core::names::{Name, Namespace};
     use dotty_core::symbols::{
         Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -1342,6 +1623,13 @@ fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages)
         });
         store.scopes.get_mut(scala.scope).enter(name, symbol);
     }
+    // `scala.&` and `scala.|` are the session's canonical special aliases
+    // (`Definitions::and_type` / `or_type`), so an applied `&` is an `And`.
+    for (text, symbol) in [("&", definitions.and_type), ("|", definitions.or_type)] {
+        let name = Name::new(store.names.intern(text), Namespace::Type);
+        store.symbols.get_mut(symbol).owner = Some(scala.symbol);
+        store.scopes.get_mut(scala.scope).enter(name, symbol);
+    }
 }
 
 #[test]
@@ -1353,11 +1641,16 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
     // so without them no lambda can decode, and the binder path would go
     // unmeasured. The second pass provides just those (and `Null`), nothing
     // else, so the remaining failures are still real external references.
-    for (corpus, builtins) in [
-        ("scala3-library", false),
-        ("scala3-compiler", false),
-        ("scala3-library", true),
-        ("scala3-compiler", true),
+    for (corpus, builtins, complete) in [
+        ("scala3-library", false, false),
+        ("scala3-compiler", false, false),
+        ("scala3-library", true, false),
+        ("scala3-compiler", true, false),
+        // The same, with every eligible symbol completed first (Milestone 5a).
+        ("scala3-library", false, true),
+        ("scala3-compiler", false, true),
+        ("scala3-library", true, true),
+        ("scala3-compiler", true, true),
     ] {
         // One store and one package registry per corpus, as a classpath
         // would have.
@@ -1365,7 +1658,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
         if builtins {
-            provide_compiler_builtins(&mut store, &mut packages);
+            provide_compiler_builtins(&mut store, &mut packages, definitions);
         }
         let mut tally = Tally::default();
         for path in tasty_files(&root.join(corpus)) {
@@ -1377,6 +1670,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 definitions,
                 packages,
                 &mut tally,
+                complete,
             );
         }
 
@@ -1413,11 +1707,16 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         let mut unsupported: Vec<_> = tally.unsupported.iter().collect();
         unsupported.sort_by(|a, b| b.1.cmp(a.1));
         println!(
-            "== {corpus} ({})",
+            "== {corpus} ({}{})",
             if builtins {
                 "compiler builtins provided"
             } else {
                 "no builtins"
+            },
+            if complete {
+                ", simple symbols completed first"
+            } else {
+                ""
             }
         );
         println!("units: {}", tally.units);
@@ -1664,6 +1963,37 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         );
         println!("missing symbols by target tag: {:?}", tally.missing_targets);
         println!("unsupported by tag: {unsupported:?}");
+        if complete {
+            let survey = &tally.completion;
+            println!("simple symbol completion (per symbol kind and definition tag):");
+            for (kind, outcomes) in &survey.outcomes {
+                println!(
+                    "  {kind}: entered {}, already complete {}, {:?}",
+                    outcomes.entered, outcomes.already_complete, outcomes.by_bucket
+                );
+            }
+            println!(
+                "  SymbolInfo after completion (kind, state -> count): {:?}",
+                survey.infos
+            );
+            println!(
+                "  type-tree roots by definition context: {:?}",
+                survey.tree_roots
+            );
+            println!(
+                "  unsupported type trees by tag: {:?}",
+                survey.unsupported_trees
+            );
+            println!(
+                "  APPLIEDtpt constructors by root: {:?}, named & or | (survey only): {}",
+                survey.applied_constructors, survey.applied_and_or
+            );
+            println!("  completion unexpected: {}", survey.unexpected.len());
+            for error in survey.unexpected.iter().take(10) {
+                println!("    {error}");
+            }
+            assert!(survey.unexpected.is_empty());
+        }
         println!("unexpected errors: {}", tally.unexpected.len());
         for error in tally.unexpected.iter().take(10) {
             println!("  {error}");

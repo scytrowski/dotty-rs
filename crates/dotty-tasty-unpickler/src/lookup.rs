@@ -9,7 +9,9 @@
 //!
 //! Only prefixes whose lookup semantics are understood are searched:
 //! `ThisType`, `TypeRef` naming a class, trait, module class or package, and
-//! `TermRef` naming a package or an object (through its module class), and
+//! `TermRef` naming a package or an object (through its module class), a
+//! stable term whose completed type is one of these or an application of one
+//! (Milestone 5a: [`lookup_owner`]), and
 //! `Flexible` and `Annotated` around any of these (looked through, never
 //! stripped: both are proxies whose members are their underlying type's, as
 //! Dotty's `FlexibleType` and `AnnotatedType` are `CachedProxyType`s).

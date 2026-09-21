@@ -7,7 +7,7 @@ use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::resolution::{NoResolver, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::store::StoreCheckpoint;
-use dotty_core::symbols::{SymbolInfo, SymbolOrigin};
+use dotty_core::symbols::{SymbolInfo, SymbolKind, SymbolOrigin};
 use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
@@ -32,7 +32,10 @@ pub(crate) struct Transaction {
 /// first pass: it allocates a symbol for every definition, with its owner,
 /// kind, flags and visibility, but no type (`SymbolInfo::Missing`). Types and
 /// signatures come from later passes, which resolve references through the
-/// [`TastySemanticIndex`] this pass builds.
+/// [`TastySemanticIndex`] this pass builds: `unpickle_type` decodes type nodes,
+/// `unpickle_type_tree_type` projects type trees (their `tpe`, not a typed
+/// AST), and `complete_symbol` gives the simple definitions their
+/// `SymbolInfo::Complete`, one atomic transaction per symbol.
 ///
 /// The store is borrowed mutably for the unpickler's lifetime, and one
 /// unpickler enters one file. To enter several files into one store, carry the
@@ -128,6 +131,14 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// The addresses entered so far.
     pub fn index(&self) -> &TastySemanticIndex {
         &self.index
+    }
+
+    /// The kind and current info of the symbol entered for the definition at
+    /// `address`, for measuring completion without reaching into the store.
+    pub fn symbol_state_at(&self, address: u32) -> Option<(SymbolKind, SymbolInfo)> {
+        let symbol = self.index.symbol_at(address)?;
+        let entered = self.store.symbols.get(symbol);
+        Some((entered.kind, entered.info))
     }
 
     /// Consumes the unpickler, keeping the index for later passes.

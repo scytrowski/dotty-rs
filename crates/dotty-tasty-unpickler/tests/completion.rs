@@ -36,6 +36,9 @@ const N_F: u32 = 13;
 const N_PARAM: u32 = 14;
 const N_S: u32 = 15;
 const N_Y: u32 = 16;
+const N_AND: u32 = 17;
+const N_OR: u32 = 18;
+const N_SCALA: u32 = 19;
 
 const IDENTTPT: u8 = 111;
 const APPLIEDTPT: u8 = 162;
@@ -86,7 +89,7 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
     let names = NameTable::from_entries(
         [
             "ASTs", "p", "Box", "Out", "Holder", "A", "x", "v", "Alias", "Abs", "Same", "Op",
-            "Bad", "f", "a", "s", "y", "m",
+            "Bad", "f", "a", "s", "y", "&", "|", "scala",
         ]
         .into_iter()
         .map(|text| RawName::Utf8(text.to_owned()))
@@ -129,7 +132,7 @@ const DEFINITIONS: [&str; 15] = [
 ];
 
 /// The loose type trees and references, in order, appended after the package.
-const ROOTS: [&str; 22] = [
+const ROOTS: [&str; 26] = [
     "ident",
     "applied",
     "applied again",
@@ -152,6 +155,10 @@ const ROOTS: [&str; 22] = [
     "a.Out",
     "f.Out",
     "s.Out",
+    "and",
+    "or",
+    "and of three",
+    "look-alike",
 ];
 
 struct Unit {
@@ -233,6 +240,14 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
     let term = |label: &str| leaf(TERMREFDIRECT_TAG, def(label));
     let out_of = |prefix: Vec<u8>| named(TYPEREF_TAG, N_OUT, &prefix);
     let applied = || node(APPLIEDTPT, &[ident_box(), ident_any()].concat());
+    // `pkg.<name>[args]`: an applied identifier for a member of a package.
+    let special = |name: u32, package: u32, args: &[Vec<u8>]| {
+        let tycon = ident(
+            name,
+            named(TYPEREF_TAG, name, &leaf(TERMREFPKG_TAG, package)),
+        );
+        node(APPLIEDTPT, &[vec![tycon], args.to_vec()].concat().concat())
+    };
     let roots: Vec<Vec<u8>> = vec![
         ident_any(),
         applied(),
@@ -259,6 +274,11 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         out_of(term("Holder.f.a")),
         out_of(term("Holder.f")),
         out_of(term("Holder.s")),
+        special(N_AND, N_SCALA, &[ident_any(), ident_any()]),
+        special(N_OR, N_SCALA, &[ident_any(), ident_any()]),
+        special(N_AND, N_SCALA, &[ident_any(), ident_any(), ident_any()]),
+        // The same text, another owner: the package `p`.
+        special(N_AND, N_P, &[ident_any(), ident_any()]),
     ];
     assert_eq!(roots.len(), ROOTS.len());
     let holder_payload = roots.concat();
@@ -329,8 +349,43 @@ impl Session {
 }
 
 fn entered<'a>(file: &'a TastyFile<'a>, session: &'a mut Session) -> TastyUnpickler<'a, 'a, 'a> {
+    use dotty_core::names::Name;
+    use dotty_core::{Symbol, SymbolFlags, SymbolLinks, Visibility};
     let mut packages = Packages::new();
-    packages.enter(&mut session.store, SymbolOrigin::Synthetic, &["p"]);
+    let package = packages
+        .enter(&mut session.store, SymbolOrigin::Synthetic, &["p"])
+        .pop()
+        .unwrap();
+    // `scala.&` and `scala.|` are the session's canonical special aliases;
+    // `p` declares a look-alike `&` of its own.
+    let scala = packages
+        .enter(&mut session.store, SymbolOrigin::Synthetic, &["scala"])
+        .pop()
+        .unwrap();
+    let mut declare = |scope, symbol, text: &str| {
+        let name = Name::new(session.store.names.intern(text), Namespace::Type);
+        session.store.scopes.get_mut(scope).enter(name, symbol);
+    };
+    declare(scala.scope, session.definitions.and_type, "&");
+    declare(scala.scope, session.definitions.or_type, "|");
+    let look_alike = session.store.symbols.alloc(Symbol {
+        name: Name::new(session.store.names.intern("&"), Namespace::Type),
+        owner: Some(package.symbol),
+        kind: SymbolKind::TypeAlias,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let name = Name::new(session.store.names.intern("&"), Namespace::Type);
+    session
+        .store
+        .scopes
+        .get_mut(package.scope)
+        .enter(name, look_alike);
     let mut unpickler =
         TastyUnpickler::with_packages(file, &mut session.store, session.definitions, packages);
     unpickler.enter_symbols().unwrap();
@@ -632,6 +687,37 @@ fn a_failing_argument_rolls_back_the_tree_types_built_before_it() {
     }
     drop(unpickler);
     assert_eq!(next_type(&mut session), expected);
+}
+
+#[test]
+fn the_special_intersection_and_union_aliases_become_and_and_or_by_identity() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let and = unpickler.unpickle_type_tree_type(unit.at("and")).unwrap();
+    let or = unpickler.unpickle_type_tree_type(unit.at("or")).unwrap();
+    let three = unpickler
+        .unpickle_type_tree_type(unit.at("and of three"))
+        .unwrap();
+    let look_alike = unpickler
+        .unpickle_type_tree_type(unit.at("look-alike"))
+        .unwrap();
+    drop(unpickler);
+
+    assert!(matches!(session.store.types.get(and), Type::And { .. }));
+    assert!(matches!(session.store.types.get(or), Type::Or { .. }));
+    // Not two arguments: nothing to canonicalize, so it stays as written.
+    assert!(matches!(
+        session.store.types.get(three),
+        Type::Applied { .. }
+    ));
+    // The text `&` of another owner is another symbol: still an application.
+    assert!(matches!(
+        session.store.types.get(look_alike),
+        Type::Applied { .. }
+    ));
 }
 
 // Symbol completion

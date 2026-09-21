@@ -57,6 +57,15 @@ pub struct Definitions {
     /// Scala's bottom type, the lower bound the same lowering uses when a
     /// wildcard does not specify one (e.g. `? extends Number`).
     pub nothing_class: SymbolId,
+    /// The identity of `scala.&`, Dotty's `defn.andType`: the special type
+    /// alias an applied source-level intersection `A & B` names. A session
+    /// (or classpath) that provides the `scala` package declares this very
+    /// symbol as `&` in it; a TASTy type tree applying it is normalized to
+    /// [`Type::And`], as upstream's `processAppliedType` does. Identity, never
+    /// the text `&`: a same-named symbol of another owner is not this one.
+    pub and_type: SymbolId,
+    /// The identity of `scala.|`, `defn.orType`; see [`and_type`](Self::and_type).
+    pub or_type: SymbolId,
 }
 
 impl Definitions {
@@ -82,6 +91,8 @@ impl Definitions {
         let object_class = Self::builtin_symbol(store, "Object");
         let any_class = Self::builtin_symbol(store, "Any");
         let nothing_class = Self::builtin_symbol(store, "Nothing");
+        let and_type = Self::builtin_alias(store, "&");
+        let or_type = Self::builtin_alias(store, "|");
 
         Self {
             no_prefix,
@@ -97,7 +108,15 @@ impl Definitions {
             object_class,
             any_class,
             nothing_class,
+            and_type,
+            or_type,
         }
+    }
+
+    fn builtin_alias(store: &mut SemanticStore, name: &str) -> SymbolId {
+        let id = Self::builtin_symbol(store, name);
+        store.symbols.get_mut(id).kind = SymbolKind::TypeAlias;
+        id
     }
 
     fn builtin_symbol(store: &mut SemanticStore, name: &str) -> SymbolId {
@@ -151,6 +170,20 @@ mod tests {
                     assert_ne!(a, b, "primitives {i} and {j} share a TypeId");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bootstrap_mints_the_special_intersection_and_union_aliases() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        assert_ne!(definitions.and_type, definitions.or_type);
+        for (symbol, text) in [(definitions.and_type, "&"), (definitions.or_type, "|")] {
+            let symbol = store.symbols.get(symbol);
+            assert_eq!(symbol.kind, SymbolKind::TypeAlias);
+            assert_eq!(symbol.origin, SymbolOrigin::Builtin);
+            assert_eq!(store.names.resolve(symbol.name.text()), text);
         }
     }
 
