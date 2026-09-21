@@ -29,6 +29,8 @@ for fixture in "${fixtures[@]}"; do
     mode=pattern
   elif [[ "$(basename "$(dirname "${fixture}")")" == "definitions" ]]; then
     mode=block
+  elif [[ "$(basename "$(dirname "${fixture}")")" == "compilation" ]]; then
+    mode=compilation
   fi
   printf '%s\t%s\n' "${mode}" "${fixture}" >>"${manifest}"
 done

@@ -3,7 +3,7 @@ use std::{env, fs, process};
 use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{parse_compilation_unit, parse_pattern_fragment};
+use dotty_parser::{parse_compilation_unit, parse_expression_fragment, parse_pattern_fragment};
 
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -16,10 +16,12 @@ fn main() {
 
     let (mode, path) = match args.as_slice() {
         [path] => ("expr", path.as_str()),
-        [flag, mode, path] if flag == "--mode" && mode == "pattern" => ("pattern", path.as_str()),
+        [flag, mode, path] if flag == "--mode" && (mode == "pattern" || mode == "compilation") => {
+            (mode.as_str(), path.as_str())
+        }
         _ => {
             eprintln!(
-                "usage: dotty-parser-smoke-dump [--mode pattern] <source-file> | --batch manifest"
+                "usage: dotty-parser-smoke-dump [--mode pattern|compilation] <source-file> | --batch manifest"
             );
             process::exit(2);
         }
@@ -27,7 +29,7 @@ fn main() {
 
     if path.is_empty() {
         eprintln!(
-            "usage: dotty-parser-smoke-dump [--mode pattern] <source-file> | --batch manifest"
+            "usage: dotty-parser-smoke-dump [--mode pattern|compilation] <source-file> | --batch manifest"
         );
         process::exit(2);
     }
@@ -86,8 +88,10 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
     let mut names = NameInterner::new();
     let result = if mode == "pattern" {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
-    } else {
+    } else if mode == "compilation" {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
+    } else {
+        parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
     };
     if !result.diagnostics.is_empty() {
         return Err(format!(
@@ -96,7 +100,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         ));
     }
 
-    let tree = if mode == "pattern" {
+    let tree = if mode == "pattern" || mode == "expr" || mode == "block" || mode == "compilation" {
         result.root
     } else {
         match &result.ast.get(result.root).kind {
@@ -156,6 +160,18 @@ fn render_tree(
             fields.push(format!(
                 "\"name\":{}",
                 quote(names.resolve(named.name.text()))
+            ));
+        }
+        TreeKind::Import(import) => {
+            fields.push(format!(
+                "\"selectors\":{}",
+                render_selectors(&import.selectors, arena, names, source)
+            ));
+        }
+        TreeKind::Export(export) => {
+            fields.push(format!(
+                "\"selectors\":{}",
+                render_selectors(&export.selectors, arena, names, source)
             ));
         }
         TreeKind::Apply(application) => {
@@ -310,6 +326,18 @@ fn render_tree(
     {
         rendered_children.push(render_synthetic_ident(names.resolve(qual.text()), span));
     }
+    if let TreeKind::Import(import) = &tree.kind
+        && import.selectors.len() == 1
+        && matches!(
+            arena.get(import.expr).kind,
+            TreeKind::Ident(ident)
+                if names.resolve(ident.name.text()) == "<empty>"
+                    && !has_non_empty_span(arena, import.expr)
+        )
+        && !rendered_children.is_empty()
+    {
+        rendered_children[0] = "{\"kind\":\"EmptyTree\",\"span\":null,\"children\":[]}".to_owned();
+    }
     fields.push(format!("\"children\":[{}]", rendered_children.join(",")));
     format!("{{{}}}", fields.join(","))
 }
@@ -320,6 +348,9 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Select(_) => "Select",
         TreeKind::Apply(_) => "Apply",
         TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::PackageDef(_) => "PackageDef",
+        TreeKind::Import(_) => "Import",
+        TreeKind::Export(_) => "Export",
         TreeKind::Bind(_) => "Bind",
         TreeKind::Alternative(_) => "Alternative",
         TreeKind::Typed(_) => "Typed",
@@ -366,6 +397,47 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
     }
 }
 
+fn render_selectors(
+    selectors: &[dotty_core::ast::ImportSelector<Untyped>],
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+    source: &str,
+) -> String {
+    let selectors = selectors
+        .iter()
+        .map(|selector| {
+            let mut fields = vec![format!(
+                "\"name\":{}",
+                quote(match names.resolve(selector.imported.text()) {
+                    "*" => "_",
+                    name => name,
+                })
+            )];
+            if let Some(rename) = selector.renamed {
+                match &arena.get(rename).kind {
+                    TreeKind::Ident(ident) => fields.push(format!(
+                        "\"rename\":{}",
+                        quote(names.resolve(ident.name.text()))
+                    )),
+                    _ => fields.push(format!(
+                        "\"rename_tree\":{}",
+                        render_tree(rename, arena, names, source)
+                    )),
+                }
+            }
+            if let Some(bound) = selector.bound {
+                fields.push(format!(
+                    "\"bound\":{}",
+                    render_tree(bound, arena, names, source)
+                ));
+            }
+            format!("{{{}}}", fields.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{selectors}]")
+}
+
 fn normalize_placeholder_name(name: &str, source_text: &str) -> String {
     if source_text == "_" {
         return name
@@ -378,6 +450,14 @@ fn normalize_placeholder_name(name: &str, source_text: &str) -> String {
 
 fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<Untyped>> {
     match kind {
+        TreeKind::PackageDef(package) => {
+            let mut children = Vec::with_capacity(package.stats.len() + 1);
+            children.push(package.name);
+            children.extend(package.stats.iter().copied());
+            children
+        }
+        TreeKind::Import(import) => vec![import.expr],
+        TreeKind::Export(export) => vec![export.expr],
         TreeKind::This(_) => Vec::new(),
         TreeKind::Super(super_tree) => vec![super_tree.qual],
         TreeKind::New(new_tree) => vec![new_tree.tpt],
