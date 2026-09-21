@@ -31,8 +31,8 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
-    DEFDEF_TAG, FLEXIBLETYPE_TAG, Header, NameTable, PACKAGE_TAG, POLYTYPE_TAG, RawName,
-    SHAREDTYPE_TAG, Section, SectionTable, TEMPLATE_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG,
+    DEFDEF_TAG, FLEXIBLETYPE_TAG, Header, MUTABLE_TAG, NameTable, PACKAGE_TAG, POLYTYPE_TAG,
+    RawName, SHAREDTYPE_TAG, Section, SectionTable, TEMPLATE_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG,
     TERMREFPKG_TAG, TYPEBOUNDS_TAG, TYPEDEF_TAG, TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG,
     TastyFile, VALDEF_TAG,
 };
@@ -49,6 +49,7 @@ const N_M: u32 = 7;
 const N_SIGNED_X: u32 = 8;
 const N_MISSING: u32 = 9;
 const N_LAMBDA: u32 = 10;
+const N_V: u32 = 11;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -107,6 +108,7 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
         },
         RawName::Utf8("Missing".to_owned()),
         RawName::Utf8("L".to_owned()),
+        RawName::Utf8("v".to_owned()),
     ])
     .unwrap();
     TastyFile::from_parts(
@@ -135,8 +137,8 @@ fn shared(address: u32) -> Vec<u8> {
 }
 
 /// The definitions, in document order.
-const DEFINITIONS: [&str; 12] = [
-    "A", "A.T", "A.x", "A.m", "B", "B.T", "B.x", "D", "D.x1", "D.x2", "D.T1", "D.T2",
+const DEFINITIONS: [&str; 13] = [
+    "A", "A.T", "A.x", "A.m", "A.v", "B", "B.T", "B.x", "D", "D.x1", "D.x2", "D.T1", "D.T2",
 ];
 
 /// The unit's wire and the addresses its tests refer to.
@@ -158,7 +160,15 @@ fn package() -> Vec<u8> {
     let classes = [
         class(
             N_A,
-            &members(&[(N_T, TYPEDEF_TAG), (N_X, VALDEF_TAG), (N_M, DEFDEF_TAG)]),
+            &[
+                members(&[(N_T, TYPEDEF_TAG), (N_X, VALDEF_TAG), (N_M, DEFDEF_TAG)]),
+                // A `var`: a `VALDEF` with the `MUTABLE` modifier.
+                vec![node(
+                    VALDEF_TAG,
+                    &[nat(N_V), any_type(), vec![MUTABLE_TAG]].concat(),
+                )],
+            ]
+            .concat(),
         ),
         class(N_B, &members(&[(N_T, TYPEDEF_TAG), (N_X, VALDEF_TAG)])),
         class(
@@ -259,6 +269,13 @@ impl Unit {
             &mut roots,
             "illegal prefix",
             type_in(N_T, &direct(TERMREFDIRECT_TAG, "A.m"), &b),
+        );
+        // So is a mutable member, which pass 1 enters as a `Field`.
+        add(
+            &mut ast,
+            &mut roots,
+            "mutable prefix",
+            type_in(N_T, &direct(TERMREFDIRECT_TAG, "A.v"), &b),
         );
         // A binder still being decoded, as the prefix and as the space.
         let mut lambda = |ast: &mut Vec<u8>, label: &'static str, prefix: bool| {
@@ -578,6 +595,21 @@ fn an_unstable_singleton_prefix_is_a_typed_error() {
 
     let (result, ..) = decode(&unit, "illegal prefix");
 
+    assert!(matches!(
+        result,
+        Err(UnpickleError::IllegalTypePrefix { .. })
+    ));
+}
+
+#[test]
+fn a_mutable_member_prefix_is_a_typed_error_not_a_legal_prefix() {
+    let unit = Unit::new();
+
+    let (result, store, symbols) = decode(&unit, "mutable prefix");
+
+    // The entered `var` is a `Field`, not a `Variable`: the flag decides.
+    let var = symbols.get("A.v");
+    assert_eq!(store.symbols.get(var).kind, SymbolKind::Field);
     assert!(matches!(
         result,
         Err(UnpickleError::IllegalTypePrefix { .. })

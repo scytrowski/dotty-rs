@@ -25,7 +25,7 @@ use dotty_core::Packages;
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 use crate::index::TastySemanticIndex;
@@ -191,7 +191,7 @@ pub(crate) fn lookup_declaration(
 
 /// Whether `prefix` (with proxies looked through) is not a legal prefix as
 /// Dotty's `TypeOps.isLegalPrefix` sees it: a singleton that is not stable, of
-/// which a `TermRef` to a method or a variable is what the semantic graph can
+/// which a `TermRef` to a method or a mutable member is what the semantic graph can
 /// show. Dotty wraps such a prefix in a `QualSkolemType`, which `dotty-core`
 /// does not model, so it must not be passed on as if it were legal. A prefix
 /// whose proxy chain is too deep is reported as illegal too.
@@ -200,10 +200,16 @@ pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
         return true;
     };
     match store.types.get(prefix) {
-        Type::TermRef { symbol, .. } => matches!(
-            store.symbols.get(*symbol).kind,
-            SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Variable
-        ),
+        Type::TermRef { symbol, .. } => {
+            let symbol = store.symbols.get(*symbol);
+            // A `var` member is a `Field` with the `MUTABLE` flag (see
+            // `val_def_kind`), so the flag decides, not the kind.
+            symbol.flags.contains(SymbolFlags::MUTABLE)
+                || matches!(
+                    symbol.kind,
+                    SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Variable
+                )
+        }
         _ => false,
     }
 }
@@ -671,11 +677,22 @@ mod tests {
         let variable = term_ref(&mut world, "v", SymbolKind::Variable);
         let value = term_ref(&mut world, "x", SymbolKind::Value);
         let object = term_ref(&mut world, "o", SymbolKind::Object);
+        // A class `var` is a `Field` with the `MUTABLE` flag, as pass 1 enters it.
+        let var_name = world.name("w", Namespace::Term);
+        let var_symbol = world.symbol(var_name, SymbolKind::Field, None);
+        world.store.symbols.get_mut(var_symbol).flags = SymbolFlags::MUTABLE;
+        let mutable_field = world.store.types.alloc(Type::TermRef {
+            prefix: no_prefix,
+            symbol: var_symbol,
+        });
+        let plain_field = term_ref(&mut world, "g", SymbolKind::Field);
         let class_ref = world.type_ref(class);
         let wrapped_method = annotated(&mut world, method);
 
         assert!(is_illegal_prefix(&world.store, method));
         assert!(is_illegal_prefix(&world.store, variable));
+        assert!(is_illegal_prefix(&world.store, mutable_field));
+        assert!(!is_illegal_prefix(&world.store, plain_field));
         assert!(is_illegal_prefix(&world.store, wrapped_method));
         assert!(!is_illegal_prefix(&world.store, value));
         assert!(!is_illegal_prefix(&world.store, object));
