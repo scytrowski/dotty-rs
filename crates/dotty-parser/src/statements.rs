@@ -103,13 +103,13 @@ where
         let mut expression = None;
 
         for statement in statements {
+            if let Some(previous) = expression.take() {
+                stats.push(previous);
+            }
+
             match statement {
                 ParsedStatement::Definition(tree) => stats.push(tree),
-                ParsedStatement::Expression(tree) => {
-                    if let Some(previous) = expression.replace(tree) {
-                        stats.push(previous);
-                    }
-                }
+                ParsedStatement::Expression(tree) => expression = Some(tree),
             }
         }
 
@@ -270,5 +270,46 @@ mod tests {
             parser.ast.get(expr).position.unwrap().span().range(),
             TextRange::new(0, 1).unwrap()
         );
+    }
+
+    #[test]
+    fn preserves_source_order_when_a_definition_follows_an_expression() {
+        let mut names = NameInterner::new();
+        let first_name = names.intern("first");
+        let last_name = names.intern("last");
+        let mut parser = parser_for(
+            "first\nval x = 1\nlast",
+            vec![token(TokenKind::Eof, 21, 21)],
+            &mut names,
+        );
+        let first = parser.alloc(
+            dotty_core::TreeKind::Ident(dotty_core::ast::Ident {
+                name: *dotty_core::TermName::new(first_name).as_name(),
+                backquoted: false,
+            }),
+            Some(parser.current_span()),
+        );
+        let definition = parser.alloc(
+            dotty_core::TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            Some(parser.current_span()),
+        );
+        let last = parser.alloc(
+            dotty_core::TreeKind::Ident(dotty_core::ast::Ident {
+                name: *dotty_core::TermName::new(last_name).as_name(),
+                backquoted: false,
+            }),
+            Some(parser.current_span()),
+        );
+
+        let (stats, expr) = parser.finish_statement_sequence(vec![
+            ParsedStatement::Expression(first),
+            ParsedStatement::Definition(definition),
+            ParsedStatement::Expression(last),
+        ]);
+
+        assert_eq!(stats, vec![first, definition]);
+        assert_eq!(expr, last);
     }
 }
