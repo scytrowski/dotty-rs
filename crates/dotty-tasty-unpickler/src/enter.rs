@@ -30,6 +30,16 @@
 //! lambda reached through a `SHAREDterm` from a second owner keeps its first
 //! owner; the conflict is recorded (`has_lambda_owner_conflict`) and refused
 //! when the tree is projected.
+//!
+//! ## Lambdas in parents and self types (Milestone 5d1)
+//!
+//! A class's template parents and its `SELFDEF` type tree are scanned too, with
+//! the class as the owner. A parent is scanned only along the paths
+//! `type_of_parent` reads (a call's function, a type application's function
+//! and type arguments, a constructor selection's `NEW` type), never through a
+//! constructor argument. Upstream reads parents in a compiler-internal dummy
+//! context; that owner is not a declaration, so the parameters are owned by the
+//! class, and, being entered as non-members, never reach its declaration scope.
 
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;

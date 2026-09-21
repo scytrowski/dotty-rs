@@ -1063,6 +1063,86 @@ reads the body:
 Signed overload selection is unchanged: each overload has its own exact info,
 `MemberSelector::Unique` still refuses to pick one.
 
+### Class completion (Milestone 5d1)
+
+`complete_symbol` on a `TYPEDEF` whose first child is a `TEMPLATE` and whose
+entered kind is `Class`, `Trait` or `ModuleClass` (module `class`) publishes
+`SymbolInfo::Complete(Type::ClassInfo)`. Order, as upstream's `readTemplate`:
+the template header's `TYPEPARAM`/`PARAM` children are completed first (a parent
+may mention them; a failure there fails the class), the parents are projected in
+wire order, an explicit `SELFDEF` is projected as the self type, the pass-1
+declaration scope is looked up, and only then is one `ClassInfo` allocated and
+set. Nothing is written before the last step, so a failure leaves the class
+`Missing` (header parameters completed by the call are restored with the rest
+of the transaction); a second call returns the stored `ClassInfo`.
+
+```text
+ClassInfo {
+    prefix:       definitions.no_prefix        // for every class, nested or not
+    class:        the entered class SymbolId
+    parents:      TypeIds in TemplateStructure order, direct parents only
+    declarations: index.scope_of(class)        // the exact pass-1 ScopeId
+    self_type:    Some(projected SELFDEF tree) | None without a SELFDEF
+}
+```
+
+* **`prefix`** is `Definitions::no_prefix`, not upstream's `owner.thisType`: the
+  repository normalizes it, and `dotty-classloader` builds the same shape (a
+  classloader test checks both adapters against one contract).
+* **`declarations` is the pass-1 scope**, not a copy: `TastySemanticIndex::scope_of`
+  stays the unit-local fast path, `ClassInfo.declarations` is the cross-unit
+  publication path. A unit whose own index has no scope for a class finds its
+  members through `store.symbols[class].info -> ClassInfo -> declarations`
+  (`lookup.rs`'s `declaration_scope_of`, which was already there and stays
+  read-only: lookup never completes a class). Completing a class does *not*
+  complete its members: they stay `Missing` until each is completed on its own
+  (upstream's `unforcedDecls`), and parents are not completed either.
+* **Class type parameters stay symbols.** A parent or self type mentions the
+  class's `TYPEPARAM` `SymbolId`s (declarations in the class scope), never a
+  `ParamRef`; only method, polymorphic and type-lambda binders abstract.
+* **Parents (`type_of_parent`, upstream `readParentType`).** A parent is not
+  always a type tree: `SHAREDterm` is followed to its target; `APPLY fun args` is
+  the parent of `fun`, the arguments never read; `BLOCK expr stats` is the parent
+  of `expr`, the statements never read; `TYPEAPPLY fun targs` is the parent of
+  `fun` when that is already an `Applied` (the compiler writes `New(Parent[A])`
+  and repeats the arguments; upstream skips them when the constructor has no
+  type parameters) and otherwise `Applied { fun, targs }`; `SELECTin <init>
+  (NEW tpt) owner` is the projection of `tpt` (any other name, or a qualifier
+  that is not `NEW`, is `MalformedParentTree`); anything else is a type tree.
+  A term that is not a constructor call (`IDENT`, `SELECT`, `TYPED`, `INLINED`,
+  `IF`, `MATCH`, `TRY`, `LAMBDA`, `NAMEDARG`, `REPEATED`) is
+  `UnsupportedParentTree`. A wrapper tree's result is cached by address, so a
+  shared parent is one `TypeId`. Constructor arguments and block statements are
+  never decoded, so an argument that cannot be read does not affect the parent
+  (synthetic tests use unreadable arguments to prove it).
+* **Parent order and aliases.** The order is the wire order; no superclass or
+  trait reordering happens here. The projected type is stored as is:
+  annotations and refinements are never erased and no alias is dealiased (upstream's
+  `dealiasKeepAnnots.separateRefinements`); no parent in the corpora is an alias
+  `TypeRef` (below), a `Refined` or an `Annotated`.
+* **Self type.** `SELFDEF name tpt` is the projection of `tpt`; the name is
+  syntax and gets no symbol. A class without a `SELFDEF` has `self_type: None`;
+  nothing is manufactured. Every *object* has a `SELFDEF` whose tree is a
+  `SINGLETONtpt` of the object itself, so every `ModuleClass` has
+  `Some(self_type)`.
+* **Lambdas in parents and self types (pass 1).** `enter_symbols` scans each
+  parent along exactly the paths `type_of_parent` reads (a call's function only,
+  a type application's function and type arguments, the `NEW` type; never a
+  constructor argument) and the `SELFDEF` tree with the ordinary `enter_lambdas_in`.
+  Upstream reads parents in a compiler-internal `localDummy` context; that is not
+  a declaration, so the parameters of such a lambda are owned by the *class*.
+  They are not class members, so they never reach `ClassInfo.declarations`. The
+  owner-conflict logic of 5c applies unchanged: a lambda reached through a
+  `SHAREDterm` from a second class is refused for both. (`SharedLambdaOwnerConflict`
+  is per address, as in 5c.)
+* **Deferred.** Constructors keep `ConstructorCompletionDeferred`, `REFINEDtpt`
+  and `MATCHtpt` stay unsupported trees (5d2), and nothing sets symbol
+  annotations or companion links (5e).
+
+New errors: `MissingClassScope`, `UnsupportedParentTree`, `MalformedParentTree`,
+`InvalidSelfTypeTree`; everything else is the existing external, unsupported or
+malformed error that names the real cause.
+
 ### Owner-space references (Milestone 4c1)
 
 ```text
@@ -1407,8 +1487,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      projection they need — complete;
    - 5c: ordinary `DEFDEF` methods and `LAMBDAtpt` with its local type
      parameters, over a symbol-abstraction primitive in `dotty-core` — complete;
-   - 5d: `ClassInfo`, parents, self types, constructor completion, cross-unit
-     declaration scopes (and `REFINEDtpt`'s synthetic class);
+   - 5d1: `ClassInfo` for classes, traits and module classes, parents, self
+     types and cross-unit declaration scopes — complete;
+   - 5d2: constructor completion and `REFINEDtpt`'s synthetic class;
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -1449,8 +1530,9 @@ Deliberately not supported yet:
 - companion links (`SymbolLinks::companion`);
 - signed `TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`;
-- signed term references, cross-unit class members and
-  inherited members (§4, "Name-based references");
+- signed term references and inherited members (§4, "Name-based references");
+  cross-unit class members resolve through a completed `ClassInfo` only;
+- constructor completion and `REFINEDtpt` (5d2);
 - packages and members outside the entered state with no resolver that knows
   them — `UnresolvedPackage`, `UnresolvedMember`;
 - wiring the classloader in as a `SymbolResolver` (Milestone 6).
@@ -2013,6 +2095,103 @@ unchanged, and so are `APPLIEDtype`, `TYPEBOUNDS`, `ANNOTATEDtype` and
 `REFINEDtype`: method infos are not read by reference decoding, and classes
 declared in other units (cross-unit `ClassInfo`/scopes, 5d) remain the
 dominant blocker (most method failures are `UnresolvedMember` / `UnresolvedPackage`).
+
+### Classes after 5d1 (library / compiler)
+
+Wire survey (independent of what completes), library / compiler. Classes by
+number of parents: `Class` 1 / 2 / 3 / 4 / 5+ = 508 / 467 / 90 / 133 / 36 (lib)
+and 1,151 / 274 / 324 / 264 / 67 (compiler); `ModuleClass` 718 / 190 / 31 / 2 /
+3 and 1,091 / 874 / 63 / 42 / 100; `Trait` 352 / 142 / 129 / 23 / 23 and 162 /
+73 / 6 / 0 / 1. Parent roots: an `APPLY` constructor call for every `Class` and
+`ModuleClass` superclass (1,234 + 944 / 2,089 + 2,170), a `BLOCK` 0 / 4, and
+type trees otherwise (`APPLIEDtpt` 1,068 / 266, `IDENTtpt` 665 / 862, `SELECTtpt`
+419 / 1,721, `SHAREDtype` 295 / 481, `TYPEREF` 296 / 509). No parent is a
+`SHAREDterm`, so that branch is covered by synthetic wire only. Constructor
+spines: `APPLY>SELECTin>NEW>` then `SHAREDtype` 989 / 2,010, `TYPEREF` 459 / 792,
+`IDENTtpt` 243 / 870, `SELECTtpt` 4 / 17; `APPLY>TYPEAPPLY>SELECTin>NEW>` then
+`APPLIEDtpt` 425 / 93, `APPLIEDtype` 22 / 0, `SELECTtpt` 18 / 0, `IDENTtpt` 1 / 3;
+curried (`APPLY>APPLY>...`) 17 / 468. Arguments per `APPLY`: 0 for 1,962 / 3,615
+(1: 128 / 972, 2: 66 / 99, 3-7: 39 / 56). `BLOCK` parents: 2 and 3 statements,
+2 each (compiler only).
+
+`TYPEAPPLY` parents: the `NEW` type is already applied (the arguments are
+skipped) 440 / 149; it is bare, so the arguments are applied, 43 / 60. Whether
+upstream's zero-type-parameter compatibility branch occurs cannot be told from
+the wire or without completing the parent class (a bare `NEW` type over a class
+with no type parameters would be the case); nothing in the corpora produced a
+malformed `Applied`, but the argument count is not checked against the class's
+arity, which needs the parent class completed.
+
+Completed parents by shape (Object stubbed): `TypeRef` 2,154 (of which none an
+alias) and `Applied` 557 in the library; every parent is one of the two. Self
+definitions: library 23 `Class` (roots `ANNOTATEDtpt` 10, `APPLIEDtype` 4,
+`APPLIEDtpt` 3, `TERMREFpkg` 3, `SHAREDtype` 2, `IDENTtpt` 1), 155 `Trait` (118
+`SINGLETONtpt`, ...) and all 944 `ModuleClass`es (`SINGLETONtpt`); compiler 61 /
+33 / 2,170. None has a nested `LAMBDAtpt`, so the parent/self lambda scan is
+covered by real fixtures and synthetic wire. Of the self trees, 13 + 140 + 943
+decode and 10 + 15 external in the library (compiler: 60 + 18 + 2,170, 1 + 15).
+
+Completion, path order, library / compiler (`ClassInfo` field sanity, for every
+completed class: `class`, `prefix == no_prefix`, the exact pass-1 scope, the
+scope's owner, parent count and self presence match the wire: 389 / 224 classes
+without the stubs, 1,952 / 1,700 with them):
+
+| kind | 5c | 5d1 (builtins) | 5d1 (+ `Object`, `AnyRef` stubs) |
+|------|----|----------------|----------------------------------|
+| `Class` | `Missing` | 325 of 1,234 / 111 of 2,080 | 535 / 437 |
+| `Trait` | `Missing` | 47 of 669 / 46 of 242 | 556 / 182 |
+| `ModuleClass` | `Missing` | 17 of 944 / 67 of 2,170 | 861 / 1,081 |
+| `Method` (class completion first) | 8,569 / 2,549 | 9,450 / 2,718 | 10,928 (5c with the stubs: 9,648) / 5,403 (4,231) |
+
+The stubs are empty classes for `java.lang.Object` and `scala.AnyRef`, which the
+compiler and the classpath supply: every class has one of them as a parent, so
+without them every class fails there first. Nothing else is stubbed (the
+library corpus defines the primitive classes itself, in later units). Where the
+classes that fail with the stubs fail, library: header parameter 117 (`Class`
+108, `Trait` 9), parent 351 (`Class` 210, `ModuleClass` 51, `Trait` 90 incl. 2
+`REFINEDtpt`), self type 10 (`Class` 2, `Trait` 8), 416 whose failing reference
+lies in a shared link's target, and 1 ambiguous member of a module class; every
+other one is an `UnresolvedMember` or `UnresolvedPackage`. The unresolved names are classpath and later units, not `ClassInfo`:
+`package` (package objects) 89, `java.util.function` 86, `Type` 66, `_root_` 61,
+`util` 43, `java.util` 32, `ImpureFunction1` 30, `scala.math` 29,
+`scala.collection.*` 37; compiler: `scala.deriving` 517, `_root_` 244,
+`Predef` 190, `scala.reflect` 174, `scala.collection.immutable` 169, `Int` 109
+(the compiler corpus has no library), `dotty.tools.dotc.core` 107. Unexpected
+errors: 0.
+
+Reference decodes with class completion first, library / compiler, builtins
+(without the stubs; with them in parentheses), against the same run without
+class completion:
+
+| | before | after |
+|---|--------|-------|
+| named `TYPEREF` decoded | 11,925 / 7,621 (13,215 / 9,204) | 12,248 / 11,097 (14,569 / 20,836) |
+| named `TERMREF` decoded | 1,742 / 9,174 (1,742 / 9,174) | 1,762 / 9,790 (1,954 / 14,948) |
+| decoded by address | 271,729 / 372,362 (281,578 / 385,117) | 273,533 / 397,438 (285,898 / 457,396) |
+| named references, unsupported prefix | 65 / 265 | 65 / 241 |
+
+Every gain is a former `UnresolvedMember` (the external counts drop by the same
+number: 323 / 3,476 named `TYPEREF`), and the compiler's unsupported-prefix
+references fall by 24. The `REFin` measurement is unchanged: **0** of 115 / 12
+`TYPEREFin` decode in path order, in either run. The oracle explains why: the
+108 library queries that reach it all have one owner class, whose completion
+fails on `member Int` (`scala.Int` is defined by a *later* unit, `Int.tasty`);
+the compiler's 2 fail on `member package`. No `REFin` owner ends the corpus with
+a `ClassInfo`, so the mechanism is proved by the two-unit test
+(`tests/class_scopes.rs`), not by the corpus.
+
+*Processing order is a lower bound.* The manifest corpora are processed in path
+order and a class can only use units entered before it. The same run in the
+reverse order (stubs) completes `Class` 120 / 329, `Trait` 377 / 191,
+`ModuleClass` 765 / 1,072 and `Method` 4,151 / 4,898; named `TYPEREF` decodes
+7,387 / 12,212. Neither order is a maximum: the two bracket what a schedule that
+retries a class after its dependencies are entered could reach. That needs an
+orchestration layer (6), not a registry in the unpickler.
+
+Findings for later milestones: `_root_` is spelled as a package name in 61
+(library) / 244 (compiler) class failures and resolves to no package (the root
+package should be the empty path); package objects (`member package`) are not
+found in the `scala` package scope in 89 / 33; `java.*` needs the classpath.
 
 ### Match types after 4d (library / compiler)
 

@@ -17,7 +17,8 @@
 //! `UnpickleError::UnsupportedType`. Pass 5a projects type trees
 //! (`unpickle_type_tree_type`) and completes simple symbols
 //! (`complete_symbol`): `VALDEF`, `PARAM`, `TYPEPARAM` and plain `TYPEDEF`
-//! become `SymbolInfo::Complete`; methods and classes stay `Missing`.
+//! become `SymbolInfo::Complete`, and (5c/5d1) ordinary methods and classes,
+//! traits and module classes do too (`ClassInfo`); constructors stay `Missing`.
 
 mod annotated;
 mod ast_view;

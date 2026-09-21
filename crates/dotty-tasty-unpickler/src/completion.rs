@@ -12,11 +12,12 @@
 //! | `TYPEDEF` without a template | the same `toBounds`: `type A = String` has info `AliasingBounds(String)` while its right-hand side still projects to `String` |
 //! | ordinary `DEFDEF` (Milestone 5c) | `Poly` / `Method` / `ByName` from its clauses and result type: see the [`method`](crate::method) module |
 //!
+//! | `TYPEDEF` with a template (Milestone 5d1) | `ClassInfo` for a `Class`, `Trait` or `ModuleClass`: see the [`class`](crate::class) module |
+//!
 //! Deferred, each with its own typed error and no info written: opaque
-//! aliases (`OpaqueAliasDeferred`), constructors
-//! (`ConstructorCompletionDeferred`, 5d), and classes, traits and modules (5d)
-//! (`UnsupportedSymbolCompletion`). No empty
-//! `ClassInfo` is made to mark a class complete.
+//! aliases (`OpaqueAliasDeferred`) and constructors
+//! (`ConstructorCompletionDeferred`, 5d2). No empty `ClassInfo` is made to mark
+//! a class complete: it is published only with its parents and self type.
 //!
 //! Completion is *per symbol*: each public call is its own transaction, so an
 //! unsupported definition never undoes a symbol another call completed. The
@@ -25,8 +26,9 @@
 //! existed. `complete_symbols` is the one batch entry, all or nothing.
 //!
 //! Completion does not force other symbols: a stable term prefix takes part in
-//! member lookup only if its own symbol was completed first (the read-only
-//! lookup never completes anything).
+//! member lookup only if its own symbol was completed first, and a class's
+//! declarations are found in another unit only through its completed
+//! `ClassInfo` (the read-only lookup never completes anything).
 
 use dotty_core::ids::TypeId;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};

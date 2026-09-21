@@ -175,6 +175,11 @@ fn module_class_of(
 /// The declaration scope of `symbol`: the scope this unit entered for it, the
 /// scope of the package registry, or the `declarations` of its completed
 /// `ClassInfo`, in that order.
+///
+/// The first is the unit-local fast path. The last is how a class of *another*
+/// unit is reached: completing a class (Milestone 5d1) publishes the exact
+/// pass-1 scope as `ClassInfo.declarations`. A class that is still `Missing`
+/// has no scope here; this function never completes anything.
 pub(crate) fn declaration_scope_of(
     store: &SemanticStore,
     index: &TastySemanticIndex,
