@@ -112,6 +112,49 @@ fn a_full_annotation_tree_is_a_typed_deferral_not_an_unsupported_type() {
     );
 }
 
+#[test]
+fn the_parent_is_decoded_first_so_its_error_wins_over_a_full_tree() {
+    // As in Dotty, `readType()` for the parent runs before the annotation is
+    // looked at: a parent with no decoder is reported, not the tree.
+    const IMPORTED: u8 = 75;
+    let bytes = annotated_file(&[IMPORTED, nat(1)], &package_ref());
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert_eq!(
+        unpickler.unpickle_type(ANNOTATED_AT),
+        Err(UnpickleError::UnsupportedType {
+            tag: IMPORTED,
+            address: UNDERLYING_AT,
+        })
+    );
+}
+
+#[test]
+fn a_typerefin_annotation_is_compact_but_its_child_is_still_unsupported() {
+    // `TYPEREFin` is in Scala's compact set, and is decoded in Milestone 4c:
+    // the annotated type is understood, its annotation child is not (yet), so
+    // the error is the child's, never `ANNOTATEDtype`'s.
+    const TYPEREFIN: u8 = 175;
+    let typerefin = length_node(
+        TYPEREFIN,
+        &[vec![nat(1)], package_ref(), package_ref()].concat(),
+    );
+    let bytes = annotated_file(&package_ref(), &typerefin);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert_eq!(
+        unpickler.unpickle_type(ANNOTATED_AT),
+        Err(UnpickleError::UnsupportedType {
+            tag: TYPEREFIN,
+            address: UNDERLYING_AT + 2,
+        })
+    );
+}
+
 /// The ids the next type and annotation allocations would get: equal for two
 /// stores exactly when they hold the same number of each.
 fn next_ids(session: &mut Session) -> (u32, u32) {
