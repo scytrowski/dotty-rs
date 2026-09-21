@@ -1,0 +1,4 @@
+{
+  type `match` = A
+  value
+}

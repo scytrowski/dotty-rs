@@ -315,6 +315,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::DefDef(_) => "DefDef",
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::If(_) => "If",
@@ -449,6 +450,11 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::LambdaTypeTree(lambda) => {
+            let mut children = lambda.type_params.clone();
+            children.push(lambda.body);
+            children
+        }
         TreeKind::TypeBoundsTree(bounds) => bounds
             .low
             .into_iter()
