@@ -833,6 +833,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_method_using_clause_with_given_parameter_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f(using ctx: Ctx) = body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    5,
+                    6,
+                ),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::ColonFollow, 15, 16),
+                token(TokenKind::Identifier, 17, 20),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    20,
+                    21,
+                ),
+                token(TokenKind::Operator, 22, 23),
+                token(TokenKind::Identifier, 24, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        let TreeKind::ValDef(ref parameter) =
+            parser.ast().get(definition.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected parameter ValDef");
+        };
+        assert_eq!(parameter.metadata.modifiers, vec![Modifier::Given]);
+        assert!(matches!(
+            parser.ast().get(definition.rhs.unwrap()).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_method_declaration_without_a_rhs_when_typed() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
