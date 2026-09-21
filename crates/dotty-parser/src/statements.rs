@@ -44,6 +44,9 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
             return self.parse_object_definition(location);
         }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Package) {
+            return self.parse_package_definition(location);
+        }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Import) {
             return ParsedStatement::Many(self.parse_import_clause(location));
         }

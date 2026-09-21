@@ -20,6 +20,7 @@ mod imports;
 mod infix;
 mod literals;
 mod names;
+mod packages;
 mod parameters;
 mod parser;
 mod patterns;
