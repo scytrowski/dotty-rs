@@ -12,6 +12,7 @@ mod case_clauses;
 mod compilation_unit;
 mod context;
 mod cursor;
+mod definitions;
 mod diagnostics;
 mod expr;
 mod infix;

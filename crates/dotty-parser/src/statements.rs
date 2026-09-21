@@ -22,6 +22,13 @@ where
 {
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        if matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Val | HardKeyword::Var)
+        ) {
+            return self.parse_value_definition(location);
+        }
+
         let tree = if is_unsupported_start(self.current().kind) {
             self.parse_unsupported_syntax()
         } else {
