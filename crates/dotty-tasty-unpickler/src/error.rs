@@ -92,6 +92,23 @@ pub enum UnpickleError {
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
     MalformedType { address: u32, reason: &'static str },
+    /// The `ANNOTATEDtype` at `address` carries a full annotation tree, whose
+    /// root node at `annotation_address` has tag `tag`. The annotated type is
+    /// understood; the tree is not, and is never dropped to fit the compact
+    /// form.
+    UnsupportedAnnotationTree {
+        address: u32,
+        annotation_address: u32,
+        tag: u8,
+    },
+    /// The `ANNOTATEDtype` at `address` has a compact annotation whose type,
+    /// `annotation_type`, is neither a `TypeRef` nor an `Applied` type, which
+    /// is all Dotty's `CompactAnnotation` accepts (a `SHAREDtype` payload can
+    /// reach any type, or a binder still being decoded).
+    InvalidCompactAnnotationType {
+        address: u32,
+        annotation_type: TypeId,
+    },
     /// The `TYPEBOUNDS` node at `address` carries variance markers for the
     /// lambda `target`, which is still being decoded, so it cannot be rebound
     /// yet. (A marker on a bound that is not a lambda is left alone, as
@@ -222,6 +239,18 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the reference at address {address} to `{name}` carries a signature, which is not supported yet"
             ),
+            Self::UnsupportedAnnotationTree {
+                address,
+                annotation_address,
+                tag,
+            } => write!(
+                formatter,
+                "the annotated type at address {address} has a full annotation tree (tag {tag} at address {annotation_address}), which is not decoded yet"
+            ),
+            Self::InvalidCompactAnnotationType { address, .. } => write!(
+                formatter,
+                "the compact annotation of the annotated type at address {address} is not a type reference or an applied type"
+            ),
             Self::MalformedType { address, reason } => write!(
                 formatter,
                 "the type at address {address} is malformed: {reason}"
@@ -309,6 +338,8 @@ impl std::error::Error for UnpickleError {
             | Self::AmbiguousMember { .. }
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
+            | Self::UnsupportedAnnotationTree { .. }
+            | Self::InvalidCompactAnnotationType { .. }
             | Self::BoundsVarianceTargetPending { .. }
             | Self::BoundsVarianceArityMismatch { .. }
             | Self::InvalidMethodModifier { .. }

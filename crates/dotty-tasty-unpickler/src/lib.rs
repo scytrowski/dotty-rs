@@ -16,6 +16,7 @@
 //! address, never by name; other type forms are an explicit
 //! `UnpickleError::UnsupportedType`.
 
+mod annotated;
 mod ast_view;
 mod binders;
 mod enter;

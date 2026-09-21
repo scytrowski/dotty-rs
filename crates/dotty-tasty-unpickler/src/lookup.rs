@@ -10,8 +10,10 @@
 //! Only prefixes whose lookup semantics are understood are searched:
 //! `ThisType`, `TypeRef` naming a class, trait, module class or package, and
 //! `TermRef` naming a package or an object (through its module class), and
-//! `Flexible` around any of these (looked through, never stripped). Anything else is `UnsupportedPrefix`. There is no textual
-//! fallback and no search across owners. The lookup is not inheritance-aware:
+//! `Flexible` and `Annotated` around any of these (looked through, never
+//! stripped: both are proxies whose members are their underlying type's, as
+//! Dotty's `FlexibleType` and `AnnotatedType` are `CachedProxyType`s).
+//! Anything else is `UnsupportedPrefix`. There is no textual fallback and no search across owners. The lookup is not inheritance-aware:
 //! it sees the members the prefix's own scope declares.
 
 use dotty_core::Packages;
@@ -43,6 +45,32 @@ pub(crate) enum LocalLookup {
     UnsupportedPrefix,
 }
 
+/// How many proxy wrappers ([`proxy_underlying`]) are looked through before
+/// the prefix is given up as unsearchable. Real wrappers nest a handful deep;
+/// a graph that keeps going is malformed, and the walk must end.
+pub(crate) const MAX_PROXY_DEPTH: usize = 64;
+
+/// The type a proxy prefix forwards its members to: the `underlying` of a
+/// `Flexible` or `Annotated` type. Nothing else is a proxy here.
+pub(crate) fn proxy_underlying(store: &SemanticStore, ty: TypeId) -> Option<TypeId> {
+    match store.types.get(ty) {
+        Type::Flexible { underlying } | Type::Annotated { underlying, .. } => Some(*underlying),
+        _ => None,
+    }
+}
+
+/// `prefix` with every proxy wrapper looked through, or `None` if there are
+/// more than [`MAX_PROXY_DEPTH`] of them. The wrappers stay in the graph.
+fn look_through_proxies(store: &SemanticStore, mut prefix: TypeId) -> Option<TypeId> {
+    for _ in 0..=MAX_PROXY_DEPTH {
+        match proxy_underlying(store, prefix) {
+            Some(underlying) => prefix = underlying,
+            None => return Some(prefix),
+        }
+    }
+    None
+}
+
 /// The symbol whose declarations a prefix type denotes, if the prefix is a
 /// form whose lookup semantics are understood.
 pub(crate) fn lookup_owner(
@@ -57,12 +85,9 @@ pub(crate) fn lookup_owner(
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass | SymbolKind::Package
         )
     };
-    // A flexible type has the members of its underlying type; nothing else
-    // is looked through.
-    let mut prefix = prefix;
-    while let Type::Flexible { underlying } = store.types.get(prefix) {
-        prefix = *underlying;
-    }
+    // A flexible or annotated type has the members of its underlying type;
+    // nothing else is looked through.
+    let prefix = look_through_proxies(store, prefix)?;
     match store.types.get(prefix) {
         Type::ThisType { class } => Some(*class),
         Type::TypeRef { symbol, .. } if is_scope_owner(*symbol) => Some(*symbol),
@@ -270,6 +295,96 @@ mod tests {
 
         assert_eq!(world.lookup(flexible, &inner), LocalLookup::Found(member));
         assert_eq!(world.lookup(twice, &inner), LocalLookup::Found(member));
+    }
+
+    fn annotated(world: &mut World, underlying: TypeId) -> TypeId {
+        let annotation = world
+            .store
+            .annotations
+            .alloc(dotty_core::types::Annotation::new(underlying, None));
+        world.store.types.alloc(Type::Annotated {
+            underlying,
+            annotation,
+        })
+    }
+
+    #[test]
+    fn an_annotated_prefix_is_searched_through_its_underlying_type() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let inner = world.name("Inner", Namespace::Type);
+        let member = world.declare(scope, class, inner, SymbolKind::Class);
+        let underlying = world.type_ref(class);
+        let once = annotated(&mut world, underlying);
+        let twice = annotated(&mut world, once);
+
+        assert_eq!(world.lookup(once, &inner), LocalLookup::Found(member));
+        assert_eq!(world.lookup(twice, &inner), LocalLookup::Found(member));
+    }
+
+    #[test]
+    fn lookup_looks_through_mixed_flexible_and_annotated_wrappers_without_stripping_them() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let inner = world.name("Inner", Namespace::Type);
+        let member = world.declare(scope, class, inner, SymbolKind::Class);
+        let base = world.type_ref(class);
+
+        let annotated_base = annotated(&mut world, base);
+        let flexible_of_annotated = world.store.types.alloc(Type::Flexible {
+            underlying: annotated_base,
+        });
+        let flexible_base = world.store.types.alloc(Type::Flexible { underlying: base });
+        let annotated_of_flexible = annotated(&mut world, flexible_base);
+
+        assert_eq!(
+            world.lookup(flexible_of_annotated, &inner),
+            LocalLookup::Found(member)
+        );
+        assert_eq!(
+            world.lookup(annotated_of_flexible, &inner),
+            LocalLookup::Found(member)
+        );
+        // Lookup reads the graph; the wrappers are still there afterwards.
+        assert!(matches!(
+            world.store.types.get(flexible_of_annotated),
+            Type::Flexible { underlying } if *underlying == annotated_base
+        ));
+        assert!(matches!(
+            world.store.types.get(annotated_of_flexible),
+            Type::Annotated { underlying, .. } if *underlying == flexible_base
+        ));
+    }
+
+    #[test]
+    fn an_annotated_wrapper_around_an_unsearchable_type_stays_unsupported() {
+        let mut world = World::new();
+        let inner = world.name("Inner", Namespace::Type);
+        let no_prefix = world.no_prefix;
+        let wrapped = annotated(&mut world, no_prefix);
+
+        assert_eq!(
+            world.lookup(wrapped, &inner),
+            LocalLookup::UnsupportedPrefix
+        );
+    }
+
+    #[test]
+    fn a_proxy_chain_deeper_than_the_bound_is_unsearchable_not_a_walk_without_end() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let inner = world.name("Inner", Namespace::Type);
+        let member = world.declare(scope, class, inner, SymbolKind::Class);
+        let mut wrapped = world.type_ref(class);
+        for depth in 0..MAX_PROXY_DEPTH + 2 {
+            wrapped = annotated(&mut world, wrapped);
+            let expected = if depth < MAX_PROXY_DEPTH {
+                LocalLookup::Found(member)
+            } else {
+                LocalLookup::UnsupportedPrefix
+            };
+            assert_eq!(world.lookup(wrapped, &inner), expected, "depth {depth}");
+        }
     }
 
     #[test]
