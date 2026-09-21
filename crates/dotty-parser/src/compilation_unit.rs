@@ -473,6 +473,10 @@ pub(crate) mod tests {
             panic!("expected package root");
         };
         assert!(package.stats.is_empty());
+        assert!(matches!(
+            result.ast.get(package.name).kind,
+            TreeKind::Ident(ident) if names.resolve(ident.name.text()) == "<empty>"
+        ));
         assert!(result.diagnostics.is_empty());
         assert_eq!(
             result.ast.get(result.root).position.unwrap().span().range(),
