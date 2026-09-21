@@ -125,13 +125,40 @@ where
         self.advance();
         let mut selectors = Vec::new();
         let mut names_allowed = true;
+        let mut expect_selector = true;
 
         while !matches!(
             self.current().kind,
             TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
         ) {
-            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+            if expect_selector && self.current().kind == TokenKind::Punctuation(Punctuation::Comma)
+            {
+                let position = self.current_span();
+                self.advance();
+                if !matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+                ) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an import/export selector after `,`",
+                    );
+                    selectors.push(self.error_selector(position));
+                }
                 continue;
+            }
+
+            if !expect_selector {
+                if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    expect_selector = true;
+                    continue;
+                }
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `,` or `}` after an import/export selector",
+                );
+                self.recover_until(crate::RecoverySet::Statement);
+                break;
             }
 
             let wildcard = self.current_is_import_wildcard()
@@ -171,19 +198,16 @@ where
 
             names_allowed &= !wildcard;
             selectors.push(selector);
-            if !self.accept(TokenKind::Punctuation(Punctuation::Comma))
-                && !matches!(
-                    self.current().kind,
-                    TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
-                )
-            {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `,` or `}` after an import/export selector",
-                );
-                self.recover_until(crate::RecoverySet::Statement);
-                break;
-            }
+            expect_selector = false;
+        }
+
+        if expect_selector {
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected an import/export selector",
+            );
+            selectors.push(self.error_selector(position));
         }
 
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
@@ -336,6 +360,21 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{HardKeyword, NameInterner, TextRange, TreeKind};
 
+    fn assert_malformed_selector_list(source: &str, tokens: Vec<dotty_core::Token>) {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+
+        parser.parse_import_clause(Location::Elsewhere);
+
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
     #[test]
     fn parses_a_qualified_import_as_a_qualifier_and_selector() {
         let mut names = NameInterner::new();
@@ -398,6 +437,55 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(empty_name.text()), "<empty>");
+    }
+
+    #[test]
+    fn diagnoses_an_empty_braced_selector_list() {
+        assert_malformed_selector_list(
+            "import foo.{}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_leading_comma_in_braced_selectors() {
+        assert_malformed_selector_list(
+            "import foo.{,bar}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::Comma), 12, 13),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_trailing_comma_in_braced_selectors() {
+        assert_malformed_selector_list(
+            "import foo.{bar,}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+        );
     }
 
     #[test]
