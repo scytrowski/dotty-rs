@@ -14,12 +14,14 @@
 //! | `TYPEBOUNDStpt lo` | `AliasingBounds { alias: lo }` (upstream's `lo eq hi`) |
 //! | `TYPEBOUNDStpt lo hi` | `Bounds { low: lo, high: hi }` |
 //! | `TYPEBOUNDStpt lo hi alias` | the alias' own type, not a `Bounds` |
+//! | `SELECTtpt name qualifier` | `TypeRef` to the member of the qualifier's term `tpe` ([`type_of_term`](TastyUnpickler::type_of_term)), by the selection a name-based `TYPEREF` makes (Milestone 5b) |
+//! | `SINGLETONtpt ref` | exactly the `tpe` of `ref`, which must be a stable singleton (5b) |
+//! | `ANNOTATEDtpt tpt annotation` | `Annotated { tpt's type, annotation }`, the annotation decoded as `ANNOTATEDtype`'s is (5b) |
 //! | any other tag | a semantic type wire node (`readType`), through `type_at` |
 //!
-//! `SELECTtpt`, `SINGLETONtpt`, `REFINEDtpt`, `LAMBDAtpt`, `ANNOTATEDtpt`,
-//! `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and any other tree that is not
-//! a type are `UnsupportedTypeTree`: they are counted, not guessed from their
-//! syntax.
+//! `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and
+//! any other tree that is not a type are `UnsupportedTypeTree`: they are
+//! counted, not guessed from their syntax.
 //!
 //! ## Identity
 //!

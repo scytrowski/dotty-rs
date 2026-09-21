@@ -44,6 +44,11 @@ Status (`crates/dotty-tasty-unpickler`):
   (§4, "Type trees and simple completion"; §8). `VALDEF`, `PARAM`, `TYPEPARAM`
   and non-opaque non-template `TYPEDEF` symbols can now be completed; methods,
   constructors and classes stay `Missing`.
+- Milestone 5b, selected, singleton and annotated type trees: implemented (§4,
+  "Selected, singleton and annotated type trees"; §8). `SELECTtpt`,
+  `SINGLETONtpt` and `ANNOTATEDtpt` project, over a narrow term-`tpe`
+  projection; `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, `BLOCK` and `HOLE` stay
+  explicit refusals.
 
 Entered symbols start `SymbolInfo::Missing`; only an explicit
 `complete_symbol` (the simple kinds above) changes that. Types are otherwise
@@ -101,7 +106,8 @@ function. It follows an enter-before-complete model:
 | 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
 | 4d. Match types | `MATCHtype` / `MATCHCASEtype` to `Match` / `MatchCase`; type-language audit | 4d |
 | 5a. Simple completion | type-tree projection; `Complete` for `VALDEF`/`PARAM`/`TYPEPARAM`/plain `TYPEDEF`; stable-term prefixes | 5a |
-| 3. Complete | `SymbolInfo::Complete(TypeId)` for methods, `ClassInfo`, annotations | 5b-5d |
+| 5b. Selected, singleton, annotated trees | `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt`; term-`tpe` projection (`type_of_term`) | 5b |
+| 3. Complete | `SymbolInfo::Complete(TypeId)` for methods, `ClassInfo`, annotations | 5c-5e |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
 ## 3. Identity invariant
@@ -838,7 +844,8 @@ simple symbols. A projected type is a tree's `tpe`, not a typed AST node: no
 | `EXPLICITtpt` | exactly its child's type (no wrapper) |
 | `TYPEBOUNDStpt` | one child `AliasingBounds` (`lo eq hi`), two `Bounds`, three the alias' own type |
 | a semantic type node | that type, through `type_at` (`readTpt` falls back to `readType`) |
-| `SELECTtpt`, `SINGLETONtpt`, `REFINEDtpt`, `LAMBDAtpt`, `ANNOTATEDtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
+| `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` | see "Selected, singleton and annotated type trees" (5b) |
+| `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
 
 *Identity.* The projection is cached by tree address in its own map
 (`type_tree_type_at`), never in the type-node map: a tree address is not a
@@ -846,6 +853,9 @@ type address, several tree addresses may project to one `TypeId` (an
 `IDENTtpt` shares its embedded type's), and derived types are owned by the
 projection. Derived types are not interned: equal `APPLIEDtpt` at two addresses
 are two types. `LAMBDAtpt` waits for the entering of type-lambda parameters.
+A tree that links back to itself (`SHAREDterm` to an ancestor) is bounded by
+the same `MAX_SHARED_DEPTH` as every shared chain, counted across the nesting
+(5b; before it such a tree overflowed the stack).
 
 *The special `&` / `|`.* Real `APPLIEDtpt` trees apply the `scala.&` and
 `scala.|` aliases (1,022 library and 1,072 compiler constructors are named that
@@ -886,6 +896,70 @@ ignored, the prefix untouched) and a stable term to its *completed* info: a
 `ByName`. Not followed: mutable fields, variables, methods, constructors,
 by-name parameters and type aliases (no dealiasing). `is_illegal_prefix` is
 unchanged. A cycle ends as `UnsupportedResolutionPrefix`.
+
+### Selected, singleton and annotated type trees (Milestone 5b)
+
+Three more trees project, over the smallest term-`tpe` projection they need.
+Nothing builds a `TreeId`: the projection is the tree's `tpe` and nothing else.
+
+**Term projection** (`TastyUnpickler::unpickle_term_type`, module `term_type`)
+follows `TreeUnpickler.readTree` for the path forms the corpora contain
+(`SELECTtpt` qualifiers and `SINGLETONtpt` references):
+
+| tree | projected type |
+|------|----------------|
+| `SHAREDterm` | the target's projection; no type or cache entry of its own |
+| `IDENT name Type` | exactly the embedded type; the name is validated and never resolved (like `IDENTtpt`) |
+| `SELECT name qualifier` (unsigned) | `TermRef { prefix: qualifier's tpe, member }`, by the selection below; a signed name is `UnsupportedSignedReference`, never the first overload |
+| `QUALTHIS (IDENTtpt Type)` | `ThisType { class }` of the class the identifier's type reference names |
+| a type-tree tag (`IDENTtpt`, `SELECTtpt`, `APPLIEDtpt`, ...) | that tree's own projection |
+| any other semantic type node (`TERMREF*`, `THIS`, a constant, `SHAREDtype`, `RECthis`, ...) | that type, through `type_at` (`readTree` falls back to `readType`) |
+| any other term (`INLINED`, `APPLY`, `BLOCK`, ...) | `UnsupportedTermTree { address, tag }` |
+
+*Identity.* A term address has its own cache (`term_tree_type_at`, with
+mark/rollback like the other two): only a type the projection itself builds
+(`QUALTHIS`, a `SELECT`) needs an entry. An `IDENT` and a direct type node
+return an id `type_at` already owns, so a second entry would only repeat it;
+repeating any projection allocates nothing.
+
+**`SELECTtpt name qualifier`** is a `TypeRef` to a type member of the
+qualifier's `tpe`, made by `select_member_type`, which is the same
+`resolved_member` policy as a name-based `TYPEREF` (`TERMREF`, `SELECT`): the
+qualifier's own declarations first, then the resolver, a structural qualifier's
+member selected by name with no symbol (`TypeRefTarget::Name`), overloads are
+`AmbiguousMember`, never a first match. The Symbol-or-Name constructor
+(`member_type`) is shared. Upstream's `completeSelect` first applies
+`widenIfUnstable` and `accessibleDenot`; this model has no widening and no
+access check: an unstable singleton qualifier (a method, a mutable member, a
+constructor, a by-name parameter) is `UnstableSelectQualifier`, not selected
+from, and access is left to a later symbol-completion step exactly as for
+`TYPEREF` (a name-based `TYPEREF` with an unstable prefix keeps its
+`UnsupportedResolutionPrefix`). A qualifier that is a term whose info is still
+`Missing` stays `UnsupportedResolutionPrefix`: projection never completes a
+symbol, the caller's order does.
+
+**`SINGLETONtpt ref`** is exactly the `tpe` of its reference (no wrapper: a
+`TermRef`, `ThisType` or constant type already is a singleton), if that is a
+stable singleton: a constant, `ThisType`, `SuperType`, `RecThis`, or a
+`TermRef` that is not an unstable path; proxies are looked through. Anything
+else (a class or applied type, a mutable member, a method, a by-name
+parameter) is `InvalidSingletonTypeTree`.
+
+**`ANNOTATEDtpt tpt annotation`** is `Annotated { base tpe, annotation }`. The
+annotation is decoded by `decode_annotation_tree`, the one decoder of a full
+annotation tree, shared with `ANNOTATEDtype`: the `SHAREDterm` chain is followed
+(`AstView::resolve_shared_term`), a constructor application is parsed once
+(spine, type arguments, literal arguments), and the `AnnotationId` belongs to
+the annotated tree, never to the tree the links end at, so two annotated trees
+sharing one annotation tree have two annotations with equal payloads. A
+non-constructor root is `UnsupportedAnnotationTree`. `Annotation.tree` stays
+`None`. A `SELECTtpt` annotation class (`new p.Tag`) is now projected (it was
+`UnsupportedAnnotationConstructor`).
+
+All three take part in the shared transaction of 5a: the qualifier or base
+projected and the failure later (member not found, unstable, invalid singleton,
+a later argument refused) restores the arenas, the three caches, the `RecThis`
+journal and the `SymbolInfo` journal.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1227,10 +1301,12 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
 5. Symbol completion, in steps:
    - 5a: type-tree projection, simple symbol infos and completed stable-term
      prefixes — complete;
-   - 5b: `DEFDEF` method and constructor signatures, `LAMBDAtpt` and its local
+   - 5b: `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` and the narrow term-`tpe`
+     projection they need — complete;
+   - 5c: `DEFDEF` method and constructor signatures, `LAMBDAtpt` and its local
      type parameters;
-   - 5c: `ClassInfo`, parents, self types, cross-unit declaration scopes;
-   - 5d: symbol annotations, companion links, opaque aliases and the
+   - 5d: `ClassInfo`, parents, self types, cross-unit declaration scopes;
+   - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
@@ -1643,7 +1719,7 @@ builtins / builtins) and compiler, per symbol kind:
 | `Parameter` (`PARAM`) | 19,152 / 38,708 | 11,296 -> 12,408 / 5,941 -> 7,618 | external; unsupported tree 1,556-1,566 / 1,413-1,425; prefix 43 (compiler) |
 | `TypeParameter` | 15,165 / 1,308 | 2 -> 14,684 / 2 -> 956 | external without `Any`/`Nothing` |
 | `TypeAlias` (`TYPEDEF`) | 437 / 1,119 | 15 -> 135 / 627 -> 654 | unsupported tree 269 / 338; opaque 4 / 24 |
-| `Class`, `Trait`, `ModuleClass`, `Method`, `Constructor` | 1,234, 669, 944, 15,645, 2,921 (library) | 0 | kind deferred (5b/5c), all still `Missing` |
+| `Class`, `Trait`, `ModuleClass`, `Method`, `Constructor` | 1,234, 669, 944, 15,645, 2,921 (library) | 0 | kind deferred (5c/5d), all still `Missing` |
 
 0 unexpected errors; `Package` symbols stay `Missing` too. Type trees the pass
 refuses, by tag, library (no builtins): `SELECTtpt` 843, `ANNOTATEDtpt` 807,
@@ -1677,6 +1753,73 @@ library and 329,361 -> 350,003 in the compiler without builtins; named `TYPEREF`
 run, with and without completion, so the completion figures above are
 completion alone.
 
+### Selected, singleton and annotated trees after 5b (library / compiler)
+
+Wire shapes (all real nodes, whatever they decode to; identical with and
+without builtins). `SHAREDterm` roots are reported by the tag their chain ends
+at.
+
+| tree | root population |
+|------|-----------------|
+| `SELECTtpt` qualifier, library (5,445) | `SHAREDtype` 2,096, `SELECT` (112) 2,981, `TERMREFsymbol` 14, `TERMREF` 116, `TERMREFdirect` 37, `TERMREFpkg` 180, `APPLIEDtpt` 14, `REFINEDtpt` 3, `IDENTtpt` 1, 3 through one `SHAREDterm` (2 to `SHAREDtype`, 1 to `SELECT`) |
+| `SELECTtpt` qualifier, compiler (7,836) | `SHAREDtype` 2,896, `SELECT` 4,532, `TERMREFsymbol` 5, `TERMREF` 180, `TERMREFdirect` 17, `TERMREFpkg` 148, `QUALTHIS` 47, `IDENTtpt` 10, `SELECTtpt` 1 |
+| `SINGLETONtpt` ref, library (2,566) | `SHAREDtype` 1,111, `SELECT` 271, `TERMREFsymbol` 740, `TERMREF` 11, `TERMREFdirect` 349, `THIS` 49, `QUALTHIS` 12, `TRUEconst` 11, `FALSEconst` 6, `INTconst` 6 |
+| `SINGLETONtpt` ref, compiler (2,807) | `SHAREDtype` 831, `SELECT` 540, `TERMREFsymbol` 1,141, `TERMREF` 11, `TERMREFdirect` 176, `THIS` 14, `QUALTHIS` 32, `TRUEconst` 47, `FALSEconst` 4, `STRINGconst` 4, `INLINED` 7 |
+| `ANNOTATEDtpt` base, library (1,878) | `APPLIEDtpt` 1,411 (+2 shared), `IDENTtpt` 407, `ANNOTATEDtpt` 29, `SELECTtpt` 14, `SINGLETONtpt` 14, `REFINEDtpt` 1 |
+| `ANNOTATEDtpt` base, compiler (121) | `APPLIEDtpt` 89 (+7 shared), `IDENTtpt` 20 (+3 shared), `SELECTtpt` 2 |
+| `ANNOTATEDtpt` annotation, library / compiler | `APPLY` 1,715 / 64, `SHAREDterm -> APPLY` 163 / 57 (chain length 1); no other root; class trees `IDENTtpt` 269 / 60, `SELECTtpt` 1,486 / 0, `TYPEREF` 60 / 46, `SHAREDtype` 62 / 15; 0 term arguments in all 1,878 / 121; one library spine is `APPLY(TYPEAPPLY(SHAREDterm ..))`, whose function is a link and stays `UnsupportedAnnotationConstructor` |
+
+The term forms therefore needed are exactly: `SHAREDterm`, `SELECT`,
+`QUALTHIS`, the semantic type nodes, a few tree tags, and constants for
+`SINGLETONtpt`. `IDENT` never occurs (it is supported and unit-tested); the
+only unsupported real term is `INLINED` (147): 4 library and 10 compiler
+symbols end at `UnsupportedTermTree`, all reported, none guessed.
+
+Completion, rerun unchanged on the wider projection (kinds and order as in 5a;
+library no builtins -> builtins / compiler no builtins -> builtins; delta over
+5a):
+
+| kind | 5a -> 5b | delta |
+|------|----------|-------|
+| `Field` (`VALDEF`) | 726 -> 829 / 3,463 -> 3,497 becomes 730 -> 844 / 3,469 -> 3,503 | +4, +15 / +6, +6 |
+| `Field` (`PARAM`) | 971 -> 1,005 / 535 -> 545 becomes 972 -> 1,006 / 535 -> 545 | +1, +1 / 0 |
+| `Parameter` | 11,296 -> 12,408 / 5,941 -> 7,618 becomes 11,601 -> 12,760 / 6,206 -> 7,880 | +305, +352 / +265, +262 |
+| `TypeParameter` | 2 -> 14,684 / 2 -> 956 becomes 19 -> 14,703 / 2 -> 956 | +17, +19 / 0 |
+| `TypeAlias` | 15 -> 135 / 627 -> 654 becomes 32 -> 152 / 736 -> 761 | +17, +17 / +109, +107 |
+| `Object` | 944 / 2,170 | 0 |
+
+By tree (library with builtins, `outcomes_by_new_trees` in the report):
+symbols whose declared tree contains a `SELECTtpt` complete 315 times (others:
+external 544, refused inside by `REFINEDtpt`/`LAMBDAtpt` 75, `INLINED` 4, prefix
+still `Missing` 2, method/class kinds 1,094 out of scope); with a
+`SINGLETONtpt` 36 (external 4, refused 9); `ANNOTATEDtpt` alone 48 (external
+90, kinds out of scope 51). The exact per-kind, per-tree table is the report's
+"completed symbols by kind and 5b trees" line. What remains refused by tag,
+library: `LAMBDAtpt` 353, `REFINEDtpt` 11; compiler: `LAMBDAtpt` 78, `REFINEDtpt`
+3 (all `SELECTtpt`, `SINGLETONtpt` and `ANNOTATEDtpt` refusals of 5a are
+gone). 0 unexpected errors.
+
+Failure migration of the completion attempts on the wider projection
+(library, builtins): external child failures (a class of another unit) are
+the large bucket; no completion ends as `UnstableSelectQualifier` or
+`InvalidSingletonTypeTree`, so every real singleton and every real select
+qualifier was stable and a singleton. The report cannot tell an annotation
+class from another external type inside one tree, so "annotation type
+external" is part of the external bucket, not counted apart. The 2 (library)
+and 43 (compiler) `Parameter` symbols whose tree selects from a term that is
+still `Missing` are `UnsupportedResolutionPrefix`; the one probed (library
+`Mirror`, the qualifier is an earlier `PARAM`) is a dependency whose own
+completion had not succeeded, not a projection gap.
+
+Member resolution. Rerunning the reference corpus after completion moves
+nothing that 5a did not: named `TYPEREF` + `TERMREF` unsupported prefixes stay
+73 (library) and 291 (compiler), the by-address decodes are unchanged in the
+compiler and +4 in the library (the 5 `ANNOTATEDtype` nodes whose `NEW` class is
+a `SELECTtpt`, 2 direct and 3 shared, were `UnsupportedAnnotationConstructor`;
+that outcome is now 0). Every path that gets past the prefix still meets a
+class declared in another unit: cross-unit declaration scopes (5d) remain the
+next blocker for reference decoding, not the projection.
+
 ### Match types after 4d (library / compiler)
 
 `MATCHtype` and `MATCHCASEtype` occur in neither corpus (0 / 0 in both), so 4d
@@ -1695,7 +1838,7 @@ compiler. Unexpected errors: 0.
 | `POLYtype`, `METHODtype`, `TYPELAMBDAtype`, `PARAMtype` | binders | decoded |
 | constants (`UNITconst` ... `CLASSconst`) | literal types | decoded |
 | `MATCHtype`, `MATCHCASEtype` | match types | decoded (this milestone) |
-| `MATCHtpt`, `SINGLETONtpt`, `IDENTtpt`, `SELECTtpt`, `LAMBDAtpt`, ... | type trees | not `unpickle_type` inputs: typed-tree rehydration (Milestone 7) |
+| `MATCHtpt`, `SINGLETONtpt`, `IDENTtpt`, `SELECTtpt`, `LAMBDAtpt`, ... | type trees | not `unpickle_type` inputs: projected by `unpickle_type_tree_type` (5a/5b) where supported, typed-tree rehydration (Milestone 7) otherwise |
 | (`QualSkolemType`) | Dotty's skolem prefix of a mutable or methodic term | not modeled: such a `REFin` prefix is `IllegalTypePrefix` |
 | `ERRORtype` | error type | Best-Effort TASTy only, not regular TASTy |
 | 166, 168, 184-189 | unassigned | reserved |

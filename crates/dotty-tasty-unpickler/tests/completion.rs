@@ -1315,3 +1315,167 @@ fn a_real_selected_type_member_completes_through_its_completed_stable_qualifier(
         Some(stable)
     );
 }
+
+// Milestone 5b, on real Scala 3.9.0 wire
+
+const SELECTED: &[u8] = include_bytes!("fixtures/semantic/SelectedHolder.tasty");
+
+/// The tag of the first child of the definition at `at` (its type tree).
+fn tree_tag_of(file: &TastyFile<'_>, at: u32) -> u8 {
+    let index = file.ast_address_index().unwrap();
+    let edge = index
+        .iter_tree_edges()
+        .find(|edge| edge.parent.offset == at as usize)
+        .unwrap();
+    edge.child.tag
+}
+
+fn selected_session<'a>(
+    file: &'a TastyFile<'a>,
+    session: &'a mut Session,
+) -> TastyUnpickler<'a, 'a, 'a> {
+    let mut packages = Packages::new();
+    stub_classes(
+        session,
+        &mut packages,
+        &["scala"],
+        &["Int", "Any", "Nothing"],
+    );
+    stub_classes(session, &mut packages, &["java", "lang"], &["String"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(file, &mut session.store, session.definitions, packages);
+    unpickler.enter_symbols().unwrap();
+    unpickler
+}
+
+#[test]
+fn the_real_fixture_writes_the_three_trees_this_milestone_projects() {
+    let file = TastyFile::parse_scala_3_9(SELECTED).unwrap();
+    let defs = definitions_by_name(&file);
+    // `box.Out`, `stable.type`, `Int @Marker` and `Any @Marker`.
+    assert_eq!(tree_tag_of(&file, defs["Selected"]), 113);
+    assert_eq!(tree_tag_of(&file, defs["SingletonAlias"]), 101);
+    assert_eq!(tree_tag_of(&file, defs["annotated"]), 154);
+    assert_eq!(tree_tag_of(&file, defs["AnnotatedAlias"]), 154);
+}
+
+#[test]
+fn real_selected_singleton_and_annotated_trees_complete_in_document_order() {
+    let file = TastyFile::parse_scala_3_9(SELECTED).unwrap();
+    let defs = definitions_by_name(&file);
+    let mut session = Session::new();
+    let mut unpickler = selected_session(&file, &mut session);
+
+    // `box.Out`: not projected until `box` is completed.
+    assert!(matches!(
+        unpickler.complete_symbol(defs["Selected"]),
+        Err(UnpickleError::UnsupportedResolutionPrefix { .. })
+    ));
+    for name in [
+        "box",
+        "Selected",
+        "stable",
+        "SingletonAlias",
+        "annotated",
+        "AnnotatedAlias",
+    ] {
+        unpickler
+            .complete_symbol(defs[name])
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+    }
+    let symbol = |name: &str| unpickler.index().symbol_at(defs[name]).unwrap();
+    let (out, box_val, stable, marker) = (
+        symbol("Out"),
+        symbol("box"),
+        symbol("stable"),
+        symbol("Marker"),
+    );
+    let complete = |name: &str| match session_info(&unpickler, defs[name]) {
+        SymbolInfo::Complete(ty) => ty,
+        other => panic!("{name}: {other:?}"),
+    };
+    let (selected, singleton, annotated, annotated_alias) = (
+        complete("Selected"),
+        complete("SingletonAlias"),
+        complete("annotated"),
+        complete("AnnotatedAlias"),
+    );
+    drop(unpickler);
+
+    // `type Selected = box.Out`: an alias of `box.type#Out`.
+    let Type::AliasingBounds { alias } = session.store.types.get(selected) else {
+        panic!("not an alias");
+    };
+    let Type::TypeRef {
+        prefix,
+        target: TypeRefTarget::Symbol(member),
+    } = session.store.types.get(*alias)
+    else {
+        panic!("not a selection");
+    };
+    assert_eq!(*member, out);
+    assert_eq!(
+        session.store.types.get(*prefix).reference_symbol(),
+        Some(box_val)
+    );
+
+    // `type SingletonAlias = stable.type`: the alias of the term reference.
+    let Type::AliasingBounds { alias } = session.store.types.get(singleton) else {
+        panic!("not an alias");
+    };
+    assert_eq!(
+        session.store.types.get(*alias).reference_symbol(),
+        Some(stable)
+    );
+    assert!(matches!(
+        session.store.types.get(*alias),
+        Type::TermRef { .. }
+    ));
+
+    // `Int @Marker` and `Any @Marker`: the base and a local annotation
+    // class, with no typed tree and no arguments.
+    for (ty, base) in [(annotated, "Int"), (annotated_alias, "Any")] {
+        let alias_of;
+        let ty = match session.store.types.get(ty) {
+            Type::AliasingBounds { alias } => {
+                alias_of = *alias;
+                alias_of
+            }
+            _ => ty,
+        };
+        let Type::Annotated {
+            underlying,
+            annotation,
+        } = session.store.types.get(ty)
+        else {
+            panic!("{base}: not annotated");
+        };
+        let name = session
+            .store
+            .symbols
+            .get(
+                session
+                    .store
+                    .types
+                    .get(*underlying)
+                    .reference_symbol()
+                    .unwrap(),
+            )
+            .name;
+        assert_eq!(session.store.names.resolve(name.text()), base);
+        let annotation = session.store.annotations.get(*annotation);
+        assert_eq!(annotation.tree, None);
+        assert_eq!(
+            session.store.types.get(annotation.ty).reference_symbol(),
+            Some(marker)
+        );
+        assert_eq!(
+            annotation.arguments,
+            dotty_core::types::AnnotationArguments::Known(vec![])
+        );
+    }
+}
+
+fn session_info(unpickler: &TastyUnpickler<'_, '_, '_>, at: u32) -> SymbolInfo {
+    unpickler.symbol_state_at(at).unwrap().1
+}
