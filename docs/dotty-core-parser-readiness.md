@@ -75,7 +75,7 @@ out-of-band tree convention or a lossy lowering step.
 | `Tuple` | `UntypedNode::Tuple` | REPRESENT | Tuple grouping is parser output, not an early application rewrite. |
 | `ForYield` / `ForDo` | `UntypedNode::ForYield` / `ForDo` | REPRESENT | Yield-versus-do is syntactically observable before for-comprehension lowering. |
 | `GenFrom` / `GenAlias` | `UntypedNode::GenFrom` / `GenAlias` | REPRESENT | Generator and alias forms remain distinct; `GenFrom.check_mode` preserves the parser's source-version and `case`-pattern policy until for-comprehension lowering. |
-| `PatDef` | `UntypedNode::PatDef` | REPRESENT | Pattern definitions retain modifiers, patterns, type ascription, and RHS. |
+| `PatDef` | `UntypedNode::PatDef` | REPRESENT | Pattern definitions retain modifiers, patterns, type ascription, and an optional RHS. |
 | `ExtMethods` | `UntypedNode::ExtensionMethods` | REPRESENT | The local name differs, but the parser-facing information is present. |
 | `InterpolatedString` | `UntypedNode::InterpolatedString` | REPRESENT | Interpolator name and interpolation parts remain available to later lowering. |
 | `ContextBounds` | `UntypedNode::ContextBounds` | REPRESENT | Multiple bounds and their order are preserved. Individual Scala 3.9 aliases are represented by `ContextBoundTypeTree` entries. |
