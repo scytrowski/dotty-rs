@@ -965,20 +965,6 @@ fn a_second_type_application_is_refused() {
 }
 
 #[test]
-fn a_shared_term_annotation_is_still_deferred_not_followed() {
-    let (_, result) = decode(&full_file(&[SHAREDTERM, nat(2)]));
-
-    assert_eq!(
-        result,
-        Err(UnpickleError::UnsupportedAnnotationTree {
-            address: ANNOTATED_AT,
-            annotation_address: UNDERLYING_AT + 2,
-            tag: SHAREDTERM,
-        })
-    );
-}
-
-#[test]
 fn a_failing_second_argument_rolls_back_the_first_and_the_call_can_be_retried() {
     // The first argument decodes; the second is an unsupported `TYPED`.
     let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
@@ -1377,4 +1363,309 @@ fn a_real_compact_annotation_decodes_to_an_annotation_without_a_tree() {
     };
     let class = session.store.symbols.get(symbol).name.text();
     assert_eq!(session.store.names.resolve(class), "retainsCap");
+}
+
+// Milestone 4b2b: `SHAREDterm` annotation roots.
+//
+// Scala 3.9 reads `SHAREDterm` as `forkAt(readAddr()).readTree()`: the link is
+// followed and the tree read again. These files put the term trees a link can
+// name in a holder node at address 0 (a bare `SHAREDterm` or `NEW` is not a
+// valid top-level node), and `ANNOTATEDtype` nodes after it.
+
+const HOLDER: u8 = APPLY_NODE;
+const HOLDER_PAYLOAD: u32 = 2;
+
+/// The addresses of `terms` once wrapped by [`with_terms`].
+fn term_addresses(terms: &[Vec<u8>]) -> Vec<u32> {
+    let mut at = HOLDER_PAYLOAD;
+    terms
+        .iter()
+        .map(|term| {
+            let here = at;
+            at += u32::try_from(term.len()).unwrap();
+            here
+        })
+        .collect()
+}
+
+/// A file of a holder around `terms` followed by `rest`; the address of each
+/// of `rest` is returned.
+fn with_terms(terms: &[Vec<u8>], rest: &[Vec<u8>]) -> (Vec<u8>, Vec<u32>) {
+    let holder = length_node(HOLDER, &terms.concat());
+    let mut ast = holder.clone();
+    let mut addresses = Vec::new();
+    for node in rest {
+        addresses.push(u32::try_from(ast.len()).unwrap());
+        ast.extend(node);
+    }
+    (file_with_ast(&ast), addresses)
+}
+
+/// `p @<annotation>` as a node.
+fn annotated_over(annotation: &[u8]) -> Vec<u8> {
+    length_node(ANNOTATED, &[package_ref(), annotation.to_vec()].concat())
+}
+
+/// `SHAREDterm target`.
+fn shared_term(target: u32) -> Vec<u8> {
+    vec![SHAREDTERM, nat(u8::try_from(target).unwrap())]
+}
+
+fn two_argument_application() -> Vec<u8> {
+    apply_to(&constructor(), &[string_argument(), true_argument()])
+}
+
+fn decode_at(bytes: &[u8], at: u32) -> (Session, Result<TypeId, UnpickleError>) {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut session = Session::new();
+    let result = {
+        let mut unpickler = unpickler_for(&file, &mut session);
+        unpickler.unpickle_type(at)
+    };
+    (session, result)
+}
+
+/// The type of `p @<annotation>` where `annotation` links to the first term.
+fn one_link_file(term: Vec<u8>) -> (Vec<u8>, u32) {
+    let target = term_addresses(std::slice::from_ref(&term))[0];
+    let (bytes, at) = with_terms(&[term], &[annotated_over(&shared_term(target))]);
+    (bytes, at[0])
+}
+
+#[test]
+fn a_shared_apply_decodes_exactly_like_the_same_apply_written_inline() {
+    let apply = two_argument_application();
+    let (bytes, at) = one_link_file(apply.clone());
+    let (session, shared) = decode_at(&bytes, at);
+    let (inline_session, inline) = decode(&full_file(&apply));
+
+    let shared = shared.unwrap();
+    assert_eq!(
+        arguments_of(&session, shared),
+        arguments_of(&inline_session, inline.unwrap())
+    );
+    assert_eq!(arguments_of(&session, shared).len(), 2);
+}
+
+#[test]
+fn a_shared_new_has_no_arguments() {
+    let (bytes, at) = one_link_file(new_of(&package_ref()));
+    let (session, id) = decode_at(&bytes, at);
+
+    assert_eq!(arguments_of(&session, id.unwrap()), Vec::new());
+}
+
+#[test]
+fn a_chain_of_shared_terms_is_followed_to_the_constructor() {
+    let terms = [two_argument_application(), shared_term(HOLDER_PAYLOAD)];
+    let addresses = term_addresses(&terms);
+    let (bytes, at) = with_terms(&terms, &[annotated_over(&shared_term(addresses[1]))]);
+    let (session, id) = decode_at(&bytes, at[0]);
+
+    assert_eq!(arguments_of(&session, id.unwrap()).len(), 2);
+}
+
+#[test]
+fn a_shared_link_that_never_reaches_a_tree_is_an_invalid_reference() {
+    // A link to itself.
+    let (bytes, at) = one_link_file(shared_term(HOLDER_PAYLOAD));
+    let (_, result) = decode_at(&bytes, at);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget { from, .. }) if from == at
+        ),
+        "{result:?}"
+    );
+
+    // Two links naming each other.
+    let terms = [shared_term(HOLDER_PAYLOAD + 2), shared_term(HOLDER_PAYLOAD)];
+    let (bytes, at) = with_terms(&terms, &[annotated_over(&shared_term(HOLDER_PAYLOAD))]);
+    let (_, result) = decode_at(&bytes, at[0]);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::InvalidReferenceTarget { from, .. }) if from == at[0]
+        ),
+        "{result:?}"
+    );
+
+    // A target that is not the start of a node.
+    let (bytes, at) = with_terms(&[], &[annotated_over(&shared_term(1))]);
+    let (_, result) = decode_at(&bytes, at[0]);
+    assert_eq!(
+        result,
+        Err(UnpickleError::InvalidReferenceTarget { from: at[0], to: 1 })
+    );
+}
+
+#[test]
+fn a_shared_chain_beyond_the_bound_is_an_error_not_a_stack_overflow() {
+    // A constructor, then 16 links and the annotation's own: one more than
+    // the bound allows.
+    let mut terms = vec![two_argument_application()];
+    for _ in 0..16 {
+        let previous = *term_addresses(&terms).last().unwrap();
+        terms.push(shared_term(previous));
+    }
+    let last = *term_addresses(&terms).last().unwrap();
+    let (bytes, at) = with_terms(&terms, &[annotated_over(&shared_term(last))]);
+    let (_, result) = decode_at(&bytes, at[0]);
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidReferenceTarget { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_chain_of_exactly_the_bound_still_decodes() {
+    let mut terms = vec![two_argument_application()];
+    for _ in 0..15 {
+        let previous = *term_addresses(&terms).last().unwrap();
+        terms.push(shared_term(previous));
+    }
+    let last = *term_addresses(&terms).last().unwrap();
+    let (bytes, at) = with_terms(&terms, &[annotated_over(&shared_term(last))]);
+    let (_, result) = decode_at(&bytes, at[0]);
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn an_unsupported_shared_target_is_reported_at_the_annotation_and_the_target() {
+    let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
+    let (bytes, at) = one_link_file(typed);
+    let (_, result) = decode_at(&bytes, at);
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::UnsupportedAnnotationTree {
+            address: at,
+            annotation_address: HOLDER_PAYLOAD,
+            tag: TYPED,
+        })
+    );
+}
+
+#[test]
+fn a_bad_part_of_a_shared_constructor_is_reported_against_the_annotated_type() {
+    let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
+    let (bytes, at) = one_link_file(apply_to(&constructor(), &[typed]));
+    let (_, result) = decode_at(&bytes, at);
+
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationArgument { address, tag: TYPED, .. })
+                if address == at
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn two_annotated_types_sharing_one_tree_get_distinct_equal_annotations() {
+    let annotation = annotated_over(&shared_term(HOLDER_PAYLOAD));
+    let (bytes, at) = with_terms(
+        &[two_argument_application()],
+        &[annotation.clone(), annotation],
+    );
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let first = unpickler.unpickle_type(at[0]).unwrap();
+    let second = unpickler.unpickle_type(at[1]).unwrap();
+    // The shared term tree is not a type: it is not in the type index.
+    assert_eq!(unpickler.index().type_at(HOLDER_PAYLOAD), None);
+    drop(unpickler);
+
+    assert_ne!(first, second);
+    let (_, one) = annotated_parts(&session.store, first);
+    let (_, two) = annotated_parts(&session.store, second);
+    assert_ne!(one, two);
+    let (one, two) = (
+        session.store.annotations.get(one),
+        session.store.annotations.get(two),
+    );
+    assert_eq!(one.ty, two.ty);
+    assert_eq!(one.arguments, two.arguments);
+    assert_eq!(one.tree, None);
+}
+
+#[test]
+fn a_shared_backed_annotated_type_decoded_twice_keeps_its_type_and_annotation() {
+    let (bytes, at) = one_link_file(two_argument_application());
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let first = unpickler.unpickle_type(at).unwrap();
+    assert_eq!(unpickler.unpickle_type(at), Ok(first));
+    drop(unpickler);
+
+    let (_, annotation) = annotated_parts(&session.store, first);
+    assert_eq!(annotation.index(), 0);
+    assert_eq!(next_ids(&mut session).1, 1);
+}
+
+#[test]
+fn a_shared_type_link_to_a_shared_backed_annotated_type_returns_its_exact_id() {
+    let annotated = annotated_over(&shared_term(HOLDER_PAYLOAD));
+    // Built once to learn where the annotated type is, then with a
+    // `FLEXIBLEtype` around a `SHAREDtype` link to it.
+    let (_, at) = with_terms(
+        &[two_argument_application()],
+        std::slice::from_ref(&annotated),
+    );
+    let annotated_at = u8::try_from(at[0]).unwrap();
+    let flexible = length_node(FLEXIBLE, &shared(annotated_at));
+    let (bytes, at) = with_terms(&[two_argument_application()], &[annotated, flexible]);
+    let link_at = at[1] + 2;
+
+    // The annotated type first, then the link.
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let id = unpickler.unpickle_type(at[0]).unwrap();
+    let before = unpickler.index().type_count();
+    assert_eq!(unpickler.unpickle_type(link_at), Ok(id));
+    assert_eq!(unpickler.index().type_count(), before);
+    drop(unpickler);
+    assert_eq!(next_ids(&mut session).1, 1);
+
+    // The link first, then the annotated type.
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let linked = unpickler.unpickle_type(link_at).unwrap();
+    assert_eq!(unpickler.unpickle_type(at[0]), Ok(linked));
+    drop(unpickler);
+    assert_eq!(next_ids(&mut session).1, 1);
+}
+
+#[test]
+fn a_failure_after_following_the_shared_tree_rolls_back_every_allocation() {
+    let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
+    let (bytes, at) = one_link_file(apply_to(&constructor(), &[string_argument(), typed]));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+    let mut untouched = Session::new();
+    drop(unpickler_for(&file, &mut untouched));
+    let expected = next_ids(&mut untouched);
+
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let before = unpickler.index().type_count();
+    for _ in 0..2 {
+        let result = unpickler.unpickle_type(at);
+        assert!(
+            matches!(
+                result,
+                Err(UnpickleError::UnsupportedAnnotationArgument { tag: TYPED, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(unpickler.index().type_count(), before);
+        assert_eq!(unpickler.index().type_at(at + 2), None);
+    }
+    drop(unpickler);
+    assert_eq!(next_ids(&mut session), expected);
 }

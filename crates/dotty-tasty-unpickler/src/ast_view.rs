@@ -112,6 +112,27 @@ impl<'bytes> AstView<'bytes> {
         Err(UnpickleError::InvalidReferenceTarget { from, to: current })
     }
 
+    /// The address of the first tree at or after `start` that is not a
+    /// `SHAREDterm`: Dotty reads `SHAREDterm` as `forkAt(readAddr()).readTree()`,
+    /// so a chain of them is just the tree at its end. Only `SHAREDterm` links
+    /// are followed. Every link target must be a visible node and the chain is
+    /// bounded like any other; a self link, a cycle, an invalid target or an
+    /// overlong chain is `InvalidReferenceTarget { from, to }` with `from` the
+    /// referring node and `to` the address that could not be followed.
+    pub(crate) fn resolve_shared_term(&self, start: u32, from: u32) -> Result<u32, UnpickleError> {
+        let mut current = start;
+        for _ in 0..=MAX_SHARED_DEPTH {
+            match self.tree_at(current, from)? {
+                RawTree::Leaf(term) if term.tag == SHAREDTERM_TAG => match term.value {
+                    TermValue::AstRef(target) => current = target,
+                    _ => return Err(UnpickleError::InvalidReferenceTarget { from, to: current }),
+                },
+                _ => return Ok(current),
+            }
+        }
+        Err(UnpickleError::InvalidReferenceTarget { from, to: current })
+    }
+
     pub(crate) fn node(&self, at: u32) -> Result<&RawNode<'bytes>, UnpickleError> {
         self.index
             .get(at)
@@ -143,6 +164,11 @@ mod tests {
         payload.extend([SHAREDTERM_TAG, nat(4)]);
         payload.extend([SHAREDTYPE_TAG, nat(8)]);
         payload.extend([SHAREDTYPE_TAG, nat(1)]);
+        // SHAREDterm to itself (12), a two-node cycle (14, 16), a link to
+        // no node (18).
+        payload.extend([SHAREDTERM_TAG, nat(12)]);
+        payload.extend([SHAREDTERM_TAG, nat(16), SHAREDTERM_TAG, nat(14)]);
+        payload.extend([SHAREDTERM_TAG, nat(1)]);
         let mut ast = vec![161, nat(u8::try_from(payload.len()).unwrap())];
         ast.extend(payload);
         let names = NameTable::from_entries(vec![
@@ -202,6 +228,33 @@ mod tests {
         let bytes = file();
         assert_eq!(
             view(&bytes).next_unshared_tag(10, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 1 })
+        );
+    }
+
+    #[test]
+    fn a_shared_term_chain_resolves_to_the_first_other_tree() {
+        let bytes = file();
+        let ast = view(&bytes);
+        // 6 is a SHAREDterm to the SHAREDtype at 4, which is not followed.
+        assert_eq!(ast.resolve_shared_term(6, 0), Ok(4));
+        assert_eq!(ast.resolve_shared_term(2, 0), Ok(2));
+    }
+
+    #[test]
+    fn a_shared_term_self_link_cycle_or_bad_target_is_an_invalid_reference() {
+        let bytes = file();
+        let ast = view(&bytes);
+        assert_eq!(
+            ast.resolve_shared_term(12, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 12 })
+        );
+        assert!(matches!(
+            ast.resolve_shared_term(14, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, .. })
+        ));
+        assert_eq!(
+            ast.resolve_shared_term(18, 0),
             Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 1 })
         );
     }
