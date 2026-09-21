@@ -269,9 +269,11 @@ where
         ) {
             count += 1;
         }
-        follows(self.cursor.lookahead(count).kind)
-            .then_some(count)
-            .unwrap_or(0)
+        if follows(self.cursor.lookahead(count).kind) {
+            count
+        } else {
+            0
+        }
     }
 
     fn parse_parent(&mut self) -> TreeId<Untyped> {
