@@ -1,10 +1,8 @@
-use dotty_core::ast::{Block, Literal};
-use dotty_core::{
-    AstArena, Constant, HardKeyword, Punctuation, SourceId, SourceText, TokenKind, TokenSource,
-    TreeId, TreeKind, Untyped,
-};
+use dotty_core::ast::Block;
+use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnostic, ParseDiagnosticKind, Parser};
+use crate::statements::StatementSequenceBoundary;
+use crate::{ParseDiagnostic, Parser};
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -31,58 +29,10 @@ where
     /// Parses the supported expression sequence into a stable synthetic block root.
     pub fn compilation_unit(mut self) -> ParseResult {
         let unit_mark = self.mark();
-        let mut trees = Vec::new();
-
-        while self.current().kind != TokenKind::Eof {
-            self.consume_statement_separators();
-            if self.current().kind == TokenKind::Eof {
-                break;
-            }
-
-            let checkpoint = self.cursor.checkpoint();
-            let tree = if is_unsupported_start(self.current().kind) {
-                self.parse_unsupported_syntax()
-            } else {
-                self.with_location(Location::Elsewhere, |parser| parser.expr())
-            };
-            trees.push(tree);
-
-            if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a compilation unit",
-                );
-                let recovery_checkpoint = self.cursor.checkpoint();
-                self.advance();
-                if !self.cursor.progressed_since(recovery_checkpoint) {
-                    break;
-                }
-            }
-
-            if self.current().kind != TokenKind::Eof && !is_statement_separator(self.current().kind)
-            {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "expected a statement separator",
-                );
-                self.recover_until(crate::RecoverySet::Statement);
-            }
-        }
+        let (stats, expr) =
+            self.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
 
         self.report_escaping_placeholders();
-
-        let (stats, expr) = match trees.pop() {
-            Some(expr) => (trees, expr),
-            None => {
-                let expr = self.alloc(
-                    TreeKind::Literal(Literal {
-                        value: Constant::Unit,
-                    }),
-                    Some(self.current_span()),
-                );
-                (Vec::new(), expr)
-            }
-        };
         let root = self.alloc(
             TreeKind::Block(Block { stats, expr }),
             Some(self.span_from(unit_mark)),
@@ -94,62 +44,16 @@ where
             diagnostics: self.diagnostics,
         }
     }
-
-    fn consume_statement_separators(&mut self) {
-        while is_statement_separator(self.current().kind) {
-            self.advance();
-        }
-    }
-
-    fn parse_unsupported_syntax(&mut self) -> TreeId<Untyped> {
-        let position = self.current_span();
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            format!(
-                "syntax beginning with {:?} is not supported by this parser milestone",
-                self.current().kind
-            ),
-        );
-        self.advance();
-        self.recover_until(crate::RecoverySet::Statement);
-        self.error_expr(position)
-    }
-}
-
-const fn is_statement_separator(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Newline
-            | TokenKind::Newlines
-            | TokenKind::Punctuation(Punctuation::Semicolon)
-            | TokenKind::Outdent
-    )
-}
-
-const fn is_unsupported_start(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Keyword(
-            HardKeyword::Class
-                | HardKeyword::Def
-                | HardKeyword::Match
-                | HardKeyword::Val
-                | HardKeyword::Var
-                | HardKeyword::Type
-                | HardKeyword::Object
-                | HardKeyword::Trait
-                | HardKeyword::Enum
-                | HardKeyword::Given
-        )
-    )
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use dotty_core::ast::UntypedNode;
+    use crate::ParseDiagnosticKind;
+    use dotty_core::ast::{Literal, UntypedNode};
     use dotty_core::{
-        HardKeyword, NameInterner, SourceId, SourceText, TextRange, Token, TokenSource, TokenValue,
+        Constant, HardKeyword, NameInterner, Punctuation, SourceId, SourceText, TextRange, Token,
+        TokenKind, TokenSource, TokenValue,
     };
 
     pub(crate) struct VecTokenSource {

@@ -5,8 +5,8 @@ use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
 
-use super::is_block_separator;
 use crate::Parser;
+use crate::statements::StatementSequenceBoundary;
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -122,78 +122,12 @@ where
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         self.with_placeholder_scope(|parser| {
             parser.with_block_end(Some(end), |parser| {
-                parser.parse_expression_block_body_inner(end)
+                parser.parse_statement_sequence(StatementSequenceBoundary::Block(end))
             })
         })
     }
 
-    fn parse_expression_block_body_inner(
-        &mut self,
-        end: TokenKind,
-    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
-        let mut trees = Vec::new();
-        self.consume_block_separators(end);
-
-        while !self.expression_block_body_ended(end) {
-            let checkpoint = self.cursor.checkpoint();
-            trees.push(self.with_location(crate::Location::InBlock, |parser| parser.expr()));
-
-            if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a block",
-                );
-                let recovery_checkpoint = self.cursor.checkpoint();
-                self.advance();
-                if !self.cursor.progressed_since(recovery_checkpoint) {
-                    break;
-                }
-            }
-
-            if is_block_separator(self.current().kind) {
-                self.consume_block_separators(end);
-            } else if !self.expression_block_body_ended(end) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "expected a block statement separator",
-                );
-                self.recover_until(crate::RecoverySet::Statement);
-                self.consume_block_separators(end);
-            }
-        }
-
-        let expr = match trees.pop() {
-            Some(expr) => expr,
-            None => self.synthetic_unit(),
-        };
-        (trees, expr)
-    }
-
-    fn expression_block_body_ended(&self, end: TokenKind) -> bool {
-        self.current().kind == end
-            || self.current().kind == TokenKind::Eof
-            || (self.context.case_body && self.is_case_body_terminator())
-    }
-
-    fn consume_block_separators(&mut self, end: TokenKind) {
-        while is_block_separator(self.current().kind)
-            && self.current().kind != end
-            && !(self.context.case_body && self.is_case_body_terminator())
-        {
-            self.advance();
-        }
-    }
-
-    fn is_case_body_terminator(&self) -> bool {
-        matches!(
-            self.current().kind,
-            TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                | TokenKind::Punctuation(Punctuation::RightBrace)
-                | TokenKind::Outdent
-        )
-    }
-
-    pub(super) fn synthetic_unit(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn synthetic_unit(&mut self) -> TreeId<Untyped> {
         self.synthetic_unit_at(self.current().span.start())
     }
 

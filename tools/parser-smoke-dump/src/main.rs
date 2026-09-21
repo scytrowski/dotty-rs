@@ -100,7 +100,14 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         result.root
     } else {
         match &result.ast.get(result.root).kind {
+            TreeKind::Block(block) if mode == "block" && block.stats.is_empty() => block.expr,
+            TreeKind::Block(_) if mode == "block" => result.root,
             TreeKind::Block(block) if block.stats.is_empty() => block.expr,
+            TreeKind::Block(block)
+                if block.stats.len() == 1 && is_synthetic_unit(&result.ast, block.expr) =>
+            {
+                block.stats[0]
+            }
             _ => {
                 return Err(format!(
                     "expression dump requires a single expression in {path}"
@@ -179,6 +186,12 @@ fn render_tree(
             ));
         }
         TreeKind::ValDef(definition) => {
+            let source_text = source_slice(tree, source);
+            let name = names.resolve(definition.name.as_name().text());
+            if !source_text.trim_start().starts_with('_') && !name.starts_with("$lambda_wildcard_")
+            {
+                fields.push(format!("\"name\":{}", quote(name)));
+            }
             if definition
                 .metadata
                 .modifiers
@@ -187,6 +200,7 @@ fn render_tree(
                 fields.push("\"given\":true".to_owned());
             }
         }
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => {}
         TreeKind::Alternative(_) | TreeKind::Typed(_) => {}
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
@@ -263,6 +277,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
         TreeKind::ValDef(_) => "ValDef",
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::TypeTree(_) => "TypeTree",
@@ -378,6 +393,14 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             }
             children
         }
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+            let mut children = definition.patterns.clone();
+            children.push(definition.tpt);
+            if let Some(rhs) = definition.rhs {
+                children.push(rhs);
+            }
+            children
+        }
         TreeKind::TypeDef(definition) => vec![definition.rhs],
         TreeKind::TypeBoundsTree(bounds) => bounds
             .low
@@ -444,6 +467,19 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::Return(return_tree) => return_tree.expr.into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+fn has_non_empty_span(arena: &AstArena<Untyped>, id: TreeId<Untyped>) -> bool {
+    arena
+        .get(id)
+        .position
+        .is_some_and(|position| position.span().range().start() != position.span().range().end())
+}
+
+fn is_synthetic_unit(arena: &AstArena<Untyped>, id: TreeId<Untyped>) -> bool {
+    let tree = arena.get(id);
+    matches!(&tree.kind, TreeKind::Literal(literal) if literal.value == dotty_core::Constant::Unit)
+        && !has_non_empty_span(arena, id)
 }
 
 fn render_span(tree: &Tree<Untyped>) -> String {
