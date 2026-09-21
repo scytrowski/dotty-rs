@@ -60,7 +60,7 @@ where
 
         let rhs = if is_bare_assignment(self) {
             self.advance();
-            Some(self.with_location(location, |parser| parser.expr()))
+            Some(self.parse_method_rhs(location))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
         } else {
@@ -83,6 +83,15 @@ where
             }),
         );
         ParsedStatement::Definition(definition)
+    }
+
+    fn parse_method_rhs(&mut self, location: Location) -> TreeId<Untyped> {
+        self.consume_control_newlines();
+        if self.current().kind == TokenKind::Indent {
+            self.parse_indented_block()
+        } else {
+            self.with_location(location, |parser| parser.expr())
+        }
     }
 
     fn parse_method_name(&mut self) -> TermName {
@@ -928,6 +937,128 @@ mod tests {
         assert!(matches!(
             parameter.rhs,
             Some(rhs) if matches!(parser.ast().get(rhs).kind, TreeKind::Ident(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_single_indented_method_body_as_its_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f =\n  1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Indent, 10, 10),
+                token(TokenKind::IntegerLiteral, 10, 11),
+                token(TokenKind::Outdent, 11, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.rhs.unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_local_value_definitions_inside_an_indented_method_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f =\n  val y = 1\n  y",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Indent, 10, 10),
+                token(TokenKind::Keyword(HardKeyword::Val), 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::IntegerLiteral, 18, 19),
+                token(TokenKind::Newline, 19, 20),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Outdent, 23, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(definition.rhs.unwrap()).kind else {
+            panic!("expected a block method body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_local_method_definitions_inside_an_indented_method_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def outer =\n  def inner = 1\n  inner",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Indent, 14, 14),
+                token(TokenKind::Keyword(HardKeyword::Def), 14, 17),
+                token(TokenKind::Identifier, 18, 23),
+                token(TokenKind::Operator, 24, 25),
+                token(TokenKind::IntegerLiteral, 26, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Identifier, 30, 35),
+                token(TokenKind::Outdent, 35, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(definition.rhs.unwrap()).kind else {
+            panic!("expected a block method body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }
