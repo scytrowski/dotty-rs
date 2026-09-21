@@ -21,7 +21,13 @@ where
     ) -> Vec<Vec<TreeId<Untyped>>> {
         self.with_param_owner(Some(owner), |parser| {
             let mut clauses = Vec::new();
-            while parser.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            loop {
+                parser.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+                    Punctuation::LeftParen,
+                ));
+                if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+                    break;
+                }
                 let is_using = parser.current_is_using_parameter_clause();
                 clauses.push(if is_using {
                     parser.parse_term_param_clause_with_modifiers(true)
@@ -31,6 +37,25 @@ where
             }
             clauses
         })
+    }
+
+    /// Consumes layout separators only when they lead to the requested
+    /// parameter-clause delimiter. A newline before a return type or method
+    /// body remains available to the enclosing grammar.
+    pub(crate) fn consume_newlines_before_parameter_clause(&mut self, expected: TokenKind) {
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if self.cursor.lookahead(newline_count).kind != expected {
+            return;
+        }
+        for _ in 0..newline_count {
+            self.advance();
+        }
     }
 
     /// Parses one ordinary `(x: T, y: U)` clause.

@@ -33,6 +33,9 @@ where
         self.advance();
 
         let name = self.parse_method_name();
+        self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+            dotty_core::Punctuation::LeftBracket,
+        ));
         let type_params = if self.current().kind
             == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket)
         {
@@ -759,6 +762,116 @@ mod tests {
             parser.ast().get(definition.type_params[0]).kind,
             TreeKind::TypeDef(_)
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_newlines_before_method_type_and_term_parameter_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def id\n[A]\n(x: A): A = x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 6),
+                token(TokenKind::Newline, 6, 7),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    7,
+                    8,
+                ),
+                token(TokenKind::Identifier, 8, 9),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Newline, 10, 11),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    11,
+                    12,
+                ),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::ColonFollow, 13, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    16,
+                    17,
+                ),
+                token(TokenKind::ColonFollow, 17, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Operator, 21, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert_eq!(definition.type_params.len(), 1);
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_newlines_between_method_term_parameter_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f(x: A)\n(y: B): B = y",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    5,
+                    6,
+                ),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    10,
+                    11,
+                ),
+                token(TokenKind::Newline, 11, 12),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    12,
+                    13,
+                ),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::ColonFollow, 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    17,
+                    18,
+                ),
+                token(TokenKind::ColonFollow, 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Operator, 22, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert_eq!(definition.value_param_clauses.len(), 2);
         assert!(parser.diagnostics().is_empty());
     }
 
