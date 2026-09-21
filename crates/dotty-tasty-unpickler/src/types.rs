@@ -846,7 +846,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// The class named by the argument of a `THIS` node: a class reference by
     /// address or a package. Only its symbol is kept, so nothing is allocated
     /// for the argument itself.
-    fn this_class(
+    pub(crate) fn this_class(
         &mut self,
         ast: &AstView<'_>,
         class: &RawTree<'_>,

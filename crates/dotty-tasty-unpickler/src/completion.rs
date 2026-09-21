@@ -96,7 +96,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             _ => return Err(unsupported),
         };
-        let projected = self.type_of_tpt(ast, tree, at)?;
+        let projected = self.type_of_tpt(ast, tree, at, 0)?;
         let info = if matches!(tag, TYPEPARAM_TAG | TYPEDEF_TAG) {
             self.bounds_of(at, projected)?
         } else {

@@ -311,6 +311,14 @@ struct CompletionSurvey {
     /// or `|` (the special constructors upstream canonicalizes).
     applied_constructors: BTreeMap<String, usize>,
     applied_and_or: usize,
+    /// The wire shapes of every `SELECTtpt` / `SINGLETONtpt` / `ANNOTATEDtpt`
+    /// (Milestone 5b), independent of what any of them decodes to: (survey,
+    /// root) -> count. A `SHAREDterm` is reported by the tag its chain ends at.
+    tpt_roots: BTreeMap<(&'static str, String), usize>,
+    /// `SHAREDterm` chain lengths under those trees: (survey, links) -> count.
+    tpt_links: BTreeMap<(&'static str, usize), usize>,
+    /// The constructor spines and arguments of the `ANNOTATEDtpt` annotations.
+    annotated_tpt_shapes: FullShapes,
     unexpected: Vec<String>,
 }
 
@@ -727,6 +735,8 @@ fn complete_unit(
         }
     }
 
+    survey_type_trees(&index, file, &children, survey);
+
     // Completion itself.
     for (at, tag) in definitions {
         let Some((kind, before)) = unpickler.symbol_state_at(at) else {
@@ -785,6 +795,54 @@ fn complete_unit(
                 .infos
                 .entry((format!("{kind:?}"), info_state(info)))
                 .or_default() += 1;
+        }
+    }
+}
+
+/// The wire shapes of the trees Milestone 5b projects, over every node of the
+/// unit and whatever they decode to.
+fn survey_type_trees(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    survey: &mut CompletionSurvey,
+) {
+    const SELECTTPT: u8 = 113;
+    const SINGLETONTPT: u8 = 101;
+    const ANNOTATEDTPT: u8 = 154;
+    let below = |at: u32| children.get(&at).map_or(&[][..], Vec::as_slice);
+    let record = |survey: &mut CompletionSurvey, what: &'static str, tree: u32| {
+        *survey
+            .tpt_roots
+            .entry((what, tree_root_name(index, file, tree)))
+            .or_default() += 1;
+        if let Some((links, ..)) = follow_shared_terms_in(index, file, tree, 16) {
+            *survey.tpt_links.entry((what, links)).or_default() += 1;
+        }
+    };
+    for node in index.iter_nodes_with_tag(SELECTTPT) {
+        let at = u32::try_from(node.offset).unwrap();
+        if let Some((qualifier, _)) = below(at).first() {
+            record(survey, "SELECTtpt qualifier", *qualifier);
+        }
+    }
+    for node in index.iter_nodes_with_tag(SINGLETONTPT) {
+        let at = u32::try_from(node.offset).unwrap();
+        if let Some((reference, _)) = below(at).first() {
+            record(survey, "SINGLETONtpt ref", *reference);
+        }
+    }
+    for node in index.iter_nodes_with_tag(ANNOTATEDTPT) {
+        let at = u32::try_from(node.offset).unwrap();
+        let [(base, _), (annotation, _)] = below(at) else {
+            continue;
+        };
+        record(survey, "ANNOTATEDtpt base", *base);
+        record(survey, "ANNOTATEDtpt annotation", *annotation);
+        if let Some((_, target, tag, _)) = follow_shared_terms_in(index, file, *annotation, 16)
+            && matches!(tag, 136 | 95)
+        {
+            survey_shape(&mut survey.annotated_tpt_shapes, file, children, target);
         }
     }
 }
@@ -1979,6 +2037,22 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             println!(
                 "  APPLIEDtpt constructors by root: {:?}, named & or | (survey only): {}",
                 survey.applied_constructors, survey.applied_and_or
+            );
+            println!(
+                "  5b wire shapes (survey, root -> count): {:?}",
+                survey.tpt_roots
+            );
+            println!(
+                "  5b SHAREDterm chain lengths (survey, links -> count): {:?}",
+                survey.tpt_links
+            );
+            let shapes = &survey.annotated_tpt_shapes;
+            println!(
+                "  ANNOTATEDtpt annotation spines: {:?}, argument counts: {:?}, argument roots: {:?}, named: {}",
+                shapes.spines,
+                shapes.argument_counts,
+                shapes.argument_roots,
+                shapes.named_arguments
             );
             println!("  completion unexpected: {}", survey.unexpected.len());
             for error in survey.unexpected.iter().take(10) {
