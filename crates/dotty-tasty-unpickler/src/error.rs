@@ -73,6 +73,9 @@ pub enum UnpickleError {
     UnresolvedMember {
         address: u32,
         prefix: TypeId,
+        /// The explicit declaration space of a `TYPEREFin` / `TERMREFin`,
+        /// where the member was searched instead of in `prefix`.
+        space: Option<TypeId>,
         name: String,
         namespace: Namespace,
     },
@@ -82,6 +85,8 @@ pub enum UnpickleError {
     AmbiguousMember {
         address: u32,
         prefix: TypeId,
+        /// As in [`Self::UnresolvedMember`].
+        space: Option<TypeId>,
         name: String,
         candidates: usize,
     },
@@ -178,6 +183,16 @@ pub enum UnpickleError {
     /// members cannot be looked up here, and the resolver did not know it
     /// either.
     UnsupportedResolutionPrefix { address: u32, prefix: TypeId },
+    /// The declaration space (the owner) of the `TYPEREFin` / `TERMREFin` at
+    /// `address` has no declaration-scope semantics here, or is a binder still
+    /// being decoded, and the resolver did not know it either. Distinct from
+    /// [`Self::UnsupportedResolutionPrefix`]: the prefix is how the reference
+    /// is viewed, the space is where its declaration is.
+    UnsupportedResolutionSpace { address: u32, space: TypeId },
+    /// The prefix of the `TYPEREFin` at `address` is not a legal prefix (an
+    /// unstable singleton), which Dotty wraps in a `QualSkolemType`. The
+    /// semantic model has none, so the reference is not decoded.
+    IllegalTypePrefix { address: u32, prefix: TypeId },
     /// The resolver failed on the reference at `address`, or answered with a
     /// symbol that cannot be the one requested.
     ResolverFailure {
@@ -344,6 +359,14 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the reference at address {address} has a prefix whose members cannot be looked up"
             ),
+            Self::UnsupportedResolutionSpace { address, .. } => write!(
+                formatter,
+                "the reference at address {address} has a declaration space whose declarations cannot be looked up"
+            ),
+            Self::IllegalTypePrefix { address, .. } => write!(
+                formatter,
+                "the type reference at address {address} has a prefix that is not a legal prefix, which needs a qualifier skolem this model does not have"
+            ),
             Self::ResolverFailure { address, error } => write!(
                 formatter,
                 "the resolver failed on the reference at address {address}: {error}"
@@ -394,6 +417,8 @@ impl std::error::Error for UnpickleError {
             | Self::InvalidParameterIndex { .. }
             | Self::InvalidTypeParameterBounds { .. }
             | Self::UnsupportedResolutionPrefix { .. }
+            | Self::UnsupportedResolutionSpace { .. }
+            | Self::IllegalTypePrefix { .. }
             | Self::ResolverFailure { .. } => None,
         }
     }
