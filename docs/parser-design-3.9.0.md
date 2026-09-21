@@ -103,7 +103,10 @@ in the scanner while allowing grammar decisions to remain in the parser.
 
 Parser diagnostics use the small categories `ExpectedToken`,
 `UnexpectedToken`, `ExpectedExpression`, `ExpectedType`, `ExpectedPattern`,
-and `UnsupportedSyntax`, with a source ID and source span.
+`UnsupportedSyntax`, and `UnboundPlaceholderParameter`, with a source ID and
+source span. `UnboundPlaceholderParameter` is reported when an expression
+placeholder reaches the end of a compilation unit or expression block without
+being captured by a complete expression.
 
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
