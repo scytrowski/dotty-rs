@@ -1,7 +1,7 @@
 use dotty_core::ast::{Export, Ident, Import, ImportSelector, Select};
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -27,9 +27,8 @@ where
         }
     }
 
-    /// Parses the first, deliberately small import/export expression subset:
-    /// `qualifier.member` and `qualifier.*`. Selector lists and renames are
-    /// layered on top of this shared path parser in later increments.
+    /// Parses an import/export expression while keeping the qualifier and its
+    /// selectors separate, as in Dotty's source-level AST.
     fn parse_import_expr(&mut self) -> (TreeId<Untyped>, Vec<ImportSelector<Untyped>>) {
         let path_mark = self.mark();
         let mut qualifier = self.parse_import_name(path_mark);
@@ -43,23 +42,16 @@ where
                 return (qualifier, Vec::new());
             }
 
-            if self.current_is_import_wildcard() {
-                let name = self.intern_current_term_name();
-                let imported = match name {
-                    Ok(name) => *name.as_name(),
-                    Err(_) => {
-                        return (qualifier, Vec::new());
-                    }
-                };
-                self.advance();
-                return (
-                    qualifier,
-                    vec![ImportSelector {
-                        imported,
-                        renamed: None,
-                        bound: None,
-                    }],
-                );
+            if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+                return (qualifier, self.parse_braced_selectors());
+            }
+
+            if self.current_is_import_wildcard() || self.current_is_legacy_wildcard() {
+                return (qualifier, vec![self.parse_wildcard_selector()]);
+            }
+
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Given) {
+                return (qualifier, vec![self.parse_given_selector()]);
             }
 
             if !self.is_import_name() {
@@ -88,14 +80,162 @@ where
                 continue;
             }
 
-            return (
-                qualifier,
-                vec![ImportSelector {
-                    imported: *name.as_name(),
-                    renamed: None,
-                    bound: None,
-                }],
+            return (qualifier, vec![self.parse_named_selector(*name.as_name())]);
+        }
+    }
+
+    fn parse_braced_selectors(&mut self) -> Vec<ImportSelector<Untyped>> {
+        self.advance();
+        let mut selectors = Vec::new();
+        let mut names_allowed = true;
+
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+        ) {
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                continue;
+            }
+
+            let wildcard = self.current_is_import_wildcard()
+                || self.current_is_legacy_wildcard()
+                || self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Given);
+            if !names_allowed && !wildcard {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "named import/export selectors cannot follow a wildcard or `given` selector",
+                );
+            }
+
+            let selector =
+                if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Given) {
+                    self.parse_given_selector()
+                } else if self.current_is_import_wildcard() || self.current_is_legacy_wildcard() {
+                    self.parse_wildcard_selector()
+                } else if self.is_import_name() {
+                    let name = self.intern_current_term_name();
+                    let Ok(name) = name else {
+                        self.advance();
+                        continue;
+                    };
+                    self.advance();
+                    self.parse_named_selector(*name.as_name())
+                } else {
+                    let position = self.current_span();
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an import/export selector",
+                    );
+                    if self.current().kind != TokenKind::Eof {
+                        self.advance();
+                    }
+                    self.error_selector(position)
+                };
+
+            names_allowed &= !wildcard;
+            selectors.push(selector);
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma))
+                && !matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+                )
+            {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `,` or `}` after an import/export selector",
+                );
+                self.recover_until(crate::RecoverySet::Statement);
+                break;
+            }
+        }
+
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `}` after import/export selectors",
             );
+        }
+        selectors
+    }
+
+    fn parse_named_selector(&mut self, imported: dotty_core::Name) -> ImportSelector<Untyped> {
+        let renamed = if self.current_is_as() {
+            self.advance();
+            if self.is_import_name() || self.current_is_legacy_wildcard() {
+                let mark = self.mark();
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+                let Ok(name) = self.intern_current_term_name() else {
+                    return ImportSelector {
+                        imported,
+                        renamed: None,
+                        bound: None,
+                    };
+                };
+                self.advance();
+                Some(self.alloc_from(
+                    mark,
+                    TreeKind::Ident(Ident {
+                        name: *name.as_name(),
+                        backquoted,
+                    }),
+                ))
+            } else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected an identifier after `as`",
+                );
+                None
+            }
+        } else {
+            None
+        };
+
+        ImportSelector {
+            imported,
+            renamed,
+            bound: None,
+        }
+    }
+
+    fn parse_wildcard_selector(&mut self) -> ImportSelector<Untyped> {
+        let legacy = self.current_is_legacy_wildcard();
+        if legacy {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                "`_` is no longer supported for a wildcard import/export; use `*` instead",
+            );
+        }
+        let imported = self.names.intern("*");
+        self.advance();
+        ImportSelector {
+            imported: dotty_core::Name::new(imported, dotty_core::Namespace::Term),
+            renamed: None,
+            bound: None,
+        }
+    }
+
+    fn parse_given_selector(&mut self) -> ImportSelector<Untyped> {
+        self.advance();
+        let empty = self.names.intern("");
+        let bound = if self.can_start_import_type() {
+            Some(self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type()))
+        } else {
+            None
+        };
+        ImportSelector {
+            imported: dotty_core::Name::new(empty, dotty_core::Namespace::Term),
+            renamed: None,
+            bound,
+        }
+    }
+
+    fn error_selector(&mut self, position: dotty_core::SourceSpan) -> ImportSelector<Untyped> {
+        let empty = self.names.intern("");
+        let bound = Some(self.error_expr(position));
+        ImportSelector {
+            imported: dotty_core::Name::new(empty, dotty_core::Namespace::Term),
+            renamed: None,
+            bound,
         }
     }
 
@@ -135,6 +275,21 @@ where
 
     fn current_is_import_wildcard(&mut self) -> bool {
         self.current().kind == TokenKind::Operator && self.current_text_is("*")
+    }
+
+    fn current_is_legacy_wildcard(&mut self) -> bool {
+        self.current().kind == TokenKind::Identifier && self.current_text_is("_")
+    }
+
+    fn current_is_as(&mut self) -> bool {
+        self.current().kind == TokenKind::Identifier && self.current_text_is("as")
+    }
+
+    fn can_start_import_type(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        )
     }
 }
 
@@ -221,5 +376,90 @@ mod tests {
         let id = parser.parse_export_clause(Location::Elsewhere);
         assert!(matches!(parser.ast().get(id).kind, TreeKind::Export(_)));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_braced_selectors_with_renames_and_hiding() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar as baz, qux as _}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Identifier, 16, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Comma), 22, 23),
+                token(TokenKind::Identifier, 24, 27),
+                token(TokenKind::Identifier, 28, 30),
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 32, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+            panic!("expected import tree");
+        };
+        assert_eq!(import.selectors.len(), 2);
+        assert!(import.selectors[0].renamed.is_some());
+        assert!(import.selectors[1].renamed.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_typed_given_selector() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.given Ordering",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Given), 11, 16),
+                token(TokenKind::Identifier, 17, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let id = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+            panic!("expected import tree");
+        };
+        assert!(import.selectors[0].bound.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_a_named_selector_after_a_wildcard() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{*, bar}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::Comma), 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        parser.parse_import_clause(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
     }
 }
