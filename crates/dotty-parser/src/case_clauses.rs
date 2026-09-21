@@ -107,7 +107,7 @@ where
 
     fn parse_case_body(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.consume_case_newlines();
-        let (stats, expr) = if self.current().kind == TokenKind::Indent {
+        let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
             let result = self.parse_expression_block_body(TokenKind::Outdent);
             if !self.cursor.at(TokenKind::Outdent) {
@@ -119,7 +119,16 @@ where
                     "expected an outdent to close a case body",
                 );
             }
-            result
+            let block_mark = result
+                .0
+                .first()
+                .and_then(|stat| {
+                    self.ast.get(*stat).position.map(|position| crate::Mark {
+                        start: position.span().range().start(),
+                    })
+                })
+                .unwrap_or(mark);
+            (block_mark, result.0, result.1)
         } else {
             let expr = self.with_case_body(|parser| {
                 parser.with_location(Location::InBlock, |parser| parser.expr())
@@ -128,10 +137,10 @@ where
                 // Dotty keeps the separator in the source-level case-body
                 // block span. The next case still starts after it.
             }
-            (Vec::new(), expr)
+            (mark, Vec::new(), expr)
         };
 
-        self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        self.alloc_from(block_mark, TreeKind::Block(Block { stats, expr }))
     }
 
     fn consume_case_newlines(&mut self) {
@@ -282,6 +291,35 @@ mod tests {
         assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(observed.borrow().is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn indented_case_body_span_starts_at_its_first_statement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x =>\n  body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Outdent, 16, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(false);
+        let TreeKind::CaseDef(CaseDef { body, .. }) = parser.ast().get(case).kind else {
+            panic!("expected case definition");
+        };
+        assert_eq!(
+            parser.ast().get(body).position.unwrap().span().range(),
+            TextRange::new(7, 16).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
