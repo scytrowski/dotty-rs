@@ -107,13 +107,19 @@ where
             );
             self.error_type(self.current_span())
         };
+        let rhs = if is_bare_assignment(self) {
+            self.advance();
+            Some(self.with_location(crate::Location::InArgs, |parser| parser.expr()))
+        } else {
+            None
+        };
 
         self.alloc_from(
             mark,
             TreeKind::ValDef(ValDef {
                 name,
                 tpt,
-                rhs: None,
+                rhs,
                 metadata,
             }),
         )
@@ -182,6 +188,10 @@ fn is_parameter_colon<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>
             | TokenKind::ColonOp
             | TokenKind::Punctuation(Punctuation::Colon)
     ) && parser.current_text_is(":")
+}
+
+fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
+    parser.current().kind == TokenKind::Operator && parser.current_text_is("=")
 }
 
 #[cfg(test)]
@@ -407,5 +417,75 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
         );
+    }
+
+    #[test]
+    fn preserves_a_default_parameter_value() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A = default)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        let TreeKind::ValDef(ValDef { rhs: Some(rhs), .. }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected a parameter default");
+        };
+        assert!(matches!(parser.ast().get(rhs).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn stops_a_default_expression_at_the_next_parameter_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A = one + two, y: B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::ColonFollow, 20, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 2);
+        let TreeKind::ValDef(ValDef { rhs: Some(rhs), .. }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected a parameter default");
+        };
+        assert!(matches!(
+            parser.ast().get(rhs).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        let TreeKind::ValDef(ValDef { rhs: None, .. }) = parser.ast().get(clauses[0][1]).kind
+        else {
+            panic!("expected a parameter without a default");
+        };
+        assert!(parser.diagnostics().is_empty());
     }
 }

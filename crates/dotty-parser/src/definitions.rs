@@ -882,6 +882,57 @@ mod tests {
     }
 
     #[test]
+    fn preserves_a_method_default_parameter_value() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f(x: A = default): B = x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    5,
+                    6,
+                ),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Identifier, 13, 20),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    20,
+                    21,
+                ),
+                token(TokenKind::ColonFollow, 21, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        let TreeKind::ValDef(ref parameter) =
+            parser.ast().get(definition.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected parameter ValDef");
+        };
+        assert!(matches!(
+            parameter.rhs,
+            Some(rhs) if matches!(parser.ast().get(rhs).kind, TreeKind::Ident(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_method_declaration_without_a_rhs_when_typed() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
