@@ -29,7 +29,7 @@ where
         self.advance();
         let name = self.parse_object_name();
         let body = self.parse_optional_template_body();
-        let constructor = self.synthetic_primary_constructor(mark.start());
+        let constructor = self.synthetic_primary_constructor(mark.start(), Vec::new(), Vec::new());
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -54,8 +54,17 @@ where
         let mark = self.mark();
         self.advance();
         let name = self.parse_type_name();
+        let type_params = if self.current().kind
+            == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket)
+        {
+            self.parse_type_param_clause(crate::ParamOwner::Class)
+        } else {
+            Vec::new()
+        };
+        let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::Class);
         let body = self.parse_optional_template_body();
-        let constructor = self.synthetic_primary_constructor(mark.start());
+        let constructor =
+            self.synthetic_primary_constructor(mark.start(), type_params, value_param_clauses);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -141,15 +150,20 @@ where
         TermName::new(self.names.intern("$missing_object"))
     }
 
-    fn synthetic_primary_constructor(&mut self, start: u32) -> TreeId<Untyped> {
+    fn synthetic_primary_constructor(
+        &mut self,
+        start: u32,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+    ) -> TreeId<Untyped> {
         let name = TermName::new(self.names.intern("<init>"));
         let tpt = self.synthetic_type_tree_at(start);
         let position = self.zero_width_span(start);
         self.alloc(
             TreeKind::DefDef(DefDef {
                 name,
-                type_params: Vec::new(),
-                value_param_clauses: Vec::new(),
+                type_params,
+                value_param_clauses,
                 tpt,
                 rhs: None,
                 metadata: Modifiers::default(),
@@ -245,6 +259,90 @@ mod tests {
             panic!("expected Template");
         };
         assert!(template.body.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_class_type_parameters_in_the_synthetic_constructor() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Box[A, B]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected synthetic constructor");
+        };
+        assert_eq!(constructor.type_params.len(), 2);
+        assert!(constructor.value_param_clauses.is_empty());
+        assert!(
+            constructor
+                .type_params
+                .iter()
+                .all(|param| matches!(parser.ast().get(*param).kind, TreeKind::TypeDef(_)))
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_multiple_class_constructor_parameter_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Pair(x: X)(y: Y)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::Colon), 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected synthetic constructor");
+        };
+        assert_eq!(constructor.value_param_clauses.len(), 2);
+        assert_eq!(constructor.value_param_clauses[0].len(), 1);
+        assert_eq!(constructor.value_param_clauses[1].len(), 1);
         assert!(parser.diagnostics().is_empty());
     }
 }
