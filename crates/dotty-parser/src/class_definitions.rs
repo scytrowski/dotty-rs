@@ -933,4 +933,36 @@ mod tests {
         );
         assert!(!parser.diagnostics().is_empty());
     }
+
+    #[test]
+    fn malformed_parent_type_preserves_a_following_template_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A extends { value }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Extends), 8, 15),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 16, 17),
+                token(TokenKind::Identifier, 18, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
 }
