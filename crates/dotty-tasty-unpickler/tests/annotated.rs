@@ -450,6 +450,27 @@ fn a_compact_link_to_a_binder_still_being_decoded_is_invalid_not_a_panic() {
 }
 
 #[test]
+fn a_full_new_pointing_at_a_binder_still_being_decoded_is_invalid_not_a_panic() {
+    // `POLYtype` at 0 whose alias bound is an annotated type whose `NEW`
+    // class tree links back to the poly itself.
+    let annotated = length_node(ANNOTATED, &[package_ref(), new_of(&shared(0))].concat());
+    let mut param = length_node(TYPEBOUNDS, &annotated);
+    param.push(nat(1));
+    let poly = length_node(POLY, &[package_ref(), param].concat());
+    let bytes = file_with_ast(&poly);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let result = unpickler.unpickle_type(0);
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidAnnotationType { .. })),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_at(0), None);
+}
+
+#[test]
 fn an_annotation_that_links_to_its_own_annotated_type_is_an_error_not_a_stack_overflow() {
     let bytes = annotated_file(&package_ref(), &shared(0));
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();

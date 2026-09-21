@@ -168,6 +168,14 @@ impl TastyUnpickler<'_, '_, '_> {
         let spine = self.constructor_spine(ast, at, annotation_at)?;
 
         let class = self.annotation_class_type(ast, spine.class, at, depth)?;
+        // A link may name a binder still being decoded, whose slot is not
+        // readable: it cannot be an annotation class.
+        if self.is_pending(class) {
+            return Err(UnpickleError::InvalidAnnotationType {
+                address: at,
+                annotation_type: class,
+            });
+        }
         let annotation_type = match spine.type_arguments {
             None => class,
             Some(type_arguments) => {
