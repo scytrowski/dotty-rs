@@ -47,6 +47,9 @@ where
             })
         });
 
+        if body == TemplateBody::Indented && self.current().kind != TokenKind::Outdent {
+            self.observe_outdented();
+        }
         if !self.accept(closing) {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -61,7 +64,14 @@ where
         let mut members = Vec::new();
         self.consume_template_separators(closing);
 
-        while !self.template_body_ended(closing) {
+        loop {
+            if !members.is_empty() && closing == TokenKind::Outdent {
+                self.feedback_template_outdent();
+            }
+            if self.template_body_ended(closing) {
+                break;
+            }
+
             let checkpoint = self.cursor.checkpoint();
             let statement = self.parse_statement(Location::InBlock);
             members.push(match statement {
@@ -81,6 +91,9 @@ where
                 }
             }
 
+            if closing == TokenKind::Outdent {
+                self.feedback_template_outdent();
+            }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
             } else if !self.template_body_ended(closing) {
@@ -94,6 +107,15 @@ where
         }
 
         members
+    }
+
+    fn feedback_template_outdent(&mut self) {
+        if self.current().kind != TokenKind::Outdent
+            && self.current().kind != TokenKind::Eof
+            && !self.is_template_separator(self.current().kind)
+        {
+            self.observe_outdented();
+        }
     }
 
     fn template_body_ended(&self, closing: TokenKind) -> bool {
