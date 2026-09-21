@@ -152,13 +152,14 @@ pub struct GenAlias {
     pub expr: TreeId<Untyped>,
 }
 
-/// `mods val (a, b) = rhs`, a pattern definition.
+/// `mods val (a, b) [= rhs]`, a pattern definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PatDef {
     pub modifiers: Modifiers,
     pub patterns: Vec<TreeId<Untyped>>,
     pub tpt: TreeId<Untyped>,
-    pub rhs: TreeId<Untyped>,
+    /// The optional RHS preserves parser-level declarations such as `val x: A`.
+    pub rhs: Option<TreeId<Untyped>>,
 }
 
 /// `extension (params) { methods }`.
@@ -541,7 +542,7 @@ mod tests {
             modifiers: Modifiers::default(),
             patterns: vec![tree_id(1)],
             tpt: tree_id(2),
-            rhs: tree_id(3),
+            rhs: Some(tree_id(3)),
         });
 
         assert_eq!(
@@ -550,7 +551,7 @@ mod tests {
                 modifiers: Modifiers::default(),
                 patterns: vec![tree_id(1)],
                 tpt: tree_id(2),
-                rhs: tree_id(3),
+                rhs: Some(tree_id(3)),
             })
         );
     }
@@ -564,13 +565,25 @@ mod tests {
             },
             patterns: vec![tree_id(1)],
             tpt: tree_id(2),
-            rhs: tree_id(3),
+            rhs: Some(tree_id(3)),
         };
 
         assert_eq!(
             node.modifiers.modifiers,
             vec![crate::ast::modifiers::Modifier::Var]
         );
+    }
+
+    #[test]
+    fn pat_def_can_preserve_an_absent_rhs() {
+        let node = PatDef {
+            modifiers: Modifiers::default(),
+            patterns: vec![tree_id(1)],
+            tpt: tree_id(2),
+            rhs: None,
+        };
+
+        assert_eq!(node.rhs, None);
     }
 
     #[test]

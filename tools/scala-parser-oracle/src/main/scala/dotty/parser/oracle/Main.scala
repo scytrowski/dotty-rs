@@ -80,8 +80,11 @@ object Main:
       case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
         val name = tdef.name.toString
         fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
-      case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] if vdef.mods.is(Given) =>
-        fields += field("given", "true")
+      case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] =>
+        if !slice(vdef, source).trim.startsWith("_") && !vdef.name.toString.startsWith("_$") then
+          fields += field("name", quote(vdef.name.toString))
+        if vdef.mods.is(Given) then
+          fields += field("given", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>

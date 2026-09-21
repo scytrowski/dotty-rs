@@ -12,6 +12,7 @@ mod case_clauses;
 mod compilation_unit;
 mod context;
 mod cursor;
+mod definitions;
 mod diagnostics;
 mod expr;
 mod infix;
@@ -21,6 +22,7 @@ mod parser;
 mod patterns;
 mod recovery;
 mod spans;
+mod statements;
 mod type_params;
 mod types;
 
