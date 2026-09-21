@@ -22,6 +22,12 @@ pub enum VisibilitySyntax {
 /// One source-level modifier keyword.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Modifier {
+    /// Parser-level distinction for a trait definition.
+    ///
+    /// This is kept in source metadata rather than inferred from constructor
+    /// shape, because a trait and a class share the same `TypeDef`/`Template`
+    /// tree family but have different source meaning.
+    Trait,
     Abstract,
     Final,
     Sealed,
@@ -102,5 +108,11 @@ mod tests {
     #[test]
     fn into_is_a_distinct_source_modifier() {
         assert_ne!(Modifier::Into, Modifier::Given);
+    }
+
+    #[test]
+    fn trait_is_a_distinct_source_definition_modifier() {
+        assert_ne!(Modifier::Trait, Modifier::Abstract);
+        assert_ne!(Modifier::Trait, Modifier::Case);
     }
 }

@@ -184,6 +184,19 @@ fn render_tree(
                     name
                 })
             ));
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Trait)
+            {
+                fields.push("\"trait\":true".to_owned());
+            }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => {
+            fields.push(format!(
+                "\"name\":{}",
+                quote(names.resolve(module.name.as_name().text()))
+            ));
         }
         TreeKind::ValDef(definition) => {
             let source_text = source_slice(tree, source);
@@ -315,6 +328,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::DefDef(_) => "DefDef",
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::Template(_) => "Template",
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::TypeTree(_) => "TypeTree",
@@ -450,6 +465,21 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::Template(template) => {
+            let mut children = Vec::with_capacity(
+                1 + template.parents.len()
+                    + usize::from(template.self_val.is_some())
+                    + template.body.len(),
+            );
+            children.push(template.constructor);
+            children.extend(template.parents.iter().copied());
+            if let Some(self_val) = template.self_val {
+                children.push(self_val);
+            }
+            children.extend(template.body.iter().copied());
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => vec![module.template],
         TreeKind::LambdaTypeTree(lambda) => {
             let mut children = lambda.type_params.clone();
             children.push(lambda.body);

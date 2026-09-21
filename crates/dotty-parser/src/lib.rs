@@ -9,6 +9,7 @@
 //! intentionally incomplete.
 
 mod case_clauses;
+mod class_definitions;
 mod compilation_unit;
 mod context;
 mod cursor;
@@ -24,6 +25,7 @@ mod patterns;
 mod recovery;
 mod spans;
 mod statements;
+mod templates;
 mod type_definitions;
 mod type_params;
 mod types;

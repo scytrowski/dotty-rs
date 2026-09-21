@@ -31,7 +31,7 @@ where
                     crate::ParseDiagnosticKind::ExpectedType,
                     "expected a simple type",
                 );
-                if self.current().kind != TokenKind::Eof {
+                if !is_type_recovery_boundary(self.current().kind) {
                     self.advance();
                 }
                 return self.error_type(position);
@@ -68,6 +68,28 @@ where
 
         tree
     }
+}
+
+const fn is_type_recovery_boundary(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Eof
+            | TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Indent
+            | TokenKind::Outdent
+            | TokenKind::ColonFollow
+            | TokenKind::ColonOp
+            | TokenKind::ColonEol
+            | TokenKind::Punctuation(
+                Punctuation::Comma
+                    | Punctuation::Colon
+                    | Punctuation::LeftBrace
+                    | Punctuation::RightBrace
+                    | Punctuation::RightBracket
+                    | Punctuation::RightParen
+            )
+    )
 }
 
 #[cfg(test)]

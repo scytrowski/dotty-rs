@@ -413,6 +413,11 @@ where
     pub fn ast(&self) -> &AstArena<Untyped> {
         &self.ast
     }
+
+    pub(crate) fn zero_width_span(&self, start: u32) -> SourceSpan {
+        let range = TextRange::new(start, start).expect("zero-width span is ordered");
+        SourceSpan::new(self.source_id, Span::without_point(range))
+    }
 }
 
 const fn is_zero_width_synthetic(kind: TokenKind) -> bool {

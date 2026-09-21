@@ -28,6 +28,11 @@ where
                 if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
                     break;
                 }
+                if owner == ParamOwner::Class && parser.current_is_class_accessor_parameter_clause()
+                {
+                    clauses.push(parser.parse_unsupported_class_accessor_parameter_clause());
+                    continue;
+                }
                 if parser.current_is_unsupported_parameter_clause() {
                     clauses.push(parser.parse_unsupported_term_param_clause());
                     continue;
@@ -52,6 +57,16 @@ where
                 "anonymous `using` parameter clauses are not supported; name the context parameter"
             };
         self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+        self.recover_term_param_clause();
+        Vec::new()
+    }
+
+    fn parse_unsupported_class_accessor_parameter_clause(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "class constructor accessor parameters using `val` or `var` are not supported",
+        );
         self.recover_term_param_clause();
         Vec::new()
     }
@@ -194,6 +209,14 @@ where
             self.cursor.lookahead(2).kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
         ) && !is_parameter_colon_at(self, 3)
+    }
+
+    fn current_is_class_accessor_parameter_clause(&mut self) -> bool {
+        self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
+            && matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Keyword(dotty_core::HardKeyword::Val | dotty_core::HardKeyword::Var)
+            )
     }
 
     fn parse_param_name(&mut self) -> TermName {

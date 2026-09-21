@@ -839,6 +839,7 @@ pub struct Modifiers {
 }
 
 pub enum Modifier {
+    Trait,
     Abstract,
     Final,
     Sealed,
@@ -860,6 +861,12 @@ pub enum Modifier {
     Erased,
 }
 ```
+
+`Trait` is a parser-level definition flag. It preserves the source
+distinction between `trait T` and `class T` when both use the shared
+`TypeDef`/`Template` tree family; it must not be inferred from constructor
+shape or body contents. Later source flags such as `Case` can compose with
+this metadata without changing the phase boundary.
 
 `Var` is attached to the existing untyped `PatDef`, matching Scala's
 parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
@@ -1542,9 +1549,11 @@ touches code that already exists.
   classfile` actually has a decoder to adapt.
 - **`dotty-parser`** produces `AstArena<Untyped>` directly — no intermediate
   representation. Per `[MINOR 3]`, it needs a `NameInterner` and the
-  `Span`/`SourceSpan` types, but nothing else from `SemanticStore`. Its current
-  grammar is intentionally limited; later parser increments expand it without
-  changing this semantic boundary.
+  `Span`/`SourceSpan` types, but nothing else from `SemanticStore`. Its source
+  grammar is incremental: the current frontend reaches from simple/operator
+  expressions and control flow through source-level definitions and initial
+  class/trait/object template structure. Later parser increments expand that
+  grammar without changing this semantic boundary.
 - **The future typer** is the first component to touch every part of
   `dotty-core` at once: it reads `AstArena<Untyped>`, populates `symbols`/
   `types`/`scopes`/`annotations` on a `SemanticStore`, and produces

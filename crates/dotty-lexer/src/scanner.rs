@@ -122,6 +122,23 @@ impl ContextualScanner {
         {
             return false;
         }
+        if self.tokens[index].kind != TokenKind::Eof {
+            let Some(indent_index) = self.tokens[..index]
+                .iter()
+                .rposition(|token| token.kind == TokenKind::Indent)
+            else {
+                return false;
+            };
+            let region_indent =
+                line_indentation(&self.source, self.tokens[indent_index].span.start());
+            let current_indent = line_indentation(&self.source, self.tokens[index].span.start());
+            if !matches!(
+                current_indent.ordering(&region_indent),
+                IndentOrdering::Less
+            ) {
+                return false;
+            }
+        }
         let depth = self.tokens[..index]
             .iter()
             .fold(0usize, |depth, token| match token.kind {
@@ -2117,6 +2134,30 @@ mod tests {
                 TokenKind::Outdent,
                 TokenKind::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn template_feedback_outdent_closes_before_an_outer_brace() {
+        let source = "{\n  class A:\n    val x = 1\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::ColonFollow {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ColonEol { in_template: true });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        while scanner.current().kind != TokenKind::Punctuation(Punctuation::RightBrace) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
         );
     }
 
