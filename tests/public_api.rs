@@ -5,7 +5,7 @@ use dotty::core::{
 use dotty::tasty::{NodeCategory, SimpleTerm, TastyFile, TermValue, Writer};
 
 use dotty::core::{ScannerEvent, TextRange, Token, TokenKind, TokenSource, TokenValue};
-use dotty::parser::parse_compilation_unit;
+use dotty::parser::{parse_compilation_unit, parse_expression_fragment};
 
 struct SingleTokenSource {
     tokens: [Token; 2],
@@ -105,6 +105,39 @@ fn exposes_the_parser_api_under_the_dotty_namespace() {
         index: 0,
     };
     let mut names = dotty::core::NameInterner::new();
+    let result = parse_expression_fragment(
+        dotty::core::SourceText::new(source).unwrap(),
+        dotty::core::SourceId::from_index(0),
+        tokens,
+        &mut names,
+    );
+
+    assert!(result.diagnostics.is_empty());
+    assert!(matches!(
+        result.ast.get(result.root).kind,
+        dotty::core::TreeKind::Ident(_)
+    ));
+}
+
+#[test]
+fn public_compilation_unit_api_returns_a_package_root() {
+    let source = "";
+    let tokens = SingleTokenSource {
+        tokens: [
+            Token {
+                kind: TokenKind::Eof,
+                span: TextRange::new(0, 0).unwrap(),
+                value: TokenValue::None,
+            },
+            Token {
+                kind: TokenKind::Eof,
+                span: TextRange::new(0, 0).unwrap(),
+                value: TokenValue::None,
+            },
+        ],
+        index: 0,
+    };
+    let mut names = dotty::core::NameInterner::new();
     let result = parse_compilation_unit(
         dotty::core::SourceText::new(source).unwrap(),
         dotty::core::SourceId::from_index(0),
@@ -115,7 +148,7 @@ fn exposes_the_parser_api_under_the_dotty_namespace() {
     assert!(result.diagnostics.is_empty());
     assert!(matches!(
         result.ast.get(result.root).kind,
-        dotty::core::TreeKind::Block(_)
+        dotty::core::TreeKind::PackageDef(_)
     ));
 }
 
