@@ -24,6 +24,7 @@ mod patterns;
 mod recovery;
 mod spans;
 mod statements;
+mod templates;
 mod type_definitions;
 mod type_params;
 mod types;
