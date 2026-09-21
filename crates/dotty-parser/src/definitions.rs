@@ -96,15 +96,16 @@ where
 
     fn parse_method_name(&mut self) -> TermName {
         match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                match self.intern_current_term_name() {
-                    Ok(name) => {
-                        self.advance();
-                        name
-                    }
-                    Err(_) => self.missing_method_name(),
+            TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Operator
+            | TokenKind::ColonOp => match self.intern_current_term_name() {
+                Ok(name) => {
+                    self.advance();
+                    name
                 }
-            }
+                Err(_) => self.missing_method_name(),
+            },
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
