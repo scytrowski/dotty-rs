@@ -111,12 +111,34 @@ where
         }
 
         let mut patterns = Vec::new();
-        loop {
-            patterns.push(self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
-                parser.with_location(Location::InPattern, |parser| parser.pattern2())
-            }));
-            if !self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Comma)) {
-                break;
+        let first = self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
+            parser.with_location(Location::InPattern, |parser| parser.pattern2())
+        });
+        let first_is_identifier = matches!(&self.ast().get(first).kind, TreeKind::Ident(_));
+        patterns.push(first);
+
+        if self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Comma)) {
+            if !first_is_identifier {
+                self.report(
+                    ParseDiagnosticKind::ExpectedPattern,
+                    "only simple identifiers may be comma-separated in a value definition",
+                );
+            } else {
+                loop {
+                    if !is_comma_definition_identifier(self) {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedPattern,
+                            "expected an identifier after `,` in a value definition",
+                        );
+                        break;
+                    }
+                    patterns.push(self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
+                        parser.with_location(Location::InPattern, |parser| parser.pattern2())
+                    }));
+                    if !self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Comma)) {
+                        break;
+                    }
+                }
             }
         }
 
@@ -205,6 +227,26 @@ fn is_definition_colon_at<S: dotty_core::TokenSource>(
             | TokenKind::ColonOp
             | TokenKind::Punctuation(dotty_core::Punctuation::Colon)
     ) && parser.token_text(&token).ok() == Some(":")
+}
+
+fn is_comma_definition_identifier<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> bool {
+    if !matches!(
+        parser.current().kind,
+        TokenKind::Identifier | TokenKind::BackquotedIdentifier
+    ) {
+        return false;
+    }
+
+    let next = parser.cursor.lookahead(1).kind;
+    is_definition_boundary(next)
+        || is_definition_colon_at(parser, 1)
+        || (next == TokenKind::Punctuation(dotty_core::Punctuation::Comma))
+        || (next == TokenKind::Operator && {
+            let token = parser.cursor.lookahead(1).clone();
+            parser.token_text(&token).ok() == Some("=")
+        })
 }
 
 fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
@@ -588,6 +630,87 @@ mod tests {
         assert_eq!(
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedToken
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_identifier_after_a_comma_in_a_value_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val x, (y, z) = pair",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(dotty_core::Punctuation::Comma), 5, 6),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    7,
+                    8,
+                ),
+                token(TokenKind::Identifier, 8, 9),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::Comma),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Identifier, 11, 12),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    12,
+                    13,
+                ),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::Identifier, 16, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_value_definition(Location::Elsewhere);
+
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern)
+        );
+    }
+
+    #[test]
+    fn rejects_an_extractor_after_a_comma_in_a_value_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val x, Some(y) = pair",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(dotty_core::Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 11),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    11,
+                    12,
+                ),
+                token(TokenKind::Identifier, 12, 13),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    13,
+                    14,
+                ),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Identifier, 17, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_value_definition(Location::Elsewhere);
+
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern)
         );
     }
 
