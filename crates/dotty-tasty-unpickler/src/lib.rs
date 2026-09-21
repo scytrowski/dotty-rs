@@ -32,6 +32,7 @@ mod names;
 mod packages;
 mod recursive;
 mod refined;
+mod term_type;
 mod type_tree;
 mod types;
 mod unpickler;

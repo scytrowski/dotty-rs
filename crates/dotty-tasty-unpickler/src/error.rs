@@ -55,6 +55,18 @@ pub enum UnpickleError {
     /// type for yet (Milestone 5a). Distinct from `UnsupportedType`, which is
     /// about type *wire nodes*; the tree is never guessed from its syntax.
     UnsupportedTypeTree { address: u32, tag: u8 },
+    /// The term tree at `address` is a form the term-`tpe` projection does not
+    /// build a type for (Milestone 5b): a `SELECTtpt` qualifier or
+    /// `SINGLETONtpt` reference that is not a path.
+    UnsupportedTermTree { address: u32, tag: u8 },
+    /// The qualifier of the selection at `address` is an unstable singleton (a
+    /// method, a mutable member, a constructor), which Dotty would widen
+    /// (`widenIfUnstable`). The model has no widening, so the selection is
+    /// refused rather than made on the unstable singleton.
+    UnstableSelectQualifier { address: u32, qualifier: TypeId },
+    /// The `SINGLETONtpt` at `address` refers to a term whose type is not a
+    /// stable singleton: `ty` is what the reference denotes.
+    InvalidSingletonTypeTree { address: u32, ty: TypeId },
     /// No symbol was entered for the definition address given to completion.
     MissingEnteredSymbol { address: u32 },
     /// The symbol at `address` is of a kind whose completion is a later
@@ -264,6 +276,18 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the type tree at address {address} has tag {tag}, which is not projected yet"
             ),
+            Self::UnsupportedTermTree { address, tag } => write!(
+                formatter,
+                "the term tree at address {address} has tag {tag}, which is not projected"
+            ),
+            Self::UnstableSelectQualifier { address, .. } => write!(
+                formatter,
+                "the selection at address {address} has an unstable qualifier, which needs widening this model does not have"
+            ),
+            Self::InvalidSingletonTypeTree { address, .. } => write!(
+                formatter,
+                "the singleton type tree at address {address} does not refer to a stable singleton"
+            ),
             Self::MissingEnteredSymbol { address } => write!(
                 formatter,
                 "no symbol was entered for the definition at address {address}"
@@ -449,6 +473,9 @@ impl std::error::Error for UnpickleError {
             | Self::DuplicateType { .. }
             | Self::UnsupportedType { .. }
             | Self::UnsupportedTypeTree { .. }
+            | Self::UnsupportedTermTree { .. }
+            | Self::UnstableSelectQualifier { .. }
+            | Self::InvalidSingletonTypeTree { .. }
             | Self::MissingEnteredSymbol { .. }
             | Self::UnsupportedSymbolCompletion { .. }
             | Self::OpaqueAliasDeferred { .. }
