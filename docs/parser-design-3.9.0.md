@@ -125,8 +125,9 @@ zero-width `Literal(Constant::Unit)` expression, not an error node. Value
 definitions are preserved as statements in this root: simple identifiers use
 `ValDef` (with `Modifier::Var` for `var`), while non-simple left-hand sides use
 the source-level `PatDef` form. A typed `ValDef` may omit its RHS as a
-declaration; a `PatDef` requires `=` and receives an error placeholder when the
-source is malformed;
+declaration, as may a typed `PatDef` containing only simple identifiers. A
+`PatDef` with a complex pattern still requires `=` and receives an error
+placeholder when the source is malformed;
 the parser uses a zero-width synthetic `TypeTree` when no explicit type is
 written.
 
