@@ -16,6 +16,12 @@ use crate::statements::ParsedStatement;
 use crate::templates::TemplateBody;
 use crate::{Location, ParseDiagnosticKind, Parser};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentSeparator {
+    Comma,
+    With,
+}
+
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
@@ -230,13 +236,26 @@ where
         }
 
         let mut parents = vec![self.parse_parent()];
+        let mut separator_mode = None;
         loop {
             self.consume_newlines_before_parent_separator();
-            let separator = self.accept(TokenKind::Punctuation(Punctuation::Comma))
-                || self.accept(TokenKind::Keyword(HardKeyword::With));
-            if !separator {
+            let separator = match self.current().kind {
+                TokenKind::Punctuation(Punctuation::Comma) => Some(ParentSeparator::Comma),
+                TokenKind::Keyword(HardKeyword::With) => Some(ParentSeparator::With),
+                _ => None,
+            };
+            let Some(separator) = separator else {
+                break;
+            };
+            if separator_mode.is_some_and(|mode| mode != separator) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "cannot mix `,` and `with` in an extends clause",
+                );
                 break;
             }
+            separator_mode = Some(separator);
+            self.advance();
             parents.push(self.parse_parent());
         }
         parents
@@ -666,6 +685,46 @@ mod tests {
     fn parses_parent_constructor_arguments_and_parent_lists() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
+            "class Child extends Parent(x), Other, Mixin",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Extends), 12, 19),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 26, 27),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Punctuation(Punctuation::Comma), 29, 30),
+                token(TokenKind::Identifier, 31, 36),
+                token(TokenKind::Punctuation(Punctuation::Comma), 36, 37),
+                token(TokenKind::Identifier, 38, 43),
+                token(TokenKind::Eof, 43, 43),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.parents.len(), 3);
+        assert!(matches!(
+            parser.ast().get(template.parents[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_mixed_parent_separators_without_accepting_the_second_mode() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
             "class Child extends Parent(x), Other with Mixin",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
@@ -694,12 +753,14 @@ mod tests {
         let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
             panic!("expected Template");
         };
-        assert_eq!(template.parents.len(), 3);
-        assert!(matches!(
-            parser.ast().get(template.parents[0]).kind,
-            TreeKind::Apply(_)
-        ));
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(template.parents.len(), 2);
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::With));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken })
+        );
     }
 
     #[test]
