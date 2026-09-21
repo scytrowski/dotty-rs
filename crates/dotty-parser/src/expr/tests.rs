@@ -601,6 +601,110 @@ fn parses_identifier_assignment() {
 }
 
 #[test]
+fn parses_a_simple_type_ascription() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "value: Result",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Identifier, 7, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Typed(typed) = parser.ast().get(tree).kind else {
+        panic!("expected a typed expression");
+    };
+    assert!(matches!(
+        parser.ast().get(typed.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    let TreeKind::Ident(type_name) = parser.ast().get(typed.tpt).kind else {
+        panic!("expected a type identifier");
+    };
+    assert!(type_name.name.is_type());
+    assert_eq!(parser.names.resolve(type_name.name.text()), "Result");
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 13).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_an_ascription_on_an_application() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "f(x): Result",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 3, 4),
+            token(TokenKind::ColonFollow, 4, 5),
+            token(TokenKind::Identifier, 6, 12),
+            token(TokenKind::Eof, 12, 12),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Typed(typed) = parser.ast().get(tree).kind else {
+        panic!("expected a typed application");
+    };
+    assert!(matches!(
+        parser.ast().get(typed.expr).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 12).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn ascription_updates_the_placeholder_parameter_type() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo(_: A)",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+            token(TokenKind::Eof, 9, 9),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) = parser.ast().get(tree).kind
+    else {
+        panic!("expected a placeholder function");
+    };
+    assert_eq!(function.params.len(), 1);
+    let TreeKind::ValDef(ref parameter) = parser.ast().get(function.params[0]).kind else {
+        panic!("expected a placeholder parameter");
+    };
+    let TreeKind::Ident(type_name) = parser.ast().get(parameter.tpt).kind else {
+        panic!("expected the placeholder type");
+    };
+    assert!(type_name.name.is_type());
+    assert_eq!(parser.names.resolve(type_name.name.text()), "A");
+    assert!(matches!(
+        parser.ast().get(function.body).kind,
+        TreeKind::Apply(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_selection_assignment() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

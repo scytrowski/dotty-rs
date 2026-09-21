@@ -1,7 +1,7 @@
-use dotty_core::ast::{Assign, Function, UntypedNode};
+use dotty_core::ast::{Assign, Function, TypedExpr, UntypedNode};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::Parser;
+use crate::{ParseKind, Parser};
 
 mod arguments;
 mod control_flow;
@@ -102,25 +102,78 @@ where
     }
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
-        if !self.current_is_bare_assignment() {
-            return lhs;
+        if self.current_is_bare_assignment() {
+            self.advance();
+            let rhs = self.expr();
+            if !is_assignable_lhs(&self.ast.get(lhs).kind) {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "left-hand side is not assignable",
+                );
+                return lhs;
+            }
+
+            return self.alloc_assign(lhs, rhs);
         }
 
-        self.advance();
-        let rhs = self.expr();
-        if !is_assignable_lhs(&self.ast.get(lhs).kind) {
-            self.report(
-                crate::ParseDiagnosticKind::UnexpectedToken,
-                "left-hand side is not assignable",
-            );
-            return lhs;
+        self.observe_colon_eol(false);
+        if self.current_is_ascription_colon() {
+            self.advance();
+            return self.parse_ascription(lhs);
         }
-
-        self.alloc_assign(lhs, rhs)
+        lhs
     }
 
     fn current_is_bare_assignment(&mut self) -> bool {
         self.current().kind == TokenKind::Operator && self.current_text().ok() == Some("=")
+    }
+
+    fn current_is_ascription_colon(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::ColonFollow | TokenKind::ColonOp
+        )
+    }
+
+    fn parse_ascription(&mut self, expr: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(expr)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type());
+        self.update_active_placeholder_type(expr, tpt);
+        self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Typed(TypedExpr { expr, tpt }),
+        )
+    }
+
+    fn update_active_placeholder_type(&mut self, expr: TreeId<Untyped>, tpt: TreeId<Untyped>) {
+        let Some(parameter) = self.placeholder_params.last().copied() else {
+            return;
+        };
+        if !self.is_placeholder_reference(expr, std::slice::from_ref(&parameter)) {
+            return;
+        }
+        let TreeKind::ValDef(definition) = &mut self.ast.get_mut(parameter).kind else {
+            return;
+        };
+        definition.tpt = tpt;
+        let Some(parameter_position) = self.ast.get(parameter).position else {
+            return;
+        };
+        let start = parameter_position.span().range().start();
+        let end = self
+            .ast
+            .get(tpt)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(start);
+        let range = TextRange::new(start, end).expect("placeholder type span is ordered");
+        self.ast.get_mut(parameter).position =
+            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
     }
 
     fn alloc_assign(&mut self, lhs: TreeId<Untyped>, rhs: TreeId<Untyped>) -> TreeId<Untyped> {
