@@ -111,7 +111,8 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `class` and `def`
+Valid but not yet implemented constructs such as `class`, `def`, `for`, `try`,
+and `match`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -120,9 +121,12 @@ of a panic.
 The current compilation-unit root is a synthetic `TreeKind::Block`. Earlier
 expressions become its statements and the final expression becomes its `expr`
 field. An empty valid unit has no statements and receives a synthetic
-zero-width `Literal(Constant::Unit)` expression, not an error node. This
-convention keeps one stable root while later grammar increments add
-definitions and package-level forms.
+zero-width `Literal(Constant::Unit)` expression, not an error node. Value
+definitions are preserved as statements in this root: simple identifiers use
+`ValDef` (with `Modifier::Var` for `var`), while non-simple left-hand sides use
+the source-level `PatDef` form. Both definition nodes preserve an optional RHS;
+the parser uses a zero-width synthetic `TypeTree` when no explicit type is
+written.
 
 The current expression, pattern, and literal implementation is split by
 responsibility: `compilation_unit.rs` owns orchestration and statement
@@ -163,6 +167,9 @@ braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
 for-comprehensions with generators, case generators, aliases, guards, and
 `yield`/`do` bodies
+simple `val`/`var` definitions with inferred or explicit types, declarations
+without an RHS, and full-expression RHS values
+pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
 explicit function literals with empty, named, wildcard, and typed parameters
 context-function literals using `?=>`, represented with `Given` parameter
 metadata
@@ -187,7 +194,7 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, definitions, remaining control flow (`do`/`while`), templates,
+`RefinedType`, remaining definition forms, remaining control flow (`do`/`while`), templates,
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
@@ -286,8 +293,9 @@ emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 ## Scala parser oracle
 
 `tools/scala-parser-oracle` is pinned to Scala 3.9.0, JDK 25, and sbt 2.0.9.
-It invokes the compiler parser in expression mode by default, or the real
-`Parser.pattern()` entry in pattern mode, and emits a deterministic JSON view containing
+It invokes the compiler parser in expression mode by default, the real
+`Parser.pattern()` entry in pattern mode, or expression-mode block fixtures in
+`block` mode, and emits a deterministic JSON view containing
 `kind`, `span`, `name`, `literal`, `operator`, `apply_kind`, and `children`. It does not compare
 compiler `Tree.show` output. Nodes without a source span are omitted from the
 normalized child list; this removes compiler-only synthetic qualifiers such as
@@ -309,10 +317,13 @@ purpose and cover the implemented simple-, operator-, initial `Expr1`, and
 source-pattern subsets, including `super`, `new`, type applications, suffix
 chains, brace blocks, prefix operators, negative literals, infix
 precedence/associativity, assignment, named arguments, `if`/`while`,
-for-comprehensions, match and case clauses, binders,
+for-comprehensions, match and case clauses, value and pattern definitions,
+binders,
 typed patterns, extractor applications, infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
-`tools/scala-parser-oracle/fixtures/patterns/`; `compare.sh` runs both modes.
+`tools/scala-parser-oracle/fixtures/patterns/`; statement-bearing definition
+fixtures live under `tools/scala-parser-oracle/fixtures/definitions/` and are
+run in block mode. `compare.sh` runs all three modes.
 The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails

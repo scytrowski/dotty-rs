@@ -1,9 +1,8 @@
 //! Parser support for the first, simple value-definition forms.
 //!
-//! Pattern definitions are added on top of this entry point in a later
-//! increment.  Keeping the statement-level dispatch here means that `val`
-//! and `var` do not get mistaken for unsupported top-level expressions while
-//! the shared statement-sequence machinery remains grammar-agnostic.
+//! Keeping the statement-level dispatch here means that `val` and `var` do not
+//! get mistaken for unsupported top-level expressions while the shared
+//! statement-sequence machinery remains grammar-agnostic.
 
 use dotty_core::ast::{Modifier, Modifiers, PatDef, TypeTree, UntypedNode, ValDef};
 use dotty_core::{HardKeyword, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
