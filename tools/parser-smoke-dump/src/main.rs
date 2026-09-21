@@ -120,7 +120,7 @@ fn render_tree(
             let source_text = source_slice(tree, source);
             fields.push(format!(
                 "\"name\":{}",
-                quote(if source_text.trim() == "_" {
+                quote(if is_wildcard_type_param_source(&source_text) {
                     "$type_wildcard"
                 } else {
                     name
@@ -412,6 +412,20 @@ fn source_slice(tree: &Tree<Untyped>, source: &str) -> String {
         .get(range.start() as usize..range.end() as usize)
         .unwrap_or("")
         .to_owned()
+}
+
+fn is_wildcard_type_param_source(source: &str) -> bool {
+    let mut chars = source.trim_start().chars();
+    if chars.next() != Some('_') {
+        return false;
+    }
+
+    match chars.next() {
+        None | Some(',') | Some(']') => true,
+        Some(character) if character.is_whitespace() => true,
+        Some('<' | '>') => chars.next() == Some(':'),
+        Some(_) => false,
+    }
 }
 
 fn find_name_span(tree: &Tree<Untyped>, name: &str, source: &str) -> Option<(u32, u32)> {

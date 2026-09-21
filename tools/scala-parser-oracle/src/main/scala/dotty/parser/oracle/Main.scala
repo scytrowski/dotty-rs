@@ -52,7 +52,7 @@ object Main:
         fields += field("name", quote(bind.name.toString))
       case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
         val name = tdef.name.toString
-        fields += field("name", quote(if slice(tdef, source).trim == "_" then "$type_wildcard" else name))
+        fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] if vdef.mods.is(Given) =>
         fields += field("given", "true")
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
@@ -110,6 +110,16 @@ object Main:
           suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - 1}").getOrElse(name)
         case _ => name
     else name
+
+  private def isWildcardTypeParamSource(sourceText: String): Boolean =
+    val text = sourceText.trim
+    if !text.startsWith("_") then false
+    else
+      text.drop(1).headOption match
+        case None | Some(',') | Some(']') => true
+        case Some(character) if character.isWhitespace => true
+        case Some('<' | '>') => text.drop(2).startsWith(":")
+        case _ => false
 
   private def isBackquotedIdent(ident: dotty.tools.dotc.ast.Trees.Ident[?], source: String): Boolean =
     val text = slice(ident, source)
