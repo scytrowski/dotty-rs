@@ -49,20 +49,20 @@ use crate::names::wire_name;
 use crate::unpickler::TastyUnpickler;
 
 /// The parts of a template's children that class completion reads.
-struct TemplateParts {
+pub(crate) struct TemplateParts {
     /// `TYPEPARAM`/`PARAM` children: the header parameters.
-    params: Vec<u32>,
+    pub(crate) params: Vec<u32>,
     /// The parent trees, in wire order.
-    parents: Vec<u32>,
+    pub(crate) parents: Vec<u32>,
     /// The `SELFDEF` node, if the template has an explicit self definition.
-    self_def: Option<u32>,
+    pub(crate) self_def: Option<u32>,
 }
 
 /// Splits the children of the template at `template` the way
 /// `decode_template_structure` does: leading parameters, then parents and the
 /// self definition, then the statements (the first non-parameter definition,
 /// or a parameter after a parent, starts them). Statements are ignored.
-fn template_parts(ast: &AstView<'_>, template: u32) -> TemplateParts {
+pub(crate) fn template_parts(ast: &AstView<'_>, template: u32) -> TemplateParts {
     let mut parts = TemplateParts {
         params: Vec::new(),
         parents: Vec::new(),

@@ -24,3 +24,16 @@ trait InfoNeeds:
 
 class InfoWrapped[F[_]](x: Int) extends InfoBase[F[Int]]:
   def m: F[Int] = ???
+
+trait InfoLam[F[_]]
+
+class InfoLambdaParent extends InfoLam[[X] =>> InfoBase[X]]
+
+trait InfoLambdaSelf:
+  self: InfoLam[[X] =>> InfoBase[X]] =>
+
+class InfoGenSelf[A]:
+  self: InfoBase[A] =>
+
+trait InfoNeedsGeneric[A]:
+  self: InfoDep =>

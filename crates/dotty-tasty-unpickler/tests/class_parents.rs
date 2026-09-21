@@ -13,7 +13,7 @@ use dotty_tasty::tasty::{
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
-const NAMES: [&str; 6] = ["ASTs", "p", "C", "<init>", "other", "x"];
+const NAMES: [&str; 9] = ["ASTs", "p", "C", "<init>", "other", "x", "D", "E", "T"];
 
 const IDENTTPT: u8 = 111;
 const APPLY: u8 = 136;
@@ -85,12 +85,28 @@ fn applied_tpt(tycon: Vec<u8>, args: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn class_unit(parents: &[Vec<u8>], self_def: Option<Vec<u8>>) -> Vec<u8> {
-    let template = node(
-        TEMPLATE_TAG,
-        &[parents.concat(), self_def.unwrap_or_default()].concat(),
+    classes_unit(&[("C", parents.to_vec(), self_def)])
+}
+
+/// A class of a synthetic unit: its name, parents and self definition.
+type ClassSpec<'a> = (&'a str, Vec<Vec<u8>>, Option<Vec<u8>>);
+
+/// One unit with a class per entry: its name, parents and self definition.
+fn classes_unit(classes: &[ClassSpec<'_>]) -> Vec<u8> {
+    let classes: Vec<u8> = classes
+        .iter()
+        .flat_map(|(name, parents, self_def)| {
+            let template = node(
+                TEMPLATE_TAG,
+                &[parents.concat(), self_def.clone().unwrap_or_default()].concat(),
+            );
+            node(TYPEDEF_TAG, &[nat(n(name)), template].concat())
+        })
+        .collect();
+    let ast = node(
+        PACKAGE_TAG,
+        &[leaf(TERMREFPKG_TAG, n("p")), classes].concat(),
     );
-    let class = node(TYPEDEF_TAG, &[nat(n("C")), template].concat());
-    let ast = node(PACKAGE_TAG, &[leaf(TERMREFPKG_TAG, n("p")), class].concat());
     let names = NameTable::from_entries(
         NAMES
             .iter()
@@ -123,6 +139,11 @@ struct Completed {
 }
 
 fn complete(bytes: &[u8]) -> Completed {
+    complete_nth(bytes, 0)
+}
+
+/// Completes the `nth` class (in address order) of the unit.
+fn complete_nth(bytes: &[u8], nth: usize) -> Completed {
     let file = TastyFile::parse_scala_3_9(bytes).unwrap();
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -131,11 +152,13 @@ fn complete(bytes: &[u8]) -> Completed {
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut store, definitions, packages);
     unpickler.enter_symbols().unwrap();
     let index = file.ast_address_index().unwrap();
-    let class = index
+    let mut classes: Vec<u32> = index
         .iter_nodes()
-        .find(|node| node.tag == TYPEDEF_TAG)
+        .filter(|node| node.tag == TYPEDEF_TAG)
         .map(|node| u32::try_from(node.offset).unwrap())
-        .unwrap();
+        .collect();
+    classes.sort_unstable();
+    let class = classes[nth];
     assert_eq!(
         unpickler.symbol_state_at(class).unwrap().0,
         SymbolKind::Class
@@ -304,4 +327,48 @@ fn a_self_definition_is_the_self_type() {
         panic!("class info")
     };
     assert!(info.self_type.is_some());
+}
+
+/// `LAMBDAtpt [T] =>> p`: a lambda whose one parameter is unbounded.
+fn lambda_tpt() -> Vec<u8> {
+    let bounds = node(
+        dotty_tasty::tasty::TYPEBOUNDSTPT_TAG,
+        &[p_type(), p_type()].concat(),
+    );
+    let parameter = node(
+        dotty_tasty::tasty::TYPEPARAM_TAG,
+        &[nat(n("T")), bounds].concat(),
+    );
+    node(
+        dotty_tasty::tasty::LAMBDATPT_TAG,
+        &[parameter, ident()].concat(),
+    )
+}
+
+#[test]
+fn a_lambda_shared_by_two_classes_is_refused_for_both() {
+    // D's parent is the lambda; E's parent is a link to it.
+    let build = |target: u32| {
+        classes_unit(&[
+            ("D", vec![lambda_tpt()], None),
+            ("E", vec![leaf(SHAREDTERM, target)], None),
+        ])
+    };
+    let target = first_parent_address(&build(0));
+    let bytes = build(target);
+
+    // The conflict belongs to the lambda's address, as in 5c: neither owner
+    // gets a lambda whose parameters it cannot own alone.
+    for nth in [0, 1] {
+        let completed = complete_nth(&bytes, nth);
+        assert!(
+            matches!(
+                completed.error(),
+                UnpickleError::SharedLambdaOwnerConflict { .. }
+            ),
+            "class {nth}: {:?}",
+            completed.result
+        );
+        assert_eq!(completed.class_state, SymbolInfo::Missing);
+    }
 }

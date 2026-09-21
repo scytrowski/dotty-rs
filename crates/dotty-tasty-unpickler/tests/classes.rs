@@ -16,6 +16,11 @@ const PARENT: &[u8] = include_bytes!("fixtures/semantic/InfoParent.tasty");
 const CHILD: &[u8] = include_bytes!("fixtures/semantic/InfoChild.tasty");
 const HOLDER: &[u8] = include_bytes!("fixtures/semantic/InfoHolder.tasty");
 const WRAPPED: &[u8] = include_bytes!("fixtures/semantic/InfoWrapped.tasty");
+const LAM: &[u8] = include_bytes!("fixtures/semantic/InfoLam.tasty");
+const LAMBDA_PARENT: &[u8] = include_bytes!("fixtures/semantic/InfoLambdaParent.tasty");
+const LAMBDA_SELF: &[u8] = include_bytes!("fixtures/semantic/InfoLambdaSelf.tasty");
+const GEN_SELF: &[u8] = include_bytes!("fixtures/semantic/InfoGenSelf.tasty");
+const NEEDS_GENERIC: &[u8] = include_bytes!("fixtures/semantic/InfoNeedsGeneric.tasty");
 const NEEDS: &[u8] = include_bytes!("fixtures/semantic/InfoNeeds.tasty");
 
 /// A session: the shared store and packages, and the entered units.
@@ -333,4 +338,168 @@ fn typedefs_or_defs_named(file: &TastyFile<'_>, text: &str) -> u32 {
         }
     }
     panic!("no definition named {text}")
+}
+
+// ---- self types and lambdas in parent / self positions -------------------
+
+fn lambda_of(store: &SemanticStore, ty: TypeId) -> dotty_core::types::TypeLambda {
+    match store.types.get(ty) {
+        Type::TypeLambda(lambda) => lambda.clone(),
+        other => panic!("not a TypeLambda: {other:?}"),
+    }
+}
+
+/// Whether the scope declares a type named `text`.
+fn declares_type(store: &SemanticStore, scope: dotty_core::ids::ScopeId, text: &str) -> bool {
+    use dotty_core::names::{Name, Namespace};
+    store.names.get(text).is_some_and(|text| {
+        !store
+            .scopes
+            .get(scope)
+            .lookup_all(&Name::new(text, Namespace::Type))
+            .is_empty()
+    })
+}
+
+#[test]
+fn an_explicit_self_type_is_the_class_info_self_type() {
+    let mut session = session_with_parents();
+    let ty = session.unit(CHILD, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoChild", SymbolKind::Class);
+        unpickler.complete_symbol(at).unwrap()
+    });
+    let info = class_info_of(&session.store, ty);
+    let self_type = info.self_type.expect("an explicit self type");
+    assert_eq!(referenced_name(&session.store, self_type), "InfoDep");
+}
+
+#[test]
+fn a_dependent_self_type_keeps_the_class_type_parameter_symbol() {
+    let mut session = session_with_parents();
+    let (ty, parameter) = session.unit(GEN_SELF, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoGenSelf", SymbolKind::Class);
+        let ty = unpickler.complete_symbol(at).unwrap();
+        let parameter = (0..64)
+            .find_map(|address| {
+                let symbol = unpickler.index().symbol_at(address)?;
+                (unpickler.symbol_state_at(address)?.0 == SymbolKind::TypeParameter)
+                    .then_some(symbol)
+            })
+            .expect("the class type parameter");
+        (ty, parameter)
+    });
+    let self_type = class_info_of(&session.store, ty)
+        .self_type
+        .expect("an explicit self type");
+    let (name, args) = applied(&session.store, self_type);
+    assert_eq!(name, "InfoBase");
+    let [arg] = args[..] else { panic!("one arg") };
+    assert_eq!(
+        session.store.types.get(arg).reference_symbol(),
+        Some(parameter)
+    );
+}
+
+#[test]
+fn a_class_without_a_self_definition_has_no_self_type() {
+    let mut session = session_with_parents();
+    let ty = session.unit(WRAPPED, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoWrapped", SymbolKind::Class);
+        unpickler.complete_symbol(at).unwrap()
+    });
+    assert_eq!(class_info_of(&session.store, ty).self_type, None);
+}
+
+fn session_with_lambda_units() -> Session {
+    let mut session = session_with_parents();
+    session.unit(LAM, |_, _| ());
+    session
+}
+
+#[test]
+fn a_lambda_in_a_parent_is_a_type_lambda_owned_by_the_class_and_not_a_member() {
+    let mut session = session_with_lambda_units();
+    let (ty, class, entered) = session.unit(LAMBDA_PARENT, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoLambdaParent", SymbolKind::Class);
+        let class = unpickler.index().symbol_at(at).unwrap();
+        let entered: Vec<_> = (0..256)
+            .filter_map(|address| unpickler.index().symbol_at(address))
+            .collect();
+        (unpickler.complete_symbol(at).unwrap(), class, entered)
+    });
+    let info = class_info_of(&session.store, ty);
+    let (name, args) = applied(&session.store, *info.parents.last().unwrap());
+    assert_eq!(name, "InfoLam");
+    let lambda = lambda_of(&session.store, args[0]);
+    assert_eq!(lambda.params.len(), 1);
+    // The lambda's parameter symbol is owned by the class but is not one of
+    // its members.
+    assert!(!declares_type(&session.store, info.declarations, "X"));
+    let owned: Vec<_> = entered
+        .iter()
+        .filter(|symbol| {
+            let symbol = session.store.symbols.get(**symbol);
+            symbol.owner == Some(class)
+                && symbol.kind == SymbolKind::TypeParameter
+                && session.store.names.resolve(symbol.name.text()) == "X"
+        })
+        .collect();
+    assert_eq!(owned.len(), 1);
+}
+
+#[test]
+fn a_lambda_in_a_self_type_is_a_type_lambda() {
+    let mut session = session_with_lambda_units();
+    let ty = session.unit(LAMBDA_SELF, |unpickler, file| {
+        let at = class_named(unpickler, file, "InfoLambdaSelf", SymbolKind::Trait);
+        unpickler.complete_symbol(at).unwrap()
+    });
+    let self_type = class_info_of(&session.store, ty)
+        .self_type
+        .expect("a self type");
+    let (name, args) = applied(&session.store, self_type);
+    assert_eq!(name, "InfoLam");
+    assert_eq!(lambda_of(&session.store, args[0]).params.len(), 1);
+}
+
+#[test]
+fn a_failure_after_header_work_restores_everything_completion_did() {
+    // InfoDep (the self type) is not entered, so completion fails after the
+    // header type parameter completed.
+    let control = {
+        let mut session = Session::new();
+        session.unit(NEEDS_GENERIC, |_, _| ());
+        session.store.types.alloc(Type::NoType)
+    };
+    let mut session = Session::new();
+    let (error, class_state, parameter_state, scope, in_scope) =
+        session.unit(NEEDS_GENERIC, |unpickler, file| {
+            let at = class_named(unpickler, file, "InfoNeedsGeneric", SymbolKind::Trait);
+            let class = unpickler.index().symbol_at(at).unwrap();
+            let error = unpickler.complete_symbol(at).unwrap_err();
+            let parameter = (0..64)
+                .find(|address| {
+                    unpickler
+                        .symbol_state_at(*address)
+                        .is_some_and(|state| state.0 == SymbolKind::TypeParameter)
+                })
+                .expect("the header type parameter");
+            (
+                error,
+                unpickler.symbol_state_at(at).unwrap().1,
+                unpickler.symbol_state_at(parameter).unwrap().1,
+                unpickler.index().scope_of(class),
+                unpickler.index().type_count(),
+            )
+        });
+    assert!(matches!(&error, UnpickleError::UnresolvedMember { name, .. } if name == "InfoDep"));
+    assert_eq!(class_state, SymbolInfo::Missing);
+    // The header parameter was completed by this call, then restored.
+    assert_eq!(parameter_state, SymbolInfo::Missing);
+    // The pass-1 scope is still there, with the parameter declared in it.
+    let scope = scope.expect("the pass-1 scope survives");
+    assert!(declares_type(&session.store, scope, "A"));
+    // The arena and the unit's caches are as before the call.
+    assert_eq!(in_scope, 0);
+    assert_eq!(session.store.types.alloc(Type::NoType), control);
 }
