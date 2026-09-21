@@ -47,7 +47,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let ast = self.ast_view()?;
         self.declare_special_aliases();
         let transaction = self.begin_transaction();
-        let result = self.complete_in(&ast, address);
+        let result = self.complete_in(&ast, address, 0);
         self.finish_transaction(transaction, result)
     }
 
@@ -59,12 +59,19 @@ impl TastyUnpickler<'_, '_, '_> {
         let transaction = self.begin_transaction();
         let result = addresses
             .iter()
-            .map(|address| self.complete_in(&ast, *address))
+            .map(|address| self.complete_in(&ast, *address, 0))
             .collect();
         self.finish_transaction(transaction, result)
     }
 
-    fn complete_in(&mut self, ast: &AstView<'_>, at: u32) -> Result<TypeId, UnpickleError> {
+    /// Completes the symbol at `at`; `depth` counts the links being followed
+    /// when the completion is reached from inside a type-tree projection.
+    pub(crate) fn complete_in(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
         let Some(symbol) = self.index.symbol_at(at) else {
             return Err(UnpickleError::MissingEnteredSymbol { address: at });
         };
@@ -96,7 +103,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             _ => return Err(unsupported),
         };
-        let projected = self.type_of_tpt(ast, tree, at, 0)?;
+        let projected = self.type_of_tpt(ast, tree, at, depth)?;
         let info = if matches!(tag, TYPEPARAM_TAG | TYPEDEF_TAG) {
             self.bounds_of(at, projected)?
         } else {

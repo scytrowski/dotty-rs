@@ -59,6 +59,16 @@ pub enum UnpickleError {
     /// build a type for (Milestone 5b): a `SELECTtpt` qualifier or
     /// `SINGLETONtpt` reference that is not a path.
     UnsupportedTermTree { address: u32, tag: u8 },
+    /// The `LAMBDAtpt` at `address` was reached from two different owners
+    /// (through a `SHAREDterm`), and its type parameters are owned once: it
+    /// is not projected rather than given a second owner.
+    SharedLambdaOwnerConflict { address: u32 },
+    /// Abstracting the parameter symbols of the binder written at `address`
+    /// into `ParamRef`s failed.
+    ParameterAbstraction {
+        address: u32,
+        error: dotty_core::TypeRebindError,
+    },
     /// The qualifier of the selection at `address` is an unstable singleton (a
     /// method, a mutable member, a constructor), which Dotty would widen
     /// (`widenIfUnstable`). The model has no widening, so the selection is
@@ -280,6 +290,14 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the term tree at address {address} has tag {tag}, which is not projected"
             ),
+            Self::SharedLambdaOwnerConflict { address } => write!(
+                formatter,
+                "the lambda type tree at address {address} is shared by definitions with different owners"
+            ),
+            Self::ParameterAbstraction { address, error } => write!(
+                formatter,
+                "abstracting the parameters of the binder at address {address} failed: {error}"
+            ),
             Self::UnstableSelectQualifier { address, .. } => write!(
                 formatter,
                 "the selection at address {address} has an unstable qualifier, which needs widening this model does not have"
@@ -475,6 +493,8 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedTypeTree { .. }
             | Self::UnsupportedTermTree { .. }
             | Self::UnstableSelectQualifier { .. }
+            | Self::SharedLambdaOwnerConflict { .. }
+            | Self::ParameterAbstraction { .. }
             | Self::InvalidSingletonTypeTree { .. }
             | Self::MissingEnteredSymbol { .. }
             | Self::UnsupportedSymbolCompletion { .. }

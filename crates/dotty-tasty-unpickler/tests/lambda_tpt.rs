@@ -14,15 +14,16 @@ use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind, SymbolOrigin};
 use dotty_tasty::tasty::{
-    APPLY_TAG, DEFDEF_TAG, Header, NameTable, PACKAGE_TAG, PARAM_TAG, RawName, SHAREDTERM_TAG,
-    Section, SectionTable, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG,
-    TYPEPARAM_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TastyFile, VALDEF_TAG,
+    APPLY_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG, Header, NameTable, PACKAGE_TAG,
+    PARAM_TAG, RawName, SHAREDTERM_TAG, STABLE_TAG, Section, SectionTable, TEMPLATE_TAG,
+    TERMREFPKG_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFDIRECT_TAG,
+    TYPEREFPKG_TAG, TastyFile, VALDEF_TAG,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
-const NAMES: [&str; 22] = [
+const NAMES: [&str; 30] = [
     "ASTs", "p", "Holder", "v", "f", "a", "X", "Y", "Z", "T", "Alias", "P", "Q", "HK", "U", "FB",
-    "A", "Twice", "u1", "u2", "R", "S",
+    "A", "Twice", "u1", "u2", "R", "S", "w", "bad", "C", "K", "I", "N", "B1", "Bad",
 ];
 
 fn n(text: &str) -> u32 {
@@ -32,6 +33,7 @@ fn n(text: &str) -> u32 {
 const IDENTTPT: u8 = 111;
 const APPLIEDTPT: u8 = 162;
 const LAMBDATPT: u8 = 171;
+const REFINEDTPT: u8 = 160;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -94,13 +96,14 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
 }
 
 /// Every definition of the unit, in document order.
-const DEFINITIONS: [&str; 20] = [
+const DEFINITIONS: [&str; 27] = [
     "Holder", "v", "v.X", "f", "f.T", "f.a", "f.a.Y", "f.Z", "Alias", "Alias.P", "Alias.Q", "HK",
-    "HK.U", "FB", "FB.A", "Twice", "u1", "u2", "one.R", "two.S",
+    "HK.U", "FB", "FB.A", "Twice", "u1", "u2", "w", "bad", "one.R", "two.S", "var.C", "var.K",
+    "var.I", "var.N", "bad.B1",
 ];
 
 /// The loose trees, in order.
-const ROOTS: [&str; 2] = ["lambda one", "lambda two"];
+const ROOTS: [&str; 4] = ["lambda one", "lambda two", "lambda variances", "lambda bad"];
 
 struct Unit {
     bytes: Vec<u8>,
@@ -192,7 +195,17 @@ fn assemble(at: &HashMap<&'static str, u32>, bad: bool) -> (Vec<u8>, HashMap<&'s
             "Alias",
             lambda(
                 vec![param("P", plain_bounds())],
-                lambda(vec![param("Q", plain_bounds())], ident_any()),
+                lambda(
+                    vec![param("Q", plain_bounds())],
+                    node(
+                        APPLIEDTPT,
+                        &[
+                            named(IDENTTPT, n("P"), &leaf(TYPEREFDIRECT_TAG, addr("Alias.P"))),
+                            named(IDENTTPT, n("Q"), &leaf(TYPEREFDIRECT_TAG, addr("Alias.Q"))),
+                        ]
+                        .concat(),
+                    ),
+                ),
             ),
         ),
         alias(
@@ -229,6 +242,8 @@ fn assemble(at: &HashMap<&'static str, u32>, bad: bool) -> (Vec<u8>, HashMap<&'s
         ),
         val("u1", leaf(SHAREDTERM_TAG, addr("lambda one"))),
         val("u2", leaf(SHAREDTERM_TAG, addr("lambda one"))),
+        val("w", leaf(SHAREDTERM_TAG, addr("lambda variances"))),
+        val("bad", leaf(SHAREDTERM_TAG, addr("lambda bad"))),
     ];
     let holder = node(
         TYPEDEF_TAG,
@@ -239,9 +254,33 @@ fn assemble(at: &HashMap<&'static str, u32>, bad: bool) -> (Vec<u8>, HashMap<&'s
         &[leaf(TERMREFPKG_TAG, n("p")), holder].concat(),
     );
 
+    let modified = |name: &str, modifier: Option<u8>| {
+        node(
+            TYPEPARAM_TAG,
+            &[
+                nat(n(name)),
+                plain_bounds(),
+                modifier.map(|tag| vec![tag]).unwrap_or_default(),
+            ]
+            .concat(),
+        )
+    };
     let loose: Vec<Vec<u8>> = vec![
         lambda(vec![param("R", plain_bounds())], ident_any()),
         lambda(vec![param("S", plain_bounds())], ident_any()),
+        lambda(
+            vec![
+                modified("C", Some(COVARIANT_TAG)),
+                modified("K", Some(CONTRAVARIANT_TAG)),
+                modified("I", Some(STABLE_TAG)),
+                modified("N", None),
+            ],
+            ident_any(),
+        ),
+        lambda(
+            vec![param("B1", plain_bounds())],
+            node(REFINEDTPT, &any_type()),
+        ),
     ];
     let payload = loose.concat();
     let header = {
@@ -487,4 +526,272 @@ fn probe(session: &mut Session) -> u32 {
             links: SymbolLinks::default(),
         })
         .index()
+}
+
+// Projection
+
+use dotty_core::ids::TypeId;
+use dotty_core::types::{Type, TypeLambda, Variance};
+
+fn lambda_of(session: &Session, ty: TypeId) -> TypeLambda {
+    match session.store.types.get(ty) {
+        Type::TypeLambda(lambda) => lambda.clone(),
+        other => panic!("not a type lambda: {other:?}"),
+    }
+}
+
+fn param_ref(session: &Session, ty: TypeId) -> (TypeId, u32) {
+    match session.store.types.get(ty) {
+        Type::ParamRef { binder, index } => (*binder, *index),
+        other => panic!("not a parameter reference: {other:?}"),
+    }
+}
+
+/// The projection of the declared type tree of the definition `label`.
+fn project(
+    unpickler: &mut TastyUnpickler<'_, '_, '_>,
+    file: &TastyFile<'_>,
+    unit: &Unit,
+    label: &str,
+) -> Result<TypeId, UnpickleError> {
+    unpickler.unpickle_type_tree_type(first_child(file, unit.at(label)))
+}
+
+#[test]
+fn a_lambda_type_tree_is_a_type_lambda_with_completed_bounds() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = project(&mut unpickler, &file, &unit, "v").unwrap();
+    // The parameter was completed on the way.
+    let param = unpickler.symbol_state_at(unit.at("v.X")).unwrap();
+    assert!(matches!(param.1, SymbolInfo::Complete(_)));
+    drop(unpickler);
+    let lambda = lambda_of(&session, ty);
+    assert_eq!(lambda.params.len(), 1);
+    assert_eq!(
+        session
+            .store
+            .names
+            .resolve(lambda.params[0].name.as_name().text()),
+        "X"
+    );
+    assert!(matches!(
+        session.store.types.get(lambda.params[0].bounds),
+        Type::Bounds { .. }
+    ));
+    assert_eq!(lambda.params[0].declared_variance, None);
+}
+
+#[test]
+fn an_f_bound_and_a_body_name_the_lambda_that_is_built() {
+    // `[A <: p[A]] =>> A`
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = project(&mut unpickler, &file, &unit, "FB").unwrap();
+    let symbol_info = unpickler.symbol_state_at(unit.at("FB.A")).unwrap().1;
+    let a = unpickler.index().symbol_at(unit.at("FB.A")).unwrap();
+    drop(unpickler);
+    let lambda = lambda_of(&session, ty);
+    assert_eq!(param_ref(&session, lambda.result), (ty, 0));
+    let Type::Bounds { high, .. } = session.store.types.get(lambda.params[0].bounds).clone() else {
+        panic!("not bounds");
+    };
+    let Type::Applied { args, .. } = session.store.types.get(high).clone() else {
+        panic!("not applied");
+    };
+    assert_eq!(param_ref(&session, args[0]), (ty, 0));
+
+    // The parameter symbol's own info is what was completed before the
+    // abstraction: it still names the symbol, and no `ParamRef` leaked in.
+    let SymbolInfo::Complete(info) = symbol_info else {
+        panic!("not complete");
+    };
+    let Type::Bounds { high, .. } = session.store.types.get(info).clone() else {
+        panic!("not bounds");
+    };
+    let Type::Applied { args, .. } = session.store.types.get(high).clone() else {
+        panic!("not applied");
+    };
+    assert_eq!(session.store.types.get(args[0]).reference_symbol(), Some(a));
+}
+
+#[test]
+fn a_nested_lambda_refers_to_both_binders() {
+    // `[P] =>> [Q] =>> P[Q]`: the inner body names the outer binder by `P`
+    // and its own by `Q`.
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let outer = project(&mut unpickler, &file, &unit, "Alias").unwrap();
+    drop(unpickler);
+    let outer_lambda = lambda_of(&session, outer);
+    let inner = outer_lambda.result;
+    assert_ne!(inner, outer);
+    let inner_lambda = lambda_of(&session, inner);
+    let Type::Applied { tycon, args } = session.store.types.get(inner_lambda.result).clone() else {
+        panic!("not applied");
+    };
+    assert_eq!(param_ref(&session, tycon), (outer, 0));
+    assert_eq!(param_ref(&session, args[0]), (inner, 0));
+}
+
+#[test]
+fn declared_variance_is_kept_and_absence_is_not_invariance() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let ty = project(&mut unpickler, &file, &unit, "w").unwrap();
+    drop(unpickler);
+    let variances: Vec<Option<Variance>> = lambda_of(&session, ty)
+        .params
+        .iter()
+        .map(|param| param.declared_variance)
+        .collect();
+    assert_eq!(
+        variances,
+        vec![
+            Some(Variance::Covariant),
+            Some(Variance::Contravariant),
+            Some(Variance::Invariant),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn projecting_a_lambda_again_is_the_same_binder_and_written_twice_is_two() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let first = project(&mut unpickler, &file, &unit, "v").unwrap();
+    let types = unpickler.index().type_count();
+    let trees = unpickler.index().type_tree_count();
+    assert_eq!(project(&mut unpickler, &file, &unit, "v"), Ok(first));
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().type_tree_count(), trees);
+    // `f`'s result lambda has the same shape and is another tree: another type.
+    let other = project(&mut unpickler, &file, &unit, "f.a").unwrap();
+    assert_ne!(other, first);
+}
+
+#[test]
+fn a_shared_lambda_from_one_owner_is_the_exact_target_type_every_time() {
+    // `Twice = p[lambda two, lambda two]`: both arguments are the target.
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let twice = project(&mut unpickler, &file, &unit, "Twice").unwrap();
+    let target = unpickler
+        .unpickle_type_tree_type(unit.at("lambda two"))
+        .unwrap();
+    assert_eq!(
+        unpickler.index().type_tree_type_at(unit.at("lambda two")),
+        Some(target)
+    );
+    drop(unpickler);
+    let Type::Applied { args, .. } = session.store.types.get(twice).clone() else {
+        panic!("not applied");
+    };
+    assert_eq!(args, vec![target, target]);
+    assert!(matches!(
+        session.store.types.get(target),
+        Type::TypeLambda(_)
+    ));
+}
+
+#[test]
+fn a_lambda_shared_by_different_owners_is_refused_not_given_a_second_owner() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let owner = unpickler.index().lambda_owner(unit.at("lambda one"));
+
+    let types = unpickler.index().type_count();
+    for label in ["u1", "u2"] {
+        assert_eq!(
+            project(&mut unpickler, &file, &unit, label),
+            Err(UnpickleError::SharedLambdaOwnerConflict {
+                address: unit.at("lambda one")
+            })
+        );
+    }
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().lambda_owner(unit.at("lambda one")), owner);
+    let r = unpickler.index().symbol_at(unit.at("one.R")).unwrap();
+    drop(unpickler);
+    // The parameter still belongs to the first owner.
+    assert_eq!(session.store.symbols.get(r).owner, owner);
+}
+
+#[test]
+fn completing_a_type_alias_of_a_lambda_wraps_the_lambda_in_alias_bounds() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let info = unpickler.complete_symbol(unit.at("Alias")).unwrap();
+    // Both parameters were completed by the projection.
+    for label in ["Alias.P", "Alias.Q"] {
+        assert!(matches!(
+            unpickler.symbol_state_at(unit.at(label)).unwrap().1,
+            SymbolInfo::Complete(_)
+        ));
+    }
+    drop(unpickler);
+    let Type::AliasingBounds { alias } = session.store.types.get(info) else {
+        panic!("not an alias");
+    };
+    assert!(matches!(
+        session.store.types.get(*alias),
+        Type::TypeLambda(_)
+    ));
+}
+
+#[test]
+fn a_lambda_whose_body_fails_undoes_the_completed_parameters_and_can_be_retried() {
+    let unit = Unit::new(false);
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    let types = unpickler.index().type_count();
+    let result = unpickler.complete_symbol(unit.at("bad"));
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedTypeTree {
+                tag: REFINEDTPT,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    // `B1` was completed before the body was projected, and is `Missing` again.
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("bad.B1")).unwrap().1,
+        SymbolInfo::Missing
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("bad")).unwrap().1,
+        SymbolInfo::Missing
+    );
+    assert_eq!(unpickler.index().type_count(), types);
+    assert_eq!(unpickler.index().type_tree_count(), 0);
+    assert_eq!(unpickler.complete_symbol(unit.at("bad")), result);
 }

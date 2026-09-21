@@ -45,7 +45,7 @@ const APPLIEDTPT: u8 = 162;
 const BYNAMETPT: u8 = 94;
 const EXPLICITTPT: u8 = 103;
 const REFINEDTPT: u8 = 160;
-const LAMBDATPT: u8 = 171;
+const MATCHTPT: u8 = 191;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -147,7 +147,7 @@ const ROOTS: [&str; 27] = [
     "direct",
     "shared type",
     "refined",
-    "lambda",
+    "match",
     "bad applied",
     "x.Out",
     "y.Out",
@@ -264,7 +264,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         any_type(),
         leaf(SHAREDTYPE_TAG, root("direct")),
         node(REFINEDTPT, &any_type()),
-        node(LAMBDATPT, &any_type()),
+        node(MATCHTPT, &any_type()),
         node(
             APPLIEDTPT,
             &[ident_any(), node(REFINEDTPT, &any_type())].concat(),
@@ -645,10 +645,10 @@ fn a_tree_form_that_is_not_projected_yet_is_a_typed_error() {
         })
     );
     assert_eq!(
-        unpickler.unpickle_type_tree_type(unit.at("lambda")),
+        unpickler.unpickle_type_tree_type(unit.at("match")),
         Err(UnpickleError::UnsupportedTypeTree {
-            address: unit.at("lambda"),
-            tag: LAMBDATPT
+            address: unit.at("match"),
+            tag: MATCHTPT
         })
     );
 }
