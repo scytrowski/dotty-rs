@@ -12,12 +12,13 @@ object Main:
     val (mode, path) = args.toList match
       case path :: Nil => ("expr", path)
       case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
+      case "--mode" :: "compilation" :: path :: Nil => ("compilation", path)
       case "--batch" :: manifest :: Nil =>
         runBatch(manifest)
         return
       case _ =>
         throw IllegalArgumentException(
-          "usage: scala-parser-oracle [--mode pattern] <source-file> | --batch manifest"
+          "usage: scala-parser-oracle [--mode pattern|compilation] <source-file> | --batch manifest"
         )
 
     println(parseAndRender(mode, path))
@@ -37,9 +38,19 @@ object Main:
     val sourceFile = SourceFile.virtual(sourcePath.toString, source)
     val context = (new ContextBase).initialCtx
     val parser = new Parsers.Parser(sourceFile)(using context)
-    val tree = if mode == "pattern" then parser.pattern() else parser.expr()
+    val tree = mode match
+      case "pattern" => parser.pattern()
+      case "compilation" => parser.compilationUnit()
+      case _ => parser.expr()
 
-    render(tree, source, placeholderBase(tree, source))
+    if mode == "compilation" && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
+      renderEmptyCompilation(source)
+    else
+      render(tree, source, placeholderBase(tree, source))
+
+  private def renderEmptyCompilation(source: String): String =
+    val end = source.length
+    s"""{"kind":"PackageDef","span":{"start":$end,"end":$end},"children":[{"kind":"Ident","span":{"start":$end,"end":$end},"name":"<empty>","children":[]}]}"""
 
   private def render(
       tree: dotty.tools.dotc.ast.Trees.Tree[?],
@@ -72,6 +83,10 @@ object Main:
           fields += field("backquoted", "true")
       case named: dotty.tools.dotc.ast.Trees.NamedArg[?] =>
         fields += field("name", quote(named.name.toString))
+      case imported: dotty.tools.dotc.ast.Trees.Import[?] =>
+        fields += field("selectors", renderSelectors(imported.selectors, source))
+      case exported: dotty.tools.dotc.ast.Trees.Export[?] =>
+        fields += field("selectors", renderSelectors(exported.selectors, source))
       case apply: dotty.tools.dotc.ast.Trees.Apply[?] =>
         fields += field("apply_kind", quote(apply.applyKind.toString))
       case generator: dotty.tools.dotc.ast.untpd.GenFrom =>
@@ -140,7 +155,32 @@ object Main:
       case values: Iterable[?] => values.toList.flatMap(collect)
       case _ => Nil
 
-    tree.productIterator.toList.flatMap(collect)
+    tree match
+      case imported: dotty.tools.dotc.ast.Trees.Import[?] => imported.expr :: Nil
+      case exported: dotty.tools.dotc.ast.Trees.Export[?] => exported.expr :: Nil
+      case packageDef: dotty.tools.dotc.ast.Trees.PackageDef[?] =>
+        packageDef.pid :: packageDef.stats
+      case _ => tree.productIterator.toList.flatMap(collect)
+
+  private def renderSelectors(
+      selectors: List[dotty.tools.dotc.ast.untpd.ImportSelector],
+      source: String
+  ): String =
+    selectors.map: selector =>
+      val fields = collection.mutable.ArrayBuffer.empty[String]
+      fields += field("name", quote(selector.name.toString))
+      selector.renamed match
+        case ident: dotty.tools.dotc.ast.Trees.Ident[?] if ident.span.exists =>
+          fields += field("rename", quote(ident.name.toString))
+        case tree if tree.span.exists =>
+          fields += field("rename_tree", render(tree, source, placeholderBase(tree, source)))
+        case _ =>
+      selector.bound match
+        case tree if tree.span.exists =>
+          fields += field("bound", render(tree, source, placeholderBase(tree, source)))
+        case _ =>
+      s"{${fields.mkString(",")}}"
+    .mkString("[", ",", "]")
 
   private def span(tree: dotty.tools.dotc.ast.Trees.Tree[?]): String =
     if tree.span.exists then

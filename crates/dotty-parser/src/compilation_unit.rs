@@ -106,7 +106,7 @@ where
             if stats.len() == 1 && matches!(self.ast.get(stats[0]).kind, TreeKind::PackageDef(_)) {
                 stats[0]
             } else {
-                let empty_name_id = self.names.intern("");
+                let empty_name_id = self.names.intern("<empty>");
                 let empty_name = self.alloc(
                     TreeKind::Ident(Ident {
                         name: *dotty_core::TermName::new(empty_name_id).as_name(),
