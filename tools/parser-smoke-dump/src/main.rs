@@ -3,7 +3,7 @@ use std::{env, fs, process};
 use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{parse_compilation_unit, parse_pattern_fragment};
+use dotty_parser::{parse_compilation_unit, parse_expression_fragment, parse_pattern_fragment};
 
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -86,8 +86,10 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
     let mut names = NameInterner::new();
     let result = if mode == "pattern" {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
-    } else {
+    } else if mode == "block" {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
+    } else {
+        parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
     };
     if !result.diagnostics.is_empty() {
         return Err(format!(
@@ -96,7 +98,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         ));
     }
 
-    let tree = if mode == "pattern" {
+    let tree = if mode == "pattern" || mode == "expr" {
         result.root
     } else {
         match &result.ast.get(result.root).kind {

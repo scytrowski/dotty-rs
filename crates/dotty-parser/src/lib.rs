@@ -30,7 +30,7 @@ mod type_definitions;
 mod type_params;
 mod types;
 
-pub use compilation_unit::{ParseResult, parse_compilation_unit};
+pub use compilation_unit::{ParseResult, parse_compilation_unit, parse_expression_fragment};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::{Cursor, CursorCheckpoint};
 pub use diagnostics::{ParseDiagnostic, ParseDiagnosticKind};

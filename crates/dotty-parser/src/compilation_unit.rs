@@ -2,7 +2,7 @@ use dotty_core::ast::Block;
 use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
 
 use crate::statements::StatementSequenceBoundary;
-use crate::{ParseDiagnostic, Parser};
+use crate::{Location, ParseDiagnostic, ParseDiagnosticKind, ParseKind, Parser};
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -22,10 +22,58 @@ pub fn parse_compilation_unit<S: TokenSource>(
     Parser::new(source, source_id, tokens, names).compilation_unit()
 }
 
+/// Parses one source-backed expression fragment.
+///
+/// This entry point is intended for parser tooling and differential tests. It
+/// uses the same expression grammar as nested parser contexts and requires the
+/// input to end after that expression; it is not an alternate compilation-unit
+/// dialect.
+pub fn parse_expression_fragment<S: TokenSource>(
+    source: SourceText<'_>,
+    source_id: SourceId,
+    tokens: S,
+    names: &mut dotty_core::NameInterner,
+) -> ParseResult {
+    Parser::new(source, source_id, tokens, names).parse_expression_fragment()
+}
+
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses one standalone expression for parser tooling and differential
+    /// tests. This is a fragment entry, not a second parser dialect.
+    pub fn parse_expression_fragment(mut self) -> ParseResult {
+        let expression = self.with_parse_kind(ParseKind::Expr, |parser| {
+            parser.with_location(Location::Elsewhere, |parser| parser.expr())
+        });
+
+        while matches!(
+            self.current().kind,
+            dotty_core::TokenKind::Newline | dotty_core::TokenKind::Newlines
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+        if self.current().kind != dotty_core::TokenKind::Eof {
+            self.report(
+                ParseDiagnosticKind::UnexpectedToken,
+                "expected end of expression fragment",
+            );
+            self.recover_until(crate::RecoverySet::Statement);
+        }
+
+        self.report_escaping_placeholders();
+        ParseResult {
+            ast: self.ast,
+            root: expression,
+            diagnostics: self.diagnostics,
+        }
+    }
+
     /// Parses the supported expression sequence into a stable synthetic block root.
     pub fn compilation_unit(mut self) -> ParseResult {
         let unit_mark = self.mark();
@@ -365,5 +413,58 @@ pub(crate) mod tests {
             result.ast.get(result.root).kind,
             TreeKind::Block(Block { .. })
         ));
+    }
+
+    #[test]
+    fn expression_fragment_returns_the_expression_root_at_eof() {
+        let mut names = NameInterner::new();
+        let result = parse_expression_fragment(
+            SourceText::new("a + b").expect("valid source"),
+            SourceId::from_index(3),
+            VecTokenSource {
+                tokens: vec![
+                    token(TokenKind::Identifier, 0, 1),
+                    token(TokenKind::Operator, 2, 3),
+                    token(TokenKind::Identifier, 4, 5),
+                    token(TokenKind::Eof, 5, 5),
+                ],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        assert!(result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 5).unwrap()
+        );
+    }
+
+    #[test]
+    fn expression_fragment_reports_trailing_input() {
+        let mut names = NameInterner::new();
+        let result = parse_expression_fragment(
+            SourceText::new("a;").expect("valid source"),
+            SourceId::from_index(4),
+            VecTokenSource {
+                tokens: vec![
+                    token(TokenKind::Identifier, 0, 1),
+                    token(TokenKind::Punctuation(Punctuation::Semicolon), 1, 2),
+                    token(TokenKind::Eof, 2, 2),
+                ],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
     }
 }
