@@ -1118,6 +1118,55 @@ mod tests {
     }
 
     #[test]
+    fn a_name_designated_reference_gets_a_rebound_prefix_and_keeps_its_name() {
+        use crate::names::{TermName, TypeName};
+        use crate::types::{TermRefTarget, TypeRefTarget};
+        let mut f = Fixture::new();
+        let text = f.store.names.intern("T1");
+        let old = f.lambda(&["A"], |f, me| {
+            let a = f.param_ref(me, 0);
+            let by_type = f.store.types.alloc(Type::TypeRef {
+                prefix: a,
+                target: TypeRefTarget::Name(TypeName::new(text)),
+            });
+            let by_term = f.store.types.alloc(Type::TermRef {
+                prefix: a,
+                target: TermRefTarget::Name(TermName::new(text)),
+            });
+            f.applied(&[by_type, by_term])
+        });
+        let old_result = f.get_lambda(old).result;
+
+        let new = rebind_type_lambda(&mut f.store, old, &[Variance::Covariant]).unwrap();
+
+        let Type::Applied { args, .. } = f.store.types.get(f.get_lambda(new).result).clone() else {
+            panic!("not an applied type");
+        };
+        let [by_type, by_term] = args[..] else {
+            panic!("two arguments expected");
+        };
+        let Type::TypeRef { prefix, target } = *f.store.types.get(by_type) else {
+            panic!("not a type ref");
+        };
+        assert_eq!(target, TypeRefTarget::Name(TypeName::new(text)));
+        assert_eq!(f.param_ref_of(prefix), (new, 0));
+        let Type::TermRef { prefix, target } = *f.store.types.get(by_term) else {
+            panic!("not a term ref");
+        };
+        assert_eq!(target, TermRefTarget::Name(TermName::new(text)));
+        assert_eq!(f.param_ref_of(prefix), (new, 0));
+        // The original graph is unchanged.
+        assert_eq!(f.get_lambda(old).result, old_result);
+        let Type::Applied { args, .. } = f.store.types.get(old_result).clone() else {
+            panic!("not an applied type");
+        };
+        let Type::TypeRef { prefix, .. } = *f.store.types.get(args[0]) else {
+            panic!("not a type ref");
+        };
+        assert_eq!(f.param_ref_of(prefix), (old, 0));
+    }
+
+    #[test]
     fn every_remaining_shape_is_traversed() {
         // One node of each remaining compound kind, all over `A`.
         let mut f = Fixture::new();

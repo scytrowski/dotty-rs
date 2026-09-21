@@ -7,6 +7,7 @@ mod class_info;
 mod constant;
 mod method;
 mod rebind;
+mod structural;
 mod ty;
 
 pub use annotation::{
@@ -18,4 +19,7 @@ pub use class_info::ClassInfo;
 pub use constant::Constant;
 pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
 pub use rebind::{TypeRebindError, rebind_type_lambda};
+pub use structural::{
+    MAX_STRUCTURAL_DEPTH, StructuralLookupError, StructuralMemberLookup, lookup_structural_member,
+};
 pub use ty::{ErrorType, MatchType, TermRefTarget, Type, TypeRefTarget};
