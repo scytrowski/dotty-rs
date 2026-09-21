@@ -941,7 +941,13 @@ an alias (`= alias`) and is deliberately not `Bounds { low: alias, high: alias }
 matching Dotty's `AliasingBounds`. It is not named `Alias`, which would collide
 with `SymbolKind::TypeAlias`. `Flexible` is a real wrapper (Dotty's
 `FlexibleType`) that model code must not strip; only member lookup sees through
-it. Variance markers that TASTy writes after `TYPEBOUNDS` belong to a
+it. `Annotated` is the same kind of proxy (Dotty's `AnnotatedType` is a
+`CachedProxyType`): member lookup sees through it to its `underlying`, and it
+is never stripped from the graph. A *compact* annotation, the type
+Scala 3.9's `CompactAnnotation` wraps, is `Annotation { ty, tree: None }`,
+which loses nothing; a *full* annotation tree cannot be that (`tree: None`
+would hide its arguments), so the TASTy adapter defers it until an annotation
+tree can be stored. Variance markers that TASTy writes after `TYPEBOUNDS` belong to a
 `TypeLambda` bound, not to the bounds, so the model has no bounds-level
 variance: they become the `declared_variance` of a rebound `TypeLambda`.
 
@@ -1134,8 +1140,10 @@ variance only; structural or inferred variance belongs to a later typer.
 encode it (a Scala repeated parameter is part of the parameter's *type*), so the
 TASTy adapter always sets it to `false` and never infers it. `erased` is derived
 in Dotty from an `ErasedParamAnnot` on the parameter's type, not from a clause
-modifier; the TASTy adapter sets it to `false` until annotations are decoded
-(Milestone 4), at which point it must revisit this. The `MethodKind` of a TASTy
+modifier; the TASTy adapter sets it to `false`. Milestone 4b1 checked the real
+wire: an erased parameter's type carries a *full* annotation tree
+(`new scala.annotation.internal.ErasedParam`), not a compact annotation, so it
+cannot be derived until full trees have a semantic form (Milestone 4b2). The `MethodKind` of a TASTy
 `METHODtype` comes from its `IMPLICIT`/`GIVEN` modifier tail.
 
 `Constant::String` uses `NameId` (interned, see §5) rather than an owned
