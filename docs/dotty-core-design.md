@@ -1423,7 +1423,7 @@ same path is the same `SymbolId` whichever saw it first. Contract:
 `SymbolResolver` is the format-agnostic boundary between an adapter and
 whatever can supply symbols the adapter did not enter itself (later, the
 classloader). A request is `MemberRequest { prefix: TypeId, name: Name,
-selector }` or a package path; the answer is a `SymbolId`. It contains no wire
+selector, space: MemberSpace }` or a package path; the answer is a `SymbolId`. It contains no wire
 concept: no addresses, name-table references, tags or wire signatures, so it
 lives in `dotty-core`, not in an adapter, and the unpickler never depends on
 the classloader.
@@ -1434,6 +1434,15 @@ Resolvers take `&SemanticStore`: until the port has a transactional contract
 they do not allocate, so a failed decode leaves nothing to undo. Overload
 selection by signature is a `#[non_exhaustive]` extension of `MemberSelector`;
 today only `Unique` exists. `NoResolver` answers `None` to everything.
+
+`MemberSpace` says where the declaration is looked for. `Prefix` (ordinary
+references) searches the members of `prefix`. `Explicit(TypeId)` (Scala's
+`TYPEREFin` / `TERMREFin`, written for private or shadowed symbols) searches
+the declarations of that type, the declaring owner, while `prefix` stays only
+how the reference is viewed: the resolver must not fall back to the prefix,
+and an adapter accepts an answer only if it belongs to the requested owner.
+The distinction is a general member-resolution concept, so no address or tag
+appears in the port.
 
 ## 10. `store/semantic_store.rs`
 

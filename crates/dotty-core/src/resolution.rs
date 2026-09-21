@@ -41,14 +41,35 @@ pub enum MemberSelector {
     Unique,
 }
 
+/// Where the declaration a request names is looked for.
+///
+/// A reference has two independent inputs: the `prefix` it is viewed from, and
+/// the space that declares the symbol. They coincide for an ordinary
+/// reference. Scala's pickler writes them apart (`TYPEREFin` / `TERMREFin`)
+/// when the symbol is private or shadowed: the name alone, searched in the
+/// prefix, would find another declaration or none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSpace {
+    /// The declaration is a member of the request's `prefix`.
+    Prefix,
+    /// The declaration is found among the declarations of this type (the
+    /// declaring owner), whatever the prefix is. The resolver must not fall
+    /// back to searching the prefix.
+    Explicit(TypeId),
+}
+
 /// A request for a member of `prefix`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberRequest {
-    /// The type whose members are searched. The resolver decides which
-    /// prefixes it understands and answers `Ok(None)` for the rest.
+    /// The type the reference is viewed from. With [`MemberSpace::Prefix`] it
+    /// is also the type whose members are searched, and the resolver decides
+    /// which prefixes it understands and answers `Ok(None)` for the rest.
     pub prefix: TypeId,
     pub name: Name,
     pub selector: MemberSelector,
+    /// Where the declaration is searched.
+    pub space: MemberSpace,
 }
 
 /// A resolver could not answer soundly.
@@ -125,6 +146,7 @@ mod tests {
             prefix: TypeId::new(0),
             name: Name::new(store.names.intern("Inner"), Namespace::Type),
             selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
         }
     }
 
@@ -145,6 +167,24 @@ mod tests {
         let mut resolver: Box<dyn SymbolResolver> = Box::new(NoResolver);
 
         assert_eq!(resolver.resolve_member(&store, &request), Ok(None));
+    }
+
+    #[test]
+    fn an_explicit_space_is_distinct_from_the_prefix_it_accompanies() {
+        let prefix = MemberSpace::Prefix;
+        let explicit = MemberSpace::Explicit(TypeId::new(0));
+
+        assert_ne!(prefix, explicit);
+        assert_ne!(explicit, MemberSpace::Explicit(TypeId::new(1)));
+    }
+
+    #[test]
+    fn the_no_op_resolver_answers_none_for_an_explicit_space_too() {
+        let mut store = SemanticStore::new();
+        let mut request = request(&mut store);
+        request.space = MemberSpace::Explicit(TypeId::new(1));
+
+        assert_eq!(NoResolver.resolve_member(&store, &request), Ok(None));
     }
 
     #[test]

@@ -15,12 +15,17 @@
 //! Dotty's `FlexibleType` and `AnnotatedType` are `CachedProxyType`s).
 //! Anything else is `UnsupportedPrefix`. There is no textual fallback and no search across owners. The lookup is not inheritance-aware:
 //! it sees the members the prefix's own scope declares.
+//!
+//! `TYPEREFin` / `TERMREFin` name their declaration through an explicit owner
+//! space instead: the space type goes through the same [`lookup_owner`], and
+//! [`lookup_declaration`] then reads that owner's own scope. That is Scala's
+//! `ownerSpace.decl(name)`. The reference's prefix takes no part in the search.
 
 use dotty_core::Packages;
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 use crate::index::TastySemanticIndex;
@@ -159,6 +164,19 @@ pub(crate) fn lookup_member(
     let Some(owner) = lookup_owner(store, index, packages, prefix) else {
         return LocalLookup::UnsupportedPrefix;
     };
+    lookup_declaration(store, index, packages, owner, name)
+}
+
+/// Looks `name` up among the declarations of `owner` itself: exact
+/// `Name` + `Namespace`, no inheritance. `UnsupportedPrefix` is never the
+/// answer here; the caller has already turned its type into an owner.
+pub(crate) fn lookup_declaration(
+    store: &SemanticStore,
+    index: &TastySemanticIndex,
+    packages: &Packages,
+    owner: SymbolId,
+    name: &Name,
+) -> LocalLookup {
     let Some(scope) = declaration_scope_of(store, index, packages, owner) else {
         return LocalLookup::ScopeUnknown;
     };
@@ -168,6 +186,31 @@ pub(crate) fn lookup_member(
         several => LocalLookup::Ambiguous {
             candidates: several.len(),
         },
+    }
+}
+
+/// Whether `prefix` (with proxies looked through) is not a legal prefix as
+/// Dotty's `TypeOps.isLegalPrefix` sees it: a singleton that is not stable, of
+/// which a `TermRef` to a method or a mutable member is what the semantic graph can
+/// show. Dotty wraps such a prefix in a `QualSkolemType`, which `dotty-core`
+/// does not model, so it must not be passed on as if it were legal. A prefix
+/// whose proxy chain is too deep is reported as illegal too.
+pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
+    let Some(prefix) = look_through_proxies(store, prefix) else {
+        return true;
+    };
+    match store.types.get(prefix) {
+        Type::TermRef { symbol, .. } => {
+            let symbol = store.symbols.get(*symbol);
+            // A `var` member is a `Field` with the `MUTABLE` flag (see
+            // `val_def_kind`), so the flag decides, not the kind.
+            symbol.flags.contains(SymbolFlags::MUTABLE)
+                || matches!(
+                    symbol.kind,
+                    SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Variable
+                )
+        }
+        _ => false,
     }
 }
 
@@ -565,5 +608,95 @@ mod tests {
             world.lookup(term_of_field, &inner),
             LocalLookup::UnsupportedPrefix
         );
+    }
+
+    fn declaration(world: &World, owner: SymbolId, name: &Name) -> LocalLookup {
+        lookup_declaration(&world.store, &world.index, &world.packages, owner, name)
+    }
+
+    #[test]
+    fn a_declaration_lookup_sees_only_the_owners_own_declarations() {
+        let mut world = World::new();
+        let (left, left_scope) = world.class("Left");
+        let (right, right_scope) = world.class("Right");
+        let secret = world.name("secret", Namespace::Term);
+        let left_secret = world.declare(left_scope, left, secret, SymbolKind::Value);
+        let right_secret = world.declare(right_scope, right, secret, SymbolKind::Value);
+
+        assert_eq!(
+            declaration(&world, left, &secret),
+            LocalLookup::Found(left_secret)
+        );
+        assert_eq!(
+            declaration(&world, right, &secret),
+            LocalLookup::Found(right_secret)
+        );
+    }
+
+    #[test]
+    fn a_declaration_lookup_is_exact_in_namespace_and_reports_misses_and_overloads() {
+        let mut world = World::new();
+        let (class, scope) = world.class("C");
+        let term = world.name("x", Namespace::Term);
+        let ty = world.name("x", Namespace::Type);
+        let only = world.declare(scope, class, term, SymbolKind::Value);
+        let (unfilled, _) = (world.class("Unfilled").0, ());
+        // A class with no scope entered here.
+        let no_scope_name = world.name("Elsewhere", Namespace::Type);
+        let elsewhere = world.symbol(no_scope_name, SymbolKind::Class, None);
+
+        assert_eq!(declaration(&world, class, &term), LocalLookup::Found(only));
+        assert_eq!(declaration(&world, class, &ty), LocalLookup::NotFound);
+        assert_eq!(declaration(&world, unfilled, &term), LocalLookup::NotFound);
+        assert_eq!(
+            declaration(&world, elsewhere, &term),
+            LocalLookup::ScopeUnknown
+        );
+
+        world.declare(scope, class, term, SymbolKind::Method);
+        assert_eq!(
+            declaration(&world, class, &term),
+            LocalLookup::Ambiguous { candidates: 2 }
+        );
+    }
+
+    #[test]
+    fn only_a_method_or_variable_term_is_an_illegal_prefix() {
+        let mut world = World::new();
+        let (class, _) = world.class("C");
+        let no_prefix = world.no_prefix;
+        let term_ref = |world: &mut World, text: &str, kind| {
+            let name = world.name(text, Namespace::Term);
+            let symbol = world.symbol(name, kind, None);
+            world.store.types.alloc(Type::TermRef {
+                prefix: no_prefix,
+                symbol,
+            })
+        };
+        let method = term_ref(&mut world, "m", SymbolKind::Method);
+        let variable = term_ref(&mut world, "v", SymbolKind::Variable);
+        let value = term_ref(&mut world, "x", SymbolKind::Value);
+        let object = term_ref(&mut world, "o", SymbolKind::Object);
+        // A class `var` is a `Field` with the `MUTABLE` flag, as pass 1 enters it.
+        let var_name = world.name("w", Namespace::Term);
+        let var_symbol = world.symbol(var_name, SymbolKind::Field, None);
+        world.store.symbols.get_mut(var_symbol).flags = SymbolFlags::MUTABLE;
+        let mutable_field = world.store.types.alloc(Type::TermRef {
+            prefix: no_prefix,
+            symbol: var_symbol,
+        });
+        let plain_field = term_ref(&mut world, "g", SymbolKind::Field);
+        let class_ref = world.type_ref(class);
+        let wrapped_method = annotated(&mut world, method);
+
+        assert!(is_illegal_prefix(&world.store, method));
+        assert!(is_illegal_prefix(&world.store, variable));
+        assert!(is_illegal_prefix(&world.store, mutable_field));
+        assert!(!is_illegal_prefix(&world.store, plain_field));
+        assert!(is_illegal_prefix(&world.store, wrapped_method));
+        assert!(!is_illegal_prefix(&world.store, value));
+        assert!(!is_illegal_prefix(&world.store, object));
+        assert!(!is_illegal_prefix(&world.store, class_ref));
+        assert!(!is_illegal_prefix(&world.store, no_prefix));
     }
 }
