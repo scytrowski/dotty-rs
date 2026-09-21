@@ -1029,9 +1029,10 @@ reads the body:
   `ByName { T }` (`ExprType`); `def f(): T` is a `Method` with no parameters;
   `def f[A]: A` has a clause and is a `Poly` (not by-name).
 * *Kind* of a term clause is decided by its first parameter's entered flags:
-  `GIVEN` is `Contextual`, else `IMPLICIT` is `Implicit`, else `Plain` (Dotty's
-  rule; a clause mixing them keeps it, no majority vote; the corpora have no such
-  clause).
+  `IMPLICIT` is `Implicit`, else `GIVEN` is `Contextual`, else `Plain` (the order
+  `METHODtype`'s `method_kind` uses, so both paths agree even for a parameter
+  with both markers; a clause mixing them keeps it, no majority vote; the
+  corpora have no such clause).
 * *Build.* Parameters are completed first, in clause order (a later one may
   depend on an earlier one's type), the result tree is projected, and the clauses
   are built from last to first with the abstraction primitive, so

@@ -544,7 +544,7 @@ mod wire {
         TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG,
     };
 
-    const NAMES: [&str; 23] = [
+    const NAMES: [&str; 24] = [
         "ASTs",
         "p",
         "Holder",
@@ -568,6 +568,7 @@ mod wire {
         "Out",
         "mixed",
         "c",
+        "both",
     ];
 
     fn n(text: &str) -> u32 {
@@ -589,7 +590,7 @@ mod wire {
     const INTO: u8 = 49;
     const COVARIANT: u8 = 28;
 
-    pub const DEFINITIONS: [&str; 34] = [
+    pub const DEFINITIONS: [&str; 36] = [
         "Holder",
         "split",
         "split.a",
@@ -624,6 +625,8 @@ mod wire {
         "mixed.a",
         "mixed.b",
         "mixed.c",
+        "both",
+        "both.a",
     ];
 
     fn nat(value: u32) -> Vec<u8> {
@@ -806,6 +809,12 @@ mod wire {
                 ],
                 ident_any(),
             ),
+            // Malformed for Dotty's pickler, but decodable: both markers.
+            def(
+                "both",
+                vec![param("a", ident_any(), &[GIVEN, IMPLICIT])],
+                ident_any(),
+            ),
         ];
         let holder = node(
             TYPEDEF_TAG,
@@ -928,11 +937,15 @@ fn the_first_parameter_of_a_clause_decides_its_kind_and_only_erased_is_erased() 
     let given = unpickler.complete_symbol(unit.at("given")).unwrap();
     let implicit = unpickler.complete_symbol(unit.at("implicit")).unwrap();
     let mixed = unpickler.complete_symbol(unit.at("mixed")).unwrap();
+    let both = unpickler.complete_symbol(unit.at("both")).unwrap();
     let erased = unpickler.complete_symbol(unit.at("erased")).unwrap();
     drop(unpickler);
 
     assert_eq!(method_of(&session, given).kind, MethodKind::Contextual);
     assert_eq!(method_of(&session, implicit).kind, MethodKind::Implicit);
+    // Both markers on the first parameter: `IMPLICIT` is tested first, as
+    // `METHODtype`'s `method_kind` does, so the two paths agree.
+    assert_eq!(method_of(&session, both).kind, MethodKind::Implicit);
     // Dotty's rule: `a` is `given`, so the whole clause is contextual; the
     // `implicit` on `b` is not a majority vote.
     let mixed = method_of(&session, mixed);

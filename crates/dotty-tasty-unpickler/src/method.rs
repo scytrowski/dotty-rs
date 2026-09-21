@@ -35,8 +35,8 @@
 //! `methodType(paramss, result)`: no clause at all is `ByName { result }`
 //! (`def f: T`, Dotty's `ExprType`), while `def f(): T` is a `Method` with no
 //! parameters; a type clause is a `Poly`, a term clause a `Method` whose kind
-//! is decided by its *first* parameter (`GIVEN` is `Contextual`, else
-//! `IMPLICIT` is `Implicit`, else `Plain`, from the entered flags, never from
+//! is decided by its *first* parameter (`IMPLICIT` is `Implicit`, else
+//! `GIVEN` is `Contextual`, else `Plain`, the order `METHODtype` uses, from the entered flags, never from
 //! names). The clauses are built from the last to the first, each by
 //! [`method_type_from_symbols`] / [`poly_type_from_symbols`], so a reference to
 //! a parameter symbol in a later clause or the result becomes a `ParamRef` of
@@ -259,11 +259,14 @@ impl TastyUnpickler<'_, '_, '_> {
                     let (symbol, info) = self.parameter_symbol(*param)?;
                     let flags = self.store.symbols.get(symbol).flags;
                     if position == 0 {
-                        // `NamerOps.methodType`: the first parameter decides.
-                        kind = if flags.contains(SymbolFlags::GIVEN) {
-                            MethodKind::Contextual
-                        } else if flags.contains(SymbolFlags::IMPLICIT) {
+                        // The first parameter decides. `IMPLICIT` is tested
+                        // before `GIVEN`, as `METHODtype`'s `method_kind` does
+                        // (`methodTypeCompanion`), so a parameter with both
+                        // is `Implicit` on both paths.
+                        kind = if flags.contains(SymbolFlags::IMPLICIT) {
                             MethodKind::Implicit
+                        } else if flags.contains(SymbolFlags::GIVEN) {
+                            MethodKind::Contextual
                         } else {
                             MethodKind::Plain
                         };
