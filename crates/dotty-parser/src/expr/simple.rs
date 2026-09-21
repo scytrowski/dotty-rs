@@ -1,6 +1,5 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, NamedArg, New, Parens, Select, Super, This, Tuple, UntypedNode,
-    ValDef,
+    Apply, ApplyKind, Block, Ident, New, Parens, Select, Super, This, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -343,7 +342,7 @@ where
         }
     }
 
-    fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
+    pub(super) fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
         let position = self.ast.get(function).position;
         let name = dotty_core::TermName::new(self.names.intern("<init>"));
         self.alloc(
@@ -467,70 +466,6 @@ where
             }
         }
         qualifier
-    }
-
-    fn parse_application(
-        &mut self,
-        mark: crate::Mark,
-        function: TreeId<Untyped>,
-    ) -> TreeId<Untyped> {
-        self.advance();
-        let function = if matches!(self.ast.get(function).kind, TreeKind::New(_)) {
-            self.constructor_select(function)
-        } else {
-            function
-        };
-        let mut args = Vec::new();
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-            loop {
-                args.push(self.argument_expr());
-                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
-                    self.expect(TokenKind::Punctuation(Punctuation::RightParen));
-                    break;
-                }
-                if self
-                    .cursor
-                    .at(TokenKind::Punctuation(Punctuation::RightParen))
-                {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedExpression,
-                        "expected an argument after `,`",
-                    );
-                    self.advance();
-                    break;
-                }
-            }
-        }
-        self.alloc_from(
-            mark,
-            TreeKind::Apply(Apply {
-                function,
-                args,
-                kind: ApplyKind::Regular,
-            }),
-        )
-    }
-
-    fn argument_expr(&mut self) -> TreeId<Untyped> {
-        let tree = self.with_location(crate::Location::InArgs, |parser| parser.expr());
-        self.normalize_named_argument(tree)
-    }
-
-    fn normalize_named_argument(&mut self, tree: TreeId<Untyped>) -> TreeId<Untyped> {
-        let TreeKind::Assign(assignment) = self.ast.get(tree).kind else {
-            return tree;
-        };
-        let TreeKind::Ident(identifier) = self.ast.get(assignment.lhs).kind else {
-            return tree;
-        };
-
-        self.alloc(
-            TreeKind::NamedArg(NamedArg {
-                name: identifier.name,
-                arg: assignment.rhs,
-            }),
-            self.ast.get(tree).position,
-        )
     }
 
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {

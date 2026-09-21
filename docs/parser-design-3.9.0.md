@@ -148,12 +148,15 @@ new with simple or qualified type names and constructor applications
 simple type applications such as foo[A] and foo[A, B]
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
+expression type ascriptions with the current narrow simple-type parser
+parenthesized `using` argument lists, including nested application clauses
+indented colon arguments, including block, lambda, and case bodies
 prefix operators `-`, `+`, `~`, and `!` on the same physical line
 negative numeric literals using Scala's parser-level literal shape
 infix operators with Scala 3.9 precedence and associativity
 feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
-named arguments in the narrow bare-identifier form
+named arguments in ordinary and `using` lists in the narrow bare-identifier form
 the initial `if` and `while` expression forms
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
@@ -167,9 +170,9 @@ metadata
 
 The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
-forms such as `using` and colon arguments, remains future work. Likewise, the
-type parser currently handles only the simple type names needed by these type
-applications.
+forms, named/using argument validation, and the remaining colon-argument
+forms, remains future work. Likewise, the type parser currently handles only
+the simple type names needed by these ascriptions and type applications.
 
 The current source-level pattern grammar is layered as:
 
@@ -251,10 +254,11 @@ limited to `-`, `+`, `~`, and `!`; infix reduction uses Scala 3.9 precedence,
 left/right associativity, and mixed-associativity diagnostics. Operators
 ending in `:` are right-associative. Legacy postfix syntax is represented by
 `PostfixOp` only when `ParserFeatures::postfix_ops` is enabled. Assignment,
-the initial `if`/`while`, `throw`, `return`, `try`/`catch`/`finally`, and match
-clauses and for-comprehensions are implemented above this layer; ascription,
-colon arguments, and the remaining higher-level expression grammar are not
-implemented yet.
+the initial `if`/`while`, `throw`, `return`, `try`/`catch`/`finally`, match
+clauses, for-comprehensions, ascriptions, and the initial using/colon argument
+forms are implemented above this layer. Full types, argument validation,
+remaining colon forms, and the rest of the higher-level expression grammar
+remain future work.
 
 ## For-comprehensions
 
@@ -284,7 +288,7 @@ emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 `tools/scala-parser-oracle` is pinned to Scala 3.9.0, JDK 25, and sbt 2.0.9.
 It invokes the compiler parser in expression mode by default, or the real
 `Parser.pattern()` entry in pattern mode, and emits a deterministic JSON view containing
-`kind`, `span`, `name`, `literal`, and `children`. It does not compare
+`kind`, `span`, `name`, `literal`, `operator`, `apply_kind`, and `children`. It does not compare
 compiler `Tree.show` output. Nodes without a source span are omitted from the
 normalized child list; this removes compiler-only synthetic qualifiers such as
 the implicit qualifier of `this`. The empty compiler tuple is normalized to

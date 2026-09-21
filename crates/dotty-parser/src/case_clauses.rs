@@ -110,6 +110,9 @@ where
         let (stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
             let result = self.parse_expression_block_body(TokenKind::Outdent);
+            if !self.cursor.at(TokenKind::Outdent) {
+                self.observe_outdented();
+            }
             if !self.accept(TokenKind::Outdent) {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,

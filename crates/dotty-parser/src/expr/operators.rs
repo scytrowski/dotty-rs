@@ -54,8 +54,15 @@ where
                 operator: operator.name,
                 offset: operator.offset,
             });
-            self.consume_infix_newlines();
-            top = self.prefix_expr();
+            if self.current().kind == TokenKind::ColonFollow {
+                self.observe_colon_eol(false);
+            }
+            top = if self.current().kind == TokenKind::ColonEol {
+                self.parse_colon_argument_body()
+            } else {
+                self.consume_infix_newlines();
+                self.prefix_expr()
+            };
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -81,6 +88,14 @@ where
                 | TokenKind::Operator
                 | TokenKind::ColonOp
         ) {
+            return None;
+        }
+
+        // A standalone colon after a literal is lexed as `ColonOp` because
+        // the scanner cannot classify it from the preceding token alone.
+        // It is an expression ascription, not an infix operator.  Leave it
+        // for `expr1_rest` so `1: Int` and `a + b: Int` become `Typed` trees.
+        if self.current().kind == TokenKind::ColonOp && self.current_text_is(":") {
             return None;
         }
 
