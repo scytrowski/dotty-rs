@@ -36,7 +36,8 @@
 //! A class's template parents and its `SELFDEF` type tree are scanned too, with
 //! the class as the owner. A parent is scanned only along the paths
 //! `type_of_parent` reads (a call's function, a type application's function
-//! and type arguments, a constructor selection's `NEW` type), never through a
+//! and, only when its constructor type is not already applied, its type
+//! arguments, a constructor selection's `NEW` type), never through a
 //! constructor argument. Upstream reads parents in a compiler-internal dummy
 //! context; that owner is not a declaration, so the parameters are owned by the
 //! class, and, being entered as non-members, never reach its declaration scope.
@@ -54,7 +55,7 @@ use dotty_tasty::tasty::{
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
-use crate::class::template_parts;
+use crate::class::{parent_constructor_is_applied, template_parts};
 use crate::error::UnpickleError;
 use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
@@ -323,8 +324,14 @@ impl TastyUnpickler<'_, '_, '_> {
                     return Ok(());
                 };
                 self.enter_parent_lambdas(ast, *function, class, depth + 1)?;
-                for argument in arguments {
-                    self.enter_lambdas_in(ast, *argument, class, depth + 1)?;
+                // The arguments are read only when the constructor type is not
+                // already applied (the same test `type_of_parent` makes); a
+                // lambda in a skipped argument is never entered, so it cannot
+                // take ownership from, or conflict with, a parent that is read.
+                if !parent_constructor_is_applied(ast, *function) {
+                    for argument in arguments {
+                        self.enter_lambdas_in(ast, *argument, class, depth + 1)?;
+                    }
                 }
                 Ok(())
             }

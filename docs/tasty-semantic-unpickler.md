@@ -1104,9 +1104,10 @@ ClassInfo {
   always a type tree: `SHAREDterm` is followed to its target; `APPLY fun args` is
   the parent of `fun`, the arguments never read; `BLOCK expr stats` is the parent
   of `expr`, the statements never read; `TYPEAPPLY fun targs` is the parent of
-  `fun` when that is already an `Applied` (the compiler writes `New(Parent[A])`
-  and repeats the arguments; upstream skips them when the constructor has no
-  type parameters) and otherwise `Applied { fun, targs }`; `SELECTin <init>
+  `fun` when its `NEW` type tree is already an application (decided on the wire,
+  looking through links, `IDENTtpt` and `EXPLICITtpt`; the compiler writes
+  `New(Parent[A])` and repeats the arguments; upstream skips them when the
+  constructor has no type parameters) and otherwise `Applied { fun, targs }`; `SELECTin <init>
   (NEW tpt) owner` is the projection of `tpt` (any other name, or a qualifier
   that is not `NEW`, is `MalformedParentTree`); anything else is a type tree.
   A term that is not a constructor call (`IDENT`, `SELECT`, `TYPED`, `INLINED`,
@@ -1127,7 +1128,8 @@ ClassInfo {
   `Some(self_type)`.
 * **Lambdas in parents and self types (pass 1).** `enter_symbols` scans each
   parent along exactly the paths `type_of_parent` reads (a call's function only,
-  a type application's function and type arguments, the `NEW` type; never a
+  a type application's function and, only when its constructor type is not
+  already applied, its type arguments, the `NEW` type; never a
   constructor argument) and the `SELFDEF` tree with the ordinary `enter_lambdas_in`.
   Upstream reads parents in a compiler-internal `localDummy` context; that is not
   a declaration, so the parameters of such a lambda are owned by the *class*.

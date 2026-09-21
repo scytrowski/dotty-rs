@@ -38,10 +38,11 @@ use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EXPORT_TAG, IDENT_TAG, IF_TAG, IMPORT_TAG, INLINED_TAG,
-    LAMBDA_TAG, MATCH_TAG, NAMEDARG_TAG, NEW_TAG, PACKAGE_TAG, PARAM_TAG, REPEATED_TAG, SELECT_TAG,
-    SELECTIN_TAG, SELFDEF_TAG, TEMPLATE_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
-    TYPEPARAM_TAG, VALDEF_TAG,
+    APPLIEDTPT_TAG, APPLIEDTYPE_TAG, APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, EXPLICITTPT_TAG, EXPORT_TAG,
+    IDENT_TAG, IDENTTPT_TAG, IF_TAG, IMPORT_TAG, INLINED_TAG, LAMBDA_TAG, MATCH_TAG, NAMEDARG_TAG,
+    NEW_TAG, PACKAGE_TAG, PARAM_TAG, REPEATED_TAG, RawTree, SELECT_TAG, SELECTIN_TAG, SELFDEF_TAG,
+    SHAREDTERM_TAG, SHAREDTYPE_TAG, TEMPLATE_TAG, TRY_TAG, TYPEAPPLY_TAG, TYPED_TAG, TYPEDEF_TAG,
+    TYPEPARAM_TAG, TermValue, VALDEF_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -228,7 +229,7 @@ impl TastyUnpickler<'_, '_, '_> {
             APPLY_TAG | BLOCK_TAG => self.type_of_parent_in(ast, first, at, depth, wrapped + 1)?,
             TYPEAPPLY_TAG => {
                 let function = self.type_of_parent_in(ast, first, at, depth, wrapped + 1)?;
-                if matches!(self.store.types.get(function), Type::Applied { .. }) {
+                if parent_constructor_is_applied(ast, first) {
                     function
                 } else {
                     let mut args = Vec::with_capacity(children.len() - 1);
@@ -276,7 +277,10 @@ impl TastyUnpickler<'_, '_, '_> {
         at: u32,
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
-        ast.tree_at(at, at)?.decode_self_def()?;
+        // The name is syntax and is never resolved, but it is an untrusted
+        // `NameRef`: it must name an entry of the name table.
+        let self_def = ast.tree_at(at, at)?.decode_self_def()?;
+        wire_name(self.file.names(), self_def.name)?;
         let [tree] = ast.children(at) else {
             return Err(UnpickleError::InvalidSelfTypeTree {
                 address: at,
@@ -285,4 +289,69 @@ impl TastyUnpickler<'_, '_, '_> {
         };
         self.type_of_tpt(ast, address(tree.offset), at, depth)
     }
+}
+
+/// Whether the constructor call at `at` (a parent's function) already carries
+/// its type arguments, which decides if a `TYPEAPPLY` over it repeats them.
+///
+/// This is decided on the wire, from the `NEW` type tree at the end of the call
+/// spine, so that pass 1 (which scans a parent's lambdas before any type
+/// exists) and `type_of_parent` take the same branch: the arguments of a
+/// `TYPEAPPLY` over an applied constructor type are read by neither.
+pub(crate) fn parent_constructor_is_applied(ast: &AstView<'_>, at: u32) -> bool {
+    let mut current = at;
+    for _ in 0..=MAX_SHARED_DEPTH {
+        let Ok(target) = ast.resolve_shared_term(current, current) else {
+            return false;
+        };
+        let below = ast.children(target);
+        match ast.tag_at(target) {
+            Some(APPLY_TAG | BLOCK_TAG | TYPEAPPLY_TAG) => match below.first() {
+                Some(first) => current = address(first.offset),
+                None => return false,
+            },
+            Some(SELECTIN_TAG) => {
+                let Some(new) = below.first().map(|child| address(child.offset)) else {
+                    return false;
+                };
+                if ast.tag_at(new) != Some(NEW_TAG) {
+                    return false;
+                }
+                return match ast.children(new) {
+                    [tpt] => type_tree_is_applied(ast, address(tpt.offset)),
+                    _ => false,
+                };
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether the type tree at `at` is an application, looking through links and
+/// the transparent wrappers `IDENTtpt` and `EXPLICITtpt`.
+fn type_tree_is_applied(ast: &AstView<'_>, at: u32) -> bool {
+    let mut current = at;
+    for _ in 0..=MAX_SHARED_DEPTH {
+        let Ok(tree) = ast.tree_at(current, current) else {
+            return false;
+        };
+        match tree {
+            RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
+                match term.value {
+                    TermValue::AstRef(target) => current = target,
+                    _ => return false,
+                }
+            }
+            _ => match ast.tag_at(current) {
+                Some(APPLIEDTPT_TAG | APPLIEDTYPE_TAG) => return true,
+                Some(IDENTTPT_TAG | EXPLICITTPT_TAG) => match ast.children(current).first() {
+                    Some(child) => current = address(child.offset),
+                    None => return false,
+                },
+                _ => return false,
+            },
+        }
+    }
+    false
 }

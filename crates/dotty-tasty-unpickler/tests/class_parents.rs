@@ -385,3 +385,48 @@ fn a_term_that_is_not_a_constructor_call_is_an_unsupported_parent() {
     ));
     assert_eq!(completed.class_state, SymbolInfo::Missing);
 }
+
+#[test]
+fn a_self_definition_with_an_invalid_name_reference_is_a_typed_error() {
+    // The name index is far outside the name table.
+    let self_def = [&[SELFDEF][..], &nat(0x3fff), &ident()].concat();
+    let completed = complete(&class_unit(&[ident()], Some(self_def)));
+
+    assert!(
+        matches!(
+            completed.error(),
+            UnpickleError::InvalidNameReference { .. } | UnpickleError::UnsupportedName { .. }
+        ),
+        "{:?}",
+        completed.result
+    );
+    assert_eq!(completed.class_state, SymbolInfo::Missing);
+}
+
+#[test]
+fn a_lambda_in_a_skipped_type_argument_does_not_take_ownership_from_a_read_parent() {
+    // D's parent is the lambda. E's parent is `TypeApply(New(p[p]), <link to
+    // the lambda>)`: the constructor type is already applied, so the argument is
+    // never read, and must not claim or conflict with D's lambda.
+    let build = |target: u32| {
+        let call = node(
+            TYPEAPPLY,
+            &[
+                constructor(applied_tpt(ident(), &[ident()])),
+                leaf(SHAREDTERM, target),
+            ]
+            .concat(),
+        );
+        classes_unit(&[
+            ("D", vec![lambda_tpt()], None),
+            ("E", vec![node(APPLY, &call)], None),
+        ])
+    };
+    let target = first_parent_address(&build(0));
+    let bytes = build(target);
+
+    let read = complete_nth(&bytes, 0);
+    assert!(read.result.is_ok(), "{:?}", read.result);
+    let skipping = complete_nth(&bytes, 1);
+    assert!(skipping.result.is_ok(), "{:?}", skipping.result);
+}
