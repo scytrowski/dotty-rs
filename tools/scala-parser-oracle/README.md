@@ -10,6 +10,7 @@ it with the selected SDKMAN defaults:
 ```text
 ./run path/to/input.scala
 ./run --mode pattern path/to/pattern.scala
+./run --mode compilation path/to/source-unit.scala
 ./run --batch path/to/manifest.tsv
 ```
 
@@ -65,3 +66,10 @@ constructor clauses; simple parent applications; and braced or indented
 template bodies. The renderer exposes the source-level `Trait` distinction
 and keeps constructor parent applications in the same `New`/`Select`/`Apply`
 shape as the Scala parser.
+
+Fixtures under `fixtures/compilation/` use `compilation` mode. Scala calls the
+real `Parser.compilationUnit()` entry and Rust calls `parse_compilation_unit`.
+The corpus covers empty and explicit package roots, nested packages, ordered
+top-level definitions, and import/export clauses. Dotty returns `EmptyTree`
+for an empty compilation unit; the Scala renderer normalizes that one case to
+the Rust parser's documented zero-width empty `PackageDef` root.

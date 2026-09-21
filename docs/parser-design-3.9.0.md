@@ -118,11 +118,34 @@ of a panic.
 
 ## AST root and current grammar
 
-The current compilation-unit root is a synthetic `TreeKind::Block`. Earlier
-expressions become its statements and the final expression becomes its `expr`
-field. An empty valid unit has no statements and receives a synthetic
-zero-width `Literal(Constant::Unit)` expression, not an error node. Value
-definitions are preserved as statements in this root: simple identifiers use
+The public compilation-unit parser returns a real `TreeKind::PackageDef` root.
+An explicitly declared package is returned directly; package-less source is
+wrapped in an empty-package definition whose name is the zero-width
+`<empty>` identifier. An empty valid source file therefore has an empty
+`PackageDef` body and no synthetic trailing `Unit` expression. The lower-level
+`Parser::compilation_unit()` helper remains an internal synthetic-block
+sequence parser for expression/block and definition tests; it is not the
+source-file entry point.
+
+The supported source-unit grammar is intentionally small:
+
+```text
+CompilationUnit -> { package QualId [body] } TopStatSeq
+TopStat         -> package QualId body
+                 | import ImportExpr {',' ImportExpr}
+                 | export ImportExpr {',' ImportExpr}
+                 | supported top-level definition
+```
+
+Package bodies may be braced, scanner-provided indented regions, or the
+unbraced outermost package form. Import and export clauses preserve source
+order and expand comma-separated expressions into separate `Import` or
+`Export` statement trees. Their selectors retain aliases, wildcard selectors,
+and the narrow `given T` type-bound form. Arbitrary top-level expressions and
+package objects remain unsupported; imports and exports are also retained as
+statements inside supported blocks and templates.
+
+Value definitions are preserved as statements in this root: simple identifiers use
 `ValDef` (with `Modifier::Var` for `var`), while non-simple left-hand sides use
 the source-level `PatDef` form. A typed `ValDef` may omit its RHS as a
 declaration, as may a typed `PatDef` containing only simple identifiers. A
@@ -356,8 +379,9 @@ emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 
 `tools/scala-parser-oracle` is pinned to Scala 3.9.0, JDK 25, and sbt 2.0.9.
 It invokes the compiler parser in expression mode by default, the real
-`Parser.pattern()` entry in pattern mode, or expression-mode block fixtures in
-`block` mode, and emits a deterministic JSON view containing
+`Parser.pattern()` entry in pattern mode, or the real `Parser.compilationUnit()`
+entry in compilation mode. Historical expression-mode block fixtures remain
+available in `block` mode. Every mode emits a deterministic JSON view containing
 `kind`, `span`, `name`, `literal`, `operator`, `apply_kind`, parameter-clause
 boundaries, and `children`. It does not compare
 compiler `Tree.show` output. Nodes without a source span are omitted from the
@@ -388,7 +412,11 @@ infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
 `tools/scala-parser-oracle/fixtures/patterns/`; statement-bearing definition
 fixtures live under `tools/scala-parser-oracle/fixtures/definitions/` and are
-run in block mode. `compare.sh` runs all three modes.
+run in block mode; source-unit fixtures live under
+`tools/scala-parser-oracle/fixtures/compilation/` and are run in compilation
+mode. `compare.sh` runs all four modes. The empty compilation unit is the one
+intentional normalization boundary: Dotty exposes `EmptyTree`, while the Rust
+source parser always exposes its documented empty `PackageDef` root.
 The same command is available
 as the manually dispatched `Scala 3.9 parser oracle` workflow in
 `.github/workflows/parser-oracle.yml`. A normalized Scala/Rust mismatch fails
