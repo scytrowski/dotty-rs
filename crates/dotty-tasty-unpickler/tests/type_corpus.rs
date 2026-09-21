@@ -28,6 +28,12 @@ const COMPOUND_TAGS: [(u8, &str); 5] = [
     (93, "BYNAMEtype"),
 ];
 
+/// Match types (Milestone 4d): decoded, but present in neither baseline corpus.
+const MATCH_TAGS: [(u8, &str); 2] = [(190, "MATCHtype"), (192, "MATCHCASEtype")];
+
+/// `MATCHtpt`: the source syntax of a match type, a tree and not a type.
+const MATCHTPT_TAG: u8 = 191;
+
 const TYPEBOUNDS_TAG: u8 = 163;
 const FLEXIBLETYPE_TAG: u8 = 193;
 const CLASSCONST_TAG: u8 = 92;
@@ -92,6 +98,7 @@ fn is_measured(tag: u8) -> bool {
         || RECURSIVE_TAGS.iter().any(|(t, _)| *t == tag)
         || ANNOTATED_TAGS.iter().any(|(t, _)| *t == tag)
         || CONSTANT_TAGS.iter().any(|(t, _)| *t == tag)
+        || MATCH_TAGS.iter().any(|(t, _)| *t == tag)
 }
 
 fn tasty_files(root: &Path) -> Vec<PathBuf> {
@@ -279,6 +286,14 @@ struct ErasedStats {
     erased_params: usize,
 }
 
+/// The wire shape of `MATCHtpt`, measured for context (Milestone 4d).
+#[derive(Default)]
+struct MatchTptSurvey {
+    total: usize,
+    with_bound: usize,
+    case_counts: BTreeMap<usize, usize>,
+}
+
 /// The `ANNOTATEDtype` survey: wire shapes, then decoding outcomes.
 #[derive(Default)]
 struct AnnotationSurvey {
@@ -458,6 +473,9 @@ struct OwnerOracle {
 
 #[derive(Default)]
 struct Tally {
+    /// `MATCHtpt` trees: total, those with an explicit bound, and how many
+    /// have each number of cases. Never given to `unpickle_type`.
+    match_tpt: MatchTptSurvey,
     /// Every class scope entered so far, by the class symbol.
     class_scopes: HashMap<dotty_core::ids::SymbolId, dotty_core::ids::ScopeId>,
     /// `REFin` nodes whose two children decoded: the owner space, the
@@ -871,6 +889,18 @@ fn run(
         .map(|(at, (_, _, head))| (*at, *head))
         .collect();
 
+    let match_index = file.ast_address_index().unwrap();
+    for node in match_index.iter_nodes_with_tag(MATCHTPT_TAG) {
+        let shape = match_index
+            .get(u32::try_from(node.offset).unwrap())
+            .unwrap()
+            .decode_match_tpt()
+            .unwrap();
+        let survey = &mut tally.match_tpt;
+        survey.total += 1;
+        survey.with_bound += usize::from(shape.bound.is_some());
+        *survey.case_counts.entry(shape.cases.len()).or_default() += 1;
+    }
     tally.annotations.total += file
         .ast_address_index()
         .unwrap()
@@ -1474,6 +1504,11 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         );
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);
+        report("match types", &MATCH_TAGS);
+        println!(
+            "MATCHtpt (a tree, not decoded here): total {}, with explicit bound {}, cases per tree {:?}",
+            tally.match_tpt.total, tally.match_tpt.with_bound, tally.match_tpt.case_counts
+        );
         report("binder types", &BINDER_TAGS);
         report("refined and recursive types", &RECURSIVE_TAGS);
         println!(
