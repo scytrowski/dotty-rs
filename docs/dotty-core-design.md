@@ -839,6 +839,7 @@ pub struct Modifiers {
 }
 
 pub enum Modifier {
+    Trait,
     Abstract,
     Final,
     Sealed,
@@ -860,6 +861,12 @@ pub enum Modifier {
     Erased,
 }
 ```
+
+`Trait` is a parser-level definition flag. It preserves the source
+distinction between `trait T` and `class T` when both use the shared
+`TypeDef`/`Template` tree family; it must not be inferred from constructor
+shape or body contents. Later source flags such as `Case` can compose with
+this metadata without changing the phase boundary.
 
 `Var` is attached to the existing untyped `PatDef`, matching Scala's
 parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
