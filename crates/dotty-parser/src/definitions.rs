@@ -52,7 +52,7 @@ where
             }
         };
 
-        let type_start = self.current().span.start();
+        let type_start = self.last_real_token_end;
         let has_explicit_type = is_definition_colon(self);
         let tpt = if has_explicit_type {
             self.advance();
@@ -121,7 +121,7 @@ where
             }
         }
 
-        let type_start = self.current().span.start();
+        let type_start = self.last_real_token_end;
         let tpt = if is_definition_colon(self) {
             self.advance();
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
