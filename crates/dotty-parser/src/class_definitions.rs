@@ -240,7 +240,20 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(self.with_location(crate::Location::InArgs, |parser| parser.expr()));
+                if matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::RightBrace)
+                        | TokenKind::Outdent
+                        | TokenKind::Eof
+                ) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedExpression,
+                        "expected a parent constructor argument",
+                    );
+                    args.push(self.error_expr(self.current_span()));
+                } else {
+                    args.push(self.with_location(crate::Location::InArgs, |parser| parser.expr()));
+                }
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -635,6 +648,51 @@ mod tests {
     }
 
     #[test]
+    fn represents_parent_constructor_arguments_as_new_select_apply() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class Child extends Parent(x)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Extends), 12, 19),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 26, 27),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::Apply(application) = &parser.ast().get(template.parents[0]).kind else {
+            panic!("expected parent constructor application");
+        };
+        let TreeKind::Select(constructor) = &parser.ast().get(application.function).kind else {
+            panic!("expected constructor selection");
+        };
+        let TreeKind::New(new_tree) = &parser.ast().get(constructor.qualifier).kind else {
+            panic!("expected New parent tree");
+        };
+        assert!(matches!(
+            parser.ast().get(new_tree.tpt).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(application.args.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_an_indented_template_body_after_colon_feedback() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -771,6 +829,53 @@ mod tests {
         let _ = parser.parse_class_definition(Location::Elsewhere);
 
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_template_closer_reports_a_diagnostic_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A { value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn malformed_parent_application_stops_at_the_outer_body_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class A extends Parent(}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Extends), 8, 15),
+                token(TokenKind::Identifier, 16, 22),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 22, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
         assert!(!parser.diagnostics().is_empty());
     }
 }
