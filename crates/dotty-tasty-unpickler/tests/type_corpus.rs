@@ -328,6 +328,8 @@ struct CompletionSurvey {
     outcomes_by_new_trees: BTreeMap<(String, &'static str), usize>,
     /// Tags of the term trees the projection refused.
     unsupported_terms: BTreeMap<u8, usize>,
+    /// The `LAMBDAtpt` survey (Milestone 5c): (what, value) -> count.
+    lambdas: BTreeMap<(&'static str, String), usize>,
     /// The first few symbols of the buckets worth a look.
     examples: BTreeMap<&'static str, Vec<String>>,
     unexpected: Vec<String>,
@@ -747,6 +749,7 @@ fn complete_unit(
     }
 
     survey_type_trees(&index, file, &children, survey);
+    survey_lambdas(&index, file, &children, unpickler, survey);
 
     // Completion itself.
     for (at, tag) in definitions {
@@ -870,6 +873,116 @@ fn new_trees_below(children: &HashMap<u32, Vec<(u32, u8)>>, root: Option<(u32, u
         "-".to_owned()
     } else {
         found.into_iter().collect::<Vec<_>>().join("+")
+    }
+}
+
+/// The `LAMBDAtpt` roots of the unit (Milestone 5c): where they sit, their
+/// shape, and whether pass 1 entered their parameters for one owner.
+fn survey_lambdas(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut CompletionSurvey,
+) {
+    const LAMBDATPT: u8 = 171;
+    const TYPEPARAM: u8 = 133;
+    let mut parents: HashMap<u32, (u32, u8)> = HashMap::new();
+    for edge in index.iter_tree_edges() {
+        parents.insert(
+            u32::try_from(edge.child.offset).unwrap(),
+            (u32::try_from(edge.parent.offset).unwrap(), edge.parent.tag),
+        );
+    }
+    let below = |at: u32| children.get(&at).map_or(&[][..], Vec::as_slice);
+    let add = |survey: &mut CompletionSurvey, what: &'static str, value: String| {
+        *survey.lambdas.entry((what, value)).or_default() += 1;
+    };
+    for node in index.iter_nodes_with_tag(LAMBDATPT) {
+        let at = u32::try_from(node.offset).unwrap();
+        add(survey, "total", String::new());
+        // Nearest definition above, and whether a lambda sits in between.
+        let (mut current, mut in_lambda, mut context) = (at, false, "none");
+        while let Some((parent, tag)) = parents.get(&current) {
+            match *tag {
+                LAMBDATPT => in_lambda = true,
+                129 | 130 | 131 | 133 | 134 if context == "none" => {
+                    context = match *tag {
+                        129 => "VALDEF",
+                        130 => "DEFDEF",
+                        131 => "TYPEDEF",
+                        133 => "TYPEPARAM",
+                        _ => "PARAM",
+                    };
+                }
+                _ => {}
+            }
+            current = *parent;
+        }
+        add(
+            survey,
+            "context",
+            format!("{context}{}", if in_lambda { " (nested)" } else { "" }),
+        );
+        let kids = below(at);
+        let params: Vec<u32> = kids
+            .iter()
+            .filter(|(_, tag)| *tag == TYPEPARAM)
+            .map(|(at, _)| *at)
+            .collect();
+        add(survey, "type parameters", params.len().to_string());
+        if let Some((body, _)) = kids.last() {
+            add(survey, "body root", tree_root_name(index, file, *body));
+        }
+        for param in &params {
+            let inside = below(*param);
+            if let Some((bounds, _)) = inside.first() {
+                add(survey, "bounds root", tree_root_name(index, file, *bounds));
+            }
+            for (_, tag) in inside.iter().skip(1) {
+                add(survey, "type parameter modifier tag", tag.to_string());
+            }
+        }
+        // References among the lambda's own parameters (by address).
+        let mut refers_to_own = false;
+        let mut stack: Vec<u32> = kids.iter().map(|(at, _)| *at).collect();
+        while let Some(current) = stack.pop() {
+            for (child, tag) in below(current) {
+                stack.push(*child);
+                if matches!(*tag, 63 | 62)
+                    && let dotty_tasty::tasty::RawTree::Leaf(term) = tree_from(file, *child)
+                    && let dotty_tasty::tasty::TermValue::AstRef(target) = term.value
+                    && params.contains(&target)
+                {
+                    refers_to_own = true;
+                }
+            }
+        }
+        add(
+            survey,
+            "refers to its own parameters",
+            refers_to_own.to_string(),
+        );
+        add(
+            survey,
+            "owner entered",
+            unpickler.index().lambda_owner(at).is_some().to_string(),
+        );
+        add(
+            survey,
+            "owner conflict",
+            unpickler.index().has_lambda_owner_conflict(at).to_string(),
+        );
+    }
+    // How many `SHAREDterm` links end at a lambda.
+    for node in index.iter_nodes_with_tag(60) {
+        let at = u32::try_from(node.offset).unwrap();
+        if let Some((_, target, tag, _)) = follow_shared_terms_in(index, file, at, 16)
+            && tag == LAMBDATPT
+        {
+            let _ = target;
+            add(survey, "SHAREDterm links to a lambda", String::new());
+        }
     }
 }
 
@@ -2140,6 +2253,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 "  unsupported term trees by tag: {:?}, examples: {:?}",
                 survey.unsupported_terms, survey.examples
             );
+            println!("  LAMBDAtpt survey: {:?}", survey.lambdas);
             println!("  completion unexpected: {}", survey.unexpected.len());
             for error in survey.unexpected.iter().take(10) {
                 println!("    {error}");

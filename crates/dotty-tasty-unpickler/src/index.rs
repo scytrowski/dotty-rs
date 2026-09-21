@@ -6,7 +6,7 @@
 //! later reference to the same address resolves to the same identity instead
 //! of building a second one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 
@@ -52,6 +52,16 @@ pub struct TastySemanticIndex {
     term_trees: HashMap<u32, TypeId>,
     /// Term addresses in recording order, to roll back.
     term_tree_order: Vec<u32>,
+    /// The owner each `LAMBDAtpt` entered its type parameters for (Milestone
+    /// 5c, pass 1): the first semantic owner to reach the tree.
+    lambda_owners: HashMap<u32, SymbolId>,
+    /// `LAMBDAtpt` addresses reached again, through a `SHAREDterm`, from a
+    /// different owner than the one that entered them: their parameters are
+    /// owned once, so projecting them is refused (`SharedLambdaOwnerConflict`).
+    lambda_conflicts: HashSet<u32>,
+    /// `(type tree, owner)` pairs the lambda scan has walked, so a tree shared
+    /// by many definitions is walked once per owner, not once per path.
+    lambda_scans: HashSet<(u32, SymbolId)>,
 }
 
 impl TastySemanticIndex {
@@ -79,6 +89,18 @@ impl TastySemanticIndex {
     /// Not a [`type_at`](Self::type_at): that is keyed by type-node address.
     pub fn type_tree_type_at(&self, address: u32) -> Option<TypeId> {
         self.type_trees.get(&address).copied()
+    }
+
+    /// The symbol that owns the type parameters entered for the `LAMBDAtpt` at
+    /// `address`, if it was reached in a declared type-tree position.
+    pub fn lambda_owner(&self, address: u32) -> Option<SymbolId> {
+        self.lambda_owners.get(&address).copied()
+    }
+
+    /// Whether the `LAMBDAtpt` at `address` was reached from more than one
+    /// owner (a `SHAREDterm` shared across definitions).
+    pub fn has_lambda_owner_conflict(&self, address: u32) -> bool {
+        self.lambda_conflicts.contains(&address)
     }
 
     /// The semantic type projected for the term tree at `address`, if any.
@@ -161,6 +183,19 @@ impl TastySemanticIndex {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn insert_lambda_owner(&mut self, address: u32, owner: SymbolId) {
+        self.lambda_owners.insert(address, owner);
+    }
+
+    pub(crate) fn mark_lambda_conflict(&mut self, address: u32) {
+        self.lambda_conflicts.insert(address);
+    }
+
+    /// Whether `(tree, owner)` had not been scanned before; records it.
+    pub(crate) fn first_lambda_scan(&mut self, tree: u32, owner: SymbolId) -> bool {
+        self.lambda_scans.insert((tree, owner))
     }
 
     /// Records the type projected for a term-tree address; a second one for
