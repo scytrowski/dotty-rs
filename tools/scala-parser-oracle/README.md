@@ -14,7 +14,7 @@ it with the selected SDKMAN defaults:
 
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
-text, and child nodes. It does not use `Tree.show`, because that output is a
+text, application kind, operators, and child nodes. It does not use `Tree.show`, because that output is a
 compiler presentation rather than a compatibility protocol.
 
 Compiler source offsets are UTF-16 code-unit offsets. Consumers comparing them
@@ -27,7 +27,8 @@ simple type applications, repeated suffix chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
-narrow bare-identifier named-argument form, and `if`/`while` expressions,
+narrow bare-identifier named-argument form, `using` argument lists, expression
+type ascriptions, indented colon arguments, and `if`/`while` expressions,
 including basic indented bodies, plus braced and indented `match` expressions
 with case patterns, guards, and bodies. The current control-flow subset also
 includes `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`,

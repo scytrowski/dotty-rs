@@ -326,9 +326,20 @@ where
     }
 
     pub(super) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
+        self.parse_indented_block_with_feedback(false)
+    }
+
+    pub(super) fn parse_feedback_indented_block(&mut self) -> TreeId<Untyped> {
+        self.parse_indented_block_with_feedback(true)
+    }
+
+    fn parse_indented_block_with_feedback(&mut self, feedback_outdent: bool) -> TreeId<Untyped> {
         self.advance();
         let mark = self.mark();
         let (stats, expr) = self.parse_expression_block_body(TokenKind::Outdent);
+        if feedback_outdent && !self.cursor.at(TokenKind::Outdent) {
+            self.observe_outdented();
+        }
         if !self.accept(TokenKind::Outdent) {
             self.report(
                 crate::ParseDiagnosticKind::ExpectedToken,
