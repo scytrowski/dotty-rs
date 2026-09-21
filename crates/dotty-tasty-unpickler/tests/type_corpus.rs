@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use dotty_core::store::SemanticStore;
 use dotty_core::{Definitions, Packages};
-use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::tasty::{TastyFile, is_compact_annot_type_tag};
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
 /// Every node tag that is a type reference, or a `THIS` prefix.
@@ -66,8 +66,21 @@ const CONSTANT_TAGS: [(u8, &str); 13] = [
     (CLASSCONST_TAG, "CLASSconst"),
 ];
 
-/// Forms that stay unsupported; only their instances are counted.
-const UNSUPPORTED_TAGS: [(u8, &str); 1] = [(153, "ANNOTATEDtype")];
+/// The annotated type, decoded since Milestone 4b1 (compact annotations only).
+const ANNOTATED_TAG: u8 = 153;
+const ANNOTATED_TAGS: [(u8, &str); 1] = [(ANNOTATED_TAG, "ANNOTATEDtype")];
+const TYPEREFIN_TAG: u8 = 175;
+const TERMREFIN_TAG: u8 = 174;
+
+/// Scala 3.9's compact annotation tags (`isCompactAnnotTypeTag`).
+const COMPACT_HEADS: [(u8, &str); 6] = [
+    (161, "APPLIEDtype"),
+    (61, "SHAREDtype"),
+    (117, "TYPEREF"),
+    (63, "TYPEREFdirect"),
+    (116, "TYPEREFsymbol"),
+    (TYPEREFIN_TAG, "TYPEREFin"),
+];
 
 /// Whether `tag` is a form measured node by node (compound, bounds, flexible or
 /// constant) rather than as a reference.
@@ -76,6 +89,7 @@ fn is_measured(tag: u8) -> bool {
         || WRAPPER_TAGS.iter().any(|(t, _)| *t == tag)
         || BINDER_TAGS.iter().any(|(t, _)| *t == tag)
         || RECURSIVE_TAGS.iter().any(|(t, _)| *t == tag)
+        || ANNOTATED_TAGS.iter().any(|(t, _)| *t == tag)
         || CONSTANT_TAGS.iter().any(|(t, _)| *t == tag)
 }
 
@@ -111,6 +125,9 @@ struct Outcomes {
     missing_local: usize,
     /// A child of a compound node is a form with no decoder yet.
     unsupported_child: usize,
+    /// A full annotation tree under the node (Milestone 4b1: an
+    /// `ANNOTATEDtype` whose payload is a tree, deferred to 4b2).
+    deferred_annotation: usize,
     /// A binder reference or parameter that is malformed: an invalid binder
     /// address, kind, parameter index, or a parameter info that is not bounds.
     binder_errors: usize,
@@ -171,8 +188,50 @@ fn variance_failure(error: &UnpickleError) -> &'static str {
     }
 }
 
+/// How the compact `ANNOTATEDtype` nodes fared (Milestone 4b1).
+#[derive(Default)]
+struct CompactOutcomes {
+    total: usize,
+    decoded: usize,
+    external: usize,
+    local_missing: usize,
+    unsupported_child: usize,
+    /// `TYPEREFin`/`TERMREFin` anywhere under the node (Milestone 4c).
+    typerefin_deferred: usize,
+    /// The annotation itself is a `TYPEREFin` that is not decoded yet.
+    typerefin_head_deferred: usize,
+    unsupported_prefix: usize,
+    invalid_compact_type: usize,
+    malformed: usize,
+    other_known: usize,
+    /// A full annotation tree met below a compact node: in its parent.
+    parent_full_tree: usize,
+}
+
+/// How the full-tree `ANNOTATEDtype` nodes fared.
+#[derive(Default)]
+struct FullOutcomes {
+    total: usize,
+    deferred: usize,
+    /// Failed before the annotation boundary, on the parent.
+    parent_failed: usize,
+    /// Decoded although its payload is a tree: a bug, never expected.
+    decoded: usize,
+}
+
+/// The `ANNOTATEDtype` survey: wire shapes, then decoding outcomes.
+#[derive(Default)]
+struct AnnotationSurvey {
+    total: usize,
+    compact_heads: BTreeMap<u8, usize>,
+    full_roots: BTreeMap<u8, usize>,
+    compact: CompactOutcomes,
+    full: FullOutcomes,
+}
+
 #[derive(Default)]
 struct Tally {
+    annotations: AnnotationSurvey,
     variance: VarianceBounds,
     units: usize,
     units_with_a_decoded_type: usize,
@@ -193,8 +252,6 @@ struct Tally {
     /// distinct canonical `RecThis` types they got (Milestone 4a).
     rec_binders: usize,
     rec_canonical_ids: usize,
-    /// Nodes of the forms that stay unsupported.
-    unsupported_nodes: BTreeMap<u8, usize>,
     unresolved_members: usize,
     unresolved_packages: usize,
     unsupported: BTreeMap<u8, usize>,
@@ -209,6 +266,63 @@ struct Tally {
     missing_outside_bodies: usize,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: Vec<String>,
+}
+
+/// The name of a tag observed at the root of a full annotation tree.
+fn full_root_name(tag: u8) -> String {
+    match tag {
+        60 => "SHAREDterm".to_owned(),
+        95 => "NEW".to_owned(),
+        136 => "APPLY".to_owned(),
+        other => format!("tag {other}"),
+    }
+}
+
+/// Files one `ANNOTATEDtype` root under its wire shape and its outcome.
+/// `head` is the first tag of the annotation payload.
+fn record_annotation(
+    survey: &mut AnnotationSurvey,
+    head: Option<u8>,
+    result: &Result<dotty_core::ids::TypeId, UnpickleError>,
+) {
+    let Some(head) = head else { return };
+    if !is_compact_annot_type_tag(head) {
+        let full = &mut survey.full;
+        full.total += 1;
+        match result {
+            Ok(_) => full.decoded += 1,
+            Err(UnpickleError::UnsupportedAnnotationTree { .. }) => full.deferred += 1,
+            Err(_) => full.parent_failed += 1,
+        }
+        return;
+    }
+    let compact = &mut survey.compact;
+    compact.total += 1;
+    match result {
+        Ok(_) => compact.decoded += 1,
+        Err(UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. }) => {
+            compact.external += 1;
+        }
+        Err(UnpickleError::MissingReferencedSymbol { .. }) => compact.local_missing += 1,
+        Err(UnpickleError::UnsupportedType { tag, .. })
+            if *tag == TYPEREFIN_TAG || *tag == TERMREFIN_TAG =>
+        {
+            compact.typerefin_deferred += 1;
+            compact.typerefin_head_deferred += usize::from(head == TYPEREFIN_TAG);
+        }
+        Err(UnpickleError::UnsupportedType { .. }) => compact.unsupported_child += 1,
+        Err(UnpickleError::UnsupportedResolutionPrefix { .. }) => compact.unsupported_prefix += 1,
+        Err(UnpickleError::InvalidCompactAnnotationType { .. }) => {
+            compact.invalid_compact_type += 1;
+        }
+        Err(UnpickleError::MalformedType { .. } | UnpickleError::Ast(_)) => compact.malformed += 1,
+        Err(UnpickleError::UnsupportedAnnotationTree { .. }) => compact.parent_full_tree += 1,
+        Err(
+            UnpickleError::AmbiguousMember { .. }
+            | UnpickleError::UnsupportedSignedReference { .. },
+        ) => compact.other_known += 1,
+        Err(_) => {}
+    }
 }
 
 /// Enters the unit and decodes every reference node in it.
@@ -275,9 +389,6 @@ fn run(
                     Err(_) => tally.bounds.malformed += 1,
                 }
             }
-            if UNSUPPORTED_TAGS.iter().any(|(tag, _)| *tag == node.tag) {
-                *tally.unsupported_nodes.entry(node.tag).or_default() += 1;
-            }
         }
     }
 
@@ -305,6 +416,38 @@ fn run(
             .collect();
         (bounds, sources)
     };
+
+    // Each `ANNOTATEDtype`'s annotation payload: the tag of its second child.
+    let annotation_heads: HashMap<u32, u8> = {
+        let index = file.ast_address_index().unwrap();
+        let mut heads = HashMap::new();
+        let mut seen: HashMap<u32, usize> = HashMap::new();
+        for edge in index.iter_tree_edges() {
+            if edge.parent.tag == ANNOTATED_TAG {
+                let parent = u32::try_from(edge.parent.offset).unwrap();
+                let position = seen.entry(parent).or_default();
+                if *position == 1 {
+                    heads.insert(parent, edge.child.tag);
+                }
+                *position += 1;
+            }
+        }
+        heads
+    };
+
+    tally.annotations.total += file
+        .ast_address_index()
+        .unwrap()
+        .iter_nodes_with_tag(ANNOTATED_TAG)
+        .count();
+    for head in annotation_heads.values() {
+        let heads = if is_compact_annot_type_tag(*head) {
+            &mut tally.annotations.compact_heads
+        } else {
+            &mut tally.annotations.full_roots
+        };
+        *heads.entry(*head).or_default() += 1;
+    }
 
     // For each `RECthis`, the binder address it names (its one `Nat`).
     let rec_this_target = |at: u32| -> Option<u32> {
@@ -350,7 +493,15 @@ fn run(
                 .is_some_and(|param| unpickler.index().type_at(param.binder.address).is_some());
             outcomes.binder_on_demand += usize::from(!binder_known);
         }
-        match unpickler.unpickle_type(at) {
+        let result = unpickler.unpickle_type(at);
+        if tag == ANNOTATED_TAG {
+            record_annotation(
+                &mut tally.annotations,
+                annotation_heads.get(&at).copied(),
+                &result,
+            );
+        }
+        match result {
             Ok(first) => {
                 decoded += 1;
                 outcomes.decoded += 1;
@@ -434,6 +585,9 @@ fn run(
                         outcomes.unexpected += 1;
                         tally.unexpected.push(format!("{label} @{at}: {error:?}"));
                     }
+                    UnpickleError::UnsupportedAnnotationTree { .. } => {
+                        outcomes.deferred_annotation += 1;
+                    }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
                     UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
                     UnpickleError::UnsupportedResolutionPrefix { .. } => {
@@ -463,6 +617,17 @@ fn run(
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
     unpickler.into_parts().1
+}
+
+#[test]
+fn the_corpus_report_names_exactly_the_compact_annotation_tags() {
+    let named: Vec<u8> = COMPACT_HEADS.iter().map(|(tag, _)| *tag).collect();
+    let compact: Vec<u8> = (0..=u8::MAX)
+        .filter(|tag| is_compact_annot_type_tag(*tag))
+        .collect();
+    let mut sorted = named.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, compact);
 }
 
 #[test]
@@ -603,7 +768,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 let none = Outcomes::default();
                 let o = tally.compound.get(tag).unwrap_or(&none);
                 println!(
-                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, binder errors {}; binder decoded on demand {}; unexpected {}",
+                    "  {label}: nodes {}, decoded {}; failures: external {}, ambiguous {}, signed {}, unsupported prefix {}, local {}, unsupported form {}, full annotation tree {}, binder errors {}; binder decoded on demand {}; unexpected {}",
                     o.nodes,
                     o.decoded,
                     o.needs_external,
@@ -612,6 +777,7 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                     o.unsupported_prefix,
                     o.missing_local,
                     o.unsupported_child,
+                    o.deferred_annotation,
                     o.binder_errors,
                     o.binder_on_demand,
                     o.unexpected,
@@ -649,12 +815,57 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             tally.bounds.decoded_alias,
             tally.bounds.decoded_two_sided,
         );
-        for (tag, label) in UNSUPPORTED_TAGS {
-            println!(
-                "{label}: {}",
-                tally.unsupported_nodes.get(&tag).copied().unwrap_or(0)
-            );
-        }
+        let survey = &tally.annotations;
+        let head_name = |tag: &u8| {
+            COMPACT_HEADS
+                .iter()
+                .find(|(t, _)| t == tag)
+                .map_or_else(|| format!("tag {tag}"), |(_, name)| (*name).to_owned())
+        };
+        println!(
+            "ANNOTATEDtype: total {}, compact {}, full tree {}, unclassified {}",
+            survey.total,
+            survey.compact.total,
+            survey.full.total,
+            survey.total - survey.compact.total - survey.full.total,
+        );
+        println!(
+            "  compact by wire head: {:?}",
+            survey
+                .compact_heads
+                .iter()
+                .map(|(tag, count)| (head_name(tag), *count))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  full tree by root tag: {:?}",
+            survey
+                .full_roots
+                .iter()
+                .map(|(tag, count)| (full_root_name(*tag), *count))
+                .collect::<Vec<_>>()
+        );
+        let c = &survey.compact;
+        println!(
+            "  compact outcomes: total {}, decoded {}, external {}, local missing {}, unsupported child {}, TYPEREFin/TERMREFin deferred {} (annotation is TYPEREFin: {}), unsupported prefix {}, invalid compact type {}, malformed {}, other known {}, full tree in parent {}",
+            c.total,
+            c.decoded,
+            c.external,
+            c.local_missing,
+            c.unsupported_child,
+            c.typerefin_deferred,
+            c.typerefin_head_deferred,
+            c.unsupported_prefix,
+            c.invalid_compact_type,
+            c.malformed,
+            c.other_known,
+            c.parent_full_tree,
+        );
+        let f = &survey.full;
+        println!(
+            "  full outcomes: total {}, deferred as UnsupportedAnnotationTree {}, parent failed first {}, decoded {}",
+            f.total, f.deferred, f.parent_failed, f.decoded
+        );
         println!(
             "unresolved: members {}, packages {}",
             tally.unresolved_members, tally.unresolved_packages
@@ -675,6 +886,35 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         }
         assert!(tally.unexpected.is_empty());
         assert_eq!(tally.missing_outside_bodies, 0);
+        // Every annotated type is either compact or a full tree, and every
+        // compact one is filed under an outcome.
+        assert_eq!(survey.total, survey.compact.total + survey.full.total);
+        assert_eq!(
+            survey.compact.total,
+            survey.compact_heads.values().sum::<usize>()
+        );
+        assert_eq!(
+            survey.compact.total,
+            c.decoded
+                + c.external
+                + c.local_missing
+                + c.unsupported_child
+                + c.typerefin_deferred
+                + c.unsupported_prefix
+                + c.invalid_compact_type
+                + c.malformed
+                + c.other_known
+                + c.parent_full_tree
+        );
+        // A full tree is never decoded with its tree dropped.
+        assert_eq!(survey.full.decoded, 0);
+        assert_eq!(
+            survey.full.total,
+            survey.full.deferred + survey.full.parent_failed
+        );
+        for tag in survey.compact_heads.keys() {
+            assert!(is_compact_annot_type_tag(*tag));
+        }
         // A well-formed marker never fails for being a marker.
         for kind in [
             "pending variance target",

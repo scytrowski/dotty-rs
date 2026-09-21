@@ -596,8 +596,7 @@ fn a_reference_to_an_address_that_is_not_a_node_is_an_invalid_target() {
 
 #[test]
 fn unmodelled_types_are_explicitly_unsupported() {
-    // Annotated types are not decoded yet. (Name-based references are: see
-    // `tests/name_resolution.rs`.)
+    // (Name-based references are decoded: see `tests/name_resolution.rs`.)
     let annotation = nodes_with_tag(DISTINCT, 173);
     assert!(!annotation.is_empty());
 

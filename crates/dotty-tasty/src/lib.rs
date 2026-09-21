@@ -86,7 +86,7 @@ pub use ast::{
     TYPEBOUNDSTPT_TAG, TYPED_TAG, TYPEDEF_TAG, TYPELAMBDATYPE_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
     TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TemplateNode,
     TemplateStructure, TypeApplyNode, TypeBoundsNode, TypedNode, UNAPPLY_TAG, UnapplyNode,
-    VALDEF_TAG, WHILE_TAG, WhileNode,
+    VALDEF_TAG, WHILE_TAG, WhileNode, is_compact_annot_type_tag,
 };
 pub use file::{AstTreePosition, EncodedTastyFile, TastyFile, TastyFileBuilder, TastyFileError};
 pub use header::{

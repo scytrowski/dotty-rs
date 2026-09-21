@@ -5,6 +5,11 @@
 # Requires `java` on PATH and the Scala 3.9.0 compiler dependencies already
 # present in the cache; set COURSIER_CACHE to use a non-default cache.
 #
+# No fixture needs a compiler option other than -Yexplicit-nulls for the units
+# under explicit_nulls/. CaptureChecking.scala and Erased.scala turn their
+# experimental features on with `import scala.language.experimental.*` in the
+# source, which the 3.9.0 compiler accepts without a flag.
+#
 # usage: tests/fixtures/semantic/generate.sh
 set -euo pipefail
 

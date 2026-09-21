@@ -21,8 +21,10 @@ Status (`crates/dotty-tasty-unpickler`):
   implemented (§4, "Variance-bearing `TYPEBOUNDS`"). This closes the binder
   milestone.
 - Milestone 4a, recursive and refined types (`REFINEDtype`, `RECtype`,
-  `RECthis`): implemented (§4, "Recursive and refined types"). Milestone 4b
-  (annotated types) is next.
+  `RECthis`): implemented (§4, "Recursive and refined types").
+- Milestone 4b1, compact annotated types (`ANNOTATEDtype` whose annotation is a
+  type): implemented (§4, "Annotated types"). Full annotation trees are a typed
+  deferral; Milestone 4b2 decides their boundary.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -72,7 +74,8 @@ function. It follows an enter-before-complete model:
 | 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
 | 3c. Binder rebinding | `dotty_core::rebind_type_lambda`; variance-bearing `TYPEBOUNDS`; `declared_variance: Option<Variance>` | 3c |
 | 4a. Refined and recursive | `Refined`, `Recursive`, `RecThis` | 4a |
-| 4b. Annotated types | `ANNOTATEDtype`, the annotation boundary, `MethodParam.erased` | 4b |
+| 4b1. Compact annotated types | `Annotated` with `Annotation { ty, tree: None }`; full trees deferred | 4b1 |
+| 4b2. Full annotation trees | the annotation boundary, `MethodParam.erased` | 4b2 |
 | 4c. `*REFin` | `TYPEREFin` / `TERMREFin` owner-space resolution | 4c |
 | 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
@@ -522,10 +525,13 @@ guess. `varargs` is the JVM `ACC_VARARGS` distinction (a Java `T...`), which
 `METHODtype` does not encode: Scala's repeated parameter is the parameter's
 *type*. It is not inferred from position or name. Dotty derives `erased` from
 an `ErasedParamAnnot` on the parameter *type* (`MethodType.hasErasedParams`),
-not from a clause modifier, and that type is an `ANNOTATEDtype`, which is not
-decoded yet, so a method whose parameter is erased does not decode at all
-today. When Milestone 4 decodes annotations it must revisit this and derive
-`erased` from them if the field stays in the core model. The type node is also
+not from a clause modifier, and that type is an `ANNOTATEDtype`. Milestone 4b1
+audited the real wire (Scala 3.9.0, `Erased.scala`): the annotation is a *full*
+tree, `new scala.annotation.internal.ErasedParam` (root tag `APPLY`), not a
+compact one, so a method whose parameter is erased still does not decode (it is
+`UnsupportedAnnotationTree`) and `erased` stays `false`. Milestone 4b2 must
+derive `erased` once full trees have a semantic form, if the field stays in the
+core model. The type node is also
 self-contained: a `METHODtype` in a refinement has no `DEFDEF` whose parameter
 flags could be copied, so nothing is read from definition symbols.
 
@@ -605,6 +611,66 @@ self-referential shape that needs no lookup does decode: `Base { def me: this.ty
 is `Recursive -> Refined -> ByName -> RecThis`, the `RecThis` naming the exact
 `Recursive` id, in either decode order.
 
+### Annotated types (Milestone 4b1)
+
+```text
+ANNOTATEDtype Length parent_Type annotation
+```
+
+Scala 3.9's `TreeUnpickler` reads the annotation in one of two forms, chosen by
+the **first tag of the payload** (`isCompactAnnotTypeTag`, mirrored exactly by
+`dotty_tasty::tasty::is_compact_annot_type_tag`):
+
+| first tag | form | result |
+|-----------|------|--------|
+| `APPLIEDtype`, `SHAREDtype`, `TYPEREF`, `TYPEREFdirect`, `TYPEREFsymbol`, `TYPEREFin` | compact: a type | `Type::Annotated { underlying, annotation }`, `Annotation { ty, tree: None }` |
+| anything else (`APPLY`, `NEW`, `SHAREDterm`, ...) | full: an annotation tree | `UnsupportedAnnotationTree { address, annotation_address, tag }` |
+
+The set is upstream's and no wider: `TYPEREFpkg`, `TERMREF*`, `THIS` and the
+binder types look like types and are not in it, so they mean a tree (a test
+pins the whole 0..=255 tag range). The outer `ANNOTATEDtype` is understood in
+both cases; `UnsupportedType { tag: ANNOTATEDtype }` is no longer produced.
+
+The structural decoder validates the shape; both children come from the AST
+index by absolute address (`children[0]` the parent, `children[1]` the
+annotation), and a count that disagrees is `MalformedType`. The parent is
+decoded first, through the ordinary type pipeline, as Dotty does, so it keeps
+address identity, `SHAREDtype`, binders, refinements and rollback. A compact
+annotation is decoded as a normal type and must be a `TypeRef` or `Applied`,
+which is what `CompactAnnotation` asserts. The wire tag only says "a type": a
+`SHAREDtype` may reach anything, or a binder still being decoded, and either is
+`InvalidCompactAnnotationType { address, annotation_type }`. The annotation
+keeps its whole type: `Applied { tycon, args }` is stored as such, not reduced
+to its class, because retaining annotations carry their arguments there.
+
+`tree: None` is lossless for a compact annotation because it *is* its type
+(Dotty's `CompactAnnotation.tree` is `TypeTree(tpe)`). It would not be for a
+full annotation, whose constructor, type and term arguments live in the tree:
+the model could no longer tell "a tree we dropped" from "a compact annotation".
+So a full tree is refused, and the semantic unpickler does not build
+`AstArena<Typed>` yet. Note the upstream comment: for Scala 3.9 the only
+compact annotations are the capture-checking `retains` family, and the
+pickler writes a `CompactAnnotation` as a type only for source version 3.9 or
+later.
+
+Identity follows the rest of the pass. One address is one `TypeId` and one
+`AnnotationId` (decoding it again allocates nothing); a `SHAREDtype` to an
+annotated node returns that node's `TypeId`, never its parent and never a
+second annotation. Annotations are not interned: two nodes with equal
+compact types get two `AnnotationId`s, and `p @a1 @a2` stays two nested
+`Annotated` types in the order written (inner annotation allocated first). A
+failed call rolls back both arenas and the type index.
+
+`Annotated` is a *proxy for member lookup*, as Dotty's `AnnotatedType` is a
+`CachedProxyType` whose `underlying` is the parent: a name-based reference
+whose prefix is `Annotated(C, ann)` looks `C`'s declarations up, just as for
+`Flexible` (and any nesting of the two, bounded). The wrapper stays in the
+graph and is never stripped.
+
+`Annotated` inside a `TypeLambda` that a variance marker rebinds is rebound by
+the existing rebinder: the annotation is a new one when its type names the
+lambda, and reused otherwise (tested with real wire shapes).
+
 ### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 
 `TYPEBOUNDS Length Type Type? Variance*`, with `STABLE`, `COVARIANT` or
@@ -677,8 +743,8 @@ links to one lambda (only the upper carries the marker). An unannotated
 beside another declared variance.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
-`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin`,
-`ANNOTATEDtype` and match types.
+`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin` and
+match types.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -798,8 +864,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — complete.
 4. Advanced types, in steps:
    - 4a: `Refined`, `Recursive`, `RecThis` — complete;
-   - 4b: annotated types and the annotation boundary, then
-     `MethodParam.erased` from `ErasedParamAnnot`;
+   - 4b1: compact `ANNOTATEDtype` and the annotation corpus survey — complete;
+   - 4b2: the full-annotation-tree boundary, then `MethodParam.erased` from
+     `ErasedParamAnnot`;
    - 4c: `TYPEREFin` / `TERMREFin` owner-space resolution;
    - 4d: `Match` / `MatchCase` and whatever else measurement shows.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
@@ -919,7 +986,7 @@ built.
 
 "External" is `UnresolvedMember` / `UnresolvedPackage`, "local" is a reference
 to a definition pass 1 does not enter, "unsupported form" a child with no
-decoder yet (most often `TYPEBOUNDS` and `ANNOTATEDtype`). No `APPLIEDtype`
+decoder yet (at the time, most often `TYPEBOUNDS` and `ANNOTATEDtype`). No `APPLIEDtype`
 is `UnsupportedType`. There were 0 unexpected errors in either corpus.
 
 The compiler corpus mostly applies types from the library (`List`, `Option`,
@@ -969,7 +1036,7 @@ binder is invalid (0 `InvalidBinderReference`, `InvalidBinderKind`,
 `InvalidParameterIndex` or `InvalidTypeParameterBounds`), and there were 0
 unexpected errors in any run. What remains is child resolution: an external
 type in a parameter's bounds or in the result, and the odd unsupported child
-(`ANNOTATEDtype`). (`TYPEBOUNDS` with variance markers, which used to be a
+(`ANNOTATEDtype`, since 4b1 a compact or full-tree case). (`TYPEBOUNDS` with variance markers, which used to be a
 deferred bucket here, decode since 3c.) "Binder decoded
 on demand" counts `PARAMtype` roots asked for before their binder had a type:
 1,672 / 169 with no builtins (every lambda fails, so none is ever cached) and
@@ -980,13 +1047,7 @@ The builtin run also moves the earlier tables: with `Any`/`Nothing` provided,
 `TYPEBOUNDS` decodes 639 / 706 nodes (from 35 / 584), all now reachable
 lambdas' parameter infos among them.
 
-Nodes with no decoder yet (instances in the corpus):
-
-| node | library | compiler |
-|------|---------|----------|
-| `ANNOTATEDtype` | 2,014 | 5,409 |
-
-`ANNOTATEDtype` belongs to the annotation work.
+`ANNOTATEDtype` had no decoder at 3a; see "Annotated types after 4b1".
 
 ### Binder types after 3b (library / compiler)
 
@@ -1054,9 +1115,64 @@ ids 0, and the two `RECthis` roots are asked for before their binder has a type
 (binder decoded on demand 2). The corpus test also asserts the canonicalization
 invariant (one `TypeId` per binder) for every decoded `RECthis`, which the
 fixtures exercise instead. The 9 library refinements with an unsupported form
-fail on a child (`ANNOTATEDtype`), the rest on an external type. Recursive
+fail on a child (`ANNOTATEDtype`; since 4b1 each is a full annotation tree, see
+below), the rest on an external type. Recursive
 binder errors: 0, unexpected errors: 0 in every run, and none of the three forms
 is reported as an unsupported form.
+
+### Annotated types after 4b1 (library / compiler)
+
+Same method, same two runs (each `ANNOTATEDtype` decoded as its own root;
+"builtins" = `scala.Any`/`Nothing`/`Null` entered). Every node is classified by
+the first tag of its annotation payload, taken from the AST index.
+
+| | library | compiler |
+|---|---------|----------|
+| `ANNOTATEDtype` nodes | 2,014 | 5,409 |
+| compact | 17 | 0 |
+| full tree | 1,997 | 5,409 |
+
+Compact by wire head: library `SHAREDtype` 12, `APPLIEDtype` 4, `TYPEREF` 1;
+none of `TYPEREFdirect`, `TYPEREFsymbol`, `TYPEREFin`; the compiler has none.
+Full tree by root tag (all observed): library `APPLY` 1,976 and `SHAREDterm`
+21; compiler `APPLY` 5,206, `NEW` 147 and `SHAREDterm` 56. (`SHAREDterm` is a
+term link to a tree written earlier, which is why it is a tree, not a
+`SHAREDtype`.)
+
+| compact outcome (library) | no builtins | builtins |
+|---------------------------|-------------|----------|
+| decoded | 1 | 3 |
+| external child | 8 | 6 |
+| full tree in the parent | 8 | 8 |
+| `TYPEREFin`/`TERMREFin` deferred | 0 | 0 |
+| local missing, unsupported child or prefix, invalid compact type, malformed | 0 | 0 |
+
+The 8 compact nodes "with a full tree in the parent" have a parent type that
+itself contains a full annotation tree; they surface that deferral, not a fault
+of the compact form. No compact annotation was a
+`TYPEREFin`, so the `TYPEREFin` deferral (Milestone 4c) does not show yet.
+
+| full outcome | library no builtins / builtins | compiler |
+|--------------|--------------------------------|----------|
+| deferred as `UnsupportedAnnotationTree` | 1,723 / 1,755 | 2,085 / 2,102 |
+| the parent failed first | 274 / 242 | 3,324 / 3,307 |
+| decoded (never expected) | 0 | 0 |
+
+Effect on the other forms: what used to be `UnsupportedType { tag: 153 }` is
+now either a decode, a deferral or an earlier failure. No form gained a decode
+from the compact case beyond the 1 (3 with builtins) compact annotated types
+themselves and one library `TYPEBOUNDS` (35 to 36 decoded, 716 to 717 with
+builtins). The 9 library
+`REFINEDtype` nodes that used to fail on an `ANNOTATEDtype` child all still
+fail, now as `UnsupportedAnnotationTree` (0 decode, 0 move to another failure):
+their annotations are full trees. Likewise `APPLIEDtype` 107, `BYNAMEtype` 15,
+`ANDtype` 7, `FLEXIBLEtype` 3 and `ORtype` 2 (library) report a full tree in place
+of an unsupported form; `TYPELAMBDAtype`, `PARAMtype`, `TYPEBOUNDS` and the
+other counts are unchanged, apart from a few nodes whose earlier failure was
+`UnsupportedType(153)` and is now an external type reached first. 0 unexpected
+errors in any run. The unsupported forms still reached are `TYPEREFin` (13 in
+the library, 12 in the compiler; Milestone 4c) and, in the library, 5
+`REFINEDtpt`.
 
 ## 9. Review of Milestone 1
 
