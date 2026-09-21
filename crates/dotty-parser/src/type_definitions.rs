@@ -1,10 +1,10 @@
 //! Source-level `type` definitions.
 //!
 //! This module owns the statement boundary for simple aliases and abstract
-//! type bounds. Parameterized definitions are layered on top of the same
-//! entry point and reuse `type_params.rs` in a later increment.
+//! type bounds. Parameterized definitions reuse `type_params.rs` and preserve
+//! the source-level abstraction in `LambdaTypeTree`.
 
-use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
 use dotty_core::{TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
 use crate::statements::ParsedStatement;
@@ -19,7 +19,31 @@ where
         self.advance();
 
         let name = self.parse_type_definition_name();
+        self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+            dotty_core::Punctuation::LeftBracket,
+        ));
+        let type_params_mark = if self.current().kind
+            == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket)
+        {
+            Some(self.mark())
+        } else {
+            None
+        };
+        let type_params = type_params_mark
+            .map(|_| self.parse_type_param_clause(crate::ParamOwner::Hk))
+            .unwrap_or_default();
         let rhs = self.parse_type_definition_rhs(location);
+        let rhs = if let Some(mark) = type_params_mark {
+            self.alloc_from(
+                mark,
+                TreeKind::LambdaTypeTree(LambdaTypeTree {
+                    type_params,
+                    body: rhs,
+                }),
+            )
+        } else {
+            rhs
+        };
         let definition = self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
@@ -115,7 +139,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{TypeBoundsTree, TypeDef};
+    use dotty_core::ast::{LambdaTypeTree, TypeBoundsTree, TypeDef};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
     #[test]
@@ -170,6 +194,146 @@ mod tests {
             panic!("expected type definition statement");
         };
         assert!(matches!(parser.ast().get(id).kind, TreeKind::TypeDef(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_parameterized_type_alias_as_a_lambda_type_tree() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type F[A] = A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    6,
+                    7,
+                ),
+                token(TokenKind::Identifier, 7, 8),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    8,
+                    9,
+                ),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::LambdaTypeTree(LambdaTypeTree {
+            ref type_params,
+            body,
+        }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected LambdaTypeTree");
+        };
+        assert_eq!(type_params.len(), 1);
+        assert!(
+            matches!(parser.ast().get(body).kind, TreeKind::Ident(ident) if ident.name.is_type())
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_multiple_type_parameters_in_a_type_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type EitherLike[A, B] = A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 15),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    15,
+                    16,
+                ),
+                token(TokenKind::Identifier, 16, 17),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::Comma),
+                    17,
+                    18,
+                ),
+                token(TokenKind::Identifier, 19, 20),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    20,
+                    21,
+                ),
+                token(TokenKind::Operator, 22, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::LambdaTypeTree(LambdaTypeTree {
+            ref type_params, ..
+        }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected LambdaTypeTree");
+        };
+        assert_eq!(type_params.len(), 2);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn wraps_parameterized_abstract_bounds_in_a_lambda_type_tree() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type F[A] <: Upper",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    6,
+                    7,
+                ),
+                token(TokenKind::Identifier, 7, 8),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    8,
+                    9,
+                ),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { body, .. }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected LambdaTypeTree");
+        };
+        assert!(matches!(
+            parser.ast().get(body).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
