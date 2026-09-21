@@ -30,6 +30,9 @@
 //! result, is not stored in `dotty-core`, and is empty whenever
 //! `unpickle_type` returns.
 
+/// The class Dotty calls `defn.ErasedParamAnnot`, by exact package path.
+const ERASED_PARAM: [&str; 4] = ["scala", "annotation", "internal", "ErasedParam"];
+
 use dotty_core::ids::TypeId;
 use dotty_core::names::{TermName, TypeName};
 use dotty_core::types::{
@@ -331,15 +334,17 @@ impl TastyUnpickler<'_, '_, '_> {
                 params: type_params(),
                 result,
             }),
-            // `erased` and `varargs` are not on the wire of a `METHODtype`:
-            // see the module documentation.
+            // `varargs` is not on the wire of a `METHODtype`. `erased` is not
+            // either: as in Dotty (`hasErasedParams`) it is an `ErasedParamAnnot`
+            // on the parameter's type, read from the outer chain of `Annotated`
+            // wrappers only. See the module documentation.
             Methodic::Method(kind) => Type::Method(MethodType {
                 params: params
                     .iter()
                     .map(|(name, info)| MethodParam {
                         name: TermName::new(*name),
                         ty: *info,
-                        erased: false,
+                        erased: self.store.has_annotation(*info, &ERASED_PARAM),
                         varargs: false,
                     })
                     .collect(),

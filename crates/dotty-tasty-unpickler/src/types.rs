@@ -51,17 +51,20 @@
 //! | TASTy                 | wire shape                | semantic type                      |
 //! |-----------------------|---------------------------|------------------------------------|
 //! | `ANNOTATEDtype`       | `Type Type` (compact)     | `Annotated { underlying, annotation }` |
-//! | `ANNOTATEDtype`       | `Type Tree` (full)        | `UnsupportedAnnotationTree`        |
+//! | `ANNOTATEDtype`       | `Type APPLY/NEW` (full)   | `Annotated`, `Annotation { ty, arguments, tree: None }` |
+//! | `ANNOTATEDtype`       | `Type <other tree>`       | `UnsupportedAnnotationTree`        |
 //!
 //! Scala 3.9 tells the two annotation forms apart by the first tag of the
 //! payload: `APPLIEDtype`, `SHAREDtype`, `TYPEREF`, `TYPEREFdirect`,
 //! `TYPEREFsymbol` or `TYPEREFin` make it a compact annotation, which is a
 //! type; anything else is a tree. A compact annotation becomes
-//! `Annotation { ty, tree: None }` (lossless: it *is* its type) and must decode
+//! `Annotation::compact(ty)` (lossless: it *is* its type, with known-empty term
+//! arguments) and must decode
 //! to a `TypeRef` or `Applied`, else
 //! [`InvalidCompactAnnotationType`](UnpickleError::InvalidCompactAnnotationType).
-//! A full tree is refused, never stored as `tree: None`, which would make it
-//! indistinguishable from a compact annotation. See the `annotated` module.
+//! A full constructor application (`APPLY`/`NEW`) becomes an annotation with its
+//! type and its ordered literal arguments; any other root, `SHAREDterm` for
+//! one, is refused rather than dropped. See the `annotated` module.
 //!
 //! ## Recursive and refined types (Milestone 4a)
 //!
@@ -137,12 +140,14 @@
 //! A `PARAMtype` to a method is a reference to one of its term parameters,
 //! which is how a dependent result (`(x: Box): x.Out`) names its own clause.
 //!
-//! `MethodParam.erased` and `MethodParam.varargs` are both `false`. Dotty
-//! derives erasure from an `ErasedParamAnnot` on the parameter's *type*, which
-//! is pickled as an `ANNOTATEDtype` with a *full* annotation tree (observed in
-//! Scala 3.9.0 output; see `tests/annotated.rs`), which is deferred, so no
-//! decodable method has an erased parameter; Milestone 4b2 must derive
-//! `erased` once full trees have a semantic form. `varargs` is the JVM `ACC_VARARGS` distinction, which a
+//! `MethodParam.erased` is derived, as in Dotty's `hasErasedParams`, from an
+//! `ErasedParamAnnot` on the parameter's *type*: the exact class
+//! `scala.annotation.internal.ErasedParam` (by package path, not by name text)
+//! among the annotations in the outer chain of `Annotated` wrappers. The
+//! wrapper stays on `MethodParam.ty`; nothing inside a type argument counts,
+//! and the definition's `ERASED` flag is never consulted (a function type has
+//! no `DEFDEF`). The annotation is a full constructor tree, decoded since
+//! Milestone 4b2a. `varargs` is the JVM `ACC_VARARGS` distinction, which a
 //! `METHODtype` does not carry (a repeated parameter is a `Seq`-like *type*),
 //! so it is never inferred from position or name.
 //!

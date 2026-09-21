@@ -1169,6 +1169,82 @@ fn a_real_annotation_whose_class_is_not_entered_rolls_back_everything() {
     assert_eq!(unpickler.index().type_at(FULL + 2), None);
 }
 
+// Erased method parameters (Milestone 4b2a)
+//
+// `MethodParam.erased` is derived from the parameter type's outer chain of
+// `Annotated` wrappers, matching `scala.annotation.internal.ErasedParam` by
+// its exact package path.
+
+/// The `METHODtype` of `(erased z: Int, w: Int) => w`.
+const ERASED_METHOD: u32 = 136;
+
+#[test]
+fn the_real_erased_method_type_decodes_with_the_first_parameter_erased() {
+    real_unit!(ERASED, file, session, unpickler);
+    let method = unpickler.unpickle_type(ERASED_METHOD).unwrap();
+    let annotated = unpickler.index().type_at(ERASED_PARAM).unwrap();
+    drop(unpickler);
+
+    let Type::Method(method) = session.store.types.get(method) else {
+        panic!("not a method type");
+    };
+    let [erased, ordinary] = &method.params[..] else {
+        panic!("not two parameters");
+    };
+    assert!(erased.erased);
+    assert!(!ordinary.erased);
+    // The annotation is not stripped from the type.
+    assert_eq!(erased.ty, annotated);
+    assert!(matches!(
+        session.store.types.get(erased.ty),
+        Type::Annotated { .. }
+    ));
+    assert_eq!(class_name(&session, ordinary.ty), "Int");
+    // `varargs` stays the JVM distinction, which a `METHODtype` does not carry.
+    assert!(!erased.varargs && !ordinary.varargs);
+}
+
+/// `METHODtype p (x: <param>)`: a method at 0 with result `p` (at 2) and one
+/// parameter, named `p`, whose type is `param`.
+fn method_with(param: &[u8]) -> Vec<u8> {
+    const METHOD: u8 = 180;
+    let mut payload = package_ref();
+    payload.extend(param);
+    payload.push(nat(1));
+    file_with_ast(&length_node(METHOD, &payload))
+}
+
+fn decoded_method(bytes: &[u8]) -> (Session, dotty_core::types::MethodType) {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut session = Session::new();
+    let id = unpickler_for(&file, &mut session).unpickle_type(0).unwrap();
+    let Type::Method(method) = session.store.types.get(id).clone() else {
+        panic!("not a method type");
+    };
+    (session, method)
+}
+
+#[test]
+fn an_annotation_that_is_not_erased_param_does_not_erase_the_parameter() {
+    // `p @new p`: annotated with the class `p`, by its name text an
+    // unrelated annotation.
+    let annotated = length_node(ANNOTATED, &[package_ref(), new_of(&package_ref())].concat());
+    let (session, method) = decoded_method(&method_with(&annotated));
+
+    assert!(!method.params[0].erased);
+    assert!(matches!(
+        session.store.types.get(method.params[0].ty),
+        Type::Annotated { .. }
+    ));
+}
+
+#[test]
+fn an_unannotated_parameter_is_not_erased() {
+    let (_, method) = decoded_method(&method_with(&package_ref()));
+
+    assert!(!method.params[0].erased);
+}
+
 // The erased-parameter wire audit (Milestone 4b1, question 12).
 //
 // `MethodParam.erased` stays `false`: Dotty derives it from an
