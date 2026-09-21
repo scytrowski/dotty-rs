@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
 use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{TastyFile, is_compact_annot_type_tag};
@@ -267,8 +268,176 @@ struct AnnotationSurvey {
     erased: ErasedStats,
 }
 
+/// `TYPEREFin` / `TERMREFin` roots (Milestone 4c1), classified by why they did
+/// not decode: probing the prefix (child 0) and the owner space (child 1) on
+/// their own first says which one failed.
+#[derive(Default)]
+struct InReferenceOutcomes {
+    nodes: usize,
+    decoded: usize,
+    /// The prefix does not decode; by the kind of failure.
+    prefix_failure: BTreeMap<&'static str, usize>,
+    /// The owner space is outside the entered state (a classpath's).
+    space_external: usize,
+    /// The owner space names a definition pass 1 did not enter.
+    space_local_missing: usize,
+    /// The owner space has no declaration-scope semantics, or fails otherwise.
+    space_unsupported: usize,
+    ambiguous: usize,
+    signed: usize,
+    /// Both children decode and the declaration is in no scope the state has.
+    resolver_unresolved: usize,
+    /// A resolver answer that is malformed (wrong namespace or owner).
+    resolver_malformed: usize,
+    /// The prefix is an unstable singleton: Dotty wraps it in a
+    /// `QualSkolemType`, which the model does not have.
+    illegal_prefix: usize,
+    other_child: usize,
+    unexpected: usize,
+    /// Wire shapes: the prefix's and the owner space's root tags, a
+    /// `SHAREDtype` followed to its target.
+    prefix_shapes: BTreeMap<String, usize>,
+    space_shapes: BTreeMap<String, usize>,
+    /// Both children decoded, whatever the root did.
+    children_decoded: usize,
+}
+
+/// The name of a type tag in the shape survey.
+fn shape_name(tag: u8) -> String {
+    match tag {
+        61 => "SHAREDtype".to_owned(),
+        62 => "TERMREFdirect".to_owned(),
+        63 => "TYPEREFdirect".to_owned(),
+        64 => "TERMREFpkg".to_owned(),
+        65 => "TYPEREFpkg".to_owned(),
+        66 => "RECthis".to_owned(),
+        90 => "THIS".to_owned(),
+        114 => "TERMREFsymbol".to_owned(),
+        115 => "TERMREF".to_owned(),
+        116 => "TYPEREFsymbol".to_owned(),
+        117 => "TYPEREF".to_owned(),
+        161 => "APPLIEDtype".to_owned(),
+        174 => "TERMREFin".to_owned(),
+        175 => "TYPEREFin".to_owned(),
+        193 => "FLEXIBLEtype".to_owned(),
+        other => format!("tag {other}"),
+    }
+}
+
+/// The root tag of the type at `at`, a chain of `SHAREDtype` links followed
+/// (a bounded number of times), and the number of links followed.
+fn shape_of(file: &TastyFile<'_>, tags: &HashMap<u32, u8>, mut at: u32) -> String {
+    let mut links = 0;
+    while tags.get(&at) == Some(&61) && links < 16 {
+        let Some(payload) = file.section(dotty_tasty::tasty::StandardSection::Asts) else {
+            break;
+        };
+        let mut value: u32 = 0;
+        let mut target = None;
+        for byte in payload.payload[usize::try_from(at).unwrap() + 1..].iter() {
+            value = value.wrapping_mul(128) | u32::from(byte & 0x7f);
+            if byte & 0x80 != 0 {
+                target = Some(value);
+                break;
+            }
+        }
+        match target {
+            Some(target) => at = target,
+            None => break,
+        }
+        links += 1;
+    }
+    let name = tags
+        .get(&at)
+        .map_or_else(|| "?".to_owned(), |t| shape_name(*t));
+    if links == 0 {
+        name
+    } else {
+        format!("SHAREDtype -> {name}")
+    }
+}
+
+/// How a failed child probe is filed.
+fn child_failure_kind(error: &UnpickleError) -> &'static str {
+    match error {
+        UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. } => {
+            "external"
+        }
+        UnpickleError::MissingReferencedSymbol { .. } => "local definition not entered",
+        UnpickleError::UnsupportedType { .. } => "unsupported form",
+        UnpickleError::UnsupportedResolutionPrefix { .. }
+        | UnpickleError::UnsupportedResolutionSpace { .. } => "unsupported prefix or space",
+        UnpickleError::UnsupportedSignedReference { .. } => "signed",
+        UnpickleError::AmbiguousMember { .. } => "ambiguous",
+        UnpickleError::UnsupportedAnnotationTree { .. }
+        | UnpickleError::UnsupportedAnnotationConstructor { .. }
+        | UnpickleError::UnsupportedAnnotationArgument { .. } => "deferred annotation",
+        _ => "other",
+    }
+}
+
+/// Files one `TYPEREFin` / `TERMREFin` root. `prefix` and `space` are what the
+/// two children decoded to on their own, `result` what the root did.
+fn record_in_reference(
+    outcomes: &mut InReferenceOutcomes,
+    prefix: &Result<dotty_core::ids::TypeId, UnpickleError>,
+    space: &Result<dotty_core::ids::TypeId, UnpickleError>,
+    result: &Result<dotty_core::ids::TypeId, UnpickleError>,
+) {
+    outcomes.nodes += 1;
+    outcomes.children_decoded += usize::from(prefix.is_ok() && space.is_ok());
+    if let Err(error) = prefix {
+        *outcomes
+            .prefix_failure
+            .entry(child_failure_kind(error))
+            .or_default() += 1;
+        return;
+    }
+    if let Err(error) = space {
+        match child_failure_kind(error) {
+            "external" => outcomes.space_external += 1,
+            "local definition not entered" => outcomes.space_local_missing += 1,
+            "unsupported form" | "unsupported prefix or space" => outcomes.space_unsupported += 1,
+            _ => outcomes.other_child += 1,
+        }
+        return;
+    }
+    match result {
+        Ok(_) => outcomes.decoded += 1,
+        Err(UnpickleError::UnresolvedMember { .. }) => outcomes.resolver_unresolved += 1,
+        Err(UnpickleError::AmbiguousMember { .. }) => outcomes.ambiguous += 1,
+        Err(UnpickleError::UnsupportedSignedReference { .. }) => outcomes.signed += 1,
+        Err(UnpickleError::UnsupportedResolutionSpace { .. }) => outcomes.space_unsupported += 1,
+        Err(UnpickleError::ResolverFailure { .. }) => outcomes.resolver_malformed += 1,
+        Err(UnpickleError::IllegalTypePrefix { .. }) => outcomes.illegal_prefix += 1,
+        Err(_) => outcomes.unexpected += 1,
+    }
+}
+
+/// What an owner-space class's own declarations hold under a `REFin` name,
+/// measured across every unit of a corpus after all of them are entered. The
+/// lookup itself cannot see it: a class's scope belongs to the unit that
+/// entered it, until symbols are completed (Milestone 5).
+#[derive(Default)]
+struct OwnerOracle {
+    /// The owner space is not a class some unit of the corpus entered.
+    no_scope: usize,
+    /// The declaration name is not text.
+    name_not_text: usize,
+    none: usize,
+    one: usize,
+    several: usize,
+}
+
 #[derive(Default)]
 struct Tally {
+    /// Every class scope entered so far, by the class symbol.
+    class_scopes: HashMap<dotty_core::ids::SymbolId, dotty_core::ids::ScopeId>,
+    /// `REFin` nodes whose two children decoded: the owner space, the
+    /// declaration name and its namespace, for the [`OwnerOracle`].
+    oracle_queries: Vec<(dotty_core::ids::TypeId, Option<String>, Namespace)>,
+    /// `TYPEREFin` (175) and `TERMREFin` (174).
+    in_references: BTreeMap<u8, InReferenceOutcomes>,
     annotations: AnnotationSurvey,
     variance: VarianceBounds,
     units: usize,
@@ -519,7 +688,11 @@ fn run(
         let index = file.ast_address_index().unwrap();
         index
             .iter_nodes()
-            .filter(|node| REFERENCE_TAGS.contains(&node.tag) || is_measured(node.tag))
+            .filter(|node| {
+                REFERENCE_TAGS.contains(&node.tag)
+                    || is_measured(node.tag)
+                    || matches!(node.tag, TYPEREFIN_TAG | TERMREFIN_TAG)
+            })
             .map(|node| (u32::try_from(node.offset).unwrap(), node.tag))
             .collect()
     };
@@ -693,6 +866,7 @@ fn run(
         let outcomes = match tag {
             117 => &mut tally.named_type,
             115 => &mut tally.named_term,
+            TYPEREFIN_TAG | TERMREFIN_TAG => tally.compound.entry(tag).or_default(),
             tag if is_measured(tag) => tally.compound.entry(tag).or_default(),
             _ => &mut tally.by_address,
         };
@@ -718,7 +892,50 @@ fn run(
             && annotated
                 .get(&at)
                 .is_some_and(|(parent, _, _)| unpickler.unpickle_type(*parent).is_err());
+        // The two children of a `REFin` decode on their own first, which says
+        // whether a failure is theirs (as for the annotated parent above).
+        let in_probe = (tag == TYPEREFIN_TAG || tag == TERMREFIN_TAG).then(|| {
+            let children = all_children.get(&at).expect("a REFin has children");
+            let [(prefix_at, _), (space_at, _)] = children[..] else {
+                panic!("{label} @{at}: a REFin has two children");
+            };
+            let detail = tally.in_references.entry(tag).or_default();
+            *detail
+                .prefix_shapes
+                .entry(shape_of(&file, &tags, prefix_at))
+                .or_default() += 1;
+            *detail
+                .space_shapes
+                .entry(shape_of(&file, &tags, space_at))
+                .or_default() += 1;
+            (
+                unpickler.unpickle_type(prefix_at),
+                unpickler.unpickle_type(space_at),
+            )
+        });
         let result = unpickler.unpickle_type(at);
+        if let Some((Ok(_), Ok(space))) = &in_probe {
+            let name = file
+                .ast_address_index()
+                .unwrap()
+                .get(at)
+                .and_then(|raw| raw.decode_in_reference().ok())
+                .and_then(|node| file.names().get_utf8(node.name).map(str::to_owned));
+            let namespace = if tag == TYPEREFIN_TAG {
+                Namespace::Type
+            } else {
+                Namespace::Term
+            };
+            tally.oracle_queries.push((*space, name, namespace));
+        }
+        if let Some((prefix, space)) = &in_probe {
+            record_in_reference(
+                tally.in_references.entry(tag).or_default(),
+                prefix,
+                space,
+                &result,
+            );
+        }
         if tag == ANNOTATED_TAG {
             record_annotation(
                 &mut tally.annotations,
@@ -835,9 +1052,12 @@ fn run(
                     }
                     UnpickleError::AmbiguousMember { .. } => outcomes.ambiguous += 1,
                     UnpickleError::UnsupportedSignedReference { .. } => outcomes.signed += 1,
-                    UnpickleError::UnsupportedResolutionPrefix { .. } => {
+                    UnpickleError::UnsupportedResolutionPrefix { .. }
+                    | UnpickleError::UnsupportedResolutionSpace { .. } => {
                         outcomes.unsupported_prefix += 1;
                     }
+                    // Counted in the `REFin` classification.
+                    UnpickleError::IllegalTypePrefix { .. } => {}
                     UnpickleError::MissingReferencedSymbol { to, .. } => {
                         outcomes.missing_local += 1;
                         tally.missing_symbols += 1;
@@ -861,7 +1081,15 @@ fn run(
     tally.rec_canonical_ids += rec_this_ids.values().map(HashSet::len).sum::<usize>();
     tally.units_with_a_decoded_type += usize::from(decoded > 0);
     tally.units_fully_decoded += usize::from(failed == 0);
-    let (_, packages) = unpickler.into_parts();
+    let (index, packages) = unpickler.into_parts();
+    for (at, tag) in &tags {
+        if *tag == 131
+            && let Some(symbol) = index.symbol_at(*at)
+            && let Some(scope) = index.scope_of(symbol)
+        {
+            tally.class_scopes.insert(symbol, scope);
+        }
+    }
     // `erased` on the decoded method types: only the ones that name
     // `ErasedParam` may have it.
     let erased_count = |ids: &[dotty_core::ids::TypeId]| -> usize {
@@ -991,6 +1219,34 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             );
         }
 
+        let mut oracle = OwnerOracle::default();
+        for (space, name, namespace) in &tally.oracle_queries {
+            let scope = match store.types.get(*space) {
+                dotty_core::types::Type::TypeRef { symbol, .. } => tally.class_scopes.get(symbol),
+                _ => None,
+            };
+            let (Some(scope), Some(text)) = (scope, name) else {
+                if scope.is_none() {
+                    oracle.no_scope += 1;
+                } else {
+                    oracle.name_not_text += 1;
+                }
+                continue;
+            };
+            let declared = store.names.get(text).map_or(0, |text| {
+                store
+                    .scopes
+                    .get(*scope)
+                    .lookup_all(&dotty_core::names::Name::new(text, *namespace))
+                    .len()
+            });
+            match declared {
+                0 => oracle.none += 1,
+                1 => oracle.one += 1,
+                _ => oracle.several += 1,
+            }
+        }
+
         let mut unsupported: Vec<_> = tally.unsupported.iter().collect();
         unsupported.sort_by(|a, b| b.1.cmp(a.1));
         println!(
@@ -1048,6 +1304,33 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 );
             }
         };
+        for (tag, label) in [(TYPEREFIN_TAG, "TYPEREFin"), (TERMREFIN_TAG, "TERMREFin")] {
+            let none = InReferenceOutcomes::default();
+            let o = tally.in_references.get(&tag).unwrap_or(&none);
+            println!(
+                "{label}: nodes {}, decoded {}, both children decoded {}; failures: prefix {:?}, ownerSpace external {}, ownerSpace local missing {}, ownerSpace unsupported {}, ambiguous {}, signed {}, resolver unresolved {}, resolver malformed {}, illegal prefix (QualSkolem) {}, other child {}; unexpected {}",
+                o.nodes,
+                o.decoded,
+                o.children_decoded,
+                o.prefix_failure,
+                o.space_external,
+                o.space_local_missing,
+                o.space_unsupported,
+                o.ambiguous,
+                o.signed,
+                o.resolver_unresolved,
+                o.resolver_malformed,
+                o.illegal_prefix,
+                o.other_child,
+                o.unexpected,
+            );
+            println!("  prefix shapes: {:?}", o.prefix_shapes);
+            println!("  ownerSpace shapes: {:?}", o.space_shapes);
+        }
+        println!(
+            "REFin owner-space oracle (both children decoded; the owner class's own scope, from the unit that entered it): no scope known {}, name is not text {}, no declaration {}, exactly one declaration {}, several {}",
+            oracle.no_scope, oracle.name_not_text, oracle.none, oracle.one, oracle.several
+        );
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);
         report("binder types", &BINDER_TAGS);

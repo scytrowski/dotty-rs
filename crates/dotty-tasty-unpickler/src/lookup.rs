@@ -15,6 +15,11 @@
 //! Dotty's `FlexibleType` and `AnnotatedType` are `CachedProxyType`s).
 //! Anything else is `UnsupportedPrefix`. There is no textual fallback and no search across owners. The lookup is not inheritance-aware:
 //! it sees the members the prefix's own scope declares.
+//!
+//! `TYPEREFin` / `TERMREFin` name their declaration through an explicit owner
+//! space instead: the space type goes through the same [`lookup_owner`], and
+//! [`lookup_declaration`] then reads that owner's own scope. That is Scala's
+//! `ownerSpace.decl(name)`. The reference's prefix takes no part in the search.
 
 use dotty_core::Packages;
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};

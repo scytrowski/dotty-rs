@@ -161,8 +161,28 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: match types, and
-//! `TYPEREFin`/`TERMREFin`.
+//! ## Owner-space references (Milestone 4c1)
+//!
+//! | TASTy       | wire shape                        | semantic type                      |
+//! |-------------|-----------------------------------|------------------------------------|
+//! | `TYPEREFin` | `NameRef prefix_Type ownerSpace_Type` | `TypeRef { prefix, symbol }`   |
+//! | `TERMREFin` | `NameRef prefix_Type ownerSpace_Type` | `TermRef { prefix, symbol }`   |
+//!
+//! The pickler writes this form for a private or shadowed symbol of another
+//! unit. The *prefix* is how the reference is viewed and the *owner space* is
+//! where the declaration is found, so the name is looked up among the
+//! declarations of the owner space (`ownerSpace.decl(name)`), never among the
+//! members of the prefix, and the result keeps the original prefix; the owner
+//! space is not stored. The namespace is the tag's. A resolver is asked with
+//! `MemberSpace::Explicit(ownerSpace)` and its answer must be a declaration of
+//! that owner. A signed `TERMREFin` is `UnsupportedSignedReference`; an
+//! unstable singleton prefix, which Dotty wraps in a `QualSkolemType`, is
+//! `IllegalTypePrefix`; a space with no declaration semantics is
+//! `UnsupportedResolutionSpace`. Upstream's `asSeenFrom(prefix)` is not
+//! applied: a reference is a symbol and a prefix, and completing symbols
+//! (Milestone 5) interprets the symbol as seen from the prefix.
+//!
+//! Every other form is `UnsupportedType`: match types.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
 use dotty_core::ids::{SymbolId, TypeId};

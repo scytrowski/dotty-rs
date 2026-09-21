@@ -28,6 +28,10 @@ Status (`crates/dotty-tasty-unpickler`):
   semantic literal arguments, and `MethodParam.erased`: implemented (§4,
   "Full annotation applications"). `SHAREDterm` annotation trees stay deferred
   for 4b2b.
+- Milestone 4c1, owner-space references (`TYPEREFin`, unsigned `TERMREFin`):
+  implemented (§4, "Owner-space references"). It decodes 0 real nodes from the
+  corpora, because the declaring classes belong to other units; see the
+  measurement in §8.
 
 Every entered symbol is still `SymbolInfo::Missing`: types are decoded on
 request by address and are not yet attached to symbols.
@@ -80,7 +84,8 @@ function. It follows an enter-before-complete model:
 | 4b1. Compact annotated types | `Annotated` with `Annotation::compact(ty)`; full trees deferred | 4b1 |
 | 4b2a. Full annotation applications | `APPLY`/`NEW` annotations with `AnnotationArguments`; `MethodParam.erased` from `ErasedParam` | 4b2a |
 | 4b2b. `SHAREDterm` annotations | term-tree address identity | 4b2b |
-| 4c. `*REFin` | `TYPEREFin` / `TERMREFin` owner-space resolution | 4c |
+| 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
+| 4c2. Symbol-less refined members | by-name references through `Refined` / `Recursive` / `RecThis` | 4c2 |
 | 4d. Match types | `Match` / `MatchCase` and the remaining advanced forms | 4d |
 | 3. Complete | `SymbolInfo::Complete(TypeId)`, `ClassInfo`, annotations | 5 |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
@@ -609,7 +614,9 @@ one is the outer's parent, nothing is flattened. `Method`, `Poly`, `Bounds` and
 `SymbolId` for the member, and TypeRef/TermRef are symbol-based, so a member of
 a refined or recursive type cannot be found here, and no synthetic symbol or
 text search was added. A by-name reference through such a prefix keeps the
-existing `UnsupportedResolutionPrefix` (`TYPEREFin`/`TERMREFin` is 4c). In
+existing `UnsupportedResolutionPrefix` (4c1 does not change this: `REFin`
+is an owner-space reference to a real symbol, not a refinement member; that
+is 4c2). In
 practice this is the common case for a *recursive* refinement: in
 `C { type T1; type T2 = T1 }` the `T1` is named through a `RECthis`, so that
 whole type decodes only with a resolver that can search refinements. The
@@ -726,6 +733,97 @@ NEW tpt
   `AnnotationId`; a failure at any argument frees everything the call
   allocated.
 
+### Owner-space references (Milestone 4c1)
+
+```text
+TYPEREFin Length NameRef prefix_Type ownerSpace_Type
+TERMREFin Length NameRef prefix_Type ownerSpace_Type
+```
+
+**Prefix versus owner space.** The prefix is how the resulting reference is
+*viewed*; the owner space is where its declaration is *found*. For an ordinary
+`TYPEREF`/`TERMREF` they coincide, which is why the wire has one child. Scala 3.9's
+`TreePickler` (`pickleExternalRef`) writes the two apart for a symbol of another
+compilation unit that is `Private`, or a class that the prefix's member of that
+name does not denote (`isShadowedRef`), and stores `sym.owner.typeRef` as the
+space. The name searched in the prefix would find another declaration or none,
+so the reader must look in the space, as `TreeUnpickler` does
+(`owner.decl(name)`, not `prefix.member(name)`).
+
+**Resolution contract** (`dotty-core`, format-agnostic):
+
+```rust
+pub enum MemberSpace { Prefix, Explicit(TypeId) }
+pub struct MemberRequest { prefix, name, selector, space: MemberSpace }
+```
+
+Ordinary `TYPEREF`/`TERMREF` send `MemberSpace::Prefix`, exactly as before;
+`REFin` sends `Explicit(ownerSpace)` with the *original* prefix. A resolver
+that receives `Explicit` searches the declarations of that type, never the
+prefix's members. `NoResolver` still answers `Ok(None)`.
+
+**Decoding** (`decode_in_reference` in `types.rs`):
+
+1. `decode_in_reference` validates the wire shape only. The two children are
+   taken by absolute address from `AstView::children` (prefix first, owner space
+   second) and decoded through `type_at`: the structural decoder's trees are
+   node-relative and are never a semantic key.
+2. The namespace is the tag's: `TYPEREFin` is `Namespace::Type`, `TERMREFin`
+   is `Namespace::Term`. It is not inferred from the name or the result; a
+   resolver answer in the other namespace is `ResolverFailure(Malformed)`.
+3. The owner space must be a type whose declaration scope is understood
+   (`lookup_owner`: `ThisType`, a class-like or package `TypeRef`, an object
+   through its module class, looked through `Flexible`/`Annotated`). The lookup is
+   `lookup_declaration`: exact `Name` + `Namespace` in that owner's own scope
+   (unit index, package registry, or completed `ClassInfo`); it is
+   `ownerSpace.decl(name)`, not inheritance-aware member lookup.
+4. One candidate is the result; several are `AmbiguousMember` (a malformed
+   duplicate type is ambiguous too, never first-wins). If the scope has no
+   answer or is unknown, the resolver is asked with the original prefix and
+   `Explicit(ownerSpace)`; the prefix is never searched as a fallback. `Ok(None)`
+   is `UnresolvedMember` (with the space in its `space` field) or, for a space
+   with no declaration semantics, `UnsupportedResolutionSpace`. This is
+   deliberately not `UnsupportedResolutionPrefix`: the two are different inputs.
+5. **Owner validation.** When the space denotes a concrete owner symbol, a
+   resolver answer must have exactly that owner
+   (`symbol.owner == expected owner`); a same-named symbol of another owner is
+   `ResolverFailure(Malformed)`, not a success.
+6. The result is `TypeRef { prefix, symbol }` / `TermRef { prefix, symbol }`
+   with the **original prefix**. The owner space is resolution metadata and is
+   not stored; `dotty-core`'s `Type` gained no TASTy concept.
+
+**Deferred, each with a typed error:**
+
+- **Signed `TERMREFin`** is `UnsupportedSignedReference`, as a signed `TERMREF`
+  already is: the resolver has only `MemberSelector::Unique`, so a signature is
+  neither stripped nor used to pick an overload.
+- **`QualSkolemType`.** Dotty wraps a prefix that is not `isLegalPrefix` (an
+  unstable singleton) in a `QualSkolemType`. The model has none, and none was
+  added. A prefix that is a `TermRef` to a method, constructor or variable (looked
+  through proxies) is `IllegalTypePrefix`; every other prefix is kept exactly. No
+  real node needed it (see the measurement).
+- **`asSeenFrom`.** Upstream applies `.asSeenFrom(prefix)` to the found
+  declaration. `NamedRef` stores only `prefix + SymbolId`, and entered symbols are
+  still `SymbolInfo::Missing`, so no denotation is built here. The boundary is:
+  the exact declaration symbol, and the exact reference prefix; later symbol
+  completion interprets the symbol as seen from the prefix.
+- **Pending binders.** The prefix and the owner space are checked separately for a
+  binder still being decoded (looking through proxies): a pending prefix is
+  `UnsupportedResolutionPrefix`, a pending space `UnsupportedResolutionSpace`;
+  an unfilled arena slot is never read.
+
+**Identity and atomicity.** A `REFin` owns one `TypeId` at its address; the same
+address decoded twice and a `SHAREDtype` link to it give the same `TypeId`, in
+either order, with no second lookup. A failure after both children decoded (a
+wrong-owner resolver answer, for one) rolls back the types and index entries
+like every other node, and a retry works.
+
+**Refinement members are a different problem.** `Refined` stores a parent, a
+`Name` and an info, with no `SymbolId` for the member, and `TypeRef`/`TermRef` are
+symbol-based. A by-name reference through a `RecThis` or a `Refined` therefore
+cannot be an owner-space declaration, and no synthetic symbol or text search
+was added: that is Milestone 4c2.
+
 ### Variance-bearing `TYPEBOUNDS` (Milestone 3c)
 
 `TYPEBOUNDS Length Type Type? Variance*`, with `STABLE`, `COVARIANT` or
@@ -798,8 +896,7 @@ links to one lambda (only the upper carries the marker). An unannotated
 beside another declared variance.
 
 Everything else is `UnsupportedType { tag, address }`: it is never lowered to
-`NoType`, `NoPrefix` or `Error`. This includes `TYPEREFin` / `TERMREFin` and
-match types.
+`NoType`, `NoPrefix` or `Error`. This includes match types.
 
 `unpickle_type` is atomic in the same way as `enter_symbols`: on failure every
 type it allocated is freed (`SemanticStore::checkpoint` / `rollback_to`) and
@@ -924,7 +1021,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      `MethodParam.erased` from `ErasedParam` — complete;
    - 4b2b: `SHAREDterm` annotation trees (term-tree identity) and whatever
      else the survey shows;
-   - 4c: `TYPEREFin` / `TERMREFin` owner-space resolution;
+   - 4c1: `TYPEREFin` / unsigned `TERMREFin` owner-space resolution — complete;
+   - 4c2: symbol-less refined / recursive member references and `RecThis`
+     member lookup;
    - 4d: `Match` / `MatchCase` and whatever else measurement shows.
 5. Symbol completion (signatures, parents, self types, `ClassInfo`).
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -963,7 +1062,7 @@ Deliberately not supported yet:
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
 - companion links (`SymbolLinks::companion`);
-- `TYPEREFin`/`TERMREFin`, and every other type form beyond §4 "Types" —
+- signed `TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`;
 - signed term references, cross-unit class members and
   inherited members (§4, "Name-based references");
@@ -1291,6 +1390,55 @@ rest of the deferred full annotations under a compound form (14 `APPLIEDtype`,
 so the corpus decodes 0 erased `MethodParam`s; the real-compiler fixture
 `Erased.scala` carries that coverage, and the survey asserts that no decoded
 method type is erased without naming `ErasedParam`.
+
+### Owner-space references after 4c1 (library / compiler)
+
+Same four runs (`--ignored --nocapture`). Each `REFin` root is measured with its
+two children first decoded on their own, so a failure is attributed to the prefix
+or to the owner space. The earlier "13 / 12 reached" figures were reached errors,
+not totals.
+
+| | library | compiler |
+|---|---------|----------|
+| `TYPEREFin` nodes | 115 | 12 |
+| `TERMREFin` nodes | 0 | 0 |
+| decoded | 0 | 0 |
+| prefix and owner space both decode (no builtins / builtins) | 107 / 108 | 2 / 2 |
+| prefix fails | 5 (1 external, 4 local definition not entered) / 4 | 7 |
+| owner space fails (external) | 3 | 3 |
+| resolver unresolved (both children decode, the owner scope is another unit's) | 107 / 108 | 2 |
+| ambiguous, signed, resolver malformed, illegal prefix (`QualSkolem`), other child, unexpected | 0 | 0 |
+
+**Why 0 decode.** A `REFin` names a symbol of *another compilation unit* (that is
+what `pickleExternalRef` means), and the local lookup sees a class's scope only
+from its own unit until symbols are completed (Milestone 5) or a classpath
+resolver answers (Milestone 6). So the nodes now get as far as the decision that
+needs a resolver, instead of `UnsupportedType`. To check that they are
+representable, the corpus measurement adds an oracle: after every unit is entered,
+each `REFin` whose children decoded is looked up in the owner class's own scope, as
+entered by the unit that owns it. Result: **every one has exactly one declaration**
+in it (library 107 / 108, compiler 2), none is missing, ambiguous or symbol-less.
+So all real `REFin` targets are representable by a `SymbolId`, and no synthetic
+symbol is needed.
+
+Shapes. `TYPEREFin` prefixes: library `TERMREFdirect` 106 (+4 through `SHAREDtype`),
+`TERMREFsymbol` 4, `APPLIEDtype` 1; compiler `TERMREFdirect` 4 (+4 shared),
+`THIS` 1 (+1 shared), `APPLIEDtype` (1 shared), `FLEXIBLEtype` 1. Owner spaces:
+always a `TYPEREF` of a class (115 in the library, of which 111 through
+`SHAREDtype`; 12 in the compiler, 11). The 106 library `TERMREFdirect` prefixes
+all come from one unit, `IArray$package`, and all name `T`. No prefix was a
+method, constructor or variable, so **no real node needs `QualSkolemType`**.
+
+Downstream (library / compiler, no builtins -> builtins): no root gained or lost
+a decode. Compared with 4b2a, `ANNOTATEDtype`, `APPLIEDtype`, `TYPEBOUNDS`
+(the one node that failed as unsupported `TYPEREFin` now fails on a local
+definition that was not entered, in both corpora), `TYPELAMBDAtype`,
+`PARAMtype`, `REFINEDtype`, `RECtype` and `RECthis` decode the same numbers; the
+`unsupported form` counts fall by the `REFin` nodes and `need external` rises by
+the `REFin` prefixes that reach an external class (library +9, compiler +7).
+The two library `RECtype`/`RECthis` roots still fail on
+`UnsupportedResolutionPrefix`: that is input for 4c2. 0 unexpected errors in any
+run.
 
 ## 9. Review of Milestone 1
 
