@@ -100,6 +100,8 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         result.root
     } else {
         match &result.ast.get(result.root).kind {
+            TreeKind::Block(block) if mode == "block" && block.stats.is_empty() => block.expr,
+            TreeKind::Block(_) if mode == "block" => result.root,
             TreeKind::Block(block) if block.stats.is_empty() => block.expr,
             TreeKind::Block(block)
                 if block.stats.len() == 1 && is_synthetic_unit(&result.ast, block.expr) =>
@@ -393,9 +395,7 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         }
         TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
             let mut children = definition.patterns.clone();
-            if has_non_empty_span(arena, definition.tpt) {
-                children.push(definition.tpt);
-            }
+            children.push(definition.tpt);
             if let Some(rhs) = definition.rhs {
                 children.push(rhs);
             }
