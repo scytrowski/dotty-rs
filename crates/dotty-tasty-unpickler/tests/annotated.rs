@@ -6,8 +6,10 @@
 //! used further down.
 use dotty_core::Definitions;
 use dotty_core::Packages;
+use dotty_core::ids::{AnnotationId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
+use dotty_core::types::Type;
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -162,6 +164,256 @@ fn an_annotated_type_with_three_children_is_a_structural_error() {
 
     let result = unpickler.unpickle_type(ANNOTATED_AT);
     assert!(matches!(result, Err(UnpickleError::Ast(_))), "{result:?}");
+}
+
+// Compact annotations
+
+const SHARED: u8 = 61;
+const FLEXIBLE: u8 = 193;
+const APPLIED: u8 = 161;
+const POLY: u8 = 169;
+const TYPEBOUNDS: u8 = 163;
+
+/// `SHAREDtype target`.
+fn shared(target: u8) -> Vec<u8> {
+    vec![SHARED, nat(target)]
+}
+
+fn annotated_parts(store: &SemanticStore, id: TypeId) -> (TypeId, AnnotationId) {
+    match store.types.get(id) {
+        Type::Annotated {
+            underlying,
+            annotation,
+        } => (*underlying, *annotation),
+        other => panic!("not an annotated type: {other:?}"),
+    }
+}
+
+/// `p @p`: the annotation is a link to the underlying `TYPEREFpkg` at 2.
+fn compact_file() -> Vec<u8> {
+    annotated_file(&package_ref(), &shared(2))
+}
+
+#[test]
+fn a_compact_annotation_type_is_stored_whole_with_no_tree() {
+    let bytes = compact_file();
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    let package = unpickler.index().type_at(UNDERLYING_AT).unwrap();
+    assert_eq!(unpickler.index().type_at(ANNOTATED_AT), Some(id));
+    drop(unpickler);
+
+    let (underlying, annotation) = annotated_parts(&session.store, id);
+    assert_eq!(underlying, package);
+    // The annotation is the type the compact payload names, and only that.
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(annotation.ty, package);
+    assert_eq!(annotation.tree, None);
+}
+
+#[test]
+fn decoding_an_annotated_address_twice_allocates_one_annotation() {
+    let bytes = compact_file();
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let first = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    assert_eq!(unpickler.unpickle_type(ANNOTATED_AT), Ok(first));
+    drop(unpickler);
+
+    let (_, annotation) = annotated_parts(&session.store, first);
+    // One annotation and one type for the package and the annotated type each:
+    // the next allocations follow directly.
+    assert_eq!(annotation.index(), 0);
+    let (_, next_annotation) = next_ids(&mut session);
+    assert_eq!(next_annotation, 1);
+}
+
+#[test]
+fn a_shared_link_to_an_annotated_type_returns_its_exact_id() {
+    // The annotated type (0..7), then a `FLEXIBLEtype` wrapper at 8 whose one
+    // child, at 10, is a link to it.
+    let annotated = length_node(ANNOTATED, &[package_ref(), shared(2)].concat());
+    let mut ast = annotated.clone();
+    ast.extend(length_node(FLEXIBLE, &shared(0)));
+    let link_at = u32::try_from(annotated.len() + 2).unwrap();
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    let before = unpickler.index().type_count();
+    assert_eq!(unpickler.unpickle_type(link_at), Ok(id));
+    assert_eq!(unpickler.index().type_count(), before);
+    drop(unpickler);
+    // The link is not the underlying type, and allocated no annotation.
+    assert!(matches!(
+        session.store.types.get(id),
+        Type::Annotated { .. }
+    ));
+    assert_eq!(next_ids(&mut session).1, 1);
+
+    // A link decoded first builds the one annotated type.
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let linked = unpickler.unpickle_type(link_at).unwrap();
+    assert_eq!(unpickler.unpickle_type(ANNOTATED_AT), Ok(linked));
+}
+
+#[test]
+fn nested_annotations_keep_their_nesting_order_and_are_not_deduplicated() {
+    // `p @a1 @a2`: both annotations link to the one `TYPEREFpkg` (at 4), so
+    // they are equal, and still two annotations, in nesting order.
+    let inner = length_node(ANNOTATED, &[package_ref(), shared(4)].concat());
+    let bytes = annotated_file(&inner, &shared(4));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let outer = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    let inner_id = unpickler.index().type_at(UNDERLYING_AT).unwrap();
+    let package = unpickler.index().type_at(UNDERLYING_AT + 2).unwrap();
+    drop(unpickler);
+
+    let (under_outer, second) = annotated_parts(&session.store, outer);
+    assert_eq!(under_outer, inner_id);
+    let (under_inner, first) = annotated_parts(&session.store, inner_id);
+    assert_eq!(under_inner, package);
+    assert_ne!(first, second);
+    assert!(first.index() < second.index());
+    assert_eq!(session.store.annotations.get(first).ty, package);
+    assert_eq!(session.store.annotations.get(second).ty, package);
+}
+
+#[test]
+fn an_applied_annotation_type_is_stored_whole_not_reduced_to_its_constructor() {
+    // The annotation payload is `APPLIEDtype tycon arg`, an `Applied` type.
+    let applied = length_node(APPLIED, &[package_ref(), package_ref()].concat());
+    let bytes = annotated_file(&package_ref(), &applied);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    drop(unpickler);
+
+    let (_, annotation) = annotated_parts(&session.store, id);
+    let stored = session.store.annotations.get(annotation).ty;
+    let Type::Applied { tycon, args } = session.store.types.get(stored) else {
+        panic!("not an applied type");
+    };
+    assert_eq!(args.len(), 1);
+    assert_ne!(stored, *tycon);
+}
+
+#[test]
+fn a_compact_link_to_a_type_that_is_not_a_reference_is_invalid() {
+    // A `FLEXIBLEtype` at 0, then the annotated type at 4 whose compact
+    // payload links to it: `SHAREDtype` is compact, its target is not valid.
+    let flexible = length_node(FLEXIBLE, &package_ref());
+    let mut ast = flexible.clone();
+    let annotated_at = u32::try_from(flexible.len()).unwrap();
+    ast.extend(length_node(ANNOTATED, &[package_ref(), shared(0)].concat()));
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+    let mut untouched = Session::new();
+    {
+        let mut unpickler = unpickler_for(&file, &mut untouched);
+        unpickler.unpickle_type(0).unwrap();
+    }
+    let expected = next_ids(&mut untouched);
+
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let flexible_id = unpickler.unpickle_type(0).unwrap();
+    let before = unpickler.index().type_count();
+
+    let result = unpickler.unpickle_type(annotated_at);
+    assert_eq!(
+        result,
+        Err(UnpickleError::InvalidCompactAnnotationType {
+            address: annotated_at,
+            annotation_type: flexible_id,
+        })
+    );
+    // What was decoded before the call is intact; what the call added is not.
+    assert_eq!(unpickler.index().type_at(0), Some(flexible_id));
+    assert_eq!(unpickler.index().type_count(), before);
+    assert_eq!(unpickler.index().type_at(annotated_at + 2), None);
+    drop(unpickler);
+    assert_eq!(next_ids(&mut session), expected);
+}
+
+#[test]
+fn a_failed_annotated_type_can_be_retried() {
+    let flexible = length_node(FLEXIBLE, &package_ref());
+    let mut ast = flexible.clone();
+    let bad_at = u32::try_from(flexible.len()).unwrap();
+    let bad = length_node(ANNOTATED, &[package_ref(), shared(0)].concat());
+    ast.extend(&bad);
+    let good_at = bad_at + u32::try_from(bad.len()).unwrap();
+    ast.extend(length_node(
+        ANNOTATED,
+        &[package_ref(), shared(u8::try_from(good_at + 2).unwrap())].concat(),
+    ));
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    assert!(unpickler.unpickle_type(bad_at).is_err());
+    assert!(unpickler.unpickle_type(bad_at).is_err());
+    let good = unpickler.unpickle_type(good_at).unwrap();
+    drop(unpickler);
+    let (_, annotation) = annotated_parts(&session.store, good);
+    // The failed attempts left no annotation behind.
+    assert_eq!(annotation.index(), 0);
+}
+
+#[test]
+fn a_compact_link_to_a_binder_still_being_decoded_is_invalid_not_a_panic() {
+    // `POLYtype` at 0 whose one parameter's alias bound is an annotated type
+    // whose compact payload links back to the poly itself.
+    let annotated = length_node(ANNOTATED, &[package_ref(), shared(0)].concat());
+    let mut param = length_node(TYPEBOUNDS, &annotated);
+    param.push(nat(1));
+    let poly = length_node(POLY, &[package_ref(), param].concat());
+    let bytes = file_with_ast(&poly);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let result = unpickler.unpickle_type(0);
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::InvalidCompactAnnotationType { .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_at(0), None);
+}
+
+#[test]
+fn an_annotation_that_links_to_its_own_annotated_type_is_an_error_not_a_stack_overflow() {
+    let bytes = annotated_file(&package_ref(), &shared(0));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let result = unpickler.unpickle_type(ANNOTATED_AT);
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidReferenceTarget { .. })),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_at(ANNOTATED_AT), None);
 }
 
 // Real Scala 3.9.0 output.
@@ -319,4 +571,69 @@ fn the_erased_parameter_annotation_is_a_constructor_call_of_erased_param() {
         }
     }
     assert_eq!(classes, [RawName::Utf8("ErasedParam".to_owned())]);
+}
+
+const CAPTURING: &[u8] = include_bytes!("fixtures/semantic/CapturingHolder.tasty");
+
+/// The inferred type of `val local = () => c` under capture checking: an
+/// `ANNOTATEDtype` whose parent and whose compact annotation are both
+/// `SHAREDtype` links (the annotation is `scala.annotation.retainsCap`).
+const CAPTURING_ANNOTATED: u32 = 92;
+const CAPTURING_PARENT: u32 = 94;
+const CAPTURING_ANNOTATION: u32 = 96;
+
+macro_rules! capturing_unit {
+    ($file:ident, $session:ident, $unpickler:ident) => {
+        let $file = TastyFile::parse_scala_3_9(CAPTURING).unwrap();
+        let mut $session = Session::new();
+        let mut packages = Packages::new();
+        enter_stub_classes(
+            &mut $session,
+            &mut packages,
+            &["scala"],
+            &["Int", "Function0"],
+        );
+        enter_stub_classes(
+            &mut $session,
+            &mut packages,
+            &["scala", "annotation"],
+            &["retainsCap"],
+        );
+        enter_stub_classes(
+            &mut $session,
+            &mut packages,
+            &["me", "cytrowski", "tastyfixtures", "semantic"],
+            &["Cap"],
+        );
+        let mut $unpickler = TastyUnpickler::with_packages(
+            &$file,
+            &mut $session.store,
+            $session.definitions,
+            packages,
+        );
+        $unpickler.enter_symbols().unwrap();
+    };
+}
+
+#[test]
+fn a_real_compact_annotation_decodes_to_an_annotation_without_a_tree() {
+    capturing_unit!(file, session, unpickler);
+    let id = unpickler.unpickle_type(CAPTURING_ANNOTATED).unwrap();
+    // A link has no entry of its own; decoding it names its target's id.
+    let parent = unpickler.unpickle_type(CAPTURING_PARENT).unwrap();
+    let annotation_type = unpickler.unpickle_type(CAPTURING_ANNOTATION).unwrap();
+    // Identity: again, and through the address index.
+    assert_eq!(unpickler.unpickle_type(CAPTURING_ANNOTATED), Ok(id));
+    drop(unpickler);
+
+    let (underlying, annotation) = annotated_parts(&session.store, id);
+    assert_eq!(underlying, parent);
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(annotation.ty, annotation_type);
+    assert_eq!(annotation.tree, None);
+    let Type::TypeRef { symbol, .. } = session.store.types.get(annotation.ty) else {
+        panic!("the annotation is not a type reference");
+    };
+    let class = session.store.symbols.get(*symbol).name.text();
+    assert_eq!(session.store.names.resolve(class), "retainsCap");
 }

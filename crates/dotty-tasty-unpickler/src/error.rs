@@ -101,6 +101,14 @@ pub enum UnpickleError {
         annotation_address: u32,
         tag: u8,
     },
+    /// The `ANNOTATEDtype` at `address` has a compact annotation whose type,
+    /// `annotation_type`, is neither a `TypeRef` nor an `Applied` type, which
+    /// is all Dotty's `CompactAnnotation` accepts (a `SHAREDtype` payload can
+    /// reach any type, or a binder still being decoded).
+    InvalidCompactAnnotationType {
+        address: u32,
+        annotation_type: TypeId,
+    },
     /// The `TYPEBOUNDS` node at `address` carries variance markers for the
     /// lambda `target`, which is still being decoded, so it cannot be rebound
     /// yet. (A marker on a bound that is not a lambda is left alone, as
@@ -239,6 +247,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the annotated type at address {address} has a full annotation tree (tag {tag} at address {annotation_address}), which is not decoded yet"
             ),
+            Self::InvalidCompactAnnotationType { address, .. } => write!(
+                formatter,
+                "the compact annotation of the annotated type at address {address} is not a type reference or an applied type"
+            ),
             Self::MalformedType { address, reason } => write!(
                 formatter,
                 "the type at address {address} is malformed: {reason}"
@@ -327,6 +339,7 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedSignedReference { .. }
             | Self::MalformedType { .. }
             | Self::UnsupportedAnnotationTree { .. }
+            | Self::InvalidCompactAnnotationType { .. }
             | Self::BoundsVarianceTargetPending { .. }
             | Self::BoundsVarianceArityMismatch { .. }
             | Self::InvalidMethodModifier { .. }

@@ -22,7 +22,7 @@
 //! (`children[0]` the parent, `children[1]` the annotation); the structural
 //! decoder validates the shape only.
 
-use dotty_core::types::Type;
+use dotty_core::types::{Annotation, Type};
 use dotty_tasty::tasty::{RawNode, is_compact_annot_type_tag};
 
 use crate::ast_view::{AstView, address};
@@ -51,7 +51,7 @@ impl TastyUnpickler<'_, '_, '_> {
             });
         };
 
-        let _underlying = self.type_at(ast, underlying_at, at, depth)?;
+        let underlying = self.type_at(ast, underlying_at, at, depth)?;
         let Some(annotation_tag) = ast.tag_at(annotation_at) else {
             return Err(UnpickleError::MalformedType {
                 address: at,
@@ -65,9 +65,30 @@ impl TastyUnpickler<'_, '_, '_> {
                 tag: annotation_tag,
             });
         }
-        Err(UnpickleError::UnsupportedType {
-            tag: node.tag,
-            address: at,
+
+        // The wire tag only says "a type": what it decodes to (a `SHAREDtype`
+        // may reach anything) must be what `CompactAnnotation` accepts, a
+        // `TypeRef` or an `AppliedType`. A binder still being decoded has no
+        // readable slot yet, so it cannot be one.
+        let annotation_type = self.type_at(ast, annotation_at, at, depth)?;
+        let accepted = !self.is_pending(annotation_type)
+            && matches!(
+                self.store.types.get(annotation_type),
+                Type::TypeRef { .. } | Type::Applied { .. }
+            );
+        if !accepted {
+            return Err(UnpickleError::InvalidCompactAnnotationType {
+                address: at,
+                annotation_type,
+            });
+        }
+        let annotation = self
+            .store
+            .annotations
+            .alloc(Annotation::new(annotation_type, None));
+        Ok(Type::Annotated {
+            underlying,
+            annotation,
         })
     }
 }

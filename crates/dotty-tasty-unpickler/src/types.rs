@@ -46,6 +46,23 @@
 //! | `TYPEBOUNDS`          | `Type Type`               | `Bounds { low, high }`             |
 //! | `TYPEBOUNDS`          | `Type` (no upper bound)   | `AliasingBounds { alias }`         |
 //!
+//! ## Annotated types (Milestone 4b1)
+//!
+//! | TASTy                 | wire shape                | semantic type                      |
+//! |-----------------------|---------------------------|------------------------------------|
+//! | `ANNOTATEDtype`       | `Type Type` (compact)     | `Annotated { underlying, annotation }` |
+//! | `ANNOTATEDtype`       | `Type Tree` (full)        | `UnsupportedAnnotationTree`        |
+//!
+//! Scala 3.9 tells the two annotation forms apart by the first tag of the
+//! payload: `APPLIEDtype`, `SHAREDtype`, `TYPEREF`, `TYPEREFdirect`,
+//! `TYPEREFsymbol` or `TYPEREFin` make it a compact annotation, which is a
+//! type; anything else is a tree. A compact annotation becomes
+//! `Annotation { ty, tree: None }` (lossless: it *is* its type) and must decode
+//! to a `TypeRef` or `Applied`, else
+//! [`InvalidCompactAnnotationType`](UnpickleError::InvalidCompactAnnotationType).
+//! A full tree is refused, never stored as `tree: None`, which would make it
+//! indistinguishable from a compact annotation. See the `annotated` module.
+//!
 //! ## Recursive and refined types (Milestone 4a)
 //!
 //! | TASTy                 | wire shape                | semantic type                      |
@@ -122,9 +139,10 @@
 //!
 //! `MethodParam.erased` and `MethodParam.varargs` are both `false`. Dotty
 //! derives erasure from an `ErasedParamAnnot` on the parameter's *type*, which
-//! is an `ANNOTATEDtype` this pass does not decode yet, so no decodable method
-//! has an erased parameter; Milestone 4 must derive `erased` from the decoded
-//! annotation. `varargs` is the JVM `ACC_VARARGS` distinction, which a
+//! is pickled as an `ANNOTATEDtype` with a *full* annotation tree (observed in
+//! Scala 3.9.0 output; see `tests/annotated.rs`), which is deferred, so no
+//! decodable method has an erased parameter; Milestone 4b2 must derive
+//! `erased` once full trees have a semantic form. `varargs` is the JVM `ACC_VARARGS` distinction, which a
 //! `METHODtype` does not carry (a repeated parameter is a `Seq`-like *type*),
 //! so it is never inferred from position or name.
 //!
@@ -138,7 +156,7 @@
 //! the error of the whole node. Compound nodes are not interned: equal trees
 //! at different addresses keep different ids.
 //!
-//! Every other form is `UnsupportedType`: `ANNOTATEDtype`, match types, and
+//! Every other form is `UnsupportedType`: match types, and
 //! `TYPEREFin`/`TERMREFin`.
 //! Unsupported input is never lowered to `NoType`, `NoPrefix` or `Error`.
 
