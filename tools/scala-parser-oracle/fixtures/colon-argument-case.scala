@@ -1,0 +1,2 @@
+foo:
+  case x => x

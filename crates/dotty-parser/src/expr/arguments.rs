@@ -15,13 +15,7 @@ where
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start());
 
-        self.observe_indented();
-        self.advance();
-        let argument = if self.cursor.at(TokenKind::Indent) {
-            self.parse_feedback_indented_block()
-        } else {
-            self.expr()
-        };
+        let argument = self.parse_colon_argument_body();
         self.alloc_from(
             crate::Mark { start },
             TreeKind::Apply(Apply {
@@ -30,6 +24,23 @@ where
                 kind: ApplyKind::Regular,
             }),
         )
+    }
+
+    pub(super) fn parse_colon_argument_body(&mut self) -> TreeId<Untyped> {
+        if self.cursor.lookahead(1).kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+            || (self.cursor.lookahead(1).kind == TokenKind::Indent
+                && self.cursor.lookahead(2).kind
+                    == TokenKind::Keyword(dotty_core::HardKeyword::Case))
+        {
+            return self.parse_colon_case_argument();
+        }
+        self.observe_indented();
+        self.advance();
+        if self.cursor.at(TokenKind::Indent) {
+            self.parse_feedback_indented_block()
+        } else {
+            self.expr()
+        }
     }
 
     pub(super) fn parse_application(

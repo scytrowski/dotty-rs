@@ -7,6 +7,35 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(super) fn parse_colon_case_argument(&mut self) -> TreeId<Untyped> {
+        let start =
+            if self.cursor.lookahead(1).kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+                self.cursor.lookahead(1).span.start()
+            } else {
+                self.cursor.lookahead(2).span.start()
+            };
+        self.observe_indented();
+        self.advance();
+        let _ = self.accept(TokenKind::Indent);
+
+        let cases = self.case_clauses();
+        if !self.cursor.at(TokenKind::Outdent) {
+            self.observe_outdented();
+        }
+        if !self.accept(TokenKind::Outdent) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected an outdent to close colon case clauses",
+            );
+        }
+
+        let selector = self.synthetic_unit_at(start);
+        self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Match(Match { selector, cases }),
+        )
+    }
+
     /// Parses the case region following an already parsed match selector.
     pub(super) fn parse_match_clause(&mut self, selector: TreeId<Untyped>) -> TreeId<Untyped> {
         let start = self
