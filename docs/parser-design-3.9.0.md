@@ -135,10 +135,10 @@ The current expression, pattern, and literal implementation is split by
 responsibility: `compilation_unit.rs` owns orchestration and statement
 separators, `expr/` owns the incremental `Expr`/`Expr1` through operator- and
 simple-expression pipeline, `patterns.rs` owns the source-level pattern
-pipeline, `types.rs` owns the initial type-name subset used by type
-applications, and `literals.rs` owns numeric and string decoding. These names
-describe the current milestone; they do not claim complete Scala grammar
-coverage.
+pipeline, `type_definitions.rs` owns source-level type definitions, `types.rs`
+owns the initial type-name subset used by type applications and bounds, and
+`literals.rs` owns numeric and string decoding. These names describe the
+current milestone; they do not claim complete Scala grammar coverage.
 
 The currently implemented expression grammar covers:
 
@@ -179,6 +179,10 @@ parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
+simple type aliases and abstract type declarations with lower and/or upper
+bounds
+parameterized type aliases and abstract declarations using the shared
+`LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
 context-function literals using `?=>`, represented with `Given` parameter
 metadata
@@ -188,7 +192,8 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles only
-the simple type names needed by these ascriptions and type applications.
+the simple type names needed by these ascriptions, type applications, and
+type-definition bounds.
 
 Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
@@ -198,6 +203,14 @@ annotations, constructors, legacy `(implicit ...)` clauses, anonymous
 `(using T)` clauses, context-type shorthand, or the remaining definition
 forms. Those parameter forms produce an explicit unsupported-syntax
 diagnostic and synchronize at the closing parenthesis.
+
+Type definitions are statement-level `TypeDef` trees. The implemented subset
+covers simple aliases (`type A = B`), abstract declarations, lower and upper
+bounds, backquoted type names, and one flat higher-kinded parameter clause
+(`type F[A] = A`). Parameterized declarations preserve their parameters in a
+shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
+the existing zero-width `TypeBoundsTree` representation. Applied, refined,
+opaque, match, and other full type forms remain deferred.
 
 The current source-level pattern grammar is layered as:
 
@@ -339,7 +352,8 @@ precedence/associativity, assignment, named arguments, `if`/`while`,
 for-comprehensions, match and case clauses, value, pattern, and method
 definitions,
 binders,
-typed patterns, extractor applications, infix patterns, alternatives, and
+type aliases, abstract type bounds, typed patterns, extractor applications,
+infix patterns, alternatives, and
 named pattern arguments. Pattern fixtures live under
 `tools/scala-parser-oracle/fixtures/patterns/`; statement-bearing definition
 fixtures live under `tools/scala-parser-oracle/fixtures/definitions/` and are
