@@ -2188,10 +2188,16 @@ reverse order (stubs) completes `Class` 120 / 329, `Trait` 377 / 191,
 retries a class after its dependencies are entered could reach. That needs an
 orchestration layer (6), not a registry in the unpickler.
 
-Findings for later milestones: `_root_` is spelled as a package name in 61
-(library) / 244 (compiler) class failures and resolves to no package (the root
-package should be the empty path); package objects (`member package`) are not
-found in the `scala` package scope in 89 / 33; `java.*` needs the classpath.
+Findings for later milestones: `_root_` is written as a package name by 276
+(library) / 764 (compiler) `TERMREFpkg` nodes and resolves to no package
+(61 / 244 class failures): the root package should be the empty path, as
+`<root>` already is. The `package` failures (89 / 33) are *not* a naming bug:
+entering `scala/package.tasty` does put `package` (term) and `package$` (type)
+in the `scala` scope. They are references entered before the defining unit in
+path order (226 of 405 library references to `<package>.package` name a unit that
+sorts later) or to a library the compiler corpus does not contain (549 of 584
+compiler references are to `scala.package`); they need the retry/orchestration
+layer and the classpath, not a fix here.
 
 ### Match types after 4d (library / compiler)
 
