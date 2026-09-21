@@ -1293,6 +1293,14 @@ Symbol -> SymbolInfo::Complete(TypeId) -> Type::ClassInfo -> ScopeId
 of semantic structure. A symbol that is not (yet, or ever) a class simply has
 no `ClassInfo` and therefore no declarations to look through.
 
+A term's `SymbolInfo::Complete(TypeId)` is its declared type. Member lookup
+may read it (read-only, never completing) to find the declaration scope of a
+*stable* term prefix (`x.T`): an immutable field, value or by-name-free
+parameter whose completed type is a class reference or an application of one.
+`Definitions::and_type` / `or_type` are the canonical identities of the
+`scala.&` / `scala.|` aliases, declared in the `scala` package by `Definitions::declare_special_aliases`; a source-level application
+of them is normalized to `Type::And` / `Type::Or` by identity, never by text.
+
 `[MAJOR 4]` The first draft's `linked: Option<SymbolId>` was meant to cover
 both `class <-> companion object` and `module value <-> module class`, but a
 bare link only answers "linked to something," never "how." Real Dotty stores
