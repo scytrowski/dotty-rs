@@ -1,0 +1,267 @@
+use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, Untyped};
+
+use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
+
+/// A parser-only classification used while building statement sequences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParsedStatement {
+    Definition(TreeId<Untyped>),
+    Expression(TreeId<Untyped>),
+}
+
+/// The boundary that terminates a statement sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatementSequenceBoundary {
+    CompilationUnit,
+    Block(TokenKind),
+}
+
+impl<'src, 'names, S> Parser<'src, 'names, S>
+where
+    S: dotty_core::TokenSource,
+{
+    /// Parses one statement at the requested source location.
+    pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        let tree = if is_unsupported_start(self.current().kind) {
+            self.parse_unsupported_syntax()
+        } else {
+            self.with_location(location, |parser| parser.expr())
+        };
+        ParsedStatement::Expression(tree)
+    }
+
+    /// Parses statements up to a compilation-unit or block boundary.
+    pub(crate) fn parse_statement_sequence(
+        &mut self,
+        boundary: StatementSequenceBoundary,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        let mut statements = Vec::new();
+        self.consume_sequence_separators(boundary);
+
+        while !self.sequence_ended(boundary) {
+            let checkpoint = self.cursor.checkpoint();
+            let location = match boundary {
+                StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
+                StatementSequenceBoundary::Block(_) => Location::InBlock,
+            };
+            statements.push(self.parse_statement(location));
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    match boundary {
+                        StatementSequenceBoundary::CompilationUnit => {
+                            "parser made no progress while parsing a compilation unit"
+                        }
+                        StatementSequenceBoundary::Block(_) => {
+                            "parser made no progress while parsing a block"
+                        }
+                    },
+                );
+                let recovery_checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(recovery_checkpoint) {
+                    break;
+                }
+            }
+
+            if self.is_sequence_separator(boundary) {
+                self.consume_sequence_separators(boundary);
+            } else if !self.sequence_ended(boundary) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    match boundary {
+                        StatementSequenceBoundary::CompilationUnit => {
+                            "expected a statement separator"
+                        }
+                        StatementSequenceBoundary::Block(_) => {
+                            "expected a block statement separator"
+                        }
+                    },
+                );
+                self.recover_until(RecoverySet::Statement);
+                self.consume_sequence_separators(boundary);
+            }
+        }
+
+        self.finish_statement_sequence(statements)
+    }
+
+    /// Places definitions in `stats` and leaves only the final expression in `expr`.
+    pub(crate) fn finish_statement_sequence(
+        &mut self,
+        statements: Vec<ParsedStatement>,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        let mut stats = Vec::new();
+        let mut expression = None;
+
+        for statement in statements {
+            match statement {
+                ParsedStatement::Definition(tree) => stats.push(tree),
+                ParsedStatement::Expression(tree) => {
+                    if let Some(previous) = expression.replace(tree) {
+                        stats.push(previous);
+                    }
+                }
+            }
+        }
+
+        (stats, expression.unwrap_or_else(|| self.synthetic_unit()))
+    }
+
+    fn sequence_ended(&self, boundary: StatementSequenceBoundary) -> bool {
+        match boundary {
+            StatementSequenceBoundary::CompilationUnit => self.current().kind == TokenKind::Eof,
+            StatementSequenceBoundary::Block(end) => {
+                self.current().kind == end
+                    || self.current().kind == TokenKind::Eof
+                    || (self.context.case_body && self.is_case_body_terminator())
+            }
+        }
+    }
+
+    fn is_sequence_separator(&self, boundary: StatementSequenceBoundary) -> bool {
+        match boundary {
+            StatementSequenceBoundary::CompilationUnit => {
+                is_statement_separator(self.current().kind)
+            }
+            StatementSequenceBoundary::Block(_) => is_block_separator(self.current().kind),
+        }
+    }
+
+    fn consume_sequence_separators(&mut self, boundary: StatementSequenceBoundary) {
+        while self.is_sequence_separator(boundary) && !self.sequence_ended(boundary) {
+            self.advance();
+        }
+    }
+
+    fn is_case_body_terminator(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+        )
+    }
+
+    fn parse_unsupported_syntax(&mut self) -> TreeId<Untyped> {
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            format!(
+                "syntax beginning with {:?} is not supported by this parser milestone",
+                self.current().kind
+            ),
+        );
+        self.advance();
+        self.recover_until(RecoverySet::Statement);
+        self.error_expr(position)
+    }
+}
+
+const fn is_statement_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Punctuation(Punctuation::Semicolon)
+            | TokenKind::Outdent
+    )
+}
+
+pub(crate) const fn is_block_separator(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Punctuation(Punctuation::Semicolon)
+            | TokenKind::Indent
+            | TokenKind::Outdent
+    )
+}
+
+const fn is_unsupported_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Class
+                | HardKeyword::Def
+                | HardKeyword::Match
+                | HardKeyword::Val
+                | HardKeyword::Var
+                | HardKeyword::Type
+                | HardKeyword::Object
+                | HardKeyword::Trait
+                | HardKeyword::Enum
+                | HardKeyword::Given
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::{NameInterner, TextRange, TokenKind, TreeKind};
+
+    #[test]
+    fn statement_sequence_keeps_the_final_expression_as_the_result() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "a\nb",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let (stats, expr) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(parser.ast.get(stats[0]).kind, TreeKind::Ident(_)));
+        assert!(matches!(parser.ast.get(expr).kind, TreeKind::Ident(_)));
+    }
+
+    #[test]
+    fn definition_statements_are_always_block_stats() {
+        let mut names = NameInterner::new();
+        let x_name = names.intern("x");
+        let mut parser = parser_for(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+        let definition = parser.alloc(
+            dotty_core::TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            Some(parser.current_span()),
+        );
+        let expression = parser.alloc(
+            dotty_core::TreeKind::Ident(dotty_core::ast::Ident {
+                name: *dotty_core::TermName::new(x_name).as_name(),
+                backquoted: false,
+            }),
+            Some(parser.current_span()),
+        );
+
+        let (stats, expr) = parser.finish_statement_sequence(vec![
+            ParsedStatement::Definition(definition),
+            ParsedStatement::Expression(expression),
+        ]);
+
+        assert_eq!(stats, vec![definition]);
+        assert_eq!(expr, expression);
+        assert_eq!(
+            parser.ast.get(expr).position.unwrap().span().range(),
+            TextRange::new(0, 1).unwrap()
+        );
+    }
+}

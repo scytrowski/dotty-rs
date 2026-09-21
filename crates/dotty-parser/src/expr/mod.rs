@@ -219,17 +219,6 @@ struct PendingOperator {
     offset: u32,
 }
 
-const fn is_block_separator(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Newline
-            | TokenKind::Newlines
-            | TokenKind::Punctuation(Punctuation::Semicolon)
-            | TokenKind::Indent
-            | TokenKind::Outdent
-    )
-}
-
 const fn is_else_separator(kind: TokenKind) -> bool {
     matches!(
         kind,

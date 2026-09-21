@@ -21,6 +21,7 @@ mod parser;
 mod patterns;
 mod recovery;
 mod spans;
+mod statements;
 mod type_params;
 mod types;
 
