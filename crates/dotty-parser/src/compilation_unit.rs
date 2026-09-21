@@ -1,4 +1,4 @@
-use dotty_core::ast::Block;
+use dotty_core::ast::{Block, Ident, PackageDef};
 use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
 
 use crate::statements::StatementSequenceBoundary;
@@ -19,7 +19,7 @@ pub fn parse_compilation_unit<S: TokenSource>(
     tokens: S,
     names: &mut dotty_core::NameInterner,
 ) -> ParseResult {
-    Parser::new(source, source_id, tokens, names).compilation_unit()
+    Parser::new(source, source_id, tokens, names).source_compilation_unit()
 }
 
 /// Parses one source-backed expression fragment.
@@ -74,7 +74,10 @@ where
         }
     }
 
-    /// Parses the supported expression sequence into a stable synthetic block root.
+    /// Parses the supported expression sequence into a synthetic block root.
+    ///
+    /// This lower-level helper remains useful for parser-internal block and
+    /// definition tests. Call [`parse_compilation_unit`] for a source file.
     pub fn compilation_unit(mut self) -> ParseResult {
         let unit_mark = self.mark();
         let (stats, expr) =
@@ -92,13 +95,47 @@ where
             diagnostics: self.diagnostics,
         }
     }
+
+    /// Parses one source compilation unit into its source-level package root.
+    pub fn source_compilation_unit(mut self) -> ParseResult {
+        let unit_mark = self.mark();
+        let stats = self.parse_top_level_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        self.report_escaping_placeholders();
+        let root =
+            if stats.len() == 1 && matches!(self.ast.get(stats[0]).kind, TreeKind::PackageDef(_)) {
+                stats[0]
+            } else {
+                let empty_name_id = self.names.intern("");
+                let empty_name = self.alloc(
+                    TreeKind::Ident(Ident {
+                        name: *dotty_core::TermName::new(empty_name_id).as_name(),
+                        backquoted: false,
+                    }),
+                    Some(self.zero_width_span(unit_mark.start())),
+                );
+                self.alloc(
+                    TreeKind::PackageDef(PackageDef {
+                        name: empty_name,
+                        stats,
+                    }),
+                    Some(self.span_from(unit_mark)),
+                )
+            };
+
+        ParseResult {
+            ast: self.ast,
+            root,
+            diagnostics: self.diagnostics,
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::ParseDiagnosticKind;
-    use dotty_core::ast::{Literal, UntypedNode};
+    use dotty_core::ast::{Block, Literal, UntypedNode};
     use dotty_core::{
         Constant, HardKeyword, NameInterner, Punctuation, SourceId, SourceText, TextRange, Token,
         TokenKind, TokenSource, TokenValue,
@@ -393,7 +430,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn public_free_function_constructs_the_same_compilation_unit_result() {
+    fn public_free_function_constructs_a_source_compilation_unit_root() {
         let mut names = NameInterner::new();
         let result = parse_compilation_unit(
             SourceText::new("x").expect("valid source"),
@@ -408,11 +445,67 @@ pub(crate) mod tests {
             &mut names,
         );
 
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
         assert!(matches!(
             result.ast.get(result.root).kind,
-            TreeKind::Block(Block { .. })
+            TreeKind::PackageDef(PackageDef { .. })
         ));
+    }
+
+    #[test]
+    fn source_compilation_unit_uses_an_empty_package_for_an_empty_file() {
+        let mut names = NameInterner::new();
+        let result = parse_compilation_unit(
+            SourceText::new("").expect("valid source"),
+            SourceId::from_index(5),
+            VecTokenSource {
+                tokens: vec![token(TokenKind::Eof, 0, 0)],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        assert!(package.stats.is_empty());
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_compilation_unit_keeps_an_explicit_package_as_the_root() {
+        let mut names = NameInterner::new();
+        let result = parse_compilation_unit(
+            SourceText::new("package foo").expect("valid source"),
+            SourceId::from_index(6),
+            VecTokenSource {
+                tokens: vec![
+                    token(TokenKind::Keyword(HardKeyword::Package), 0, 7),
+                    token(TokenKind::Identifier, 8, 11),
+                    token(TokenKind::Eof, 11, 11),
+                ],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        assert!(package.stats.is_empty());
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
+        );
     }
 
     #[test]

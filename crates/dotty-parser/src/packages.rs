@@ -100,18 +100,11 @@ where
             return self.parse_unbraced_package_body();
         };
 
-        let (mut stats, expr) = self.with_location(Location::InBlock, |parser| {
+        let stats = self.with_location(Location::InBlock, |parser| {
             parser.with_block_end(Some(end), |parser| {
-                parser.parse_statement_sequence(StatementSequenceBoundary::Block(end))
+                parser.parse_top_level_sequence(StatementSequenceBoundary::Block(end))
             })
         });
-        if !self.is_synthetic_unit(expr) {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "expressions are not supported directly in package bodies",
-            );
-            stats.push(expr);
-        }
 
         if end == TokenKind::Outdent && self.current().kind != TokenKind::Outdent {
             self.observe_outdented();
@@ -126,16 +119,7 @@ where
     }
 
     fn parse_unbraced_package_body(&mut self) -> Vec<TreeId<Untyped>> {
-        let (mut stats, expr) =
-            self.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
-        if !self.is_synthetic_unit(expr) {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "expressions are not supported directly in package bodies",
-            );
-            stats.push(expr);
-        }
-        stats
+        self.parse_top_level_sequence(StatementSequenceBoundary::CompilationUnit)
     }
 
     fn accept_package_layout_start(&mut self) -> bool {
@@ -163,15 +147,6 @@ where
         ) {
             self.advance();
         }
-    }
-
-    fn is_synthetic_unit(&self, id: TreeId<Untyped>) -> bool {
-        matches!(self.ast().get(id).kind, TreeKind::Literal(ref literal) if literal.value == dotty_core::Constant::Unit)
-            && self
-                .ast()
-                .get(id)
-                .position
-                .is_some_and(|position| position.span().range().is_empty())
     }
 
     fn is_package_name(&self) -> bool {

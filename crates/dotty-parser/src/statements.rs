@@ -119,6 +119,75 @@ where
         self.finish_statement_sequence(statements)
     }
 
+    /// Parses a compilation-unit or package statement sequence without the
+    /// synthetic trailing expression used by expression blocks.
+    pub(crate) fn parse_top_level_sequence(
+        &mut self,
+        boundary: StatementSequenceBoundary,
+    ) -> Vec<TreeId<Untyped>> {
+        let mut statements = Vec::new();
+        self.consume_sequence_separators(boundary);
+
+        while !self.sequence_ended(boundary) {
+            let checkpoint = self.cursor.checkpoint();
+            let location = match boundary {
+                StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
+                StatementSequenceBoundary::Block(_) => Location::InBlock,
+            };
+            match self.parse_top_level_statement(location) {
+                ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => {
+                    statements.push(tree)
+                }
+                ParsedStatement::Many(trees) => statements.extend(trees),
+            }
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing a top-level statement",
+                );
+                let recovery_checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(recovery_checkpoint) {
+                    break;
+                }
+            }
+
+            if self.is_sequence_separator(boundary) {
+                self.consume_sequence_separators(boundary);
+            } else if !self.sequence_ended(boundary) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "expected a top-level statement separator",
+                );
+                self.recover_until(RecoverySet::Statement);
+                self.consume_sequence_separators(boundary);
+            }
+        }
+
+        statements
+    }
+
+    fn parse_top_level_statement(&mut self, location: Location) -> ParsedStatement {
+        if is_top_level_statement_start(self.current().kind) {
+            return self.parse_statement(location);
+        }
+
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "top-level expressions are not supported in a compilation unit",
+        );
+        let checkpoint = self.cursor.checkpoint();
+        self.with_location(location, |parser| {
+            let _ = parser.expr();
+        });
+        if !self.cursor.progressed_since(checkpoint) && self.current().kind != TokenKind::Eof {
+            self.advance();
+        }
+        ParsedStatement::Expression(self.error_expr(position))
+    }
+
     /// Places definitions in `stats` and leaves only the final expression in `expr`.
     pub(crate) fn finish_statement_sequence(
         &mut self,
@@ -220,6 +289,27 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
             HardKeyword::Match
                 | HardKeyword::Val
                 | HardKeyword::Var
+                | HardKeyword::Enum
+                | HardKeyword::Given
+        )
+    )
+}
+
+const fn is_top_level_statement_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Val
+                | HardKeyword::Var
+                | HardKeyword::Def
+                | HardKeyword::Type
+                | HardKeyword::Class
+                | HardKeyword::Trait
+                | HardKeyword::Object
+                | HardKeyword::Package
+                | HardKeyword::Import
+                | HardKeyword::Export
+                | HardKeyword::Match
                 | HardKeyword::Enum
                 | HardKeyword::Given
         )
