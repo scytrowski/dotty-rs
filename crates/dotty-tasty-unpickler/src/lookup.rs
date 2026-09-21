@@ -194,6 +194,19 @@ pub(crate) fn lookup_declaration(
     }
 }
 
+/// Whether `prefix`, with proxies looked through, is a structural prefix: a
+/// `Refined`, `Recursive` or `RecThis` type, whose members may be refinements
+/// with no declaration symbol. A `RecThis` is not read further (its binder
+/// may still be being decoded), and nothing else is structural.
+pub(crate) fn is_structural_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
+    look_through_proxies(store, prefix).is_some_and(|prefix| {
+        matches!(
+            store.types.get(prefix),
+            Type::Refined { .. } | Type::Recursive { .. } | Type::RecThis { .. }
+        )
+    })
+}
+
 /// Whether `prefix` (with proxies looked through) is not a legal prefix as
 /// Dotty's `TypeOps.isLegalPrefix` sees it: a singleton that is not stable, of
 /// which a `TermRef` to a method or a mutable member is what the semantic graph can

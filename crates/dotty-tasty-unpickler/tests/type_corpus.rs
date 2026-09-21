@@ -436,6 +436,9 @@ struct Tally {
     /// `REFin` nodes whose two children decoded: the owner space, the
     /// declaration name and its namespace, for the [`OwnerOracle`].
     oracle_queries: Vec<(dotty_core::ids::TypeId, Option<String>, Namespace)>,
+    /// Name-based `TYPEREF` / `TERMREF` roots that failed on an unsupported
+    /// prefix (Milestone 4c2 survey), by tag and the prefix's wire shape.
+    unsupported_prefix_shapes: BTreeMap<(&'static str, String), usize>,
     /// `TYPEREFin` (175) and `TERMREFin` (174).
     in_references: BTreeMap<u8, InReferenceOutcomes>,
     annotations: AnnotationSurvey,
@@ -914,6 +917,19 @@ fn run(
             )
         });
         let result = unpickler.unpickle_type(at);
+        if matches!(tag, 115 | 117)
+            && matches!(
+                result,
+                Err(UnpickleError::UnsupportedResolutionPrefix { .. })
+            )
+            && let Some(&[(prefix_at, _)]) = all_children.get(&at).map(Vec::as_slice)
+        {
+            let kind = if tag == 117 { "TYPEREF" } else { "TERMREF" };
+            *tally
+                .unsupported_prefix_shapes
+                .entry((kind, shape_of(&file, &tags, prefix_at)))
+                .or_default() += 1;
+        }
         if let Some((Ok(_), Ok(space))) = &in_probe {
             let name = file
                 .ast_address_index()
@@ -1332,6 +1348,10 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         println!(
             "REFin owner-space oracle (both children decoded; the owner class's own scope, from the unit that entered it): no scope known {}, name is not text {}, no declaration {}, exactly one declaration {}, several {}",
             oracle.no_scope, oracle.name_not_text, oracle.none, oracle.one, oracle.several
+        );
+        println!(
+            "unsupported-prefix name references by prefix wire shape: {:?}",
+            tally.unsupported_prefix_shapes
         );
         report("compound types", &COMPOUND_TAGS);
         report("bounds and flexible types", &WRAPPER_TAGS);

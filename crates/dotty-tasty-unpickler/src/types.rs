@@ -187,9 +187,10 @@
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
+use dotty_core::names::{TermName, TypeName};
 use dotty_core::resolution::{MemberRequest, MemberSelector, MemberSpace, ResolutionError};
 use dotty_core::symbols::SymbolKind;
-use dotty_core::types::{Constant, Type};
+use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, ANNOTATEDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG,
     ConstantValue, FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
@@ -203,8 +204,8 @@ use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::binders::declared_variances;
 use crate::error::UnpickleError;
 use crate::lookup::{
-    LocalLookup, MAX_PROXY_DEPTH, is_illegal_prefix, lookup_declaration, lookup_member,
-    lookup_owner, proxy_underlying,
+    LocalLookup, MAX_PROXY_DEPTH, is_illegal_prefix, is_structural_prefix, lookup_declaration,
+    lookup_member, lookup_owner, proxy_underlying,
 };
 use crate::names::{is_signed, package_segments, string_value, wire_name};
 use crate::unpickler::TastyUnpickler;
@@ -218,6 +219,14 @@ fn head(tree: &RawTree<'_>) -> (u8, u32) {
         }
         RawTree::LengthNode(node) => (node.tag, address(node.offset)),
     }
+}
+
+/// What a name-based reference resolved to.
+enum Resolved {
+    /// A declaration symbol.
+    Symbol(SymbolId),
+    /// No symbol: a member of a structural prefix, selected by this name.
+    Structural(Name),
 }
 
 impl TastyUnpickler<'_, '_, '_> {
@@ -321,11 +330,18 @@ impl TastyUnpickler<'_, '_, '_> {
                 } else {
                     Namespace::Term
                 };
-                let symbol = self.resolved_member(at, *name, prefix, namespace)?;
-                if tag == TYPEREF_TAG {
-                    Type::type_ref(prefix, symbol)
-                } else {
-                    Type::term_ref(prefix, symbol)
+                let resolved = self.resolved_member(at, *name, prefix, namespace)?;
+                match (tag == TYPEREF_TAG, resolved) {
+                    (true, Resolved::Symbol(symbol)) => Type::type_ref(prefix, symbol),
+                    (false, Resolved::Symbol(symbol)) => Type::term_ref(prefix, symbol),
+                    (true, Resolved::Structural(name)) => Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Name(TypeName::new(name.text())),
+                    },
+                    (false, Resolved::Structural(name)) => Type::TermRef {
+                        prefix,
+                        target: TermRefTarget::Name(TermName::new(name.text())),
+                    },
                 }
             }
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
@@ -426,6 +442,13 @@ impl TastyUnpickler<'_, '_, '_> {
             _ => return Err(UnpickleError::UnsupportedType { tag, address: at }),
         };
 
+        // Decoding a child can reach this very node again: a `RECthis` child
+        // decodes its binder on demand, and the binder's own parent contains
+        // this node. The inner decode owns the address then, and this outer
+        // one returns its type rather than allocating a second.
+        if let Some(existing) = self.index.type_at(at) {
+            return Ok(existing);
+        }
         let id = self.store.types.alloc(ty);
         self.index.insert_type(at, id)?;
         Ok(id)
@@ -535,7 +558,7 @@ impl TastyUnpickler<'_, '_, '_> {
         name_ref: u32,
         prefix: TypeId,
         namespace: Namespace,
-    ) -> Result<SymbolId, UnpickleError> {
+    ) -> Result<Resolved, UnpickleError> {
         self.resolved_named(at, name_ref, prefix, None, namespace)
     }
 
@@ -551,7 +574,15 @@ impl TastyUnpickler<'_, '_, '_> {
         space: TypeId,
         namespace: Namespace,
     ) -> Result<SymbolId, UnpickleError> {
-        self.resolved_named(at, name_ref, prefix, Some(space), namespace)
+        match self.resolved_named(at, name_ref, prefix, Some(space), namespace)? {
+            Resolved::Symbol(symbol) => Ok(symbol),
+            // An explicit space names a declaration; it never falls back to a
+            // name designator.
+            Resolved::Structural(_) => Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "an owner-space reference resolved to a name designator",
+            }),
+        }
     }
 
     /// Whether `ty`, or a proxy it wraps, is a binder still being decoded,
@@ -580,7 +611,7 @@ impl TastyUnpickler<'_, '_, '_> {
         prefix: TypeId,
         space: Option<TypeId>,
         namespace: Namespace,
-    ) -> Result<SymbolId, UnpickleError> {
+    ) -> Result<Resolved, UnpickleError> {
         let text = wire_name(self.file.names(), name_ref)?;
         if namespace == Namespace::Term && is_signed(self.file.names(), name_ref) {
             return Err(UnpickleError::UnsupportedSignedReference {
@@ -624,7 +655,7 @@ impl TastyUnpickler<'_, '_, '_> {
         };
         let unsupported = local == LocalLookup::UnsupportedPrefix;
         match local {
-            LocalLookup::Found(symbol) => return Ok(symbol),
+            LocalLookup::Found(symbol) => return Ok(Resolved::Symbol(symbol)),
             LocalLookup::Ambiguous { candidates } => {
                 return Err(UnpickleError::AmbiguousMember {
                     address: at,
@@ -663,7 +694,14 @@ impl TastyUnpickler<'_, '_, '_> {
                     ),
                 }))
             }
-            Some(symbol) => Ok(symbol),
+            Some(symbol) => Ok(Resolved::Symbol(symbol)),
+            // The resolver did not know it and the prefix is a refinement or
+            // recursive type: its member has no declaration symbol, and is
+            // selected by name. Only an ordinary reference does this, and only
+            // after the local scope and the resolver had their say.
+            None if unsupported && space.is_none() && is_structural_prefix(self.store, prefix) => {
+                Ok(Resolved::Structural(name))
+            }
             None if unsupported => Err(match space {
                 Some(space) => UnpickleError::UnsupportedResolutionSpace { address: at, space },
                 None => UnpickleError::UnsupportedResolutionPrefix {
@@ -790,7 +828,16 @@ impl TastyUnpickler<'_, '_, '_> {
             // The class of an external `this`, named through its prefix.
             RawTree::NatAst { value, child, .. } if tag == TYPEREF_TAG => {
                 let prefix = self.decode_type(ast, child, depth)?;
-                let symbol = self.resolved_member(at, *value, prefix, Namespace::Type)?;
+                // A name-designated class has no symbol to be the class of a
+                // `this`.
+                let Resolved::Symbol(symbol) =
+                    self.resolved_member(at, *value, prefix, Namespace::Type)?
+                else {
+                    return Err(UnpickleError::UnsupportedResolutionPrefix {
+                        address: at,
+                        prefix,
+                    });
+                };
                 match self.store.symbols.get(symbol).kind {
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => Ok(symbol),
                     _ => Err(UnpickleError::InvalidReferenceKind { from: at, to: at }),
