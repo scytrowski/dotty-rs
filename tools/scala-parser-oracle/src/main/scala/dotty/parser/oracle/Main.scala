@@ -12,8 +12,26 @@ object Main:
     val (mode, path) = args.toList match
       case path :: Nil => ("expr", path)
       case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
-      case _ => throw IllegalArgumentException("usage: scala-parser-oracle [--mode pattern] <source-file>")
+      case "--batch" :: manifest :: Nil =>
+        runBatch(manifest)
+        return
+      case _ =>
+        throw IllegalArgumentException(
+          "usage: scala-parser-oracle [--mode pattern] <source-file> | --batch manifest"
+        )
 
+    println(parseAndRender(mode, path))
+
+  private def runBatch(manifest: String): Unit =
+    Files.readString(Paths.get(manifest)).linesIterator
+      .filter(_.nonEmpty)
+      .foreach: line =>
+        val fields = line.split("\\t", -1)
+        if fields.length != 2 then
+          throw IllegalArgumentException(s"invalid oracle manifest entry: $line")
+        println(parseAndRender(fields(0), fields(1)))
+
+  private def parseAndRender(mode: String, path: String): String =
     val sourcePath = Paths.get(path)
     val source = Files.readString(sourcePath)
     val sourceFile = SourceFile.virtual(sourcePath.toString, source)
@@ -21,9 +39,13 @@ object Main:
     val parser = new Parsers.Parser(sourceFile)(using context)
     val tree = if mode == "pattern" then parser.pattern() else parser.expr()
 
-    println(render(tree, source))
+    render(tree, source, placeholderBase(tree, source))
 
-  private def render(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
+  private def render(
+      tree: dotty.tools.dotc.ast.Trees.Tree[?],
+      source: String,
+      placeholderBase: Int
+  ): String =
     val fields = collection.mutable.ArrayBuffer.empty[String]
     val normalizedKind = tree match
       case tuple: dotty.tools.dotc.ast.untpd.Tuple if childTrees(tuple).isEmpty => "Literal"
@@ -37,7 +59,10 @@ object Main:
 
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
-        fields += field("name", quote(normalizePlaceholderName(ident.name.toString, slice(ident, source))))
+        fields += field(
+          "name",
+          quote(normalizePlaceholderName(ident.name.toString, slice(ident, source), placeholderBase))
+        )
         if isBackquotedIdent(ident, source) then
           fields += field("backquoted", "true")
       case select: dotty.tools.dotc.ast.Trees.Select[?] =>
@@ -74,7 +99,9 @@ object Main:
     operatorIndex.flatMap(index => rawChildren.lift(index)).foreach: operatorTree =>
       fields += field("operator", quote(operatorName(operatorTree, source)))
     val children = rawChildren.zipWithIndex
-      .collect { case (child, index) if !operatorIndex.contains(index) => render(child, source) }
+      .collect {
+        case (child, index) if !operatorIndex.contains(index) => render(child, source, placeholderBase)
+      }
       .mkString("[", ",", "]")
     fields += field("children", children)
     fields.mkString("{", ",", "}")
@@ -105,11 +132,26 @@ object Main:
       case text if text.startsWith("`") && text.endsWith("`") => text.drop(1).dropRight(1)
       case text => text
 
-  private def normalizePlaceholderName(name: String, sourceText: String): String =
+  private def placeholderBase(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): Int =
+    placeholderIndices(tree, source).minOption.getOrElse(1)
+
+  private def placeholderIndices(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): List[Int] =
+    val own = tree match
+      case ident: dotty.tools.dotc.ast.Trees.Ident[?] if slice(ident, source) == "_" =>
+        ident.name.toString match
+          case name if name.startsWith("_$") => name.drop(2).toIntOption.toList
+          case name if name.startsWith("$placeholder_") => name.drop("$placeholder_".length).toIntOption.toList
+          case _ => Nil
+      case _ => Nil
+    own ++ childTrees(tree).flatMap(child => placeholderIndices(child, source))
+
+  private def normalizePlaceholderName(name: String, sourceText: String, base: Int): String =
     if sourceText == "_" then
       name match
         case suffix if suffix.startsWith("_$") =>
-          suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - 1}").getOrElse(name)
+          suffix.drop(2).toIntOption.map(index => s"$$placeholder_${index - base}").getOrElse(name)
+        case suffix if suffix.startsWith("$placeholder_") =>
+          suffix.drop("$placeholder_".length).toIntOption.map(index => s"$$placeholder_${index - base}").getOrElse(name)
         case _ => name
     else name
 

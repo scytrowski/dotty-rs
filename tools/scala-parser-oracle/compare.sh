@@ -10,30 +10,28 @@ if [[ "$#" -gt 1 ]]; then
   exit 2
 fi
 
+fixture_dir=$(cd "${fixture_dir}" && pwd)
+
 mapfile -t fixtures < <(find "${fixture_dir}" -type f -name '*.scala' | sort)
 if [[ "${#fixtures[@]}" -eq 0 ]]; then
   echo "no Scala fixtures found in ${fixture_dir}" >&2
   exit 2
 fi
 
+manifest=$(mktemp)
+scala_output=$(mktemp)
+rust_output=$(mktemp)
+trap 'rm -f "${manifest}" "${scala_output}" "${rust_output}"' EXIT
+
 for fixture in "${fixtures[@]}"; do
   mode=expr
   if [[ "$(basename "$(dirname "${fixture}")")" == "patterns" ]]; then
     mode=pattern
   fi
-  scala_output=$(mktemp)
-  rust_output=$(mktemp)
-  trap 'rm -f "${scala_output}" "${rust_output}"' EXIT
-
-  if [[ "${mode}" == pattern ]]; then
-    "${script_dir}/run" --mode pattern "${fixture}" >"${scala_output}"
-    cargo run -q -p dotty-parser-smoke-dump --locked -- --mode pattern "${fixture}" >"${rust_output}"
-  else
-    "${script_dir}/run" "${fixture}" >"${scala_output}"
-    cargo run -q -p dotty-parser-smoke-dump --locked -- "${fixture}" >"${rust_output}"
-  fi
-  python3 "${script_dir}/compare.py" "${fixture}" "${scala_output}" "${rust_output}"
-
-  rm -f "${scala_output}" "${rust_output}"
-  trap - EXIT
+  printf '%s\t%s\n' "${mode}" "${fixture}" >>"${manifest}"
 done
+
+"${script_dir}/run" --batch "${manifest}" >"${scala_output}"
+cargo build -q -p dotty-parser-smoke-dump --locked
+"${repo_dir}/target/debug/dotty-parser-smoke-dump" --batch "${manifest}" >"${rust_output}"
+python3 "${script_dir}/compare.py" --batch "${manifest}" "${scala_output}" "${rust_output}"

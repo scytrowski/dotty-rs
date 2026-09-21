@@ -10,7 +10,13 @@ it with the selected SDKMAN defaults:
 ```text
 ./run path/to/input.scala
 ./run --mode pattern path/to/pattern.scala
+./run --batch path/to/manifest.tsv
 ```
+
+The batch manifest contains one tab-separated `mode` and absolute source path
+per line. `compare.sh` uses this mode automatically: Scala parses the whole
+corpus in one JVM, while the Rust dump tool is built and run once. This avoids
+restarting sbt, Scala, Cargo, and Python for every fixture.
 
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
