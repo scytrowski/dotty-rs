@@ -74,10 +74,11 @@ where
 
             let checkpoint = self.cursor.checkpoint();
             let statement = self.parse_statement(Location::InBlock);
-            members.push(match statement {
+            match statement {
                 crate::statements::ParsedStatement::Definition(tree)
-                | crate::statements::ParsedStatement::Expression(tree) => tree,
-            });
+                | crate::statements::ParsedStatement::Expression(tree) => members.push(tree),
+                crate::statements::ParsedStatement::Many(trees) => members.extend(trees),
+            }
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(

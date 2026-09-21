@@ -3,10 +3,11 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, Untyped};
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 
 /// A parser-only classification used while building statement sequences.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ParsedStatement {
     Definition(TreeId<Untyped>),
     Expression(TreeId<Untyped>),
+    Many(Vec<TreeId<Untyped>>),
 }
 
 /// The boundary that terminates a statement sequence.
@@ -44,10 +45,10 @@ where
             return self.parse_object_definition(location);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Import) {
-            return ParsedStatement::Definition(self.parse_import_clause(location));
+            return ParsedStatement::Many(self.parse_import_clause(location));
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Export) {
-            return ParsedStatement::Definition(self.parse_export_clause(location));
+            return ParsedStatement::Many(self.parse_export_clause(location));
         }
 
         let tree = if is_unsupported_start(self.current().kind) {
@@ -131,6 +132,7 @@ where
             match statement {
                 ParsedStatement::Definition(tree) => stats.push(tree),
                 ParsedStatement::Expression(tree) => expression = Some(tree),
+                ParsedStatement::Many(trees) => stats.extend(trees),
             }
         }
 

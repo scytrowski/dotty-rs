@@ -7,24 +7,38 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    pub(crate) fn parse_import_clause(&mut self, _location: Location) -> TreeId<Untyped> {
+    pub(crate) fn parse_import_clause(&mut self, _location: Location) -> Vec<TreeId<Untyped>> {
         self.parse_import_or_export_clause(false)
     }
 
-    pub(crate) fn parse_export_clause(&mut self, _location: Location) -> TreeId<Untyped> {
+    pub(crate) fn parse_export_clause(&mut self, _location: Location) -> Vec<TreeId<Untyped>> {
         self.parse_import_or_export_clause(true)
     }
 
-    fn parse_import_or_export_clause(&mut self, is_export: bool) -> TreeId<Untyped> {
-        let mark = self.mark();
+    fn parse_import_or_export_clause(&mut self, is_export: bool) -> Vec<TreeId<Untyped>> {
+        let keyword_mark = self.mark();
         self.advance();
+        let mut trees = Vec::new();
 
-        let (expr, selectors) = self.parse_import_expr();
-        if is_export {
-            self.alloc_from(mark, TreeKind::Export(Export { expr, selectors }))
-        } else {
-            self.alloc_from(mark, TreeKind::Import(Import { expr, selectors }))
+        loop {
+            let mark = if trees.is_empty() {
+                keyword_mark
+            } else {
+                self.mark()
+            };
+            let (expr, selectors) = self.parse_import_expr();
+            let tree = if is_export {
+                self.alloc_from(mark, TreeKind::Export(Export { expr, selectors }))
+            } else {
+                self.alloc_from(mark, TreeKind::Import(Import { expr, selectors }))
+            };
+            trees.push(tree);
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                break;
+            }
         }
+
+        trees
     }
 
     /// Parses an import/export expression while keeping the qualifier and its
@@ -314,8 +328,8 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_import_clause(Location::Elsewhere);
-        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
             panic!("expected import tree");
         };
         assert_eq!(import.selectors.len(), 1);
@@ -325,7 +339,7 @@ mod tests {
             TreeKind::Ident(_)
         ));
         assert_eq!(
-            parser.ast().get(id).position.unwrap().span().range(),
+            parser.ast().get(ids[0]).position.unwrap().span().range(),
             TextRange::new(0, 14).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
@@ -348,8 +362,8 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_import_clause(Location::Elsewhere);
-        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
             panic!("expected import tree");
         };
         let imported = import.selectors[0].imported;
@@ -373,8 +387,8 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_export_clause(Location::Elsewhere);
-        assert!(matches!(parser.ast().get(id).kind, TreeKind::Export(_)));
+        let ids = parser.parse_export_clause(Location::Elsewhere);
+        assert!(matches!(parser.ast().get(ids[0]).kind, TreeKind::Export(_)));
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -401,8 +415,8 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_import_clause(Location::Elsewhere);
-        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
             panic!("expected import tree");
         };
         assert_eq!(import.selectors.len(), 2);
@@ -427,8 +441,8 @@ mod tests {
             &mut names,
         );
 
-        let id = parser.parse_import_clause(Location::Elsewhere);
-        let TreeKind::Import(import) = &parser.ast().get(id).kind else {
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
             panic!("expected import tree");
         };
         assert!(import.selectors[0].bound.is_some());
@@ -461,5 +475,62 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
         );
+    }
+
+    #[test]
+    fn parses_multiple_import_expressions_in_source_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.bar, baz.qux",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Punctuation(Punctuation::Comma), 14, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::Dot), 19, 20),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+
+        assert_eq!(ids.len(), 2);
+        assert!(matches!(parser.ast().get(ids[0]).kind, TreeKind::Import(_)));
+        assert!(matches!(parser.ast().get(ids[1]).kind, TreeKind::Import(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn import_statement_is_retained_as_a_block_stat() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.bar\nx",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Newline, 14, 15),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let (stats, expr) = parser.parse_statement_sequence(
+            crate::statements::StatementSequenceBoundary::CompilationUnit,
+        );
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(stats[0]).kind,
+            TreeKind::Import(_)
+        ));
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
     }
 }
