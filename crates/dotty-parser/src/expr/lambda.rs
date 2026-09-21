@@ -313,7 +313,7 @@ where
         TermName::new(self.names.intern(&name))
     }
 
-    pub(super) fn synthetic_type_tree_at(&mut self, start: u32) -> TreeId<Untyped> {
+    pub(crate) fn synthetic_type_tree_at(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width synthetic type range");
         self.alloc(
             TreeKind::TypeTree(dotty_core::ast::TypeTree),

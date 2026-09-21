@@ -9,6 +9,7 @@
 //! intentionally incomplete.
 
 mod case_clauses;
+mod class_definitions;
 mod compilation_unit;
 mod context;
 mod cursor;
