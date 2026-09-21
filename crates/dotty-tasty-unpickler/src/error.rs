@@ -109,6 +109,29 @@ pub enum UnpickleError {
         address: u32,
         annotation_type: TypeId,
     },
+    /// The full annotation at `annotation_address` inside the `ANNOTATEDtype`
+    /// at `address` is a constructor call with a part this pass does not read
+    /// (`tag` names it): a spine node that is not `APPLY`, `TYPEAPPLY`, the
+    /// constructor `SELECTin` or `NEW`, or a class tree that is not a type.
+    UnsupportedAnnotationConstructor {
+        address: u32,
+        annotation_address: u32,
+        tag: u8,
+    },
+    /// An argument of the annotation on the `ANNOTATEDtype` at `address` is
+    /// a form the annotation value model does not hold (only literals and class
+    /// literals are). It is never dropped or evaluated.
+    UnsupportedAnnotationArgument {
+        address: u32,
+        argument_address: u32,
+        tag: u8,
+    },
+    /// The type of the full annotation on the `ANNOTATEDtype` at `address`,
+    /// `annotation_type`, is neither a `TypeRef` nor an `Applied` type.
+    InvalidAnnotationType {
+        address: u32,
+        annotation_type: TypeId,
+    },
     /// The `TYPEBOUNDS` node at `address` carries variance markers for the
     /// lambda `target`, which is still being decoded, so it cannot be rebound
     /// yet. (A marker on a bound that is not a lambda is left alone, as
@@ -251,6 +274,26 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the compact annotation of the annotated type at address {address} is not a type reference or an applied type"
             ),
+            Self::UnsupportedAnnotationConstructor {
+                address,
+                annotation_address,
+                tag,
+            } => write!(
+                formatter,
+                "the annotation at address {annotation_address} of the annotated type at address {address} has a constructor part with tag {tag}, which is not decoded"
+            ),
+            Self::UnsupportedAnnotationArgument {
+                address,
+                argument_address,
+                tag,
+            } => write!(
+                formatter,
+                "the annotated type at address {address} has an annotation argument at address {argument_address} with tag {tag}, which is not decoded"
+            ),
+            Self::InvalidAnnotationType { address, .. } => write!(
+                formatter,
+                "the annotation of the annotated type at address {address} is not a type reference or an applied type"
+            ),
             Self::MalformedType { address, reason } => write!(
                 formatter,
                 "the type at address {address} is malformed: {reason}"
@@ -340,6 +383,9 @@ impl std::error::Error for UnpickleError {
             | Self::MalformedType { .. }
             | Self::UnsupportedAnnotationTree { .. }
             | Self::InvalidCompactAnnotationType { .. }
+            | Self::UnsupportedAnnotationConstructor { .. }
+            | Self::UnsupportedAnnotationArgument { .. }
+            | Self::InvalidAnnotationType { .. }
             | Self::BoundsVarianceTargetPending { .. }
             | Self::BoundsVarianceArityMismatch { .. }
             | Self::InvalidMethodModifier { .. }

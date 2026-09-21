@@ -39,7 +39,9 @@ use std::fmt;
 
 use crate::ids::{AnnotationId, TypeId};
 use crate::store::SemanticStore;
-use crate::types::annotation::Annotation;
+use crate::types::annotation::{
+    Annotation, AnnotationArgument, AnnotationArguments, AnnotationValue,
+};
 use crate::types::class_info::ClassInfo;
 use crate::types::constant::Constant;
 use crate::types::method::{MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
@@ -210,15 +212,38 @@ impl<'a> Rebinder<'a> {
         if let Some(&done) = self.annotations.get(&id) {
             return Ok(done);
         }
-        let annotation = *self.store.annotations.get(id);
+        let annotation = self.store.annotations.get(id).clone();
         let ty = self.ty(annotation.ty)?;
-        let new = if ty == annotation.ty {
+        // The term arguments can name types too (`classOf[T]`); rebinding
+        // them is part of the annotation, and the rest is copied as it is.
+        let arguments = match &annotation.arguments {
+            AnnotationArguments::Unavailable => AnnotationArguments::Unavailable,
+            AnnotationArguments::Known(arguments) => {
+                let mut rebound = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    let value = match &argument.value {
+                        AnnotationValue::Constant(Constant::Class(class)) => {
+                            AnnotationValue::Constant(Constant::Class(self.ty(*class)?))
+                        }
+                        unchanged @ AnnotationValue::Constant(_) => unchanged.clone(),
+                    };
+                    rebound.push(AnnotationArgument {
+                        name: argument.name,
+                        value,
+                    });
+                }
+                AnnotationArguments::Known(rebound)
+            }
+        };
+        let new = if ty == annotation.ty && arguments == annotation.arguments {
             id
         } else {
             // A new annotation, never a change to the stored one.
-            self.store
-                .annotations
-                .alloc(Annotation::new(ty, annotation.tree))
+            self.store.annotations.alloc(Annotation {
+                ty,
+                arguments,
+                tree: annotation.tree,
+            })
         };
         self.annotations.insert(id, new);
         Ok(new)
@@ -942,6 +967,124 @@ mod tests {
             (old, 0)
         );
         assert_ne!(*underlying, inner_old);
+    }
+
+    fn class_argument(class: TypeId, name: Option<TermName>) -> AnnotationArgument {
+        AnnotationArgument {
+            name,
+            value: AnnotationValue::Constant(Constant::Class(class)),
+        }
+    }
+
+    #[test]
+    fn a_class_literal_argument_naming_the_binder_is_rebound_in_a_new_annotation() {
+        let mut f = Fixture::new();
+        let name = TermName::new(crate::ids::NameId::new(3));
+        let mut old_annotation = None;
+        let old = f.lambda(&["A"], |f, me| {
+            let a = f.param_ref(me, 0);
+            let leaf = f.leaf;
+            let annotation = f.store.annotations.alloc(Annotation::with_arguments(
+                leaf,
+                vec![
+                    AnnotationArgument {
+                        name: None,
+                        value: AnnotationValue::Constant(Constant::Int(1)),
+                    },
+                    class_argument(a, Some(name)),
+                ],
+            ));
+            old_annotation = Some(annotation);
+            f.store.types.alloc(Type::Annotated {
+                underlying: leaf,
+                annotation,
+            })
+        });
+        let old_annotation = old_annotation.unwrap();
+
+        let new = rebind_type_lambda(&mut f.store, old, &[Variance::Covariant]).unwrap();
+
+        let Type::Annotated { annotation, .. } = f.store.types.get(f.get_lambda(new).result) else {
+            panic!("not annotated");
+        };
+        assert_ne!(*annotation, old_annotation);
+        let AnnotationArguments::Known(arguments) = &f.store.annotations.get(*annotation).arguments
+        else {
+            panic!("arguments lost");
+        };
+        // Order and names are kept; only the type inside the class literal moves.
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(
+            arguments[0].value,
+            AnnotationValue::Constant(Constant::Int(1))
+        );
+        assert_eq!(arguments[1].name, Some(name));
+        let AnnotationValue::Constant(Constant::Class(class)) = arguments[1].value else {
+            panic!("not a class literal");
+        };
+        assert_eq!(f.param_ref_of(class), (new, 0));
+        // The stored annotation still names the old binder.
+        let AnnotationArguments::Known(old_arguments) =
+            &f.store.annotations.get(old_annotation).arguments
+        else {
+            panic!("arguments lost");
+        };
+        let AnnotationValue::Constant(Constant::Class(old_class)) = old_arguments[1].value else {
+            panic!("not a class literal");
+        };
+        assert_eq!(f.param_ref_of(old_class), (old, 0));
+    }
+
+    #[test]
+    fn annotation_arguments_that_name_no_type_are_reused_not_copied() {
+        let mut f = Fixture::new();
+        let mut unavailable = None;
+        let mut known = None;
+        let old = f.lambda(&["A"], |f, me| {
+            let a = f.param_ref(me, 0);
+            let leaf = f.leaf;
+            let plain = f.store.annotations.alloc(Annotation::new(leaf, None));
+            let with_constants = f.store.annotations.alloc(Annotation::with_arguments(
+                leaf,
+                vec![
+                    AnnotationArgument {
+                        name: None,
+                        value: AnnotationValue::Constant(Constant::Int(1)),
+                    },
+                    class_argument(leaf, None),
+                ],
+            ));
+            unavailable = Some(plain);
+            known = Some(with_constants);
+            let inner = f.store.types.alloc(Type::Annotated {
+                underlying: a,
+                annotation: plain,
+            });
+            f.store.types.alloc(Type::Annotated {
+                underlying: inner,
+                annotation: with_constants,
+            })
+        });
+
+        let new = rebind_type_lambda(&mut f.store, old, &[Variance::Covariant]).unwrap();
+
+        let Type::Annotated {
+            underlying,
+            annotation,
+        } = f.store.types.get(f.get_lambda(new).result)
+        else {
+            panic!("not annotated");
+        };
+        assert_eq!(*annotation, known.unwrap());
+        let Type::Annotated { annotation, .. } = f.store.types.get(*underlying) else {
+            panic!("not annotated");
+        };
+        assert_eq!(*annotation, unavailable.unwrap());
+        // Reuse keeps "unavailable" unavailable: it is never turned into "none".
+        assert_eq!(
+            f.store.annotations.get(*annotation).arguments,
+            AnnotationArguments::Unavailable
+        );
     }
 
     #[test]

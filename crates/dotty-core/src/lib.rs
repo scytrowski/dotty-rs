@@ -77,7 +77,8 @@ pub use token::{
     HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource, TokenValue,
 };
 pub use types::{
-    Annotation, AnnotationArena, ClassInfo, Constant, ErrorType, MatchType, MethodKind,
-    MethodParam, MethodType, PolyType, ReservedTypeId, Type, TypeArena, TypeLambda, TypeParam,
-    TypeRebindError, Variance, rebind_type_lambda,
+    Annotation, AnnotationArena, AnnotationArgument, AnnotationArguments, AnnotationValue,
+    ClassInfo, Constant, ErrorType, MatchType, MethodKind, MethodParam, MethodType, PolyType,
+    ReservedTypeId, Type, TypeArena, TypeLambda, TypeParam, TypeRebindError, Variance,
+    rebind_type_lambda,
 };

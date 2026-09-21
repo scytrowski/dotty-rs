@@ -9,7 +9,9 @@ mod method;
 mod rebind;
 mod ty;
 
-pub use annotation::{Annotation, AnnotationArena};
+pub use annotation::{
+    Annotation, AnnotationArena, AnnotationArgument, AnnotationArguments, AnnotationValue,
+};
 pub use arena::TypeArena;
 pub use binder::ReservedTypeId;
 pub use class_info::ClassInfo;

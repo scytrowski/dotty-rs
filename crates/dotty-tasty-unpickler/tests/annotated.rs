@@ -9,7 +9,7 @@ use dotty_core::Packages;
 use dotty_core::ids::{AnnotationId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
-use dotty_core::types::Type;
+use dotty_core::types::{AnnotationArguments, AnnotationValue, Constant, Type};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -46,6 +46,9 @@ fn file_with_ast(ast: &[u8]) -> Vec<u8> {
     let names = NameTable::from_entries(vec![
         RawName::Utf8("ASTs".to_owned()),
         RawName::Utf8("p".to_owned()),
+        RawName::Utf8("<init>".to_owned()),
+        RawName::Utf8("label".to_owned()),
+        RawName::Utf8("hello".to_owned()),
     ])
     .unwrap();
     TastyFile::from_parts(
@@ -255,6 +258,8 @@ fn a_compact_annotation_type_is_stored_whole_with_no_tree() {
     let annotation = session.store.annotations.get(annotation);
     assert_eq!(annotation.ty, package);
     assert_eq!(annotation.tree, None);
+    // Known to have no term arguments, which is not "unavailable".
+    assert_eq!(annotation.arguments, AnnotationArguments::Known(Vec::new()));
 }
 
 #[test]
@@ -439,6 +444,27 @@ fn a_compact_link_to_a_binder_still_being_decoded_is_invalid_not_a_panic() {
             result,
             Err(UnpickleError::InvalidCompactAnnotationType { .. })
         ),
+        "{result:?}"
+    );
+    assert_eq!(unpickler.index().type_at(0), None);
+}
+
+#[test]
+fn a_full_new_pointing_at_a_binder_still_being_decoded_is_invalid_not_a_panic() {
+    // `POLYtype` at 0 whose alias bound is an annotated type whose `NEW`
+    // class tree links back to the poly itself.
+    let annotated = length_node(ANNOTATED, &[package_ref(), new_of(&shared(0))].concat());
+    let mut param = length_node(TYPEBOUNDS, &annotated);
+    param.push(nat(1));
+    let poly = length_node(POLY, &[package_ref(), param].concat());
+    let bytes = file_with_ast(&poly);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let result = unpickler.unpickle_type(0);
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidAnnotationType { .. })),
         "{result:?}"
     );
     assert_eq!(unpickler.index().type_at(0), None);
@@ -671,6 +697,344 @@ fn a_compact_annotation_that_names_no_binder_is_reused_by_the_rebound_type() {
     assert_eq!(binders_named(&session, new_underlying), vec![derived]);
 }
 
+// Full annotation constructor applications, on synthetic wire
+
+const NEW: u8 = 95;
+const SELECTIN: u8 = 176;
+const APPLY_NODE: u8 = 136;
+const TYPEAPPLY: u8 = 137;
+const TYPED: u8 = 138;
+const NAMEDARG: u8 = 119;
+const STRINGCONST: u8 = 74;
+const TRUECONST: u8 = 4;
+const CLASSCONST: u8 = 92;
+const IDENTTPT: u8 = 111;
+const SHAREDTERM: u8 = 60;
+
+/// `NEW tpt`.
+fn new_of(class: &[u8]) -> Vec<u8> {
+    [&[NEW][..], class].concat()
+}
+
+/// `SELECTin <init> (NEW p) p`: the constructor of `new p`.
+fn constructor() -> Vec<u8> {
+    let mut payload = vec![nat(2)];
+    payload.extend(new_of(&package_ref()));
+    payload.extend(package_ref());
+    length_node(SELECTIN, &payload)
+}
+
+fn apply_to(function: &[u8], arguments: &[Vec<u8>]) -> Vec<u8> {
+    let mut payload = function.to_vec();
+    for argument in arguments {
+        payload.extend(argument);
+    }
+    length_node(APPLY_NODE, &payload)
+}
+
+/// `STRINGconst hello`.
+fn string_argument() -> Vec<u8> {
+    vec![STRINGCONST, nat(4)]
+}
+
+/// `TRUEconst`.
+fn true_argument() -> Vec<u8> {
+    vec![TRUECONST]
+}
+
+/// `NAMEDARG label value`.
+fn named(value: &[u8]) -> Vec<u8> {
+    [&[NAMEDARG, nat(3)][..], value].concat()
+}
+
+/// The annotation on `p`: `p @<annotation>`.
+fn full_file(annotation: &[u8]) -> Vec<u8> {
+    annotated_file(&package_ref(), annotation)
+}
+
+fn arguments_of(session: &Session, id: TypeId) -> Vec<(Option<String>, Constant)> {
+    let (_, annotation) = annotated_parts(&session.store, id);
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(annotation.tree, None);
+    let AnnotationArguments::Known(arguments) = &annotation.arguments else {
+        panic!("arguments unavailable");
+    };
+    arguments
+        .iter()
+        .map(|argument| {
+            let name = argument.name.map(|name| {
+                session
+                    .store
+                    .names
+                    .resolve(name.as_name().text())
+                    .to_string()
+            });
+            let AnnotationValue::Constant(constant) = &argument.value;
+            (name, constant.clone())
+        })
+        .collect()
+}
+
+fn decode(bytes: &[u8]) -> (Session, Result<TypeId, UnpickleError>) {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut session = Session::new();
+    let result = {
+        let mut unpickler = unpickler_for(&file, &mut session);
+        unpickler.unpickle_type(ANNOTATED_AT)
+    };
+    (session, result)
+}
+
+#[test]
+fn a_new_without_an_application_has_no_arguments() {
+    let (session, id) = decode(&full_file(&new_of(&package_ref())));
+    let id = id.unwrap();
+
+    assert_eq!(arguments_of(&session, id), vec![]);
+}
+
+#[test]
+fn arguments_keep_their_order_names_and_values() {
+    // `new p(hello, label = true)`
+    let apply = apply_to(
+        &constructor(),
+        &[string_argument(), named(&true_argument())],
+    );
+    let (session, id) = decode(&full_file(&apply));
+
+    let arguments = arguments_of(&session, id.unwrap());
+    assert_eq!(arguments.len(), 2);
+    assert_eq!(arguments[0].0, None);
+    assert!(matches!(arguments[0].1, Constant::String(_)));
+    assert_eq!(
+        arguments[1],
+        (Some("label".to_owned()), Constant::Boolean(true))
+    );
+}
+
+#[test]
+fn duplicate_argument_names_are_kept_as_written() {
+    let apply = apply_to(
+        &constructor(),
+        &[named(&true_argument()), named(&string_argument())],
+    );
+    let (session, id) = decode(&full_file(&apply));
+
+    let names: Vec<_> = arguments_of(&session, id.unwrap())
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, [Some("label".to_owned()), Some("label".to_owned())]);
+}
+
+#[test]
+fn the_arguments_of_every_application_layer_are_read_innermost_first() {
+    // `new p(hello)(true)`: `allTermArguments(fn) ::: args`.
+    let inner = apply_to(&constructor(), &[string_argument()]);
+    let outer = apply_to(&inner, &[true_argument()]);
+    let (session, id) = decode(&full_file(&outer));
+
+    let arguments = arguments_of(&session, id.unwrap());
+    assert!(matches!(arguments[0].1, Constant::String(_)));
+    assert_eq!(arguments[1].1, Constant::Boolean(true));
+}
+
+#[test]
+fn constructor_type_arguments_make_an_applied_annotation_type() {
+    // `new p[p]()`: `TYPEAPPLY (SELECTin <init> (NEW p)) p`.
+    let type_apply = length_node(TYPEAPPLY, &[constructor(), package_ref()].concat());
+    let (session, id) = decode(&full_file(&apply_to(&type_apply, &[])));
+    let id = id.unwrap();
+    let (_, annotation) = annotated_parts(&session.store, id);
+    let stored = session.store.annotations.get(annotation).ty;
+
+    let Type::Applied { tycon, args } = session.store.types.get(stored) else {
+        panic!("annotation type is not applied");
+    };
+    assert!(matches!(
+        session.store.types.get(*tycon),
+        Type::TypeRef { .. }
+    ));
+    assert_eq!(args.len(), 1);
+    assert_eq!(arguments_of(&session, id), vec![]);
+}
+
+#[test]
+fn an_identifier_type_tree_stands_for_its_type() {
+    // `NEW (IDENTtpt p p)`: the class tree is a type tree, not a type.
+    let class = [&[IDENTTPT, nat(1)][..], &package_ref()].concat();
+    let (session, id) = decode(&full_file(&new_of(&class)));
+    let (_, annotation) = annotated_parts(&session.store, id.unwrap());
+
+    let ty = session.store.annotations.get(annotation).ty;
+    assert!(matches!(session.store.types.get(ty), Type::TypeRef { .. }));
+}
+
+#[test]
+fn a_class_literal_argument_is_a_constant_class() {
+    let class_literal = [&[CLASSCONST][..], &package_ref()].concat();
+    let (session, id) = decode(&full_file(&apply_to(&constructor(), &[class_literal])));
+
+    let arguments = arguments_of(&session, id.unwrap());
+    let [(None, Constant::Class(class))] = &arguments[..] else {
+        panic!("not one class literal: {arguments:?}");
+    };
+    assert!(matches!(
+        session.store.types.get(*class),
+        Type::TypeRef { .. }
+    ));
+}
+
+#[test]
+fn an_argument_wrapper_is_not_stripped() {
+    // `TYPED true p`: an ascribed literal. Not evaluated, not unwrapped.
+    let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
+    let apply = apply_to(&constructor(), &[typed]);
+    let (_, result) = decode(&full_file(&apply));
+
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationArgument {
+                address: ANNOTATED_AT,
+                tag: TYPED,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_selection_that_is_not_the_constructor_is_refused() {
+    // `SELECTin p (NEW p) p`: the name is not `<init>`.
+    let mut payload = vec![nat(1)];
+    payload.extend(new_of(&package_ref()));
+    payload.extend(package_ref());
+    let selection = length_node(SELECTIN, &payload);
+    let (_, result) = decode(&full_file(&apply_to(&selection, &[])));
+
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationConstructor { tag: SELECTIN, .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_class_tree_that_is_not_a_type_is_a_constructor_error() {
+    const IMPORTED: u8 = 75;
+    let (_, result) = decode(&full_file(&new_of(&[IMPORTED, nat(1)])));
+
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationConstructor { tag: IMPORTED, .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_class_that_is_not_a_reference_is_an_invalid_annotation_type() {
+    let flexible = length_node(FLEXIBLE, &package_ref());
+    let (_, result) = decode(&full_file(&new_of(&flexible)));
+
+    assert!(
+        matches!(result, Err(UnpickleError::InvalidAnnotationType { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_second_type_application_is_refused() {
+    let once = length_node(TYPEAPPLY, &[constructor(), package_ref()].concat());
+    let twice = length_node(TYPEAPPLY, &[once, package_ref()].concat());
+    let (_, result) = decode(&full_file(&apply_to(&twice, &[])));
+
+    assert!(
+        matches!(
+            result,
+            Err(UnpickleError::UnsupportedAnnotationConstructor { tag: TYPEAPPLY, .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_shared_term_annotation_is_still_deferred_not_followed() {
+    let (_, result) = decode(&full_file(&[SHAREDTERM, nat(2)]));
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::UnsupportedAnnotationTree {
+            address: ANNOTATED_AT,
+            annotation_address: UNDERLYING_AT + 2,
+            tag: SHAREDTERM,
+        })
+    );
+}
+
+#[test]
+fn a_failing_second_argument_rolls_back_the_first_and_the_call_can_be_retried() {
+    // The first argument decodes; the second is an unsupported `TYPED`.
+    let typed = length_node(TYPED, &[true_argument(), package_ref()].concat());
+    let bytes = full_file(&apply_to(&constructor(), &[string_argument(), typed]));
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+    let mut untouched = Session::new();
+    drop(unpickler_for(&file, &mut untouched));
+    let expected = next_ids(&mut untouched);
+
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+    let before = unpickler.index().type_count();
+    for _ in 0..2 {
+        let result = unpickler.unpickle_type(ANNOTATED_AT);
+        assert!(
+            matches!(
+                result,
+                Err(UnpickleError::UnsupportedAnnotationArgument { tag: TYPED, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(unpickler.index().type_count(), before);
+        assert_eq!(unpickler.index().type_at(UNDERLYING_AT), None);
+    }
+    drop(unpickler);
+    assert_eq!(next_ids(&mut session), expected);
+}
+
+#[test]
+fn a_shared_link_to_a_full_annotated_type_returns_its_exact_id() {
+    let annotated = length_node(
+        ANNOTATED,
+        &[
+            package_ref(),
+            apply_to(&constructor(), &[string_argument()]),
+        ]
+        .concat(),
+    );
+    let mut ast = annotated.clone();
+    ast.extend(length_node(FLEXIBLE, &shared(0)));
+    let link_at = u32::try_from(annotated.len() + 2).unwrap();
+    let bytes = file_with_ast(&ast);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = unpickler_for(&file, &mut session);
+
+    let id = unpickler.unpickle_type(ANNOTATED_AT).unwrap();
+    let before = unpickler.index().type_count();
+    assert_eq!(unpickler.unpickle_type(link_at), Ok(id));
+    assert_eq!(unpickler.index().type_count(), before);
+    drop(unpickler);
+    // One annotation, with its one argument.
+    assert_eq!(next_ids(&mut session).1, 1);
+    assert_eq!(arguments_of(&session, id).len(), 1);
+}
+
 // Real Scala 3.9.0 output.
 
 const ANNOTATIONS: &[u8] = include_bytes!("fixtures/semantic/Annotated.tasty");
@@ -719,6 +1083,18 @@ macro_rules! real_unit {
         let mut packages = Packages::new();
         enter_stub_classes(&mut $session, &mut packages, &["scala"], &["Int"]);
         enter_stub_classes(&mut $session, &mut packages, &["java", "lang"], &["String"]);
+        enter_stub_classes(
+            &mut $session,
+            &mut packages,
+            &["me", "cytrowski", "tastyfixtures", "semantic"],
+            &["Tag", "Label"],
+        );
+        enter_stub_classes(
+            &mut $session,
+            &mut packages,
+            &["scala", "annotation", "internal"],
+            &["ErasedParam"],
+        );
         let mut $unpickler = TastyUnpickler::with_packages(
             &$file,
             &mut $session.store,
@@ -730,48 +1106,164 @@ macro_rules! real_unit {
 }
 
 /// `def inferred = (1: Int @Tag)`: an `ANNOTATEDtype` over `Int` whose
-/// annotation is a `Tag` constructor call (`APPLY`).
+/// annotation is a `Tag` constructor call (`APPLY`, no arguments).
 const FULL: u32 = 35;
-const FULL_ANNOTATION: u32 = 41;
 /// `(1: Int @Tag @Label("second"))`: the outer node (86) wraps the inner (88).
 const NESTED_OUTER: u32 = 86;
 const NESTED_INNER: u32 = 88;
-const APPLY: u8 = 136;
 
-#[test]
-fn a_real_full_annotation_is_deferred_with_its_root_tag() {
-    real_unit!(ANNOTATIONS, file, session, unpickler);
-    assert_eq!(
-        unpickler.unpickle_type(FULL),
-        Err(UnpickleError::UnsupportedAnnotationTree {
-            address: FULL,
-            annotation_address: FULL_ANNOTATION,
-            tag: APPLY,
-        })
-    );
+fn class_name(session: &Session, ty: TypeId) -> String {
+    let Type::TypeRef { symbol, .. } = session.store.types.get(ty) else {
+        panic!("not a type reference: {:?}", session.store.types.get(ty));
+    };
+    let name = session.store.symbols.get(*symbol).name.text();
+    session.store.names.resolve(name).to_string()
 }
 
 #[test]
-fn a_real_full_annotation_is_atomic() {
+fn a_real_zero_argument_annotation_is_known_to_have_no_arguments() {
     real_unit!(ANNOTATIONS, file, session, unpickler);
+    let id = unpickler.unpickle_type(FULL).unwrap();
+    // Identity: the same annotated type, and no second annotation.
+    assert_eq!(unpickler.unpickle_type(FULL), Ok(id));
+    drop(unpickler);
+
+    let (underlying, annotation) = annotated_parts(&session.store, id);
+    assert_eq!(class_name(&session, underlying), "Int");
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(class_name(&session, annotation.ty), "Tag");
+    // `@Tag()` written: no arguments, which is not "unavailable"; and no typed
+    // tree is attached.
+    assert_eq!(annotation.arguments, AnnotationArguments::Known(Vec::new()));
+    assert_eq!(annotation.tree, None);
+    assert_eq!(next_ids(&mut session).1, 1);
+}
+
+#[test]
+fn a_real_annotation_with_an_argument_keeps_it_and_the_nesting_order() {
+    real_unit!(ANNOTATIONS, file, session, unpickler);
+    let outer = unpickler.unpickle_type(NESTED_OUTER).unwrap();
+    let inner = unpickler.index().type_at(NESTED_INNER).unwrap();
+    drop(unpickler);
+
+    // `Int @Tag @Label("second")`: the later annotation is the outer one.
+    let (under_outer, label) = annotated_parts(&session.store, outer);
+    assert_eq!(under_outer, inner);
+    let (_, tag) = annotated_parts(&session.store, inner);
+    assert_eq!(
+        class_name(&session, session.store.annotations.get(tag).ty),
+        "Tag"
+    );
+    let label = session.store.annotations.get(label);
+    assert_eq!(class_name(&session, label.ty), "Label");
+    let AnnotationArguments::Known(arguments) = &label.arguments else {
+        panic!("arguments unavailable");
+    };
+    assert_eq!(arguments.len(), 1);
+    assert_eq!(arguments[0].name, None);
+    let AnnotationValue::Constant(Constant::String(text)) = &arguments[0].value else {
+        panic!("not a string argument");
+    };
+    assert_eq!(session.store.names.resolve(*text), "second");
+}
+
+#[test]
+fn a_real_annotation_whose_class_is_not_entered_rolls_back_everything() {
+    // Without the `Tag` class the annotation type cannot resolve: the call
+    // fails after `Int` (the parent) was decoded, and nothing survives.
+    let file = TastyFile::parse_scala_3_9(ANNOTATIONS).unwrap();
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    enter_stub_classes(&mut session, &mut packages, &["scala"], &["Int"]);
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages);
+    unpickler.enter_symbols().unwrap();
     let before = unpickler.index().type_count();
 
-    assert!(unpickler.unpickle_type(FULL).is_err());
+    let result = unpickler.unpickle_type(FULL);
+    assert!(
+        matches!(result, Err(UnpickleError::UnresolvedMember { .. })),
+        "{result:?}"
+    );
     assert_eq!(unpickler.index().type_count(), before);
-    // Nothing of the parent (`Int`) survives either.
-    assert_eq!(unpickler.index().type_at(FULL + 2), None);
     assert_eq!(unpickler.index().type_at(FULL), None);
+    assert_eq!(unpickler.index().type_at(FULL + 2), None);
+}
+
+// Erased method parameters (Milestone 4b2a)
+//
+// `MethodParam.erased` is derived from the parameter type's outer chain of
+// `Annotated` wrappers, matching `scala.annotation.internal.ErasedParam` by
+// its exact package path.
+
+/// The `METHODtype` of `(erased z: Int, w: Int) => w`.
+const ERASED_METHOD: u32 = 136;
+
+#[test]
+fn the_real_erased_method_type_decodes_with_the_first_parameter_erased() {
+    real_unit!(ERASED, file, session, unpickler);
+    let method = unpickler.unpickle_type(ERASED_METHOD).unwrap();
+    let annotated = unpickler.index().type_at(ERASED_PARAM).unwrap();
+    drop(unpickler);
+
+    let Type::Method(method) = session.store.types.get(method) else {
+        panic!("not a method type");
+    };
+    let [erased, ordinary] = &method.params[..] else {
+        panic!("not two parameters");
+    };
+    assert!(erased.erased);
+    assert!(!ordinary.erased);
+    // The annotation is not stripped from the type.
+    assert_eq!(erased.ty, annotated);
+    assert!(matches!(
+        session.store.types.get(erased.ty),
+        Type::Annotated { .. }
+    ));
+    assert_eq!(class_name(&session, ordinary.ty), "Int");
+    // `varargs` stays the JVM distinction, which a `METHODtype` does not carry.
+    assert!(!erased.varargs && !ordinary.varargs);
+}
+
+/// `METHODtype p (x: <param>)`: a method at 0 with result `p` (at 2) and one
+/// parameter, named `p`, whose type is `param`.
+fn method_with(param: &[u8]) -> Vec<u8> {
+    const METHOD: u8 = 180;
+    let mut payload = package_ref();
+    payload.extend(param);
+    payload.push(nat(1));
+    file_with_ast(&length_node(METHOD, &payload))
+}
+
+fn decoded_method(bytes: &[u8]) -> (Session, dotty_core::types::MethodType) {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut session = Session::new();
+    let id = unpickler_for(&file, &mut session).unpickle_type(0).unwrap();
+    let Type::Method(method) = session.store.types.get(id).clone() else {
+        panic!("not a method type");
+    };
+    (session, method)
 }
 
 #[test]
-fn a_nested_real_annotation_reports_the_first_full_tree_it_meets() {
-    real_unit!(ANNOTATIONS, file, session, unpickler);
-    // The parent is decoded first, so the inner annotation is reached first.
+fn an_annotation_that_is_not_erased_param_does_not_erase_the_parameter() {
+    // `p @new p`: annotated with the class `p`, by its name text an
+    // unrelated annotation.
+    let annotated = length_node(ANNOTATED, &[package_ref(), new_of(&package_ref())].concat());
+    let (session, method) = decoded_method(&method_with(&annotated));
+
+    assert!(!method.params[0].erased);
     assert!(matches!(
-        unpickler.unpickle_type(NESTED_OUTER),
-        Err(UnpickleError::UnsupportedAnnotationTree { address, tag: APPLY, .. })
-            if address == NESTED_INNER
+        session.store.types.get(method.params[0].ty),
+        Type::Annotated { .. }
     ));
+}
+
+#[test]
+fn an_unannotated_parameter_is_not_erased() {
+    let (_, method) = decoded_method(&method_with(&package_ref()));
+
+    assert!(!method.params[0].erased);
 }
 
 // The erased-parameter wire audit (Milestone 4b1, question 12).
@@ -780,29 +1272,22 @@ fn a_nested_real_annotation_reports_the_first_full_tree_it_meets() {
 // `ErasedParamAnnot` (`scala.annotation.internal.ErasedParam`) on the parameter *type*, and the type is pickled with a
 // full annotation tree, not a compact one.
 
-/// The `METHODtype` of `(erased z: Int, w: Int) => w` (136), whose first
-/// parameter type is the `ANNOTATEDtype` at 140.
-const ERASED_METHOD: u32 = 136;
+/// The first parameter type of the `METHODtype` of
+/// `(erased z: Int, w: Int) => w`: an `ANNOTATEDtype`.
 const ERASED_PARAM: u32 = 140;
 const ERASED_ANNOTATION: u32 = 144;
 
 #[test]
-fn an_erased_parameter_type_is_annotated_with_a_full_tree() {
+fn an_erased_parameter_type_is_annotated_with_a_real_erased_param_annotation() {
     real_unit!(ERASED, file, session, unpickler);
-    assert_eq!(
-        unpickler.unpickle_type(ERASED_PARAM),
-        Err(UnpickleError::UnsupportedAnnotationTree {
-            address: ERASED_PARAM,
-            annotation_address: ERASED_ANNOTATION,
-            tag: APPLY,
-        })
-    );
-    // So the method type holding it is deferred, not decoded with the
-    // annotation dropped.
-    assert!(matches!(
-        unpickler.unpickle_type(ERASED_METHOD),
-        Err(UnpickleError::UnsupportedAnnotationTree { .. })
-    ));
+    let id = unpickler.unpickle_type(ERASED_PARAM).unwrap();
+    drop(unpickler);
+
+    let (underlying, annotation) = annotated_parts(&session.store, id);
+    assert_eq!(class_name(&session, underlying), "Int");
+    let annotation = session.store.annotations.get(annotation);
+    assert_eq!(class_name(&session, annotation.ty), "ErasedParam");
+    assert_eq!(annotation.arguments, AnnotationArguments::Known(Vec::new()));
 }
 
 #[test]
