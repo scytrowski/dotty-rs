@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use dotty_core::ids::TypeId;
+use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::resolution::{NoResolver, SymbolResolver};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::SymbolOrigin;
+use dotty_core::store::StoreCheckpoint;
+use dotty_core::symbols::{SymbolInfo, SymbolOrigin};
 use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
 
@@ -15,6 +16,15 @@ use crate::binders::PendingBinder;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::ScopeJournal;
+
+/// The marks of one public call, to roll it back.
+pub(crate) struct Transaction {
+    checkpoint: StoreCheckpoint,
+    types: usize,
+    type_trees: usize,
+    rec_this: usize,
+    infos: usize,
+}
 
 /// Interprets one TASTy file into a `SemanticStore`.
 ///
@@ -52,6 +62,10 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) rec_this: HashMap<TypeId, TypeId>,
     /// The binders `rec_this` gained entries for, in order, to roll back.
     pub(crate) rec_this_journal: Vec<TypeId>,
+    /// The `SymbolInfo` each completed symbol held before the transaction that
+    /// completed it, oldest first. Arena truncation cannot restore a field of
+    /// a symbol that already existed, so a failed transaction puts these back.
+    pub(crate) info_journal: Vec<(SymbolId, SymbolInfo)>,
     /// The file's AST view, built on first use and shared by both passes.
     ast: Option<Rc<AstView<'bytes>>>,
 }
@@ -94,6 +108,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             pending_binders: Vec::new(),
             rec_this: HashMap::new(),
             rec_this_journal: Vec::new(),
+            info_journal: Vec::new(),
             ast: None,
         }
     }
@@ -190,20 +205,70 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// they were.
     pub fn unpickle_type(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
         let ast = self.ast_view()?;
-        let checkpoint = self.store.checkpoint();
-        let mark = self.index.mark_types();
-        let rec_this_mark = self.rec_this_journal.len();
+        let transaction = self.begin_transaction();
         let result = self.type_at(&ast, address, address, 0);
+        self.finish_transaction(transaction, result)
+    }
+
+    /// Pass 5a: the semantic type of the type *tree* at `address`.
+    ///
+    /// This is the tree's `tpe`, not a typed AST node: see the `type_tree`
+    /// module. It is cached by tree address, apart from the type-node cache
+    /// of [`unpickle_type`](Self::unpickle_type). Atomic like it.
+    pub fn unpickle_type_tree_type(&mut self, address: u32) -> Result<TypeId, UnpickleError> {
+        let ast = self.ast_view()?;
+        let transaction = self.begin_transaction();
+        let result = self.type_of_tpt(&ast, address, address);
+        self.finish_transaction(transaction, result)
+    }
+
+    /// Everything a public call may change that is not truncated with the
+    /// arenas, taken at the start of the call.
+    pub(crate) fn begin_transaction(&self) -> Transaction {
+        Transaction {
+            checkpoint: self.store.checkpoint(),
+            types: self.index.mark_types(),
+            type_trees: self.index.mark_type_trees(),
+            rec_this: self.rec_this_journal.len(),
+            infos: self.info_journal.len(),
+        }
+    }
+
+    /// Ends a public call: on failure puts everything back as
+    /// [`begin_transaction`](Self::begin_transaction) found it.
+    pub(crate) fn finish_transaction<T>(
+        &mut self,
+        transaction: Transaction,
+        result: Result<T, UnpickleError>,
+    ) -> Result<T, UnpickleError> {
         if result.is_err() {
-            self.store.rollback_to(checkpoint);
-            self.index.roll_back_types(mark);
-            self.roll_back_rec_this(rec_this_mark);
+            // Infos first: they name symbols that exist before the call, and
+            // truncating the arenas does not touch them.
+            while self.info_journal.len() > transaction.infos {
+                if let Some((symbol, info)) = self.info_journal.pop() {
+                    self.store.symbols.set_info(symbol, info);
+                }
+            }
+            self.store.rollback_to(transaction.checkpoint);
+            self.index.roll_back_types(transaction.types);
+            self.index.roll_back_type_trees(transaction.type_trees);
+            self.roll_back_rec_this(transaction.rec_this);
+        } else if transaction.infos == 0 {
+            // Committed and outermost: nothing left to undo.
+            self.info_journal.clear();
         }
         // Nothing is pending outside a call, and every binder unregisters
         // itself; this only guarantees the invariant for the next call.
         debug_assert!(self.pending_binders.is_empty());
         self.pending_binders.clear();
         result
+    }
+
+    /// Sets a symbol's info, remembering the old one for rollback.
+    pub(crate) fn set_symbol_info(&mut self, symbol: SymbolId, info: SymbolInfo) {
+        let old = self.store.symbols.get(symbol).info;
+        self.info_journal.push((symbol, old));
+        self.store.symbols.set_info(symbol, info);
     }
 
     fn enter_all(&mut self) -> Result<(), UnpickleError> {

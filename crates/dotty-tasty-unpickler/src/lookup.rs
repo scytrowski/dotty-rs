@@ -78,6 +78,20 @@ fn look_through_proxies(store: &SemanticStore, mut prefix: TypeId) -> Option<Typ
 
 /// The symbol whose declarations a prefix type denotes, if the prefix is a
 /// form whose lookup semantics are understood.
+///
+/// The walk follows, in one bounded chain of at most [`MAX_PROXY_DEPTH`]
+/// steps, every form that only forwards to another type:
+///
+/// * a `Flexible` or `Annotated` type to its underlying type;
+/// * an `Applied` type to its constructor (only to find the declaration scope:
+///   the type arguments are ignored and the prefix stays as written);
+/// * a stable term, to the *completed* type of its symbol
+///   ([`SymbolInfo::Complete`]): a `Field` that is not `MUTABLE`, a `Value`,
+///   or a `Parameter` whose type is not by-name. Reading it never completes
+///   anything, so the caller completes the term's symbol first.
+///
+/// A graph that keeps forwarding, a cycle included, ends as `None` (an
+/// unsupported prefix), never as recursion. A type alias is not followed.
 pub(crate) fn lookup_owner(
     store: &SemanticStore,
     index: &TastySemanticIndex,
@@ -90,26 +104,49 @@ pub(crate) fn lookup_owner(
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass | SymbolKind::Package
         )
     };
-    // A flexible or annotated type has the members of its underlying type;
-    // nothing else is looked through.
-    let prefix = look_through_proxies(store, prefix)?;
-    let ty_symbol = store.types.get(prefix).reference_symbol();
-    match store.types.get(prefix) {
-        Type::ThisType { class } => Some(*class),
-        // A name-designated reference has no symbol, so no declaration scope.
-        Type::TypeRef { .. } => ty_symbol.filter(|symbol| is_scope_owner(*symbol)),
-        // A term reference is a searchable prefix when it names a package, or
-        // an object, whose declarations are those of its module class.
-        Type::TermRef { .. } => {
-            let symbol = ty_symbol?;
-            match store.symbols.get(symbol).kind {
-                SymbolKind::Package => Some(symbol),
-                SymbolKind::Object => module_class_of(store, index, packages, symbol),
-                _ => None,
-            }
+    let mut current = prefix;
+    for _ in 0..=MAX_PROXY_DEPTH {
+        if let Some(underlying) = proxy_underlying(store, current) {
+            current = underlying;
+            continue;
         }
-        _ => None,
+        let ty_symbol = store.types.get(current).reference_symbol();
+        match store.types.get(current) {
+            Type::ThisType { class } => return Some(*class),
+            // The declarations of `C[A]` are those of `C`.
+            Type::Applied { tycon, .. } => current = *tycon,
+            // A name-designated reference has no symbol, so no declaration
+            // scope.
+            Type::TypeRef { .. } => return ty_symbol.filter(|symbol| is_scope_owner(*symbol)),
+            // A term reference is a searchable prefix when it names a package,
+            // or an object, whose declarations are those of its module class,
+            // or a stable term of a completed type.
+            Type::TermRef { .. } => {
+                let symbol = store.symbols.get(ty_symbol?);
+                match symbol.kind {
+                    SymbolKind::Package => return ty_symbol,
+                    SymbolKind::Object => {
+                        return module_class_of(store, index, packages, ty_symbol?);
+                    }
+                    SymbolKind::Field | SymbolKind::Value | SymbolKind::Parameter
+                        if !symbol.flags.contains(SymbolFlags::MUTABLE) =>
+                    {
+                        let SymbolInfo::Complete(declared) = symbol.info else {
+                            return None;
+                        };
+                        // A by-name parameter is not a path.
+                        if matches!(store.types.get(declared), Type::ByName { .. }) {
+                            return None;
+                        }
+                        current = declared;
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
     }
+    None
 }
 
 /// The module class of an object: the `ModuleClass` its owner declares under
@@ -716,5 +753,139 @@ mod tests {
         assert!(!is_illegal_prefix(&world.store, object));
         assert!(!is_illegal_prefix(&world.store, class_ref));
         assert!(!is_illegal_prefix(&world.store, no_prefix));
+    }
+
+    // Completed stable terms as prefixes (Milestone 5a)
+
+    /// A class `Box` with a type member `Out`, in a fresh world, and a term
+    /// of `kind` and `flags` whose info is `Complete(info(box))`.
+    struct Terms {
+        world: World,
+        box_class: SymbolId,
+        out: SymbolId,
+        box_ty: TypeId,
+    }
+
+    impl Terms {
+        fn new() -> Self {
+            let mut world = World::new();
+            let (box_class, scope) = world.class("Box");
+            let out_name = world.name("Out", Namespace::Type);
+            let out = world.declare(scope, box_class, out_name, SymbolKind::TypeAlias);
+            let box_ty = world.type_ref(box_class);
+            Self {
+                world,
+                box_class,
+                out,
+                box_ty,
+            }
+        }
+
+        fn term(&mut self, kind: SymbolKind, flags: SymbolFlags, info: SymbolInfo) -> TypeId {
+            let name = self.world.name("x", Namespace::Term);
+            let symbol = self.world.symbol(name, kind, None);
+            let entry = self.world.store.symbols.get_mut(symbol);
+            entry.flags = flags;
+            entry.info = info;
+            let prefix = self.world.no_prefix;
+            self.world.store.types.alloc(Type::term_ref(prefix, symbol))
+        }
+
+        fn out(&self, prefix: TypeId) -> LocalLookup {
+            let name = Name::new(self.world.store.names.get("Out").unwrap(), Namespace::Type);
+            self.world.lookup(prefix, &name)
+        }
+    }
+
+    #[test]
+    fn a_stable_term_is_searched_through_its_completed_type() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        for kind in [SymbolKind::Field, SymbolKind::Value, SymbolKind::Parameter] {
+            let prefix = terms.term(kind, SymbolFlags::EMPTY, info);
+            assert_eq!(terms.out(prefix), LocalLookup::Found(terms.out), "{kind:?}");
+        }
+        // Not completed: nothing to search.
+        let missing = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, SymbolInfo::Missing);
+        assert_eq!(terms.out(missing), LocalLookup::UnsupportedPrefix);
+    }
+
+    #[test]
+    fn an_applied_type_is_searched_through_its_constructor_and_stays_applied() {
+        let mut terms = Terms::new();
+        let argument = terms.world.type_ref(terms.box_class);
+        let applied = terms.world.store.types.alloc(Type::Applied {
+            tycon: terms.box_ty,
+            args: vec![argument],
+        });
+        let prefix = terms.term(
+            SymbolKind::Field,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(applied),
+        );
+        assert_eq!(terms.out(prefix), LocalLookup::Found(terms.out));
+        assert_eq!(terms.out(applied), LocalLookup::Found(terms.out));
+        // Lookup reads only: the info is the same application.
+        assert_eq!(
+            terms.world.store.types.get(applied),
+            &Type::Applied {
+                tycon: terms.box_ty,
+                args: vec![argument]
+            }
+        );
+    }
+
+    #[test]
+    fn a_mutable_a_variable_a_method_a_constructor_and_a_by_name_term_are_not_paths() {
+        let mut terms = Terms::new();
+        let info = SymbolInfo::Complete(terms.box_ty);
+        let mutable = terms.term(SymbolKind::Field, SymbolFlags::MUTABLE, info);
+        let variable = terms.term(SymbolKind::Variable, SymbolFlags::EMPTY, info);
+        let method = terms.term(SymbolKind::Method, SymbolFlags::EMPTY, info);
+        let constructor = terms.term(SymbolKind::Constructor, SymbolFlags::EMPTY, info);
+        let by_name_info = terms.world.store.types.alloc(Type::ByName {
+            result: terms.box_ty,
+        });
+        let by_name = terms.term(
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(by_name_info),
+        );
+        for prefix in [mutable, variable, method, constructor, by_name] {
+            assert_eq!(terms.out(prefix), LocalLookup::UnsupportedPrefix);
+        }
+        // The legal-prefix predicate is unchanged.
+        assert!(is_illegal_prefix(&terms.world.store, mutable));
+        assert!(is_illegal_prefix(&terms.world.store, method));
+        assert!(!is_illegal_prefix(&terms.world.store, by_name));
+    }
+
+    #[test]
+    fn a_type_alias_prefix_is_not_dealiased() {
+        let mut terms = Terms::new();
+        let alias_name = terms.world.name("Alias", Namespace::Type);
+        let alias = terms.world.symbol(alias_name, SymbolKind::TypeAlias, None);
+        terms.world.store.symbols.get_mut(alias).info = SymbolInfo::Complete(terms.box_ty);
+        let alias_ty = terms.world.type_ref(alias);
+        let prefix = terms.term(
+            SymbolKind::Field,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(alias_ty),
+        );
+        assert_eq!(terms.out(prefix), LocalLookup::UnsupportedPrefix);
+    }
+
+    #[test]
+    fn a_completed_info_that_leads_back_to_its_term_ends_as_unsupported() {
+        let mut terms = Terms::new();
+        // `x: y.type` and `y: x.type`: allocate both symbols, then set infos.
+        let x = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, SymbolInfo::Missing);
+        let y = terms.term(SymbolKind::Field, SymbolFlags::EMPTY, SymbolInfo::Missing);
+        let symbol_of =
+            |terms: &Terms, ty: TypeId| terms.world.store.types.get(ty).reference_symbol().unwrap();
+        let (xs, ys) = (symbol_of(&terms, x), symbol_of(&terms, y));
+        terms.world.store.symbols.get_mut(xs).info = SymbolInfo::Complete(y);
+        terms.world.store.symbols.get_mut(ys).info = SymbolInfo::Complete(x);
+        assert_eq!(terms.out(x), LocalLookup::UnsupportedPrefix);
     }
 }

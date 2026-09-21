@@ -37,6 +37,14 @@ pub struct TastySemanticIndex {
     /// Type addresses in the order they were recorded, so a failed type
     /// operation can forget the newest ones.
     type_order: Vec<u32>,
+    /// The semantic type of the *type tree* at an address (Milestone 5a).
+    /// Kept apart from `types`: a tree address is not a type-node address,
+    /// several tree addresses may project to one `TypeId` (an `IDENTtpt` has
+    /// exactly its embedded type), and a derived type (`APPLIEDtpt`) is owned
+    /// by the projection, not by any type node.
+    type_trees: HashMap<u32, TypeId>,
+    /// Tree addresses in recording order, to roll back.
+    type_tree_order: Vec<u32>,
 }
 
 impl TastySemanticIndex {
@@ -58,6 +66,17 @@ impl TastySemanticIndex {
     /// The type decoded for the type node at `address`, if any.
     pub fn type_at(&self, address: u32) -> Option<TypeId> {
         self.types.get(&address).copied()
+    }
+
+    /// The semantic type projected for the type tree at `address`, if any.
+    /// Not a [`type_at`](Self::type_at): that is keyed by type-node address.
+    pub fn type_tree_type_at(&self, address: u32) -> Option<TypeId> {
+        self.type_trees.get(&address).copied()
+    }
+
+    /// The number of type-tree addresses that have a projected type.
+    pub fn type_tree_count(&self) -> usize {
+        self.type_trees.len()
     }
 
     /// The number of type addresses that have a `TypeId`.
@@ -104,6 +123,39 @@ impl TastySemanticIndex {
                 slot.insert(ty);
                 self.type_order.push(address);
                 Ok(())
+            }
+        }
+    }
+
+    /// Records the type projected for a type-tree address; a second one for
+    /// the address is rejected and the existing entry kept.
+    pub(crate) fn insert_type_tree(
+        &mut self,
+        address: u32,
+        ty: TypeId,
+    ) -> Result<(), UnpickleError> {
+        match self.type_trees.entry(address) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(UnpickleError::DuplicateType { address })
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(ty);
+                self.type_tree_order.push(address);
+                Ok(())
+            }
+        }
+    }
+
+    /// A position to [`roll_back_type_trees`](Self::roll_back_type_trees).
+    pub(crate) fn mark_type_trees(&self) -> usize {
+        self.type_tree_order.len()
+    }
+
+    /// Forgets every type-tree address recorded after `mark`.
+    pub(crate) fn roll_back_type_trees(&mut self, mark: usize) {
+        while self.type_tree_order.len() > mark {
+            if let Some(address) = self.type_tree_order.pop() {
+                self.type_trees.remove(&address);
             }
         }
     }

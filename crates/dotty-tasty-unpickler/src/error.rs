@@ -3,6 +3,7 @@ use std::fmt;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::Namespace;
 use dotty_core::resolution::ResolutionError;
+use dotty_core::symbols::SymbolKind;
 use dotty_core::types::TypeRebindError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
 
@@ -50,6 +51,26 @@ pub enum UnpickleError {
     /// A second `TypeId` was recorded for a type-node address that already
     /// has one, which would break the address-identity invariant.
     DuplicateType { address: u32 },
+    /// The type tree at `address` is a form the projection does not build a
+    /// type for yet (Milestone 5a). Distinct from `UnsupportedType`, which is
+    /// about type *wire nodes*; the tree is never guessed from its syntax.
+    UnsupportedTypeTree { address: u32, tag: u8 },
+    /// No symbol was entered for the definition address given to completion.
+    MissingEnteredSymbol { address: u32 },
+    /// The symbol at `address` is of a kind whose completion is a later
+    /// milestone (methods, constructors, classes, traits, modules).
+    UnsupportedSymbolCompletion { address: u32, kind: SymbolKind },
+    /// An opaque type alias, whose completion (`opaqueToBounds`) is not
+    /// approximated as an ordinary alias.
+    OpaqueAliasDeferred { address: u32 },
+    /// The symbol at `address` already holds `SymbolInfo::Deferred`, which
+    /// this milestone has no way to force.
+    SymbolCompletionDeferred { address: u32 },
+    /// The symbol at `address` already holds `SymbolInfo::Error`.
+    SymbolInfoError { address: u32 },
+    /// A type parameter or type definition whose right-hand side cannot be
+    /// bounds: `ty` is its projected type.
+    InvalidCompletedBounds { address: u32, ty: TypeId },
     /// The type node at `address` has a tag the type pass does not decode
     /// yet (a later increment) or that is not a type at all. The node is
     /// never lowered to a placeholder type.
@@ -239,6 +260,36 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "a type was already recorded for the type node at address {address}"
             ),
+            Self::UnsupportedTypeTree { address, tag } => write!(
+                formatter,
+                "the type tree at address {address} has tag {tag}, which is not projected yet"
+            ),
+            Self::MissingEnteredSymbol { address } => write!(
+                formatter,
+                "no symbol was entered for the definition at address {address}"
+            ),
+            Self::UnsupportedSymbolCompletion { address, kind } => write!(
+                formatter,
+                "the {kind:?} at address {address} cannot be completed yet"
+            ),
+            Self::OpaqueAliasDeferred { address } => write!(
+                formatter,
+                "the opaque type alias at address {address} cannot be completed yet"
+            ),
+            Self::SymbolCompletionDeferred { address } => write!(
+                formatter,
+                "the symbol at address {address} has a deferred completion"
+            ),
+            Self::SymbolInfoError { address } => {
+                write!(
+                    formatter,
+                    "the symbol at address {address} has an error info"
+                )
+            }
+            Self::InvalidCompletedBounds { address, ty } => write!(
+                formatter,
+                "the type {ty:?} of the definition at address {address} cannot be bounds"
+            ),
             Self::UnsupportedType { tag, address } => write!(
                 formatter,
                 "the type node at address {address} has tag {tag}, which is not decoded yet"
@@ -397,6 +448,13 @@ impl std::error::Error for UnpickleError {
             | Self::MissingDefinition { .. }
             | Self::DuplicateType { .. }
             | Self::UnsupportedType { .. }
+            | Self::UnsupportedTypeTree { .. }
+            | Self::MissingEnteredSymbol { .. }
+            | Self::UnsupportedSymbolCompletion { .. }
+            | Self::OpaqueAliasDeferred { .. }
+            | Self::SymbolCompletionDeferred { .. }
+            | Self::SymbolInfoError { .. }
+            | Self::InvalidCompletedBounds { .. }
             | Self::MissingReferencedSymbol { .. }
             | Self::InvalidReferenceKind { .. }
             | Self::UnresolvedPackage { .. }

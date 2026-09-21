@@ -19,6 +19,7 @@
 mod annotated;
 mod ast_view;
 mod binders;
+mod completion;
 mod enter;
 mod error;
 mod index;
@@ -28,6 +29,7 @@ mod names;
 mod packages;
 mod recursive;
 mod refined;
+mod type_tree;
 mod types;
 mod unpickler;
 
