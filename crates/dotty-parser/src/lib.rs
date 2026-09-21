@@ -18,6 +18,7 @@ mod expr;
 mod infix;
 mod literals;
 mod names;
+mod parameters;
 mod parser;
 mod patterns;
 mod recovery;

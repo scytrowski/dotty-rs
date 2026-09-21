@@ -200,6 +200,41 @@ fn render_tree(
                 fields.push("\"given\":true".to_owned());
             }
         }
+        TreeKind::DefDef(definition) => {
+            fields.push(format!(
+                "\"name\":{}",
+                quote(names.resolve(definition.name.as_name().text()))
+            ));
+            fields.push(format!(
+                "\"type_param_count\":{}",
+                definition.type_params.len()
+            ));
+            let mut clause_sizes = Vec::with_capacity(
+                usize::from(!definition.type_params.is_empty())
+                    + definition.value_param_clauses.len(),
+            );
+            let mut using_clauses = Vec::with_capacity(clause_sizes.capacity());
+            if !definition.type_params.is_empty() {
+                clause_sizes.push(definition.type_params.len().to_string());
+                using_clauses.push("false".to_owned());
+            }
+            for clause in &definition.value_param_clauses {
+                clause_sizes.push(clause.len().to_string());
+                let using = clause.first().is_some_and(|parameter| {
+                    matches!(
+                        &arena.get(*parameter).kind,
+                        TreeKind::ValDef(value)
+                            if value.metadata.modifiers.contains(&dotty_core::ast::Modifier::Given)
+                    )
+                });
+                using_clauses.push(using.to_string());
+            }
+            fields.push(format!(
+                "\"param_clause_sizes\":[{}]",
+                clause_sizes.join(",")
+            ));
+            fields.push(format!("\"using_clauses\":[{}]", using_clauses.join(",")));
+        }
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => {}
         TreeKind::Alternative(_) | TreeKind::Typed(_) => {}
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
@@ -277,6 +312,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
         TreeKind::ValDef(_) => "ValDef",
+        TreeKind::DefDef(_) => "DefDef",
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
@@ -388,6 +424,17 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         }
         TreeKind::ValDef(definition) => {
             let mut children = vec![definition.tpt];
+            if let Some(rhs) = definition.rhs {
+                children.push(rhs);
+            }
+            children
+        }
+        TreeKind::DefDef(definition) => {
+            let mut children = definition.type_params.clone();
+            for clause in &definition.value_param_clauses {
+                children.extend(clause.iter().copied());
+            }
+            children.push(definition.tpt);
             if let Some(rhs) = definition.rhs {
                 children.push(rhs);
             }

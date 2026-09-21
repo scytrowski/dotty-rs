@@ -308,7 +308,7 @@ where
             })
     }
 
-    fn consume_control_newlines(&mut self) {
+    pub(crate) fn consume_control_newlines(&mut self) {
         while matches!(
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
@@ -325,7 +325,7 @@ where
         }
     }
 
-    pub(super) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
         self.parse_indented_block_with_feedback(false)
     }
 

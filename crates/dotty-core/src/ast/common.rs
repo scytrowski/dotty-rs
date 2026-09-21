@@ -180,10 +180,12 @@ pub struct ValDef<P: AstPhase> {
 
 /// `mods def name[type_params](value_param_clauses): tpt = rhs`.
 ///
-/// Unlike Dotty's `DefDef`, which folds the leading type-parameter clause
-/// into a single unified `paramss: List[ParamClause]`, this keeps
-/// `type_params` separate from `value_param_clauses` — a clearer split in
-/// Rust without losing information.
+/// Unlike Dotty's `DefDef`, which folds parameter clauses into a single
+/// unified `paramss: List[ParamClause]`, this keeps the leading type-parameter
+/// clause separate from the ordered term clauses. The parser currently scopes
+/// method syntax to that shape; interleaved type-parameter clauses remain an
+/// explicit unsupported syntax until the model grows an ordered mixed-clause
+/// representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefDef<P: AstPhase> {
     pub name: TermName,
