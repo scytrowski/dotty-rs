@@ -29,7 +29,7 @@
 use dotty_core::ids::TypeId;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
-use dotty_tasty::tasty::{PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
 
 use crate::ast_view::{AstView, address};
 use crate::error::UnpickleError;
@@ -90,6 +90,15 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::MissingDefinition { address: at });
         };
         let unsupported = UnpickleError::UnsupportedSymbolCompletion { address: at, kind };
+        if tag == DEFDEF_TAG {
+            return match kind {
+                SymbolKind::Method => self.complete_method(ast, at, symbol, depth),
+                SymbolKind::Constructor => {
+                    Err(UnpickleError::ConstructorCompletionDeferred { address: at })
+                }
+                _ => Err(unsupported),
+            };
+        }
         let tree = match tag {
             VALDEF_TAG | PARAM_TAG | TYPEPARAM_TAG => first_child(ast, at)?,
             TYPEDEF_TAG => {
