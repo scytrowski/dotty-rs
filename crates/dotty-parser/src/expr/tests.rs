@@ -1025,6 +1025,62 @@ fn parses_an_infix_colon_argument_as_the_right_operand() {
 }
 
 #[test]
+fn recovers_from_a_colon_argument_without_a_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo:",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonEol, 3, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn recovers_from_an_ascription_without_a_type() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "value:",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let _ = parser.expr();
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn recovers_from_an_infix_colon_argument_without_a_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "left combine:",
+        vec![
+            token(TokenKind::Identifier, 0, 4),
+            token(TokenKind::Identifier, 5, 12),
+            token(TokenKind::ColonEol, 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let _ = parser.expr();
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn named_argument_keeps_a_full_expression_rhs() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
