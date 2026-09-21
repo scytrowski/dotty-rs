@@ -40,6 +40,8 @@
 //! | `ORtype`              | `Type Type`               | `Or { left, right }`               |
 //! | `SUPERtype`           | `Type Type`               | `SuperType { this_type, super_type }` |
 //! | `BYNAMEtype`          | `Type`                    | `ByName { result }`                |
+//! | `MATCHCASEtype`       | `Type Type`               | `MatchCase { pattern, result }`    |
+//! | `MATCHtype`           | `Type Type Type*`         | `Match { bound, scrutinee, cases }` |
 //! | `UNITconst` .. `STRINGconst` | the constant itself | `Constant(..)`, losslessly        |
 //! | `CLASSconst`          | `Type`                    | `Constant(Class(type))`            |
 //! | `FLEXIBLEtype`        | `Type`                    | `Flexible { underlying }`          |
@@ -201,14 +203,14 @@ use dotty_core::names::{Name, Namespace};
 use dotty_core::names::{TermName, TypeName};
 use dotty_core::resolution::{MemberRequest, MemberSelector, MemberSpace, ResolutionError};
 use dotty_core::symbols::SymbolKind;
-use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
+use dotty_core::types::{Constant, MatchType, TermRefTarget, Type, TypeRefTarget};
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, ANNOTATEDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG,
-    ConstantValue, FLEXIBLETYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG, PARAMTYPE_TAG, POLYTYPE_TAG,
-    RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawNode, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG,
-    TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG,
-    TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFIN_TAG,
-    TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    ConstantValue, FLEXIBLETYPE_TAG, MATCHCASETYPE_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG,
+    PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawNode, RawTree,
+    SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
+    TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -391,6 +393,42 @@ impl TastyUnpickler<'_, '_, '_> {
                     this_type,
                     super_type,
                 }
+            }
+            RawTree::LengthNode(node) if tag == MATCHCASETYPE_TAG => {
+                // Dotty carries a case as `MatchCase[pattern, result]`; the
+                // model has the case itself, so no `MatchCase` class symbol
+                // is looked up or made.
+                node.decode_matchcase_type()?;
+                let [pattern, result] = self.decode_binary(ast, at, depth)?;
+                Type::MatchCase { pattern, result }
+            }
+            RawTree::LengthNode(node) if tag == MATCHTYPE_TAG => {
+                // `bound scrutinee CaseType*`. A match type with no case is
+                // what the grammar and `MatchType(bound, scrutinee, cases)`
+                // accept, so it is kept.
+                node.decode_match_type()?;
+                let children: Vec<u32> = ast
+                    .children(at)
+                    .iter()
+                    .map(|child| address(child.offset))
+                    .collect();
+                let [bound_at, scrutinee_at, case_ats @ ..] = &children[..] else {
+                    return Err(UnpickleError::MalformedType {
+                        address: at,
+                        reason: "a match type has a bound and a scrutinee",
+                    });
+                };
+                let bound = self.type_at(ast, *bound_at, at, depth)?;
+                let scrutinee = self.type_at(ast, *scrutinee_at, at, depth)?;
+                let mut cases = Vec::with_capacity(case_ats.len());
+                for case in case_ats {
+                    cases.push(self.type_at(ast, *case, at, depth)?);
+                }
+                Type::Match(MatchType {
+                    bound,
+                    scrutinee,
+                    cases,
+                })
             }
             RawTree::LengthNode(node) if tag == TYPEBOUNDS_TAG => {
                 let shape = node.decode_type_bounds()?;
