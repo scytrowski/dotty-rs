@@ -33,10 +33,16 @@ where
         self.advance();
         let name = self.parse_object_name();
         let parents = self.parse_parent_clause();
-        let (body, has_explicit_body) = self.parse_optional_template_body();
+        let body = self.parse_optional_template_body();
         let parent_start = parents.first().and_then(|parent| {
             self.ast
                 .get(*parent)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let body_start = body.first().and_then(|member| {
+            self.ast
+                .get(*member)
                 .position
                 .map(|position| position.span().range().start())
         });
@@ -46,9 +52,10 @@ where
             Vec::new(),
             mark.start(),
             parent_start,
+            body_start,
         );
         let template_position =
-            self.template_position(constructor, constructor_start, &parents, has_explicit_body);
+            self.template_position(constructor, constructor_start, &parents, &body);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -84,10 +91,16 @@ where
         let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::Class);
         let constructor_end = self.last_real_token_end;
         let parents = self.parse_parent_clause();
-        let (body, has_explicit_body) = self.parse_optional_template_body();
+        let body = self.parse_optional_template_body();
         let parent_start = parents.first().and_then(|parent| {
             self.ast
                 .get(*parent)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let body_start = body.first().and_then(|member| {
+            self.ast
+                .get(*member)
                 .position
                 .map(|position| position.span().range().start())
         });
@@ -97,9 +110,10 @@ where
             value_param_clauses,
             constructor_end,
             parent_start,
+            body_start,
         );
         let template_position =
-            self.template_position(constructor, constructor_start, &parents, has_explicit_body);
+            self.template_position(constructor, constructor_start, &parents, &body);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -126,7 +140,7 @@ where
         ))
     }
 
-    fn parse_optional_template_body(&mut self) -> (Vec<TreeId<Untyped>>, bool) {
+    fn parse_optional_template_body(&mut self) -> Vec<TreeId<Untyped>> {
         if matches!(
             self.current().kind,
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
@@ -138,22 +152,22 @@ where
                 self.observe_indented();
                 self.advance();
                 if self.current().kind == TokenKind::Indent {
-                    return (self.parse_template_body(TemplateBody::Indented), true);
+                    return self.parse_template_body(TemplateBody::Indented);
                 }
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an indented template body after `:`",
                 );
-                return (Vec::new(), true);
+                return Vec::new();
             }
         }
 
         match self.current().kind {
             TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace) => {
-                (self.parse_template_body(TemplateBody::Braced), true)
+                self.parse_template_body(TemplateBody::Braced)
             }
-            TokenKind::Indent => (self.parse_template_body(TemplateBody::Indented), true),
-            _ => (Vec::new(), false),
+            TokenKind::Indent => self.parse_template_body(TemplateBody::Indented),
+            _ => Vec::new(),
         }
     }
 
@@ -162,16 +176,51 @@ where
         constructor: TreeId<Untyped>,
         start: u32,
         parents: &[TreeId<Untyped>],
-        has_explicit_body: bool,
+        body: &[TreeId<Untyped>],
     ) -> dotty_core::SourceSpan {
-        if parents.is_empty() && !has_explicit_body {
+        let constructor_range = self.ast.get(constructor).position.map(|position| {
+            (
+                position.span().range().start(),
+                position.span().range().end(),
+            )
+        });
+        let body_start = body.first().and_then(|tree| {
             self.ast
-                .get(constructor)
+                .get(*tree)
                 .position
-                .unwrap_or_else(|| self.zero_width_span(start))
+                .map(|position| position.span().range().start())
+        });
+        let body_end = body.last().and_then(|tree| {
+            self.ast
+                .get(*tree)
+                .position
+                .map(|position| position.span().range().end())
+        });
+        let parent_end = parents.last().and_then(|tree| {
+            self.ast
+                .get(*tree)
+                .position
+                .map(|position| position.span().range().end())
+        });
+        let template_start = if parents.is_empty()
+            && constructor_range.is_some_and(|(constructor_start, constructor_end)| {
+                constructor_start == constructor_end
+            }) {
+            body_start.unwrap_or(start)
         } else {
-            self.span_from(crate::Mark { start })
-        }
+            start
+        };
+        let template_end = body_end
+            .or(parent_end)
+            .or_else(|| constructor_range.map(|(_, end)| end))
+            .unwrap_or(template_start);
+        dotty_core::SourceSpan::new(
+            self.source_id,
+            dotty_core::Span::without_point(
+                dotty_core::TextRange::new(template_start, template_end)
+                    .expect("template span is ordered"),
+            ),
+        )
     }
 
     fn parse_parent_clause(&mut self) -> Vec<TreeId<Untyped>> {
@@ -343,6 +392,7 @@ where
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
         parameter_end: u32,
         parent_start: Option<u32>,
+        body_start: Option<u32>,
     ) -> (TreeId<Untyped>, u32) {
         let name = TermName::new(self.names.intern("<init>"));
         let first_child_start = type_params
@@ -357,10 +407,12 @@ where
         let constructor_start = first_child_start
             .map(|child_start| child_start.saturating_sub(1))
             .or(parent_start)
+            .or(body_start)
             .unwrap_or(start);
         let constructor_end = first_child_start
             .map(|_| parameter_end)
             .or(parent_start)
+            .or(body_start)
             .unwrap_or(start);
         let tpt_start = value_param_clauses
             .last()
@@ -375,17 +427,18 @@ where
             })
             .unwrap_or(constructor_end);
         let tpt = self.synthetic_type_tree_at(tpt_start);
-        let position = if first_child_start.is_some() || parent_start.is_some() {
-            dotty_core::SourceSpan::new(
-                self.source_id,
-                dotty_core::Span::without_point(
-                    dotty_core::TextRange::new(constructor_start, constructor_end)
-                        .expect("constructor span is ordered"),
-                ),
-            )
-        } else {
-            self.zero_width_span(start)
-        };
+        let position =
+            if first_child_start.is_some() || parent_start.is_some() || body_start.is_some() {
+                dotty_core::SourceSpan::new(
+                    self.source_id,
+                    dotty_core::Span::without_point(
+                        dotty_core::TextRange::new(constructor_start, constructor_end)
+                            .expect("constructor span is ordered"),
+                    ),
+                )
+            } else {
+                self.zero_width_span(start)
+            };
         let constructor = self.alloc(
             TreeKind::DefDef(DefDef {
                 name,
