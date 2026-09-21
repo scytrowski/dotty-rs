@@ -85,6 +85,25 @@ object Main:
           fields += field("name", quote(vdef.name.toString))
         if vdef.mods.is(Given) then
           fields += field("given", "true")
+      case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] =>
+        fields += field("name", quote(ddef.name.toString))
+        val clauses = ddef.paramss
+        val typeParamCount = clauses.headOption.toList.flatMap(_.collect {
+          case _: dotty.tools.dotc.ast.Trees.TypeDef[?] => 1
+        }).size
+        fields += field("type_param_count", typeParamCount.toString)
+        fields += field(
+          "param_clause_sizes",
+          clauses.map(clause => clause.size).mkString("[", ",", "]")
+        )
+        fields += field(
+          "using_clauses",
+          clauses.map: clause =>
+            clause.headOption match
+              case Some(value: dotty.tools.dotc.ast.Trees.ValDef[?]) => value.mods.is(Given).toString
+              case _ => "false"
+          .mkString("[", ",", "]")
+        )
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
