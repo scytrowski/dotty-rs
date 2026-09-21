@@ -34,6 +34,15 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
             return self.parse_type_definition(location);
         }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Class) {
+            return self.parse_class_definition(location);
+        }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Trait) {
+            return self.parse_trait_definition(location);
+        }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
+            return self.parse_object_definition(location);
+        }
 
         let tree = if is_unsupported_start(self.current().kind) {
             self.parse_unsupported_syntax()
@@ -197,12 +206,9 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Keyword(
-            HardKeyword::Class
-                | HardKeyword::Match
+            HardKeyword::Match
                 | HardKeyword::Val
                 | HardKeyword::Var
-                | HardKeyword::Object
-                | HardKeyword::Trait
                 | HardKeyword::Enum
                 | HardKeyword::Given
         )

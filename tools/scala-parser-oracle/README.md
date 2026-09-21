@@ -58,3 +58,10 @@ parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
 in synthetic `match` expressions. The normalized tree compares `Bind`,
 `Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
 arguments as they appear before semantic extractor lowering.
+
+Fixtures under `fixtures/definitions/` cover the initial class-like
+definition subset in block mode: class, trait, and object nodes; primary
+constructor clauses; simple parent applications; and braced or indented
+template bodies. The renderer exposes the source-level `Trait` distinction
+and keeps constructor parent applications in the same `New`/`Select`/`Apply`
+shape as the Scala parser.

@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.Given
+import dotty.tools.dotc.core.Flags.{Given, Trait}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -52,6 +52,7 @@ object Main:
       case _ =>
         tree.getClass.getSimpleName.stripSuffix("$") match
           case "WhileDo" => "While"
+          case "AppliedTypeTree" => "TypeApply"
           case "WildcardFunction" => "Function"
           case name => name
     fields += field("kind", quote(normalizedKind))
@@ -80,6 +81,10 @@ object Main:
       case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
         val name = tdef.name.toString
         fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
+        if tdef.mods.is(Trait) then
+          fields += field("trait", "true")
+      case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
+        fields += field("name", quote(module.name.toString))
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] =>
         if !slice(vdef, source).trim.startsWith("_") && !vdef.name.toString.startsWith("_$") then
           fields += field("name", quote(vdef.name.toString))
