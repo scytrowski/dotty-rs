@@ -275,6 +275,52 @@ pub(crate) fn is_illegal_prefix(store: &SemanticStore, prefix: TypeId) -> bool {
     }
 }
 
+/// Whether `ty` is an unstable path, one Dotty's `widenIfUnstable` would widen
+/// and this model cannot: an illegal prefix ([`is_illegal_prefix`]: a method,
+/// a mutable member, a constructor) or a reference to a by-name parameter
+/// (`Complete` with a `ByName` type). A reference whose type is not yet
+/// completed is not known to be by-name and is not counted here.
+pub(crate) fn is_unstable_path(store: &SemanticStore, ty: TypeId) -> bool {
+    if is_illegal_prefix(store, ty) {
+        return true;
+    }
+    let Some(ty) = look_through_proxies(store, ty) else {
+        return true;
+    };
+    let Some(symbol) = store
+        .types
+        .get(ty)
+        .reference_symbol()
+        .filter(|_| matches!(store.types.get(ty), Type::TermRef { .. }))
+    else {
+        return false;
+    };
+    let symbol = store.symbols.get(symbol);
+    symbol.kind == SymbolKind::Parameter
+        && matches!(symbol.info, SymbolInfo::Complete(declared)
+            if matches!(store.types.get(declared), Type::ByName { .. }))
+}
+
+/// Whether `ty` is a stable singleton type as `SINGLETONtpt` needs: a
+/// constant, a `this`, a super reference, a recursive `this`, or a term
+/// reference that is a stable path (a package, an object, a stable member; a
+/// name-designated one of a structural prefix). Proxies (annotated, flexible)
+/// are looked through. Everything else, a class type, an applied type, a
+/// method, and any unstable path, is not.
+pub(crate) fn is_singleton_type(store: &SemanticStore, ty: TypeId) -> bool {
+    let Some(inner) = look_through_proxies(store, ty) else {
+        return false;
+    };
+    match store.types.get(inner) {
+        Type::Constant(_)
+        | Type::ThisType { .. }
+        | Type::SuperType { .. }
+        | Type::RecThis { .. } => true,
+        Type::TermRef { .. } => !is_unstable_path(store, inner),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

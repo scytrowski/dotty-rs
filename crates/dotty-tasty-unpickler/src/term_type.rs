@@ -10,6 +10,7 @@
 //! |------|----------------|
 //! | `SHAREDterm target` | the projection of the target tree; no type and no cache entry of its own |
 //! | `IDENT name Type` | exactly the embedded type; the name is syntax and is never resolved |
+//! | `SELECT name qualifier` | a `TermRef` to the member of the qualifier's type, by the same selection as a name-based `TERMREF` (unsigned names only) |
 //! | `QUALTHIS (IDENTtpt Type)` | `ThisType { class }`, the class the identifier's type reference names |
 //! | a tree tag (`IDENTtpt`, `SELECTtpt`, `APPLIEDtpt`, ...) | the tree's own projection, [`type_of_tpt`](TastyUnpickler::type_of_tpt) |
 //! | any other tag | a semantic type wire node (`readTree` falls back to `readType`): `TERMREF*`, `THIS`, a constant, `SHAREDtype`, `RECthis`, ... through `type_at` |
@@ -30,10 +31,11 @@
 //! [`TastySemanticIndex::term_tree_type_at`]: crate::index::TastySemanticIndex::term_tree_type_at
 
 use dotty_core::ids::TypeId;
+use dotty_core::names::Namespace;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
     ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, EXPLICITTPT_TAG, IDENT_TAG, IDENTTPT_TAG,
-    LAMBDATPT_TAG, MATCHTPT_TAG, QUALTHIS_TAG, REFINEDTPT_TAG, RawTree, SELECTTPT_TAG,
+    LAMBDATPT_TAG, MATCHTPT_TAG, QUALTHIS_TAG, REFINEDTPT_TAG, RawTree, SELECT_TAG, SELECTTPT_TAG,
     SHAREDTERM_TAG, SINGLETONTPT_TAG, TYPEBOUNDSTPT_TAG,
 };
 
@@ -90,6 +92,22 @@ impl TastyUnpickler<'_, '_, '_> {
                     return Err(malformed(at, "an identifier has one type"));
                 };
                 return self.type_at(ast, embedded, at, depth);
+            }
+            SELECT_TAG => {
+                // `SELECT name qualifier`, unsigned: a term member of the
+                // qualifier's `tpe`, as a name-based `TERMREF` makes it. A
+                // signed name is `UnsupportedSignedReference`, never the
+                // first overload.
+                let shape = ast.tree_at(at, from)?.decode_select()?;
+                let [qualifier] = children[..] else {
+                    return Err(malformed(at, "a selection has one qualifier"));
+                };
+                let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
+                let selected =
+                    self.select_member_type(at, shape.name, qualifier, Namespace::Term)?;
+                let ty = self.store.types.alloc(selected);
+                self.index.insert_term_tree(at, ty)?;
+                return Ok(ty);
             }
             QUALTHIS_TAG => {}
             // `readTree` falls back to `readType` for every other tag.

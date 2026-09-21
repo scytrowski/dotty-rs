@@ -35,14 +35,16 @@
 //! [`TastySemanticIndex::type_tree_type_at`]: crate::index::TastySemanticIndex::type_tree_type_at
 
 use dotty_core::ids::TypeId;
+use dotty_core::names::Namespace;
 use dotty_core::types::Type;
 use dotty_tasty::tasty::{
     ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, EXPLICITTPT_TAG, IDENTTPT_TAG, RawTree,
-    SHAREDTERM_TAG, TYPEBOUNDSTPT_TAG,
+    SELECTTPT_TAG, SHAREDTERM_TAG, SINGLETONTPT_TAG, TYPEBOUNDSTPT_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::error::UnpickleError;
+use crate::lookup::is_singleton_type;
 use crate::names::wire_name;
 use crate::unpickler::TastyUnpickler;
 
@@ -168,6 +170,33 @@ impl TastyUnpickler<'_, '_, '_> {
                     }
                 }
             }
+            SELECTTPT_TAG => {
+                // `SELECTtpt name qualifier`: a type member of the
+                // qualifier's own `tpe`, the same selection as a name-based
+                // `TYPEREF` makes.
+                let shape = ast.tree_at(at, from)?.decode_select()?;
+                let [qualifier] = children[..] else {
+                    return Err(malformed(at, "a type selection has one qualifier"));
+                };
+                let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
+                let selected =
+                    self.select_member_type(at, shape.name, qualifier, Namespace::Type)?;
+                self.store.types.alloc(selected)
+            }
+            SINGLETONTPT_TAG => {
+                // `SINGLETONtpt ref`: exactly the `tpe` of the reference; no
+                // wrapper, because a `TermRef`, `ThisType` or constant type
+                // already is a singleton. The reference must be one.
+                ast.tree_at(at, from)?.decode_singleton_tpt()?;
+                let [reference] = children[..] else {
+                    return Err(malformed(at, "a singleton type tree has one reference"));
+                };
+                let ty = self.type_of_term(ast, reference, at, depth)?;
+                if !is_singleton_type(self.store, ty) {
+                    return Err(UnpickleError::InvalidSingletonTypeTree { address: at, ty });
+                }
+                ty
+            }
             // A dedicated tree with no projection yet.
             tag if is_deferred_tree(tag) => {
                 return Err(UnpickleError::UnsupportedTypeTree { address: at, tag });
@@ -189,20 +218,10 @@ impl TastyUnpickler<'_, '_, '_> {
 /// list is documentation; anything else that is not a type is refused in the
 /// same way by the fall-through.
 fn is_deferred_tree(tag: u8) -> bool {
-    use dotty_tasty::tasty::{
-        BLOCK_TAG, HOLE_TAG, LAMBDATPT_TAG, MATCHTPT_TAG, REFINEDTPT_TAG, SELECTTPT_TAG,
-        SINGLETONTPT_TAG,
-    };
+    use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, LAMBDATPT_TAG, MATCHTPT_TAG, REFINEDTPT_TAG};
     matches!(
         tag,
-        SELECTTPT_TAG
-            | SINGLETONTPT_TAG
-            | REFINEDTPT_TAG
-            | LAMBDATPT_TAG
-            | ANNOTATEDTPT_TAG
-            | MATCHTPT_TAG
-            | BLOCK_TAG
-            | HOLE_TAG
+        REFINEDTPT_TAG | LAMBDATPT_TAG | ANNOTATEDTPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG
     )
 }
 

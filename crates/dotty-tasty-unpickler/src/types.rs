@@ -217,8 +217,8 @@ use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::binders::declared_variances;
 use crate::error::UnpickleError;
 use crate::lookup::{
-    LocalLookup, MAX_PROXY_DEPTH, is_illegal_prefix, is_structural_prefix, lookup_declaration,
-    lookup_member, lookup_owner, proxy_underlying,
+    LocalLookup, MAX_PROXY_DEPTH, is_illegal_prefix, is_structural_prefix, is_unstable_path,
+    lookup_declaration, lookup_member, lookup_owner, proxy_underlying,
 };
 use crate::names::{is_signed, package_segments, string_value, wire_name};
 use crate::unpickler::TastyUnpickler;
@@ -231,6 +231,25 @@ fn head(tree: &RawTree<'_>) -> (u8, u32) {
             (*tag, address(*offset))
         }
         RawTree::LengthNode(node) => (node.tag, address(node.offset)),
+    }
+}
+
+/// The reference type for a member of `prefix` that was resolved: a `TypeRef`
+/// or `TermRef` to its declaration symbol, or, for a member of a structural
+/// prefix that has none, to its name. The one Symbol-vs-Name policy of every
+/// name-based reference (`TYPEREF`, `TERMREF`, `SELECT`, `SELECTtpt`).
+fn member_type(prefix: TypeId, resolved: Resolved, namespace: Namespace) -> Type {
+    match (namespace, resolved) {
+        (Namespace::Type, Resolved::Symbol(symbol)) => Type::type_ref(prefix, symbol),
+        (Namespace::Term, Resolved::Symbol(symbol)) => Type::term_ref(prefix, symbol),
+        (Namespace::Type, Resolved::Structural(name)) => Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Name(TypeName::new(name.text())),
+        },
+        (Namespace::Term, Resolved::Structural(name)) => Type::TermRef {
+            prefix,
+            target: TermRefTarget::Name(TermName::new(name.text())),
+        },
     }
 }
 
@@ -344,18 +363,7 @@ impl TastyUnpickler<'_, '_, '_> {
                     Namespace::Term
                 };
                 let resolved = self.resolved_member(at, *name, prefix, namespace)?;
-                match (tag == TYPEREF_TAG, resolved) {
-                    (true, Resolved::Symbol(symbol)) => Type::type_ref(prefix, symbol),
-                    (false, Resolved::Symbol(symbol)) => Type::term_ref(prefix, symbol),
-                    (true, Resolved::Structural(name)) => Type::TypeRef {
-                        prefix,
-                        target: TypeRefTarget::Name(TypeName::new(name.text())),
-                    },
-                    (false, Resolved::Structural(name)) => Type::TermRef {
-                        prefix,
-                        target: TermRefTarget::Name(TermName::new(name.text())),
-                    },
-                }
+                member_type(prefix, resolved, namespace)
             }
             RawTree::Ast { child, .. } if tag == THIS_TAG => Type::ThisType {
                 class: self.this_class(ast, child, depth)?,
@@ -609,6 +617,37 @@ impl TastyUnpickler<'_, '_, '_> {
         namespace: Namespace,
     ) -> Result<Resolved, UnpickleError> {
         self.resolved_named(at, name_ref, prefix, None, namespace)
+    }
+
+    /// The type of the selection `qualifier.name` written by the tree at `at`
+    /// (a `SELECT` or a `SELECTtpt`): a member of `qualifier` in `namespace`,
+    /// found by the same policy as a name-based `TYPEREF` / `TERMREF`
+    /// ([`resolved_member`](Self::resolved_member): the qualifier's own
+    /// declarations, then the resolver, never a search by text and never the
+    /// first of several overloads; a structural qualifier's member is a
+    /// name-designated reference).
+    ///
+    /// Upstream's `completeSelect` first widens an unstable qualifier
+    /// (`widenIfUnstable`) and applies `accessibleDenot`. This model has no
+    /// widening, so an unstable singleton qualifier (a method, a mutable
+    /// member, a constructor, a by-name parameter) is refused rather than
+    /// selected from as if it were stable; and access is not checked, exactly
+    /// as for a name-based `TYPEREF` (a later symbol-completion concern).
+    pub(crate) fn select_member_type(
+        &mut self,
+        at: u32,
+        name_ref: u32,
+        qualifier: TypeId,
+        namespace: Namespace,
+    ) -> Result<Type, UnpickleError> {
+        if is_unstable_path(self.store, qualifier) {
+            return Err(UnpickleError::UnstableSelectQualifier {
+                address: at,
+                qualifier,
+            });
+        }
+        let resolved = self.resolved_member(at, name_ref, qualifier, namespace)?;
+        Ok(member_type(qualifier, resolved, namespace))
     }
 
     /// The declaration a `TYPEREFin` / `TERMREFin` at `at` names: `name`
