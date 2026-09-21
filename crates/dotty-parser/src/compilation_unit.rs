@@ -1,11 +1,8 @@
-use dotty_core::ast::{Block, Literal};
-use dotty_core::{
-    AstArena, Constant, Punctuation, SourceId, SourceText, TokenKind, TokenSource, TreeId,
-    TreeKind, Untyped,
-};
+use dotty_core::ast::Block;
+use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
 
 use crate::statements::StatementSequenceBoundary;
-use crate::{ParseDiagnostic, ParseDiagnosticKind, Parser};
+use crate::{ParseDiagnostic, Parser};
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -52,9 +49,11 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use dotty_core::ast::UntypedNode;
+    use crate::ParseDiagnosticKind;
+    use dotty_core::ast::{Literal, UntypedNode};
     use dotty_core::{
-        HardKeyword, NameInterner, SourceId, SourceText, TextRange, Token, TokenSource, TokenValue,
+        Constant, HardKeyword, NameInterner, Punctuation, SourceId, SourceText, TextRange, Token,
+        TokenKind, TokenSource, TokenValue,
     };
 
     pub(crate) struct VecTokenSource {
