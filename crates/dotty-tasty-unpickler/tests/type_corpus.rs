@@ -328,6 +328,11 @@ struct CompletionSurvey {
     outcomes_by_new_trees: BTreeMap<(String, &'static str), usize>,
     /// Tags of the term trees the projection refused.
     unsupported_terms: BTreeMap<u8, usize>,
+    /// The `LAMBDAtpt` survey (Milestone 5c): (what, value) -> count.
+    lambdas: BTreeMap<(&'static str, String), usize>,
+    /// The method / constructor survey (Milestone 5c): (kind, what, value) ->
+    /// count.
+    methods: BTreeMap<(&'static str, &'static str, String), usize>,
     /// The first few symbols of the buckets worth a look.
     examples: BTreeMap<&'static str, Vec<String>>,
     unexpected: Vec<String>,
@@ -747,8 +752,12 @@ fn complete_unit(
     }
 
     survey_type_trees(&index, file, &children, survey);
+    survey_lambdas(&index, file, &children, unpickler, survey);
+    survey_methods(&index, file, &children, unpickler, survey);
 
-    // Completion itself.
+    // Completion itself: every simple symbol first, in document order (so the
+    // simple-symbol figures stay comparable), then the methods.
+    definitions.sort_by_key(|(at, tag)| (*tag == DEFDEF, *at));
     for (at, tag) in definitions {
         let Some((kind, before)) = unpickler.symbol_state_at(at) else {
             continue;
@@ -783,7 +792,14 @@ fn complete_unit(
             Err(UnpickleError::UnstableSelectQualifier { .. }) => "unstable select qualifier",
             Err(UnpickleError::InvalidSingletonTypeTree { .. }) => "invalid singleton",
             Err(UnpickleError::OpaqueAliasDeferred { .. }) => "opaque alias",
-            Err(UnpickleError::UnsupportedSymbolCompletion { .. }) => "kind deferred (5c/5d)",
+            Err(UnpickleError::ConstructorCompletionDeferred { .. }) => "constructor deferred (5d)",
+            Err(UnpickleError::UnsupportedMethodParameterSemantics { .. }) => {
+                "unsupported parameter semantics"
+            }
+            Err(UnpickleError::MalformedDefinition { .. }) => "clause malformed",
+            Err(UnpickleError::SharedLambdaOwnerConflict { .. }) => "shared lambda owner conflict",
+            Err(UnpickleError::ParameterAbstraction { .. }) => "abstraction failed",
+            Err(UnpickleError::UnsupportedSymbolCompletion { .. }) => "kind deferred (5d)",
             Err(UnpickleError::InvalidCompletedBounds { .. }) => "invalid bounds",
             // An annotation inside the type (4b's deferrals).
             Err(
@@ -870,6 +886,396 @@ fn new_trees_below(children: &HashMap<u32, Vec<(u32, u8)>>, root: Option<(u32, u
         "-".to_owned()
     } else {
         found.into_iter().collect::<Vec<_>>().join("+")
+    }
+}
+
+/// Every `DEFDEF` of the unit (Milestone 5c): its clause shape, parameter
+/// modifiers, and how its signature refers to its own parameters. Constructors
+/// are surveyed (and reported apart) but never completed.
+fn survey_methods(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut CompletionSurvey,
+) {
+    use dotty_tasty::tasty::{DefDefHeaderItem, DefinitionTail, ParameterNode};
+    const TYPEPARAM: u8 = 133;
+    const PARAM: u8 = 134;
+    const EMPTYCLAUSE: u8 = 45;
+    let below = |at: u32| children.get(&at).map_or(&[][..], Vec::as_slice);
+    let add =
+        |survey: &mut CompletionSurvey, kind: &'static str, what: &'static str, value: String| {
+            *survey.methods.entry((kind, what, value)).or_default() += 1;
+        };
+    // The enclosing template's type-parameter count, for constructors.
+    let mut parent_of: HashMap<u32, u32> = HashMap::new();
+    for edge in index.iter_tree_edges() {
+        parent_of.insert(
+            u32::try_from(edge.child.offset).unwrap(),
+            u32::try_from(edge.parent.offset).unwrap(),
+        );
+    }
+
+    for node in index.iter_nodes_with_tag(130) {
+        let at = u32::try_from(node.offset).unwrap();
+        let Some((symbol_kind, _)) = unpickler.symbol_state_at(at) else {
+            continue;
+        };
+        let kind: &'static str = match symbol_kind {
+            dotty_core::symbols::SymbolKind::Method => "Method",
+            dotty_core::symbols::SymbolKind::Constructor => "Constructor",
+            _ => continue,
+        };
+        let Some(raw) = index.get(at) else { continue };
+        let Ok(body) = raw.decode_defdef_body() else {
+            add(survey, kind, "undecodable", String::new());
+            continue;
+        };
+        add(survey, kind, "total", String::new());
+
+        // The clauses, as upstream `readParamss` reads them: consecutive
+        // parameters of one tag are a clause, `EMPTYCLAUSE` an empty term
+        // clause, `SPLITCLAUSE` a boundary.
+        let mut clauses: Vec<(u8, Vec<&ParameterNode<'_>>)> = Vec::new();
+        let (mut empties, mut splits) = (0usize, 0usize);
+        let mut open: Option<u8> = None;
+        for item in &body.header_items {
+            match item {
+                DefDefHeaderItem::Parameter(parameter) => {
+                    let tag = parameter.tag();
+                    match (open, clauses.last_mut()) {
+                        (Some(current), Some(last)) if current == tag => last.1.push(parameter),
+                        _ => clauses.push((tag, vec![parameter])),
+                    }
+                    open = Some(tag);
+                }
+                DefDefHeaderItem::Clause(EMPTYCLAUSE) => {
+                    empties += 1;
+                    clauses.push((EMPTYCLAUSE, Vec::new()));
+                    open = None;
+                }
+                DefDefHeaderItem::Clause(_) => {
+                    splits += 1;
+                    open = None;
+                }
+            }
+        }
+        let modifiers = |parameter: &ParameterNode<'_>| -> Vec<u8> {
+            parameter
+                .decode_body()
+                .map(|body| {
+                    body.tail
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            DefinitionTail::Modifier(tag) => Some(*tag),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let term_clauses = clauses.iter().filter(|c| c.0 != TYPEPARAM).count();
+        let type_clauses = clauses.iter().filter(|c| c.0 == TYPEPARAM).count();
+        if clauses.is_empty() {
+            add(survey, kind, "no parameter clauses", String::new());
+        }
+        if empties > 0 {
+            add(survey, kind, "explicit empty clauses", empties.to_string());
+        }
+        add(survey, kind, "term clauses", term_clauses.to_string());
+        add(survey, kind, "type clauses", type_clauses.to_string());
+        add(survey, kind, "clause depth", clauses.len().to_string());
+        add(survey, kind, "SPLITCLAUSE", splits.to_string());
+        let sequence: Vec<&str> = clauses
+            .iter()
+            .map(|(tag, params)| match *tag {
+                TYPEPARAM => "T",
+                EMPTYCLAUSE => "()",
+                _ => match params.first().map(|p| modifiers(p)) {
+                    Some(mods) if mods.contains(&37) => "using",
+                    Some(mods) if mods.contains(&13) => "implicit",
+                    _ => "P",
+                },
+            })
+            .collect();
+        add(survey, kind, "clause sequence", sequence.join(" "));
+        let widest = clauses.iter().map(|c| c.1.len()).max().unwrap_or(0);
+        add(
+            survey,
+            kind,
+            "max parameters in a clause",
+            widest.to_string(),
+        );
+        // Mixed given/implicit inside one clause.
+        for (tag, params) in &clauses {
+            if *tag == PARAM && !params.is_empty() {
+                let flags: Vec<(bool, bool)> = params
+                    .iter()
+                    .map(|p| {
+                        let mods = modifiers(p);
+                        (mods.contains(&37), mods.contains(&13))
+                    })
+                    .collect();
+                if flags.iter().any(|f| *f != flags[0]) {
+                    add(
+                        survey,
+                        kind,
+                        "clause with mixed given/implicit",
+                        String::new(),
+                    );
+                }
+            }
+            for parameter in params {
+                for tag in modifiers(parameter) {
+                    add(survey, kind, "parameter modifier tag", tag.to_string());
+                }
+            }
+        }
+        // AstView lists the parameter nodes (clause markers are bare tags,
+        // not nodes), then the result type tree.
+        let kids = below(at);
+        let header = body
+            .header_items
+            .iter()
+            .filter(|item| matches!(item, DefDefHeaderItem::Parameter(_)))
+            .count();
+        if let Some((result, _)) = kids.get(header) {
+            add(
+                survey,
+                kind,
+                "result root",
+                tree_root_name(index, file, *result),
+            );
+        }
+        // Repeated parameters (`T*` is an applied `<repeated>`), and own
+        // parameter references.
+        let mut addresses: Vec<(u32, u8, usize)> = Vec::new(); // (address, tag, clause)
+        {
+            let mut clause = 0usize;
+            let mut previous: Option<u8> = None;
+            let mut next = kids.iter();
+            for item in &body.header_items {
+                match item {
+                    DefDefHeaderItem::Parameter(parameter) => {
+                        let tag = parameter.tag();
+                        if previous.is_some() && previous != Some(tag) {
+                            clause += 1;
+                        }
+                        if let Some((child, _)) = next.next() {
+                            addresses.push((*child, tag, clause));
+                        }
+                        previous = Some(tag);
+                    }
+                    DefDefHeaderItem::Clause(EMPTYCLAUSE) => {
+                        clause += usize::from(previous.is_some()) + 1;
+                        previous = None;
+                    }
+                    DefDefHeaderItem::Clause(_) => {
+                        clause += usize::from(previous.is_some());
+                        previous = None;
+                    }
+                }
+            }
+        }
+        let own: HashMap<u32, (u8, usize)> =
+            addresses.iter().map(|(a, t, c)| (*a, (*t, *c))).collect();
+        for (param, tag, _) in &addresses {
+            if *tag == PARAM
+                && let Some((tree, 162)) = below(*param).first().copied()
+                && let Some((tycon, _)) = below(tree).first()
+                && let dotty_tasty::tasty::RawTree::NatAst { value, .. } = tree_from(file, *tycon)
+                && file.names().get_utf8(value) == Some("<repeated>")
+            {
+                add(survey, kind, "repeated parameter", String::new());
+            }
+        }
+        // Where do references to own parameters occur? (target tag, place)
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let scan = |root: u32,
+                    place: &str,
+                    from_clause: usize,
+                    seen: &mut std::collections::BTreeSet<String>| {
+            let mut stack = vec![root];
+            while let Some(current) = stack.pop() {
+                let tag = index.get_node(current).map(|n| n.tag);
+                let target = match (tag, tree_from(file, current)) {
+                    (Some(62 | 63), dotty_tasty::tasty::RawTree::Leaf(term)) => match term.value {
+                        dotty_tasty::tasty::TermValue::AstRef(target) => Some(target),
+                        _ => None,
+                    },
+                    (Some(114 | 116), dotty_tasty::tasty::RawTree::NatAst { value, .. }) => {
+                        Some(value)
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target
+                    && let Some((target_tag, target_clause)) = own.get(&target)
+                {
+                    let what = if *target_tag == TYPEPARAM {
+                        "type parameter"
+                    } else {
+                        "term parameter"
+                    };
+                    seen.insert(format!("{what} referenced in {place}"));
+                    if *target_clause < from_clause {
+                        seen.insert("reference across clauses".to_owned());
+                    }
+                    if target == root {
+                        seen.insert("self".to_owned());
+                    }
+                }
+                for (child, _) in below(current) {
+                    stack.push(*child);
+                }
+            }
+        };
+        for (param, tag, clause) in &addresses {
+            let place = if *tag == TYPEPARAM {
+                "type parameter bounds"
+            } else {
+                "parameter type"
+            };
+            if let Some((tree, _)) = below(*param).first() {
+                scan(*tree, place, *clause, &mut seen);
+            }
+        }
+        if let Some((result, _)) = kids.get(header) {
+            scan(*result, "result type", clauses.len(), &mut seen);
+        }
+        if seen.is_empty() {
+            add(survey, kind, "own-parameter references", "none".to_owned());
+        } else {
+            add(survey, kind, "own-parameter references", "some".to_owned());
+        }
+        for what in seen {
+            add(survey, kind, "own reference", what);
+        }
+        // Constructors: the class's own arity.
+        if kind == "Constructor"
+            && let Some(template) = parent_of.get(&at)
+        {
+            let arity = below(*template)
+                .iter()
+                .filter(|(_, t)| *t == TYPEPARAM)
+                .count();
+            add(
+                survey,
+                kind,
+                "owner class type parameters",
+                arity.to_string(),
+            );
+        }
+    }
+}
+
+/// The `LAMBDAtpt` roots of the unit (Milestone 5c): where they sit, their
+/// shape, and whether pass 1 entered their parameters for one owner.
+fn survey_lambdas(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    file: &TastyFile<'_>,
+    children: &HashMap<u32, Vec<(u32, u8)>>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut CompletionSurvey,
+) {
+    const LAMBDATPT: u8 = 171;
+    const TYPEPARAM: u8 = 133;
+    let mut parents: HashMap<u32, (u32, u8)> = HashMap::new();
+    for edge in index.iter_tree_edges() {
+        parents.insert(
+            u32::try_from(edge.child.offset).unwrap(),
+            (u32::try_from(edge.parent.offset).unwrap(), edge.parent.tag),
+        );
+    }
+    let below = |at: u32| children.get(&at).map_or(&[][..], Vec::as_slice);
+    let add = |survey: &mut CompletionSurvey, what: &'static str, value: String| {
+        *survey.lambdas.entry((what, value)).or_default() += 1;
+    };
+    for node in index.iter_nodes_with_tag(LAMBDATPT) {
+        let at = u32::try_from(node.offset).unwrap();
+        add(survey, "total", String::new());
+        // Nearest definition above, and whether a lambda sits in between.
+        let (mut current, mut in_lambda, mut context) = (at, false, "none");
+        while let Some((parent, tag)) = parents.get(&current) {
+            match *tag {
+                LAMBDATPT => in_lambda = true,
+                129 | 130 | 131 | 133 | 134 if context == "none" => {
+                    context = match *tag {
+                        129 => "VALDEF",
+                        130 => "DEFDEF",
+                        131 => "TYPEDEF",
+                        133 => "TYPEPARAM",
+                        _ => "PARAM",
+                    };
+                }
+                _ => {}
+            }
+            current = *parent;
+        }
+        add(
+            survey,
+            "context",
+            format!("{context}{}", if in_lambda { " (nested)" } else { "" }),
+        );
+        let kids = below(at);
+        let params: Vec<u32> = kids
+            .iter()
+            .filter(|(_, tag)| *tag == TYPEPARAM)
+            .map(|(at, _)| *at)
+            .collect();
+        add(survey, "type parameters", params.len().to_string());
+        if let Some((body, _)) = kids.last() {
+            add(survey, "body root", tree_root_name(index, file, *body));
+        }
+        for param in &params {
+            let inside = below(*param);
+            if let Some((bounds, _)) = inside.first() {
+                add(survey, "bounds root", tree_root_name(index, file, *bounds));
+            }
+            for (_, tag) in inside.iter().skip(1) {
+                add(survey, "type parameter modifier tag", tag.to_string());
+            }
+        }
+        // References among the lambda's own parameters (by address).
+        let mut refers_to_own = false;
+        let mut stack: Vec<u32> = kids.iter().map(|(at, _)| *at).collect();
+        while let Some(current) = stack.pop() {
+            for (child, tag) in below(current) {
+                stack.push(*child);
+                if matches!(*tag, 63 | 62)
+                    && let dotty_tasty::tasty::RawTree::Leaf(term) = tree_from(file, *child)
+                    && let dotty_tasty::tasty::TermValue::AstRef(target) = term.value
+                    && params.contains(&target)
+                {
+                    refers_to_own = true;
+                }
+            }
+        }
+        add(
+            survey,
+            "refers to its own parameters",
+            refers_to_own.to_string(),
+        );
+        add(
+            survey,
+            "owner entered",
+            unpickler.index().lambda_owner(at).is_some().to_string(),
+        );
+        add(
+            survey,
+            "owner conflict",
+            unpickler.index().has_lambda_owner_conflict(at).to_string(),
+        );
+    }
+    // How many `SHAREDterm` links end at a lambda.
+    for node in index.iter_nodes_with_tag(60) {
+        let at = u32::try_from(node.offset).unwrap();
+        if let Some((_, target, tag, _)) = follow_shared_terms_in(index, file, at, 16)
+            && tag == LAMBDATPT
+        {
+            let _ = target;
+            add(survey, "SHAREDterm links to a lambda", String::new());
+        }
     }
 }
 
@@ -2140,6 +2546,8 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
                 "  unsupported term trees by tag: {:?}, examples: {:?}",
                 survey.unsupported_terms, survey.examples
             );
+            println!("  LAMBDAtpt survey: {:?}", survey.lambdas);
+            println!("  method survey: {:?}", survey.methods);
             println!("  completion unexpected: {}", survey.unexpected.len());
             for error in survey.unexpected.iter().take(10) {
                 println!("    {error}");

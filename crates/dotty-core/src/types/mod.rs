@@ -18,7 +18,10 @@ pub use binder::ReservedTypeId;
 pub use class_info::ClassInfo;
 pub use constant::Constant;
 pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
-pub use rebind::{TypeRebindError, rebind_type_lambda};
+pub use rebind::{
+    MethodParamSpec, TypeParamSpec, TypeRebindError, method_type_from_symbols,
+    poly_type_from_symbols, rebind_type_lambda, type_lambda_from_symbols,
+};
 pub use structural::{
     MAX_STRUCTURAL_DEPTH, StructuralLookupError, StructuralMemberLookup, lookup_structural_member,
 };

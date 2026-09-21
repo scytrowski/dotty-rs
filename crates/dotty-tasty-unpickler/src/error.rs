@@ -59,6 +59,28 @@ pub enum UnpickleError {
     /// build a type for (Milestone 5b): a `SELECTtpt` qualifier or
     /// `SINGLETONtpt` reference that is not a path.
     UnsupportedTermTree { address: u32, tag: u8 },
+    /// The definition at `address` has a header that does not agree with its
+    /// nodes (a parameter clause sequence that cannot be aligned with the
+    /// parameter nodes, or a missing result type).
+    MalformedDefinition { address: u32, reason: &'static str },
+    /// The method whose parameter is at `address` has a parameter modifier
+    /// (`INLINE`, `TRACKED`, `INTO`: `tag`) whose upstream adaptation
+    /// (`MethodType.fromSymbols`) `dotty-core` cannot represent. The method is
+    /// not completed rather than completed with it dropped.
+    UnsupportedMethodParameterSemantics { address: u32, tag: u8 },
+    /// The constructor at `address` is not completed: its info is the
+    /// effective result type of its owner class, which needs the class model.
+    ConstructorCompletionDeferred { address: u32 },
+    /// The `LAMBDAtpt` at `address` was reached from two different owners
+    /// (through a `SHAREDterm`), and its type parameters are owned once: it
+    /// is not projected rather than given a second owner.
+    SharedLambdaOwnerConflict { address: u32 },
+    /// Abstracting the parameter symbols of the binder written at `address`
+    /// into `ParamRef`s failed.
+    ParameterAbstraction {
+        address: u32,
+        error: dotty_core::TypeRebindError,
+    },
     /// The qualifier of the selection at `address` is an unstable singleton (a
     /// method, a mutable member, a constructor), which Dotty would widen
     /// (`widenIfUnstable`). The model has no widening, so the selection is
@@ -280,6 +302,26 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the term tree at address {address} has tag {tag}, which is not projected"
             ),
+            Self::MalformedDefinition { address, reason } => write!(
+                formatter,
+                "the definition at address {address} is malformed: {reason}"
+            ),
+            Self::UnsupportedMethodParameterSemantics { address, tag } => write!(
+                formatter,
+                "the method parameter at address {address} has the modifier with tag {tag}, whose method-type adaptation is not modeled"
+            ),
+            Self::ConstructorCompletionDeferred { address } => write!(
+                formatter,
+                "the constructor at address {address} is not completed until class completion"
+            ),
+            Self::SharedLambdaOwnerConflict { address } => write!(
+                formatter,
+                "the lambda type tree at address {address} is shared by definitions with different owners"
+            ),
+            Self::ParameterAbstraction { address, error } => write!(
+                formatter,
+                "abstracting the parameters of the binder at address {address} failed: {error}"
+            ),
             Self::UnstableSelectQualifier { address, .. } => write!(
                 formatter,
                 "the selection at address {address} has an unstable qualifier, which needs widening this model does not have"
@@ -475,6 +517,11 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedTypeTree { .. }
             | Self::UnsupportedTermTree { .. }
             | Self::UnstableSelectQualifier { .. }
+            | Self::SharedLambdaOwnerConflict { .. }
+            | Self::MalformedDefinition { .. }
+            | Self::UnsupportedMethodParameterSemantics { .. }
+            | Self::ConstructorCompletionDeferred { .. }
+            | Self::ParameterAbstraction { .. }
             | Self::InvalidSingletonTypeTree { .. }
             | Self::MissingEnteredSymbol { .. }
             | Self::UnsupportedSymbolCompletion { .. }

@@ -10,10 +10,12 @@
 //! | `VALDEF`, `PARAM` | the projected type of its type tree, as is (a by-name parameter stays `ByName`) |
 //! | `TYPEPARAM` | its bounds tree, projected: `Bounds`/`AliasingBounds` as is, any other type wrapped in a fresh `AliasingBounds` |
 //! | `TYPEDEF` without a template | the same `toBounds`: `type A = String` has info `AliasingBounds(String)` while its right-hand side still projects to `String` |
+//! | ordinary `DEFDEF` (Milestone 5c) | `Poly` / `Method` / `ByName` from its clauses and result type: see the [`method`](crate::method) module |
 //!
 //! Deferred, each with its own typed error and no info written: opaque
-//! aliases (`OpaqueAliasDeferred`), methods and constructors (5c), and
-//! classes, traits and modules (5d) (`UnsupportedSymbolCompletion`). No empty
+//! aliases (`OpaqueAliasDeferred`), constructors
+//! (`ConstructorCompletionDeferred`, 5d), and classes, traits and modules (5d)
+//! (`UnsupportedSymbolCompletion`). No empty
 //! `ClassInfo` is made to mark a class complete.
 //!
 //! Completion is *per symbol*: each public call is its own transaction, so an
@@ -29,7 +31,7 @@
 use dotty_core::ids::TypeId;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
-use dotty_tasty::tasty::{PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
 
 use crate::ast_view::{AstView, address};
 use crate::error::UnpickleError;
@@ -47,7 +49,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let ast = self.ast_view()?;
         self.declare_special_aliases();
         let transaction = self.begin_transaction();
-        let result = self.complete_in(&ast, address);
+        let result = self.complete_in(&ast, address, 0);
         self.finish_transaction(transaction, result)
     }
 
@@ -59,12 +61,19 @@ impl TastyUnpickler<'_, '_, '_> {
         let transaction = self.begin_transaction();
         let result = addresses
             .iter()
-            .map(|address| self.complete_in(&ast, *address))
+            .map(|address| self.complete_in(&ast, *address, 0))
             .collect();
         self.finish_transaction(transaction, result)
     }
 
-    fn complete_in(&mut self, ast: &AstView<'_>, at: u32) -> Result<TypeId, UnpickleError> {
+    /// Completes the symbol at `at`; `depth` counts the links being followed
+    /// when the completion is reached from inside a type-tree projection.
+    pub(crate) fn complete_in(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
         let Some(symbol) = self.index.symbol_at(at) else {
             return Err(UnpickleError::MissingEnteredSymbol { address: at });
         };
@@ -83,6 +92,15 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::MissingDefinition { address: at });
         };
         let unsupported = UnpickleError::UnsupportedSymbolCompletion { address: at, kind };
+        if tag == DEFDEF_TAG {
+            return match kind {
+                SymbolKind::Method => self.complete_method(ast, at, symbol, depth),
+                SymbolKind::Constructor => {
+                    Err(UnpickleError::ConstructorCompletionDeferred { address: at })
+                }
+                _ => Err(unsupported),
+            };
+        }
         let tree = match tag {
             VALDEF_TAG | PARAM_TAG | TYPEPARAM_TAG => first_child(ast, at)?,
             TYPEDEF_TAG => {
@@ -96,7 +114,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             _ => return Err(unsupported),
         };
-        let projected = self.type_of_tpt(ast, tree, at, 0)?;
+        let projected = self.type_of_tpt(ast, tree, at, depth)?;
         let info = if matches!(tag, TYPEPARAM_TAG | TYPEDEF_TAG) {
             self.bounds_of(at, projected)?
         } else {

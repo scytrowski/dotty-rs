@@ -28,6 +28,7 @@ mod error;
 mod index;
 mod lookup;
 mod mapping;
+mod method;
 mod names;
 mod packages;
 mod recursive;

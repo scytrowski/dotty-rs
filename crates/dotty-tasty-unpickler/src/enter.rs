@@ -13,14 +13,33 @@
 //! method, and the parameters of a class's constructor node, are owned by
 //! that method but are not members of any scope. Definitions inside method
 //! bodies (locals) are not entered.
+//!
+//! ## Type parameters of a `LAMBDAtpt` (Milestone 5c)
+//!
+//! A type tree `[X <: B] =>> body` declares type parameters that exist before
+//! any type is projected, so pass 1 enters them too: while a definition is
+//! entered, its *declared type trees* (a `VALDEF`'s or parameter's type, a
+//! `TYPEPARAM`'s bounds, a type alias's right-hand side, a `DEFDEF`'s result
+//! type) are scanned for `LAMBDAtpt`. Only tree forms that can hold one are
+//! walked (`APPLIEDtpt`, `BYNAMEtpt`, `EXPLICITtpt`, `TYPEBOUNDStpt`,
+//! `ANNOTATEDtpt`'s base, a `SHAREDterm` link and nested `LAMBDAtpt`); method
+//! bodies and other terms never are. Each parameter is owned by the
+//! *enclosing definition or parameter symbol* (the lambda is not a symbol),
+//! is not a member of any scope, and all the immediate parameters of a lambda
+//! are entered before the walk continues into their bounds and the body. A
+//! lambda reached through a `SHAREDterm` from a second owner keeps its first
+//! owner; the conflict is recorded (`has_lambda_owner_conflict`) and refused
+//! when the tree is projected.
 
 use dotty_core::ids::SymbolId;
 use dotty_core::names::Name;
 use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
 use dotty_tasty::tasty::{
-    DEFDEF_TAG, DefinitionBody, PACKAGE_TAG, PARAM_TAG, ParameterNode, RawTree, SHAREDTYPE_TAG,
-    StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG,
-    TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
+    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, DEFDEF_TAG, DefinitionBody, EMPTYCLAUSE_TAG,
+    EXPLICITTPT_TAG, LAMBDATPT_TAG, PACKAGE_TAG, PARAM_TAG, ParameterNode, RawTree, SHAREDTERM_TAG,
+    SHAREDTYPE_TAG, SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG,
+    TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
+    VALDEF_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
@@ -32,6 +51,9 @@ use crate::mapping::{
 use crate::names::{package_segments, wire_name};
 use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
+
+/// How deep a type tree may nest before pass 1 refuses it.
+const MAX_TREE_DEPTH: usize = 256;
 
 /// What is known about a definition when its symbol is allocated.
 struct Declaration<'a> {
@@ -154,12 +176,14 @@ impl TastyUnpickler<'_, '_, '_> {
                 if has_template {
                     self.enter_class_scope(symbol)?;
                     self.enter_template(ast, at, symbol)?;
+                } else {
+                    self.enter_declared_lambdas(ast, at, symbol)?;
                 }
             }
             StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) => {
                 let modifiers = DeclaredModifiers::from_tail(&tail)?;
                 let kind = val_def_kind(&modifiers, owner_kind);
-                self.enter_symbol(
+                let symbol = self.enter_symbol(
                     ast,
                     Declaration {
                         at,
@@ -171,6 +195,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
+                self.enter_declared_lambdas(ast, at, symbol)?;
             }
             StructuredNode::DefDef(body) => {
                 let modifiers = DeclaredModifiers::from_tail(&body.tail)?;
@@ -188,6 +213,17 @@ impl TastyUnpickler<'_, '_, '_> {
                     },
                 )?;
                 self.enter_parameters(ast, at, method, false)?;
+                // The result type is the first child that is not a parameter
+                // or a clause marker.
+                let result = ast.children(at).iter().find(|child| {
+                    !matches!(
+                        child.tag,
+                        TYPEPARAM_TAG | PARAM_TAG | EMPTYCLAUSE_TAG | SPLITCLAUSE_TAG
+                    )
+                });
+                if let Some(result) = result {
+                    self.enter_lambdas_in(ast, address(result.offset), method, 0)?;
+                }
             }
             _ => return Err(UnpickleError::MissingDefinition { address: at }),
         }
@@ -260,7 +296,7 @@ impl TastyUnpickler<'_, '_, '_> {
             term_param_kind(&modifiers, in_class)
         };
         let is_member = in_class && matches!(kind, SymbolKind::TypeParameter | SymbolKind::Field);
-        self.enter_symbol(
+        let symbol = self.enter_symbol(
             ast,
             Declaration {
                 at,
@@ -272,7 +308,111 @@ impl TastyUnpickler<'_, '_, '_> {
                 member: is_member,
             },
         )?;
+        self.enter_declared_lambdas(ast, at, symbol)?;
         Ok(())
+    }
+
+    /// Scans the declared type tree of the definition at `at` (its first
+    /// child: a type, bounds or right-hand side) for `LAMBDAtpt` parameters
+    /// owned by `owner`.
+    fn enter_declared_lambdas(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        owner: SymbolId,
+    ) -> Result<(), UnpickleError> {
+        if let Some(tree) = ast.children(at).first() {
+            self.enter_lambdas_in(ast, address(tree.offset), owner, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Walks the type tree at `tree`, entering the type parameters of every
+    /// `LAMBDAtpt` in it for `owner`. `depth` bounds the nesting, links and
+    /// lambdas alike.
+    fn enter_lambdas_in(
+        &mut self,
+        ast: &AstView<'_>,
+        tree: u32,
+        owner: SymbolId,
+        depth: usize,
+    ) -> Result<(), UnpickleError> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(UnpickleError::MalformedType {
+                address: tree,
+                reason: "a type tree nests too deeply",
+            });
+        }
+        let Some(tag) = ast.tag_at(tree) else {
+            return Ok(());
+        };
+        if !matches!(
+            tag,
+            SHAREDTERM_TAG
+                | LAMBDATPT_TAG
+                | APPLIEDTPT_TAG
+                | BYNAMETPT_TAG
+                | EXPLICITTPT_TAG
+                | TYPEBOUNDSTPT_TAG
+                | ANNOTATEDTPT_TAG
+        ) || !self.index.first_lambda_scan(tree, owner)
+        {
+            return Ok(());
+        }
+        let children: Vec<u32> = ast
+            .children(tree)
+            .iter()
+            .map(|child| address(child.offset))
+            .collect();
+        match tag {
+            SHAREDTERM_TAG => {
+                // A link to a tree written earlier: walked as if it were here.
+                // A chain of links is bounded like every shared chain.
+                let target = ast.resolve_shared_term(tree, tree)?;
+                self.enter_lambdas_in(ast, target, owner, depth + 1)
+            }
+            LAMBDATPT_TAG => {
+                match self.index.lambda_owner(tree) {
+                    Some(first) if first == owner => return Ok(()),
+                    Some(_) => {
+                        self.index.mark_lambda_conflict(tree);
+                        return Ok(());
+                    }
+                    None => self.index.insert_lambda_owner(tree, owner),
+                }
+                ast.node(tree)?.decode_lambda_tpt()?;
+                let Some((body, params)) = children.split_last() else {
+                    return Err(UnpickleError::MalformedType {
+                        address: tree,
+                        reason: "a lambda type tree has type parameters and a body",
+                    });
+                };
+                // Every parameter is entered before any bounds or the body
+                // are walked, so they can refer to one another.
+                for param in params {
+                    if ast.tag_at(*param) != Some(TYPEPARAM_TAG) {
+                        return Err(UnpickleError::MalformedType {
+                            address: tree,
+                            reason: "a lambda type tree parameter is not a type parameter",
+                        });
+                    }
+                    let parameter = ast.node(*param)?.decode_parameter()?;
+                    self.enter_parameter(ast, *param, &parameter, owner, false)?;
+                }
+                self.enter_lambdas_in(ast, *body, owner, depth + 1)
+            }
+            // A type tree with the annotation to be ignored: only the base.
+            ANNOTATEDTPT_TAG => match children.first() {
+                Some(base) => self.enter_lambdas_in(ast, *base, owner, depth + 1),
+                None => Ok(()),
+            },
+            _ => {
+                for child in children {
+                    self.enter_lambdas_in(ast, child, owner, depth + 1)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Allocates the symbol for a definition, records its address, and

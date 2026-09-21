@@ -49,6 +49,12 @@ Status (`crates/dotty-tasty-unpickler`):
   `SINGLETONtpt` and `ANNOTATEDtpt` project, over a narrow term-`tpe`
   projection; `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, `BLOCK` and `HOLE` stay
   explicit refusals.
+- Milestone 5c, lambda type trees and method completion: implemented (§4,
+  "Lambda type trees and method completion"; §8). `LAMBDAtpt` projects to a
+  `TypeLambda` (its type parameters are entered in pass 1) and ordinary `DEFDEF`
+  methods complete to `Poly`/`Method`/`ByName` infos built by a format-agnostic
+  parameter-symbol abstraction in `dotty-core`. Constructors, classes,
+  `REFINEDtpt` and `MATCHtpt` stay deferred.
 
 Entered symbols start `SymbolInfo::Missing`; only an explicit
 `complete_symbol` (the simple kinds above) changes that. Types are otherwise
@@ -107,7 +113,8 @@ function. It follows an enter-before-complete model:
 | 4d. Match types | `MATCHtype` / `MATCHCASEtype` to `Match` / `MatchCase`; type-language audit | 4d |
 | 5a. Simple completion | type-tree projection; `Complete` for `VALDEF`/`PARAM`/`TYPEPARAM`/plain `TYPEDEF`; stable-term prefixes | 5a |
 | 5b. Selected, singleton, annotated trees | `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt`; term-`tpe` projection (`type_of_term`) | 5b |
-| 3. Complete | `SymbolInfo::Complete(TypeId)` for methods, `ClassInfo`, annotations | 5c-5e |
+| 5c. Lambdas and methods | `LAMBDAtpt` -> `TypeLambda`; `DEFDEF` -> `Poly`/`Method`/`ByName`; `method_type_from_symbols` and friends in `dotty-core` | 5c |
+| 3. Complete | `SymbolInfo::Complete(TypeId)` for constructors, `ClassInfo`, annotations | 5d-5e |
 | 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
 
 ## 3. Identity invariant
@@ -845,14 +852,15 @@ simple symbols. A projected type is a tree's `tpe`, not a typed AST node: no
 | `TYPEBOUNDStpt` | one child `AliasingBounds` (`lo eq hi`), two `Bounds`, three the alias' own type |
 | a semantic type node | that type, through `type_at` (`readTpt` falls back to `readType`) |
 | `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` | see "Selected, singleton and annotated type trees" (5b) |
-| `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
+| `LAMBDAtpt` | see "Lambda type trees and method completion" (5c) |
+| `REFINEDtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
 
 *Identity.* The projection is cached by tree address in its own map
 (`type_tree_type_at`), never in the type-node map: a tree address is not a
 type address, several tree addresses may project to one `TypeId` (an
 `IDENTtpt` shares its embedded type's), and derived types are owned by the
 projection. Derived types are not interned: equal `APPLIEDtpt` at two addresses
-are two types. `LAMBDAtpt` waits for the entering of type-lambda parameters.
+are two types.
 A tree that links back to itself (`SHAREDterm` to an ancestor) is bounded by
 the same `MAX_SHARED_DEPTH` as every shared chain, counted across the nesting
 (5b; before it such a tree overflowed the stack).
@@ -960,6 +968,100 @@ All three take part in the shared transaction of 5a: the qualifier or base
 projected and the failure later (member not found, unstable, invalid singleton,
 a later argument refused) restores the arenas, the three caches, the `RecThis`
 journal and the `SymbolInfo` journal.
+
+### Lambda type trees and method completion (Milestone 5c)
+
+**Symbol identity versus binder identity.** An entered parameter `SymbolId` is
+*source* identity (a definition address); `ParamRef { binder, index }` is
+identity *inside* a `Method`/`Poly`/`TypeLambda`. Both are needed and neither
+replaces the other globally: a parameter's own `SymbolInfo` keeps naming symbols
+(it is what was projected before any binder existed), while a binder built from
+symbols names `ParamRef`s. The operation between the two is
+`method_type_from_symbols` / `poly_type_from_symbols` /
+`type_lambda_from_symbols` in `dotty-core` (see `dotty-core-design.md` §8): it
+shares the memoized `rebind_type_lambda` traversal, replaces a `TypeRef` or
+`TermRef` to an exact parameter `SymbolId` (never a name; whatever its prefix)
+by the `ParamRef` of the new binder, copies and rebinds an already built inner
+binder that mentions an outer parameter, never mutates a stored type, keeps the
+id of a type that mentions no parameter, and is atomic.
+
+**`LAMBDAtpt` type parameters (pass 1).** They exist before any type is
+projected, so `enter_symbols` enters them: while a definition is entered, its
+declared type trees (a value's or parameter's type, a type parameter's bounds, a
+type alias' right-hand side, a method's result type) are scanned for `LAMBDAtpt`,
+through the forms that can hold one (`APPLIEDtpt`, `BYNAMEtpt`, `EXPLICITtpt`,
+`TYPEBOUNDStpt`, `ANNOTATEDtpt`'s base, `SHAREDterm`, nested `LAMBDAtpt`); method
+bodies and other terms are never scanned. Each parameter is a `TypeParameter`
+owned by the *enclosing definition or parameter symbol* (the lambda is not a
+symbol) and a member of no scope; all the immediate parameters of a lambda are
+entered before the walk continues into their bounds and the body, so bounds may
+refer forward or to themselves. The whole-enter transaction owns these symbols
+(store checkpoint plus the index clone: nothing is journaled at completion
+time). A lambda reached through a `SHAREDterm` from a second owner keeps its
+first owner (`lambda_owner`), and the conflict is recorded
+(`has_lambda_owner_conflict`) and refused at projection
+(`SharedLambdaOwnerConflict`); the same target from the same owner reuses the
+entered symbols. A `(tree, owner)` visit set keeps a heavily shared tree from
+being walked once per path.
+
+**`LAMBDAtpt` projection.** `HKTypeLambda.fromParams(tparams, body.tpe)`: each
+entered parameter is completed first by the ordinary type-parameter completion
+(its bounds through `toBounds`), the body is projected, and the `TypeLambda` is
+built by `type_lambda_from_symbols`. Its `TypeId` is the binder; bounds and body
+refer to it through `ParamRef`s (F-bounds and nested lambdas included). Declared
+variance comes from the `TYPEPARAM` modifiers: `COVARIANT`, `CONTRAVARIANT`,
+`STABLE` (an explicit invariant marker), none is `None`, which is not
+`Some(Invariant)`; nothing is put in `SymbolFlags`. Identity as for every
+projection: cached by tree address, a link is the exact target, two written
+lambdas are two binders.
+
+**Method completion** (`complete_symbol` on an ordinary `DEFDEF`, module
+`method`) follows `readParamss` and `methodType(paramss, resultType)` and never
+reads the body:
+
+* *Clauses* come from the structural decoder's `header_items` (wire order), not
+  the grouped `parameters`: consecutive parameters of one tag are one clause, a
+  tag change starts the next, `SPLITCLAUSE` is a boundary, `EMPTYCLAUSE` an empty
+  term clause. Parameter addresses come from the AST index; clause markers are
+  bare tags, not nodes, so the index lists the parameter nodes and then the
+  result tree, aligned by tag (`MalformedDefinition` on disagreement).
+* *No clause versus an empty clause.* `def f: T` (no clause at all) is
+  `ByName { T }` (`ExprType`); `def f(): T` is a `Method` with no parameters;
+  `def f[A]: A` has a clause and is a `Poly` (not by-name).
+* *Kind* of a term clause is decided by its first parameter's entered flags:
+  `IMPLICIT` is `Implicit`, else `GIVEN` is `Contextual`, else `Plain` (the order
+  `METHODtype`'s `method_kind` uses, so both paths agree even for a parameter
+  with both markers; a clause mixing them keeps it, no majority vote; the
+  corpora have no such clause).
+* *Build.* Parameters are completed first, in clause order (a later one may
+  depend on an earlier one's type), the result tree is projected, and the clauses
+  are built from last to first with the abstraction primitive, so
+  `(x: A)(y: x.B): y.C` is `Method(x) { Method(y) { .. } }` with `x` in the inner
+  parameter as `ParamRef(outer, 0)` and `y` in the result as `ParamRef(inner, 0)`.
+  The projected parameter and result graphs are untouched.
+* *Parameters.* `MethodParam.erased` is the entered `ERASED` flag (where a
+  DEFDEF carries it; upstream turns it into an `ErasedParam` annotation of the
+  info in `fromSymbols`, and this model keeps the boolean as it does for
+  `METHODtype`). `varargs` is `false`: it is JVM `ACC_VARARGS`, which TASTy does
+  not have (a Scala repeated parameter is the `<repeated>` type). A method type
+  parameter has `declared_variance: None`.
+* *Deferred, never dropped.* `INLINE`, `TRACKED` and `INTO` on a parameter
+  make `fromSymbols` add an annotation (or, for `TRACKED`, a result refinement)
+  that needs annotation classes `dotty-core` does not have: the method is
+  `UnsupportedMethodParameterSemantics { address, tag }` and stays `Missing`.
+  Constructors are `ConstructorCompletionDeferred`: their info is the owner
+  class's effective result type, not the serialized return tree.
+* *No cycle.* Completion never forces another method: a reference through a
+  term still `Missing` is `UnsupportedResolutionPrefix` (a regression test), and
+  the only nested completions are the method's own and lambda parameters, so no
+  in-progress tracking is needed. An external class not resolvable leaves the
+  method `Missing` with the real `UnresolvedPackage` / `UnresolvedMember`.
+* *Idempotent and atomic.* A second call returns the stored info and allocates
+  nothing; a failure after parameters completed (and, for a lambda, after its
+  parameters) restores every `SymbolInfo`, arena and cache of the call.
+
+Signed overload selection is unchanged: each overload has its own exact info,
+`MemberSelector::Unique` still refuses to pick one.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1303,9 +1405,10 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      prefixes — complete;
    - 5b: `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` and the narrow term-`tpe`
      projection they need — complete;
-   - 5c: `DEFDEF` method and constructor signatures, `LAMBDAtpt` and its local
-     type parameters;
-   - 5d: `ClassInfo`, parents, self types, cross-unit declaration scopes;
+   - 5c: ordinary `DEFDEF` methods and `LAMBDAtpt` with its local type
+     parameters, over a symbol-abstraction primitive in `dotty-core` — complete;
+   - 5d: `ClassInfo`, parents, self types, constructor completion, cross-unit
+     declaration scopes (and `REFINEDtpt`'s synthetic class);
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -1719,7 +1822,7 @@ builtins / builtins) and compiler, per symbol kind:
 | `Parameter` (`PARAM`) | 19,152 / 38,708 | 11,296 -> 12,408 / 5,941 -> 7,618 | external; unsupported tree 1,556-1,566 / 1,413-1,425; prefix 43 (compiler) |
 | `TypeParameter` | 15,165 / 1,308 | 2 -> 14,684 / 2 -> 956 | external without `Any`/`Nothing` |
 | `TypeAlias` (`TYPEDEF`) | 437 / 1,119 | 15 -> 135 / 627 -> 654 | unsupported tree 269 / 338; opaque 4 / 24 |
-| `Class`, `Trait`, `ModuleClass`, `Method`, `Constructor` | 1,234, 669, 944, 15,645, 2,921 (library) | 0 | kind deferred (5c/5d), all still `Missing` |
+| `Class`, `Trait`, `ModuleClass`, `Method`, `Constructor` | 1,234, 669, 944, 15,645, 2,921 (library) | 0 | kind deferred (5d), all still `Missing` |
 
 0 unexpected errors; `Package` symbols stay `Missing` too. Type trees the pass
 refuses, by tag, library (no builtins): `SELECTtpt` 843, `ANNOTATEDtpt` 807,
@@ -1819,6 +1922,97 @@ a `SELECTtpt`, 2 direct and 3 shared, were `UnsupportedAnnotationConstructor`;
 that outcome is now 0). Every path that gets past the prefix still meets a
 class declared in another unit: cross-unit declaration scopes (5d) remain the
 next blocker for reference decoding, not the projection.
+
+### Lambdas and methods after 5c (library / compiler)
+
+`LAMBDAtpt` roots: 390 (library) / 83 (compiler). Contexts: type alias
+right-hand side or class parent 233 + 3 nested / 83; type parameter bounds
+146 + 8 nested / 0. Type parameters per lambda: 1 (230 / 81), 2 (157 / 2), 3
+(3 / 0). Bounds roots: `TYPEBOUNDStpt` 545 / 85, `LAMBDAtpt` 8 / 0. Body roots:
+`TYPEBOUNDStpt` 252 / 20, `APPLIEDtpt` 106 / 60, `MATCHtpt` 22 / 0, `REFINEDtpt`
+6 / 1, `IDENTtpt` 2 / 2, `ANNOTATEDtpt` 1 / 0, `LAMBDAtpt` 1 / 0. 202 / 82 refer
+to their own parameters. No parameter carries a variance modifier and no
+`SHAREDterm` links to a lambda, so shared-owner conflicts are 0 in both corpora
+(covered by synthetic wire). 366 of 390 library lambdas (all 83 compiler) are in
+declared type-tree positions and have their parameters entered; the 24 others
+(class parents, 5d) are not entered, and projecting one would be
+`MissingEnteredSymbol`.
+
+Method shapes (ordinary `DEFDEF`s, library / compiler; constructors are
+surveyed apart and stay `Missing`):
+
+| | library | compiler |
+|---|---|---|
+| methods / constructors | 15,645 / 2,921 | 32,926 / 4,525 |
+| no parameter clause | 3,647 | 9,241 |
+| explicit `EMPTYCLAUSE` (methods) | 2,086 | 4,045 |
+| `SPLITCLAUSE` 1 / 2 / 3 | 816 / 84 / 2 | 5,443 / 391 / 1 |
+| term clauses 0 / 1 / 2 / 3 / 4 | 4,249 / 10,453 / 829 / 108 / 6 | 9,428 / 17,369 / 5,720 / 408 / 1 |
+| type clauses 0 / 1 / 2 | 12,218 / 3,360 / 67 | 32,061 / 857 / 8 |
+| deepest clause list | 6 | 5 |
+| widest clause | 44 | 15 |
+| top sequences | `P` 6,196, none 3,647, `()` 2,078, `T P` 1,844, `T` 602, `T P implicit` 219, `T implicit` 203 | `P` 11,471, none 9,241, `P using` 4,521, `()` 3,755, `using` 1,803 |
+| methods mentioning an own parameter | 3,157 | 863 |
+
+Own-parameter references (methods): across clauses 3,150 / 863; a type
+parameter in a parameter type 2,737 / 648; a term parameter in the result 354 /
+173; a type parameter in the result 345 / 33; a type parameter in a type
+parameter's bounds (F-bounds) 32 / 1; a term parameter in a parameter type 7 /
+12. So abstraction is exercised by thousands of real signatures, not only by
+synthetic tests. Parameter modifiers on method parameters: `SYNTHETIC` 465 /
+7,924, `GIVEN` 1,518 / 7,215, `HASDEFAULT` 514 / 2,199, `IMPLICIT` 590 / 592,
+`INLINE` 21 / 111; `ERASED`, `TRACKED` and `INTO`: 0 / 0 (`ERASED` is covered by
+the real `ErasedParams` fixture and synthetic wire). No clause mixes `GIVEN` and
+`IMPLICIT` parameters. Repeated parameters were not counted separately: `T*` is
+the `<repeated>` type applied like any other, with no method-level adaptation
+to defer.
+
+Constructors (for 5d): 2,921 / 4,525; a leading type clause 1,011 / 181 (owner
+class arity 1..13 in the library, 0..3 in the compiler); the sequence `()` alone
+1,566 / 2,826, `T P` 523 / 52, `T ()` 360 / 47, `P` 342 / 946, `P using`
+(compiler) 302; `EMPTYCLAUSE` 1,932 / 2,935; return trees `SHAREDtype` 1,980 /
+3,377 and `TYPEREF` 940 / 1,148; own-parameter references (type parameters of
+the class in parameter types) 636 / 94; parameter modifiers `GIVEN` 1,087 / 397,
+`IMPLICIT` 30 / 235, `HASDEFAULT` 22 / 249; `TRACKED` and `ERASED` 0.
+
+Completion, library (no builtins -> builtins) / compiler; the simple symbols are
+completed first and the methods afterwards, so the simple figures compare with
+5b:
+
+| kind | 5b | 5c | note |
+|------|----|----|------|
+| `Method` | `Missing` | 6,133 -> 8,569 of 15,645 / 2,327 -> 2,549 of 32,926 | |
+| `Constructor` | `Missing` | `Missing` (2,921 / 4,525, `ConstructorCompletionDeferred`) | |
+| `TypeAlias` | 32 -> 152 / 736 -> 761 | 32 -> 299 / 736 -> 827 | +0, +147 / +0, +66 (lambda right-hand sides) |
+| `TypeParameter` (completed, incl. by a lambda) | 19 -> 14,703 / 2 -> 956 | 19 -> 15,315 / 2 -> 1,033 | +612 (519 newly entered lambda parameters) / +77 (85) |
+| `Parameter`, `Field`, `Object` | as 5b | same | |
+
+Method failures (library builtins): external child failure 7,042; unsupported
+parameter semantics (`INLINE`) 15; `REFINEDtpt` / `MATCHtpt` in a signature 13;
+dependency still `Missing` 4; `INLINED` term 2. Compiler builtins: external
+30,251, `INLINE` 86, dependency still `Missing` 40. No completion cycle,
+malformed clause, abstraction failure, unstable qualifier or invalid singleton
+occurs; unexpected errors: 0. Refusals by tag now: `REFINEDtpt` 30 (11 without
+builtins) and `MATCHtpt` 20 in the library, `REFINEDtpt` 4 in the compiler:
+projecting lambda bodies and method results reaches trees that were hidden
+behind the lambda refusal. `LAMBDAtpt`: 0.
+
+`SymbolInfo` after 5c (library builtins): `Method` `Complete` 8,569 /
+`Missing` 7,076 (5b: 0 / 15,645); `Constructor` `Missing` 2,921;
+`Class`/`Trait`/`ModuleClass` `Missing` 1,234 / 669 / 944; `Parameter` 12,760 /
+6,392; `TypeParameter` 15,315 / 369; `TypeAlias` 299 / 138; `Field` 1,850 / 837.
+Compiler builtins: `Method` 2,549 / 30,377; `Constructor` `Missing` 4,525;
+`Class`/`Trait`/`ModuleClass` `Missing` 2,080 / 242 / 2,170; `TypeParameter`
+1,033 / 360; `TypeAlias` 827 / 292.
+
+Reference and type decodes. Entering lambda parameters lets references to them
+by address resolve: by address 226,204 -> 226,548 (library) and 350,003 ->
+350,094 (compiler), builtins 271,385 -> 271,729 and 372,271 -> 372,362. Named
+`TYPEREF`/`TERMREF` decodes and their unsupported prefixes (73 / 291) are
+unchanged, and so are `APPLIEDtype`, `TYPEBOUNDS`, `ANNOTATEDtype` and
+`REFINEDtype`: method infos are not read by reference decoding, and classes
+declared in other units (cross-unit `ClassInfo`/scopes, 5d) remain the
+dominant blocker (most method failures are `UnresolvedMember` / `UnresolvedPackage`).
 
 ### Match types after 4d (library / compiler)
 

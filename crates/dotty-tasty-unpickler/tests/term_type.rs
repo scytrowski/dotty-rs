@@ -53,7 +53,7 @@ const ANNOTATEDTYPE: u8 = 153;
 const NEW: u8 = 95;
 const SELECTIN: u8 = 176;
 const STRINGCONST: u8 = 74;
-const LAMBDATPT: u8 = 171;
+const REFINEDTPT: u8 = 160;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -486,7 +486,7 @@ fn roots(at: &Addresses<'_>) -> Roots {
             "annotated bad base",
             node(
                 ANNOTATEDTPT,
-                &[node(LAMBDATPT, &any_type()), annotation(&ident_tag(), &[])].concat(),
+                &[node(REFINEDTPT, &any_type()), annotation(&ident_tag(), &[])].concat(),
             ),
         ),
         (
@@ -1659,7 +1659,10 @@ fn a_base_that_is_not_projected_fails_before_the_annotation_is_read() {
 
     assert!(matches!(
         unpickler.unpickle_type_tree_type(unit.at("annotated bad base")),
-        Err(UnpickleError::UnsupportedTypeTree { tag: LAMBDATPT, .. })
+        Err(UnpickleError::UnsupportedTypeTree {
+            tag: REFINEDTPT,
+            ..
+        })
     ));
 }
 

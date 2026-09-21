@@ -17,9 +17,10 @@
 //! | `SELECTtpt name qualifier` | `TypeRef` to the member of the qualifier's term `tpe` ([`type_of_term`](TastyUnpickler::type_of_term)), by the selection a name-based `TYPEREF` makes (Milestone 5b) |
 //! | `SINGLETONtpt ref` | exactly the `tpe` of `ref`, which must be a stable singleton (5b) |
 //! | `ANNOTATEDtpt tpt annotation` | `Annotated { tpt's type, annotation }`, the annotation decoded as `ANNOTATEDtype`'s is (5b) |
+//! | `LAMBDAtpt tparams body` | `TypeLambda`, built by `type_lambda_from_symbols` from the type parameters entered in pass 1 (completed first) and the projected body: parameter references become `ParamRef`s of that binder (Milestone 5c) |
 //! | any other tag | a semantic type wire node (`readType`), through `type_at` |
 //!
-//! `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and
+//! `REFINEDtpt`, `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and
 //! any other tree that is not a type are `UnsupportedTypeTree`: they are
 //! counted, not guessed from their syntax.
 //!
@@ -37,11 +38,13 @@
 //! [`TastySemanticIndex::type_tree_type_at`]: crate::index::TastySemanticIndex::type_tree_type_at
 
 use dotty_core::ids::TypeId;
-use dotty_core::names::Namespace;
+use dotty_core::names::{Namespace, TypeName};
 use dotty_core::types::Type;
+use dotty_core::{TypeParamSpec, Variance, type_lambda_from_symbols};
 use dotty_tasty::tasty::{
-    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, EXPLICITTPT_TAG, IDENTTPT_TAG, RawTree,
-    SELECTTPT_TAG, SHAREDTERM_TAG, SINGLETONTPT_TAG, TYPEBOUNDSTPT_TAG,
+    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG,
+    DefinitionTail, EXPLICITTPT_TAG, IDENTTPT_TAG, LAMBDATPT_TAG, RawTree, SELECTTPT_TAG,
+    SHAREDTERM_TAG, SINGLETONTPT_TAG, STABLE_TAG, TYPEBOUNDSTPT_TAG,
 };
 
 use crate::annotated::FullAnnotation;
@@ -229,6 +232,7 @@ impl TastyUnpickler<'_, '_, '_> {
                     }
                 }
             }
+            LAMBDATPT_TAG => self.type_of_lambda_tpt(ast, at, &children, depth)?,
             // A dedicated tree with no projection yet.
             tag if is_deferred_tree(tag) => {
                 return Err(UnpickleError::UnsupportedTypeTree { address: at, tag });
@@ -246,15 +250,87 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 }
 
+impl TastyUnpickler<'_, '_, '_> {
+    /// `LAMBDAtpt tparams body`: `HKTypeLambda.fromParams(tparams, body.tpe)`.
+    ///
+    /// The parameters were entered in pass 1 (owned by the enclosing
+    /// definition), so each is completed here first, through the ordinary
+    /// type-parameter completion (its bounds tree, `toBounds`), and then the
+    /// body is projected. The lambda is built by
+    /// [`type_lambda_from_symbols`]: every reference to a parameter symbol in
+    /// the bounds and body becomes a `ParamRef` naming the new `TypeLambda`,
+    /// whose `TypeId` is the binder. The parameters' own infos keep naming the
+    /// symbols.
+    fn type_of_lambda_tpt(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        children: &[u32],
+        depth: usize,
+    ) -> Result<TypeId, UnpickleError> {
+        if self.index.has_lambda_owner_conflict(at) {
+            return Err(UnpickleError::SharedLambdaOwnerConflict { address: at });
+        }
+        ast.node(at)?.decode_lambda_tpt()?;
+        let Some((body, params)) = children
+            .split_last()
+            .filter(|(_, params)| !params.is_empty())
+        else {
+            return Err(malformed(
+                at,
+                "a lambda type tree has type parameters and a body",
+            ));
+        };
+
+        let mut specs = Vec::with_capacity(params.len());
+        for param in params {
+            let Some(symbol) = self.index.symbol_at(*param) else {
+                return Err(UnpickleError::MissingEnteredSymbol { address: *param });
+            };
+            let bounds = self.complete_in(ast, *param, depth)?;
+            let entered = self.store.symbols.get(symbol);
+            specs.push(TypeParamSpec {
+                symbol,
+                name: TypeName::new(entered.name.text()),
+                bounds,
+                declared_variance: self.declared_variance(ast, *param)?,
+            });
+        }
+        let body = self.type_of_tpt(ast, *body, at, depth)?;
+        type_lambda_from_symbols(self.store, &specs, body)
+            .map_err(|error| UnpickleError::ParameterAbstraction { address: at, error })
+    }
+
+    /// The variance a `TYPEPARAM` was declared with: `COVARIANT` and
+    /// `CONTRAVARIANT` say so, `STABLE` is an explicit invariant marker, and no
+    /// modifier is no declaration (`None`, which is not `Some(Invariant)`).
+    pub(crate) fn declared_variance(
+        &self,
+        ast: &AstView<'_>,
+        param: u32,
+    ) -> Result<Option<Variance>, UnpickleError> {
+        let parameter = ast.node(param)?.decode_parameter()?;
+        let mut declared = None;
+        for entry in &parameter.decode_body()?.tail {
+            if let DefinitionTail::Modifier(tag) = entry {
+                declared = match *tag {
+                    COVARIANT_TAG => Some(Variance::Covariant),
+                    CONTRAVARIANT_TAG => Some(Variance::Contravariant),
+                    STABLE_TAG => Some(Variance::Invariant),
+                    _ => declared,
+                };
+            }
+        }
+        Ok(declared)
+    }
+}
+
 /// Whether `tag` is a tree the projection knowingly does not build yet. The
 /// list is documentation; anything else that is not a type is refused in the
 /// same way by the fall-through.
 fn is_deferred_tree(tag: u8) -> bool {
-    use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, LAMBDATPT_TAG, MATCHTPT_TAG, REFINEDTPT_TAG};
-    matches!(
-        tag,
-        REFINEDTPT_TAG | LAMBDATPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG
-    )
+    use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, MATCHTPT_TAG, REFINEDTPT_TAG};
+    matches!(tag, REFINEDTPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG)
 }
 
 fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {

@@ -31,21 +31,30 @@
 //! * leaves the source graph unchanged and is atomic: on error every
 //!   allocation is rolled back.
 //!
+//! The same traversal also abstracts parameter *symbols*
+//! ([`method_type_from_symbols`], [`poly_type_from_symbols`],
+//! [`type_lambda_from_symbols`]): a `TypeRef`/`TermRef` to an entered parameter
+//! symbol becomes the `ParamRef` naming the new binder and the parameter's
+//! position. The symbol is source identity, the `ParamRef` is identity inside
+//! the binder; both are needed and neither replaces the other globally.
+//!
 //! The `match` over [`Type`] has no wildcard arm, so adding a variant forces
 //! this module to be reviewed.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::ids::{AnnotationId, TypeId};
+use crate::ids::{AnnotationId, SymbolId, TypeId};
+use crate::names::{TermName, TypeName};
 use crate::store::SemanticStore;
 use crate::types::annotation::{
     Annotation, AnnotationArgument, AnnotationArguments, AnnotationValue,
 };
 use crate::types::class_info::ClassInfo;
 use crate::types::constant::Constant;
+use crate::types::method::MethodKind;
 use crate::types::method::{MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
-use crate::types::ty::{MatchType, Type};
+use crate::types::ty::{MatchType, TermRefTarget, Type, TypeRefTarget};
 
 /// Types nest a handful of levels at most; a graph deeper than this is
 /// treated as malformed rather than risking the stack.
@@ -73,6 +82,9 @@ pub enum TypeRebindError {
     CyclicType { id: TypeId },
     /// The graph nests deeper than the rebinder allows.
     TooDeep { id: TypeId },
+    /// A parameter symbol was given twice to an abstraction: a reference to it
+    /// could only name one of the two positions.
+    DuplicateParameterSymbol { symbol: SymbolId },
 }
 
 impl fmt::Display for TypeRebindError {
@@ -99,6 +111,11 @@ impl fmt::Display for TypeRebindError {
                 formatter,
                 "type {} is nested too deeply to rebind",
                 id.index()
+            ),
+            Self::DuplicateParameterSymbol { symbol } => write!(
+                formatter,
+                "parameter symbol {} was given for two positions",
+                symbol.index()
             ),
         }
     }
@@ -147,6 +164,163 @@ pub fn rebind_type_lambda(
     result
 }
 
+/// A term parameter of the method being built by
+/// [`method_type_from_symbols`]: the symbol it was entered as, and what its
+/// `MethodParam` will say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MethodParamSpec {
+    pub symbol: SymbolId,
+    pub name: TermName,
+    pub ty: TypeId,
+    pub erased: bool,
+    pub varargs: bool,
+}
+
+/// A type parameter of the polymorphic or lambda type being built by
+/// [`poly_type_from_symbols`] / [`type_lambda_from_symbols`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypeParamSpec {
+    pub symbol: SymbolId,
+    pub name: TypeName,
+    pub bounds: TypeId,
+    pub declared_variance: Option<Variance>,
+}
+
+/// Which binder [`abstract_symbols`] builds.
+enum Abstraction<'a> {
+    Method(&'a [MethodParamSpec], MethodKind),
+    Poly(&'a [TypeParamSpec]),
+    Lambda(&'a [TypeParamSpec]),
+}
+
+/// Builds `(params): result` with every reference to a parameter *symbol*, in
+/// the parameter types and in `result`, replaced by the `ParamRef` naming the
+/// new method and the parameter's position (Dotty's `MethodType.fromSymbols`).
+///
+/// A parameter symbol is source identity; a `ParamRef { binder, index }` is
+/// identity inside the binder. Before a binder exists a reference to the
+/// parameter can only name the symbol, and once it exists the reference must
+/// name the binder: this is the operation between the two. Only the exact
+/// `SymbolId` is replaced, never a name, and only its `TypeRef` / `TermRef`
+/// (whatever its prefix, as `subst` does). An already built nested binder that
+/// mentions a parameter is copied with the replacement, as `rebind_type_lambda`
+/// copies one; nothing stored is mutated, and a type with no such reference
+/// keeps its id. The result is a new binder.
+///
+/// Atomic: on error the store is as it was.
+pub fn method_type_from_symbols(
+    store: &mut SemanticStore,
+    params: &[MethodParamSpec],
+    result: TypeId,
+    kind: MethodKind,
+) -> Result<TypeId, TypeRebindError> {
+    abstract_symbols(store, Abstraction::Method(params, kind), result)
+}
+
+/// `[params]: result` from type parameter symbols; see
+/// [`method_type_from_symbols`] (Dotty's `PolyType.fromParams`). References in
+/// the parameters' own bounds (F-bounds) name the new binder too.
+pub fn poly_type_from_symbols(
+    store: &mut SemanticStore,
+    params: &[TypeParamSpec],
+    result: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    abstract_symbols(store, Abstraction::Poly(params), result)
+}
+
+/// `[params] =>> result` from type parameter symbols; see
+/// [`method_type_from_symbols`] (Dotty's `HKTypeLambda.fromParams`).
+pub fn type_lambda_from_symbols(
+    store: &mut SemanticStore,
+    params: &[TypeParamSpec],
+    result: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    abstract_symbols(store, Abstraction::Lambda(params), result)
+}
+
+fn abstract_symbols(
+    store: &mut SemanticStore,
+    what: Abstraction<'_>,
+    result: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    let symbols: Vec<SymbolId> = match &what {
+        Abstraction::Method(params, _) => params.iter().map(|param| param.symbol).collect(),
+        Abstraction::Poly(params) | Abstraction::Lambda(params) => {
+            params.iter().map(|param| param.symbol).collect()
+        }
+    };
+    let mut seen = HashSet::new();
+    for symbol in &symbols {
+        if !seen.insert(*symbol) {
+            return Err(TypeRebindError::DuplicateParameterSymbol { symbol: *symbol });
+        }
+    }
+
+    let checkpoint = store.checkpoint();
+    let built = build_abstraction(store, &what, &symbols, result);
+    if built.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    built
+}
+
+fn build_abstraction(
+    store: &mut SemanticStore,
+    what: &Abstraction<'_>,
+    symbols: &[SymbolId],
+    result: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    let mut rebinder = Rebinder::new(store);
+    let reserved = rebinder.store.types.reserve();
+    let binder = reserved.id();
+    for (index, symbol) in symbols.iter().enumerate() {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        rebinder.substitution.insert(*symbol, (binder, index));
+    }
+    let built = match what {
+        Abstraction::Method(params, kind) => {
+            let mut out = Vec::with_capacity(params.len());
+            for param in *params {
+                out.push(MethodParam {
+                    name: param.name,
+                    ty: rebinder.ty(param.ty)?,
+                    erased: param.erased,
+                    varargs: param.varargs,
+                });
+            }
+            Type::Method(MethodType {
+                params: out,
+                result: rebinder.ty(result)?,
+                kind: *kind,
+            })
+        }
+        Abstraction::Poly(params) | Abstraction::Lambda(params) => {
+            let mut out = Vec::with_capacity(params.len());
+            for param in *params {
+                out.push(TypeParam {
+                    name: param.name,
+                    bounds: rebinder.ty(param.bounds)?,
+                    declared_variance: param.declared_variance,
+                });
+            }
+            let result = rebinder.ty(result)?;
+            if matches!(what, Abstraction::Poly(_)) {
+                Type::Poly(PolyType {
+                    params: out,
+                    result,
+                })
+            } else {
+                Type::TypeLambda(TypeLambda {
+                    params: out,
+                    result,
+                })
+            }
+        }
+    };
+    rebinder.store.types.fill(reserved, built);
+    Ok(binder)
+}
+
 struct Rebinder<'a> {
     store: &'a mut SemanticStore,
     /// Old type -> its transformed (or reused) type.
@@ -154,6 +328,9 @@ struct Rebinder<'a> {
     /// Old binder -> the copy that replaces it, for `ParamRef` and `RecThis`.
     binders: HashMap<TypeId, TypeId>,
     annotations: HashMap<AnnotationId, AnnotationId>,
+    /// Parameter symbol -> the binder position that replaces every reference
+    /// to it (`abstract_symbols`). Empty when only rebinding.
+    substitution: HashMap<SymbolId, (TypeId, u32)>,
     /// Types being transformed right now, to refuse a cycle.
     in_progress: HashSet<TypeId>,
     depth: usize,
@@ -166,6 +343,7 @@ impl<'a> Rebinder<'a> {
             memo: HashMap::new(),
             binders: HashMap::new(),
             annotations: HashMap::new(),
+            substitution: HashMap::new(),
             in_progress: HashSet::new(),
             depth: 0,
         }
@@ -193,6 +371,12 @@ impl<'a> Rebinder<'a> {
         let new = built?;
         self.memo.insert(id, new);
         Ok(new)
+    }
+
+    /// The `ParamRef` that replaces a reference to the parameter `symbol`.
+    fn parameter_ref(&mut self, symbol: SymbolId) -> TypeId {
+        let (binder, index) = self.substitution[&symbol];
+        self.store.types.alloc(Type::ParamRef { binder, index })
     }
 
     fn all(&mut self, ids: &[TypeId]) -> Result<Vec<TypeId>, TypeRebindError> {
@@ -301,6 +485,14 @@ impl<'a> Rebinder<'a> {
 
             // Only the prefix is rebound; a symbol or a name designator stays
             // as it is.
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if self.substitution.contains_key(&symbol) => self.parameter_ref(symbol),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if self.substitution.contains_key(&symbol) => self.parameter_ref(symbol),
             Type::TermRef { prefix, target } => {
                 let new = self.ty(prefix)?;
                 self.keep_or_alloc(
@@ -1369,5 +1561,329 @@ mod tests {
             f.param_ref_of(f.get_lambda(contravariant).result),
             (contravariant, 0)
         );
+    }
+
+    // Abstracting parameter symbols into `ParamRef`s
+
+    fn type_ref_to(f: &mut Fixture, symbol: SymbolId) -> TypeId {
+        let prefix = f.store.types.alloc(Type::NoPrefix);
+        f.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        })
+    }
+
+    fn term_ref_to(f: &mut Fixture, symbol: SymbolId) -> TypeId {
+        let prefix = f.store.types.alloc(Type::NoPrefix);
+        f.store.types.alloc(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(symbol),
+        })
+    }
+
+    fn method_param(f: &mut Fixture, symbol: SymbolId, text: &str, ty: TypeId) -> MethodParamSpec {
+        MethodParamSpec {
+            symbol,
+            name: TermName::new(f.store.names.intern(text)),
+            ty,
+            erased: false,
+            varargs: false,
+        }
+    }
+
+    fn type_param_spec(
+        f: &mut Fixture,
+        symbol: SymbolId,
+        text: &str,
+        bounds: TypeId,
+    ) -> TypeParamSpec {
+        TypeParamSpec {
+            symbol,
+            name: f.type_name(text),
+            bounds,
+            declared_variance: None,
+        }
+    }
+
+    fn get_method(f: &Fixture, id: TypeId) -> &MethodType {
+        match f.store.types.get(id) {
+            Type::Method(method) => method,
+            other => panic!("not a method: {other:?}"),
+        }
+    }
+
+    fn type_count(f: &mut Fixture) -> u32 {
+        f.store.types.alloc(Type::NoType).index()
+    }
+
+    #[test]
+    fn a_reference_to_a_parameter_symbol_becomes_a_param_ref_of_the_new_method() {
+        let mut f = Fixture::new();
+        let (x, y) = (SymbolId::new(10), SymbolId::new(11));
+        let x_ty = f.leaf;
+        let y_ref = term_ref_to(&mut f, x);
+        let first = method_param(&mut f, x, "x", x_ty);
+        let second = method_param(&mut f, y, "y", y_ref);
+        let result = term_ref_to(&mut f, y);
+
+        let method =
+            method_type_from_symbols(&mut f.store, &[first, second], result, MethodKind::Plain)
+                .unwrap();
+
+        let built = get_method(&f, method).clone();
+        // `y: x.type` names position 0 of this very method, and the result
+        // names position 1.
+        assert_eq!(f.param_ref_of(built.params[1].ty), (method, 0));
+        assert_eq!(f.param_ref_of(built.result), (method, 1));
+        assert_eq!(built.params[0].ty, f.leaf);
+        assert_eq!(built.kind, MethodKind::Plain);
+        // The graph it was built from still names the symbols.
+        assert!(matches!(
+            f.store.types.get(y_ref),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == x
+        ));
+    }
+
+    #[test]
+    fn only_the_exact_symbol_is_replaced_never_a_name() {
+        let mut f = Fixture::new();
+        // Two parameters named `x`, one of this clause and one of another
+        // method: only the first is abstracted.
+        let (mine, other) = (SymbolId::new(10), SymbolId::new(11));
+        let param = {
+            let leaf = f.leaf;
+            method_param(&mut f, mine, "x", leaf)
+        };
+        let stranger = term_ref_to(&mut f, other);
+
+        let method =
+            method_type_from_symbols(&mut f.store, &[param], stranger, MethodKind::Plain).unwrap();
+
+        // No reference to `mine` in the result: it is the very same type.
+        assert_eq!(get_method(&f, method).result, stranger);
+    }
+
+    #[test]
+    fn a_type_with_no_reference_to_a_parameter_keeps_its_id() {
+        let mut f = Fixture::new();
+        let param = {
+            let leaf = f.leaf;
+            method_param(&mut f, SymbolId::new(10), "x", leaf)
+        };
+        let applied = f.applied(&[f.leaf]);
+
+        let method =
+            method_type_from_symbols(&mut f.store, &[param], applied, MethodKind::Contextual)
+                .unwrap();
+
+        assert_eq!(get_method(&f, method).result, applied);
+        assert_eq!(get_method(&f, method).kind, MethodKind::Contextual);
+    }
+
+    #[test]
+    fn an_f_bound_names_the_poly_that_is_built() {
+        // `[A <: Comparable[A]]: A`
+        let mut f = Fixture::new();
+        let a = SymbolId::new(20);
+        let a_ref = type_ref_to(&mut f, a);
+        let comparable = f.applied(&[a_ref]);
+        let bounds = f.store.types.alloc(Type::Bounds {
+            low: f.leaf,
+            high: comparable,
+        });
+        let spec = type_param_spec(&mut f, a, "A", bounds);
+
+        let poly = poly_type_from_symbols(&mut f.store, &[spec], a_ref).unwrap();
+
+        let Type::Poly(built) = f.store.types.get(poly).clone() else {
+            panic!("not a poly");
+        };
+        assert_eq!(f.param_ref_of(built.result), (poly, 0));
+        let Type::Bounds { high, .. } = f.store.types.get(built.params[0].bounds).clone() else {
+            panic!("not bounds");
+        };
+        let Type::Applied { args, .. } = f.store.types.get(high).clone() else {
+            panic!("not applied");
+        };
+        assert_eq!(f.param_ref_of(args[0]), (poly, 0));
+        // The original bounds still name the symbol.
+        assert!(
+            matches!(f.store.types.get(bounds), Type::Bounds { high, .. } if *high == comparable)
+        );
+        assert!(matches!(
+            f.store.types.get(a_ref),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == a
+        ));
+    }
+
+    #[test]
+    fn an_inner_clause_is_copied_and_rebound_when_the_outer_clause_is_built() {
+        // `(x: T)(y: x.type): y.type`, built inner first.
+        let mut f = Fixture::new();
+        let (x, y) = (SymbolId::new(30), SymbolId::new(31));
+        let x_ref = term_ref_to(&mut f, x);
+        let inner_param = method_param(&mut f, y, "y", x_ref);
+        let y_ref = term_ref_to(&mut f, y);
+        let inner =
+            method_type_from_symbols(&mut f.store, &[inner_param], y_ref, MethodKind::Plain)
+                .unwrap();
+        let before = get_method(&f, inner).clone();
+        let outer_param = {
+            let leaf = f.leaf;
+            method_param(&mut f, x, "x", leaf)
+        };
+
+        let outer =
+            method_type_from_symbols(&mut f.store, &[outer_param], inner, MethodKind::Plain)
+                .unwrap();
+
+        // The outer result is a copy of the inner method, not the inner one.
+        let copy = get_method(&f, outer).result;
+        assert_ne!(copy, inner);
+        assert_eq!(
+            f.param_ref_of(get_method(&f, copy).params[0].ty),
+            (outer, 0)
+        );
+        assert_eq!(f.param_ref_of(get_method(&f, copy).result), (copy, 0));
+        // The stored inner method was not touched.
+        assert_eq!(get_method(&f, inner), &before);
+        assert_eq!(f.param_ref_of(before.result), (inner, 0));
+    }
+
+    #[test]
+    fn a_shared_dependent_subgraph_is_transformed_once() {
+        let mut f = Fixture::new();
+        let a = SymbolId::new(40);
+        let a_ref = type_ref_to(&mut f, a);
+        let shared = f.applied(&[a_ref]);
+        let result = f.store.types.alloc(Type::And {
+            left: shared,
+            right: shared,
+        });
+        let spec = {
+            let leaf = f.leaf;
+            type_param_spec(&mut f, a, "A", leaf)
+        };
+
+        let poly = poly_type_from_symbols(&mut f.store, &[spec], result).unwrap();
+
+        let Type::Poly(built) = f.store.types.get(poly).clone() else {
+            panic!("not a poly");
+        };
+        let Type::And { left, right } = f.store.types.get(built.result).clone() else {
+            panic!("not an intersection");
+        };
+        assert_eq!(left, right);
+        assert_ne!(left, shared);
+    }
+
+    #[test]
+    fn an_annotation_that_mentions_a_parameter_is_replaced_not_mutated() {
+        let mut f = Fixture::new();
+        let a = SymbolId::new(50);
+        let a_ref = type_ref_to(&mut f, a);
+        let annotation = f.store.annotations.alloc(Annotation::new(a_ref, None));
+        let annotated = f.store.types.alloc(Type::Annotated {
+            underlying: f.leaf,
+            annotation,
+        });
+        let spec = {
+            let leaf = f.leaf;
+            type_param_spec(&mut f, a, "A", leaf)
+        };
+
+        let poly = poly_type_from_symbols(&mut f.store, &[spec], annotated).unwrap();
+
+        let Type::Poly(built) = f.store.types.get(poly).clone() else {
+            panic!("not a poly");
+        };
+        let Type::Annotated {
+            annotation: new, ..
+        } = f.store.types.get(built.result).clone()
+        else {
+            panic!("not annotated");
+        };
+        assert_ne!(new, annotation);
+        assert_eq!(f.param_ref_of(f.store.annotations.get(new).ty), (poly, 0));
+        assert_eq!(f.store.annotations.get(annotation).ty, a_ref);
+    }
+
+    #[test]
+    fn a_type_lambda_from_symbols_is_its_own_binder_with_declared_variance() {
+        let mut f = Fixture::new();
+        let a = SymbolId::new(60);
+        let a_ref = type_ref_to(&mut f, a);
+        let mut spec = {
+            let leaf = f.leaf;
+            type_param_spec(&mut f, a, "A", leaf)
+        };
+        spec.declared_variance = Some(Variance::Covariant);
+
+        let lambda = type_lambda_from_symbols(&mut f.store, &[spec], a_ref).unwrap();
+
+        let built = f.get_lambda(lambda).clone();
+        assert_eq!(built.params[0].declared_variance, Some(Variance::Covariant));
+        assert_eq!(f.param_ref_of(built.result), (lambda, 0));
+    }
+
+    #[test]
+    fn a_parameter_symbol_given_twice_is_refused_and_nothing_is_allocated() {
+        let mut f = Fixture::new();
+        let x = SymbolId::new(70);
+        let first = {
+            let leaf = f.leaf;
+            method_param(&mut f, x, "x", leaf)
+        };
+        let second = {
+            let leaf = f.leaf;
+            method_param(&mut f, x, "y", leaf)
+        };
+        let before = type_count(&mut f);
+
+        let result =
+            method_type_from_symbols(&mut f.store, &[first, second], f.leaf, MethodKind::Plain);
+
+        assert_eq!(
+            result,
+            Err(TypeRebindError::DuplicateParameterSymbol { symbol: x })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn a_failure_deep_in_the_graph_rolls_back_the_binder_and_every_copy() {
+        let mut f = Fixture::new();
+        let x = SymbolId::new(80);
+        let x_ref = term_ref_to(&mut f, x);
+        // A slot that is reserved and never filled is reachable from the
+        // result, after a part that does need copying.
+        let unfilled = f.store.types.reserve().id();
+        let result = f.store.types.alloc(Type::And {
+            left: x_ref,
+            right: unfilled,
+        });
+        let param = {
+            let leaf = f.leaf;
+            method_param(&mut f, x, "x", leaf)
+        };
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            method_type_from_symbols(&mut f.store, &[param], result, MethodKind::Plain),
+            Err(TypeRebindError::UnfilledType { id: unfilled })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+        // And the same call after the graph is fixed is not affected.
+    }
+
+    #[test]
+    fn an_empty_parameter_list_is_a_method_type_with_no_parameters() {
+        let mut f = Fixture::new();
+
+        let method =
+            method_type_from_symbols(&mut f.store, &[], f.leaf, MethodKind::Plain).unwrap();
+
+        assert!(get_method(&f, method).params.is_empty());
+        assert_eq!(get_method(&f, method).result, f.leaf);
     }
 }

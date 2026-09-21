@@ -45,7 +45,7 @@ const APPLIEDTPT: u8 = 162;
 const BYNAMETPT: u8 = 94;
 const EXPLICITTPT: u8 = 103;
 const REFINEDTPT: u8 = 160;
-const LAMBDATPT: u8 = 171;
+const MATCHTPT: u8 = 191;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -147,7 +147,7 @@ const ROOTS: [&str; 27] = [
     "direct",
     "shared type",
     "refined",
-    "lambda",
+    "match",
     "bad applied",
     "x.Out",
     "y.Out",
@@ -264,7 +264,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         any_type(),
         leaf(SHAREDTYPE_TAG, root("direct")),
         node(REFINEDTPT, &any_type()),
-        node(LAMBDATPT, &any_type()),
+        node(MATCHTPT, &any_type()),
         node(
             APPLIEDTPT,
             &[ident_any(), node(REFINEDTPT, &any_type())].concat(),
@@ -645,10 +645,10 @@ fn a_tree_form_that_is_not_projected_yet_is_a_typed_error() {
         })
     );
     assert_eq!(
-        unpickler.unpickle_type_tree_type(unit.at("lambda")),
+        unpickler.unpickle_type_tree_type(unit.at("match")),
         Err(UnpickleError::UnsupportedTypeTree {
-            address: unit.at("lambda"),
-            tag: LAMBDATPT
+            address: unit.at("match"),
+            tag: MATCHTPT
         })
     );
 }
@@ -875,11 +875,7 @@ fn an_opaque_alias_a_class_a_method_and_a_package_are_explicit_deferrals() {
             address: unit.at("Holder.Op")
         })
     );
-    for (label, kind) in [
-        ("Box", SymbolKind::Class),
-        ("Holder", SymbolKind::Class),
-        ("Holder.f", SymbolKind::Method),
-    ] {
+    for (label, kind) in [("Box", SymbolKind::Class), ("Holder", SymbolKind::Class)] {
         assert_eq!(
             unpickler.complete_symbol(unit.at(label)),
             Err(UnpickleError::UnsupportedSymbolCompletion {
@@ -901,7 +897,7 @@ fn an_opaque_alias_a_class_a_method_and_a_package_are_explicit_deferrals() {
         Err(UnpickleError::MissingEnteredSymbol { address: 1 })
     );
     drop(unpickler);
-    for label in ["Holder.Op", "Box", "Holder", "Holder.f"] {
+    for label in ["Holder.Op", "Box", "Holder"] {
         // No empty class info or placeholder is written.
         assert_eq!(
             info(&session, symbols[label]),
@@ -1194,7 +1190,7 @@ fn stub_classes(session: &mut Session, packages: &mut Packages, path: &[&str], n
 }
 
 #[test]
-fn real_simple_definitions_complete_and_methods_and_classes_stay_missing() {
+fn real_simple_definitions_complete_and_classes_stay_missing() {
     let file = TastyFile::parse_scala_3_9(HOLDER).unwrap();
     let defs = definitions_by_name(&file);
     let mut session = Session::new();
@@ -1219,8 +1215,8 @@ fn real_simple_definitions_complete_and_methods_and_classes_stay_missing() {
     let alias = unpickler.complete_symbol(defs["Alias"]).unwrap();
     let abstract_ = unpickler.complete_symbol(defs["Abstract"]).unwrap();
     let mutable = unpickler.complete_symbol(defs["mutable"]).unwrap();
-    // Methods, constructors and classes are later milestones.
-    for name in ["use", "byName", "CompletionHolder", "CBox"] {
+    // Classes are a later milestone (methods are 5c, tested apart).
+    for name in ["CompletionHolder", "CBox"] {
         let Some(at) = defs.get(name) else { continue };
         assert!(
             matches!(
