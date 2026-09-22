@@ -67,11 +67,10 @@
 //!   cannot represent without the annotation classes: the method is
 //!   `UnsupportedMethodParameterSemantics`, not completed with it dropped.
 //! * Constructors reuse every piece of this module (clause grouping, the
-//!   parameter guard, `build_clause`) but are completed by
-//!   [`complete_constructor`](crate::constructor::TastyUnpickler::complete_constructor)
-//!   in the [`constructor`](crate::constructor) module: their info is the
-//!   owner class's effective result type, not the serialized return tree, and
-//!   their clauses are normalized first (`normalizeIfConstructor`).
+//!   parameter guard, `build_clause`) but are completed in the
+//!   [`constructor`](crate::constructor) module: their info is the owner
+//!   class's effective result type, not the serialized return tree, and their
+//!   clauses are normalized first (`normalizeIfConstructor`).
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{TermName, TypeName};
@@ -90,7 +89,7 @@ use crate::error::UnpickleError;
 use crate::unpickler::TastyUnpickler;
 
 /// One parameter clause of a method, as addresses of its parameter nodes.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Clause {
     /// `[A, B]`.
     Type(Vec<u32>),

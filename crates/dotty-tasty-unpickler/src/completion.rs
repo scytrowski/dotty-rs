@@ -13,11 +13,13 @@
 //! | ordinary `DEFDEF` (Milestone 5c) | `Poly` / `Method` / `ByName` from its clauses and result type: see the [`method`](crate::method) module |
 //!
 //! | `TYPEDEF` with a template (Milestone 5d1) | `ClassInfo` for a `Class`, `Trait` or `ModuleClass`: see the [`class`](crate::class) module |
+//! | `Constructor` `DEFDEF` (Milestone 5d2a) | `Poly`/`Method` whose final result constructs the owner class, from normalized clauses: see the [`constructor`](crate::constructor) module |
 //!
-//! Deferred, each with its own typed error and no info written: opaque
-//! aliases (`OpaqueAliasDeferred`) and constructors
-//! (`ConstructorCompletionDeferred`, 5d2). No empty `ClassInfo` is made to mark
-//! a class complete: it is published only with its parents and self type.
+//! Deferred, with its own typed error and no info written: opaque aliases
+//! (`OpaqueAliasDeferred`). No empty `ClassInfo` is made to mark a class
+//! complete: it is published only with its parents and self type. A
+//! constructor does not need its owner's `ClassInfo` to complete (see the
+//! [`constructor`](crate::constructor) module).
 //!
 //! Completion is *per symbol*: each public call is its own transaction, so an
 //! unsupported definition never undoes a symbol another call completed. The
@@ -97,9 +99,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if tag == DEFDEF_TAG {
             return match kind {
                 SymbolKind::Method => self.complete_method(ast, at, symbol, depth),
-                SymbolKind::Constructor => {
-                    Err(UnpickleError::ConstructorCompletionDeferred { address: at })
-                }
+                SymbolKind::Constructor => self.complete_constructor(ast, at, symbol, depth),
                 _ => Err(unsupported),
             };
         }
