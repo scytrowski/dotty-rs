@@ -81,6 +81,18 @@ fn with_unpickler<R>(
     (result, store, index)
 }
 
+/// Just `enter_symbols`, for a fixture whose corruption is reachable through
+/// declared-type identity discovery (Milestone 5d2c) itself, so the error
+/// surfaces during pass 1 rather than through an explicit `unpickle_type`
+/// call.
+fn entering(bytes: &[u8]) -> Result<(), UnpickleError> {
+    let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+    unpickler.enter_symbols().map(|_| ())
+}
+
 fn name(store: &SemanticStore, symbol: SymbolId) -> &str {
     store.names.resolve(store.symbols.get(symbol).name.text())
 }
@@ -464,14 +476,14 @@ fn a_shared_link_to_itself_is_an_error_not_a_hang() {
         &[SHARED_TAG, 0x80 | 49],
     );
 
-    let (result, _, index) =
-        with_unpickler(&bytes, |unpickler| unpickler.unpickle_type(SHARED_SHORT));
-
+    // `SHARED_SHORT` (49) is itself reached from a real declared-type
+    // position in `Distinct.tasty` (Milestone 5d2c's identity discovery
+    // scans it during `enter_symbols`), so the self-link is caught there,
+    // before any explicit `unpickle_type` call.
     assert_eq!(
-        result,
+        entering(&bytes),
         Err(UnpickleError::InvalidReferenceTarget { from: 49, to: 49 })
     );
-    assert_eq!(index.type_count(), 0);
 }
 
 #[test]
@@ -490,10 +502,10 @@ fn two_shared_links_to_each_other_are_an_error_not_a_hang() {
         &[SHARED_TAG, 0x80 | 49],
     );
 
-    let (result, _, _) = with_unpickler(&cycle, |unpickler| unpickler.unpickle_type(22));
-
+    // Reached from a declared-type position, the same way the single
+    // self-link above is: see `a_shared_link_to_itself_is_an_error_not_a_hang`.
     assert!(matches!(
-        result,
+        entering(&cycle),
         Err(UnpickleError::InvalidReferenceTarget { .. })
     ));
 }
@@ -508,10 +520,10 @@ fn a_shared_link_into_the_middle_of_a_node_is_rejected() {
         &[SHARED_TAG, 0x80 | 11],
     );
 
-    let (result, _, _) = with_unpickler(&bytes, |unpickler| unpickler.unpickle_type(SHARED_SHORT));
-
+    // Reached from a declared-type position: see
+    // `a_shared_link_to_itself_is_an_error_not_a_hang`.
     assert_eq!(
-        result,
+        entering(&bytes),
         Err(UnpickleError::InvalidReferenceTarget { from: 49, to: 11 })
     );
 }
@@ -581,12 +593,11 @@ fn a_reference_to_an_address_that_is_not_a_node_is_an_invalid_target() {
         &[TYPEREFDIRECT_TAG, 0, 0x80 | 11],
     );
 
-    let (result, _, _) = with_unpickler(&bytes, |unpickler| {
-        unpickler.unpickle_type(TYPE_PARAMETER_REFERENCE)
-    });
-
+    // `TYPE_PARAMETER_REFERENCE` (351) is itself a real declared-type
+    // position's reference (`TYPEREFdirect` to `Box`'s type parameter `T`),
+    // reached by Milestone 5d2c's identity discovery during `enter_symbols`.
     assert_eq!(
-        result,
+        entering(&bytes),
         Err(UnpickleError::InvalidReferenceTarget {
             from: TYPE_PARAMETER_REFERENCE,
             to: 11

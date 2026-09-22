@@ -330,7 +330,7 @@ impl TastyUnpickler<'_, '_, '_> {
 /// Whether `tag` is a tree the projection knowingly does not build yet. The
 /// list is documentation; anything else that is not a type is refused in the
 /// same way by the fall-through.
-fn is_deferred_tree(tag: u8) -> bool {
+pub(crate) fn is_deferred_tree(tag: u8) -> bool {
     use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, MATCHTPT_TAG};
     matches!(tag, MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG)
 }
