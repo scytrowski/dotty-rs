@@ -1332,6 +1332,15 @@ and `self_type` as `None` unless the source states one; parents are ordered,
 direct-only semantic types and may differ in richness between adapters (TASTy
 keeps `Applied` parents, a classfile only erased classes).
 
+A constructor's completed info (the TASTy adapter's Milestone 5d2a) reuses
+the same `no_prefix` convention for the type it constructs, independently of
+`ClassInfo`: `Type::type_ref(no_prefix, class)`, or that applied to the
+constructor's own leading type-parameter symbols, never the class's
+completed `ClassInfo.prefix` copied by value, a fresh `ThisType`, or a
+textual lookup. This is why a constructor can complete before, after, or
+regardless of whether its owner's `ClassInfo` ever completes: both read the
+same session-wide canonical prefix rather than depending on each other.
+
 A term's `SymbolInfo::Complete(TypeId)` is its declared type. Member lookup
 may read it (read-only, never completing) to find the declaration scope of a
 *stable* term prefix (`x.T`): an immutable field, value or by-name-free

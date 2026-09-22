@@ -497,25 +497,9 @@ fn a_method_with_an_unresolved_type_stays_missing_and_undoes_its_parameters() {
     assert_eq!(unpickler.complete_symbol(methods["one"][0]), result);
 }
 
-#[test]
-fn constructors_stay_missing_with_a_typed_deferral() {
-    let file = TastyFile::parse_scala_3_9(METHODS).unwrap();
-    let methods = methods_by_name(&file);
-    let mut session = Session::new();
-    let mut unpickler = entered(&file, &mut session, true);
-
-    let constructor = methods["<init>"][0];
-    assert_eq!(
-        unpickler.complete_symbol(constructor),
-        Err(UnpickleError::ConstructorCompletionDeferred {
-            address: constructor
-        })
-    );
-    assert_eq!(
-        unpickler.symbol_state_at(constructor),
-        Some((SymbolKind::Constructor, SymbolInfo::Missing))
-    );
-}
+// Constructor completion (Milestone 5d2a) has its own fixtures and tests in
+// tests/constructors.rs; `Methods.tasty`'s two no-arg constructors (`Methods`,
+// the nested trait `Box`) are covered there too.
 
 #[test]
 fn an_erased_parameter_is_erased_by_its_flag_and_only_it() {
