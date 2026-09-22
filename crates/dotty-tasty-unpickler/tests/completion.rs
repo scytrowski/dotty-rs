@@ -44,7 +44,10 @@ const IDENTTPT: u8 = 111;
 const APPLIEDTPT: u8 = 162;
 const BYNAMETPT: u8 = 94;
 const EXPLICITTPT: u8 = 103;
-const REFINEDTPT: u8 = 160;
+// A tag `is_deferred_tree` still refuses (`HOLE_TAG`), used below as a
+// stand-in "unsupported type tree" distinct from MATCHTPT. `REFINEDTPT`
+// filled this role before Milestone 5d2b made it a projectable type tree.
+const HOLE: u8 = 255;
 const MATCHTPT: u8 = 191;
 
 fn nat(value: u32) -> Vec<u8> {
@@ -213,7 +216,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         alias(N_ABS, bounds(&[any_type(), any_type()]), &[]),
         alias(N_SAME, bounds(&[any_type()]), &[]),
         alias(N_OP, ident_any(), &[OPAQUE_TAG]),
-        alias(N_BAD, node(REFINEDTPT, &any_type()), &[]),
+        alias(N_BAD, node(HOLE, &any_type()), &[]),
         node(DEFDEF_TAG, &[nat(N_F), by_name_param, any_type()].concat()),
         val(
             N_S,
@@ -263,12 +266,9 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         leaf(SHAREDTERM_TAG, root("shared cycle")),
         any_type(),
         leaf(SHAREDTYPE_TAG, root("direct")),
-        node(REFINEDTPT, &any_type()),
+        node(HOLE, &any_type()),
         node(MATCHTPT, &any_type()),
-        node(
-            APPLIEDTPT,
-            &[ident_any(), node(REFINEDTPT, &any_type())].concat(),
-        ),
+        node(APPLIEDTPT, &[ident_any(), node(HOLE, &any_type())].concat()),
         out_of(term("Holder.x")),
         out_of(term("Holder.y")),
         out_of(term("Holder.v")),
@@ -641,7 +641,7 @@ fn a_tree_form_that_is_not_projected_yet_is_a_typed_error() {
         unpickler.unpickle_type_tree_type(unit.at("refined")),
         Err(UnpickleError::UnsupportedTypeTree {
             address: unit.at("refined"),
-            tag: REFINEDTPT
+            tag: HOLE
         })
     );
     assert_eq!(
@@ -671,10 +671,7 @@ fn a_failing_argument_rolls_back_the_tree_types_built_before_it() {
         assert!(
             matches!(
                 result,
-                Err(UnpickleError::UnsupportedTypeTree {
-                    tag: REFINEDTPT,
-                    ..
-                })
+                Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
             ),
             "{result:?}"
         );
@@ -929,7 +926,7 @@ fn an_unsupported_definition_leaves_an_earlier_completion_alone() {
         unpickler.complete_symbol(unit.at("Holder.Bad")),
         Err(UnpickleError::UnsupportedTypeTree {
             address: unit.at("Holder.Bad") + 3,
-            tag: REFINEDTPT
+            tag: HOLE
         })
     );
     drop(unpickler);
@@ -961,10 +958,7 @@ fn a_failed_batch_restores_every_symbol_info_it_had_set_and_can_be_retried() {
     for _ in 0..2 {
         assert!(matches!(
             unpickler.complete_symbols(&batch),
-            Err(UnpickleError::UnsupportedTypeTree {
-                tag: REFINEDTPT,
-                ..
-            })
+            Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
         ));
         assert_eq!(unpickler.index().type_count(), types);
         assert_eq!(unpickler.index().type_tree_count(), trees);

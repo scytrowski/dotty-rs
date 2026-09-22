@@ -563,7 +563,10 @@ mod wire {
     const PARAM: u8 = 134;
     const IDENTTPT: u8 = 111;
     const SELECTTPT: u8 = 113;
-    const REFINEDTPT: u8 = 160;
+    // A tag `is_deferred_tree` still refuses (`HOLE_TAG`), used below as a
+    // parameter type that fails to project. `REFINEDTPT` filled this role
+    // before Milestone 5d2b made it a projectable type tree.
+    const HOLE: u8 = 255;
     const EMPTYCLAUSE: u8 = 45;
     const SPLITCLAUSE: u8 = 46;
     const GIVEN: u8 = 37;
@@ -780,7 +783,7 @@ mod wire {
                     ),
                     param("a", ident_any(), &[]),
                     vec![SPLITCLAUSE],
-                    param("b", node(REFINEDTPT, &any_type()), &[]),
+                    param("b", node(HOLE, &any_type()), &[]),
                 ],
                 ident_any(),
             ),
@@ -1006,7 +1009,7 @@ fn a_failure_after_type_and_term_clauses_completed_undoes_them_all_and_retries_c
     assert!(
         matches!(
             result,
-            Err(UnpickleError::UnsupportedTypeTree { tag: 160, .. })
+            Err(UnpickleError::UnsupportedTypeTree { tag: 255, .. })
         ),
         "{result:?}"
     );
