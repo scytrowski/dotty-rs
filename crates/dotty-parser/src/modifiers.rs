@@ -121,6 +121,7 @@ where
     }
 
     fn parse_visibility(&mut self, metadata: &mut Modifiers) {
+        let visibility_span = self.current_span();
         let visibility = match self.current().kind {
             TokenKind::Keyword(HardKeyword::Private) => {
                 dotty_core::ast::VisibilitySyntax::Private {
@@ -136,8 +137,9 @@ where
         };
 
         if metadata.visibility.is_some() {
-            self.report(
+            self.report_at(
                 ParseDiagnosticKind::UnexpectedToken,
+                visibility_span,
                 "duplicate definition visibility",
             );
         } else {
@@ -187,10 +189,7 @@ where
     }
 
     fn soft_modifier(&mut self) -> Option<Modifier> {
-        if !matches!(
-            self.current().kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) {
+        if self.current().kind != TokenKind::Identifier {
             return None;
         }
         let name = self.intern_current_term_name().ok()?;
@@ -212,20 +211,36 @@ where
         if !matches!(self.current().kind, TokenKind::Identifier) {
             return false;
         }
-        let text = self.current_text().ok();
-        matches!(
-            text,
-            Some("opaque" | "erased" | "tracked" | "into" | "update")
-        )
+        let Ok(name) = self.intern_current_term_name() else {
+            return false;
+        };
+        let known = self.known_names();
+        name == known.opaque
+            || name == known.erased
+            || name == known.tracked
+            || name == known.into
+            || name == known.update
     }
 
     fn parse_annotation(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         self.advance(); // `@` is scanner-facing Operator punctuation.
 
-        let tpt = self.with_location(Location::Elsewhere, |parser| {
-            parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
-        });
+        let tpt = if matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            self.with_location(Location::Elsewhere, |parser| {
+                parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+            })
+        } else {
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected an annotation type after `@`",
+            );
+            self.error_type(position)
+        };
         let new_tree = self.alloc_from(mark, TreeKind::New(New { tpt }));
         let constructor = self.constructor_select(new_tree);
         let mut annotation = constructor;
@@ -376,6 +391,65 @@ mod tests {
         ];
         let mut parser = parser_for("inline", tokens, &mut names);
         assert!(!parser.starts_definition_prefix());
+    }
+
+    #[test]
+    fn backquoted_soft_modifier_remains_an_identifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "`inline` def",
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 8),
+                token(TokenKind::Keyword(HardKeyword::Def), 9, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        assert!(!parser.starts_definition_prefix());
+    }
+
+    #[test]
+    fn reports_duplicate_modifiers_at_the_repeated_token() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "final final class A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Final), 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Class), 12, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition");
+        };
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.diagnostics()[0].span().start(), 6);
+    }
+
+    #[test]
+    fn malformed_annotation_keeps_the_definition_keyword_available() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "@ class A",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Class), 2, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the class to remain parseable");
+        };
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(parser.current().kind == TokenKind::Eof);
     }
 
     #[test]
