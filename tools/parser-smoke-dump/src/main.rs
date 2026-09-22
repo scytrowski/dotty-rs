@@ -388,6 +388,9 @@ fn render_definition_metadata(
         .iter()
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
+            dotty_core::ast::Modifier::ParamAccessor | dotty_core::ast::Modifier::PrivateLocal => {
+                None
+            }
             dotty_core::ast::Modifier::Abstract => Some("abstract"),
             dotty_core::ast::Modifier::Final => Some("final"),
             dotty_core::ast::Modifier::Sealed => Some("sealed"),

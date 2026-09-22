@@ -28,6 +28,15 @@ pub enum Modifier {
     /// shape, because a trait and a class share the same `TypeDef`/`Template`
     /// tree family but have different source meaning.
     Trait,
+    /// Parser-level role for a constructor parameter that contributes an
+    /// accessor on its owning class.
+    ///
+    /// This is metadata synthesized from the constructor-parameter context,
+    /// not a source modifier keyword.
+    ParamAccessor,
+    /// Parser-level role for a plain constructor parameter that is not an
+    /// accessor. This must not be represented as written `private` visibility.
+    PrivateLocal,
     Abstract,
     Final,
     Sealed,
@@ -93,6 +102,12 @@ mod tests {
     #[test]
     fn var_is_a_distinct_mutability_modifier() {
         assert_ne!(Modifier::Var, Modifier::Lazy);
+    }
+
+    #[test]
+    fn constructor_parameter_roles_are_distinct_from_source_visibility() {
+        assert_ne!(Modifier::ParamAccessor, Modifier::PrivateLocal);
+        assert_ne!(Modifier::PrivateLocal, Modifier::Var);
     }
 
     #[test]
