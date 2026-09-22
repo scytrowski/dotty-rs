@@ -168,6 +168,13 @@ where
         } else {
             self.synthetic_type_tree_at(mark.start())
         };
+        if self.starts_unsupported_self_type_tail() {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                "compound template self types are not supported yet",
+            );
+            self.recover_self_type_tail();
+        }
         if self.current_is_arrow() {
             self.observe_self_arrow();
             self.advance();
@@ -190,6 +197,40 @@ where
                 },
             }),
         ))
+    }
+
+    fn starts_unsupported_self_type_tail(&mut self) -> bool {
+        match self.current().kind {
+            TokenKind::Operator | TokenKind::ColonOp => !self.current_text_is("=>"),
+            TokenKind::Keyword(HardKeyword::With) => true,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                matches!(
+                    self.cursor.lookahead(1).kind,
+                    TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn recover_self_type_tail(&mut self) {
+        while !self.current_is_arrow()
+            && !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Eof
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            )
+        {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn starts_template_self(&mut self) -> bool {
@@ -440,6 +481,38 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_compound_self_types_without_losing_the_body_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ self: A & B => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
     }
 
     #[test]
