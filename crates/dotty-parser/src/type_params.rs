@@ -77,16 +77,18 @@ where
 
     fn type_param(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        let variance = if self.current().kind == TokenKind::Operator
-            && matches!(self.current_text().ok(), Some("+" | "-"))
-        {
-            let variance = match self.current_text().ok() {
-                Some("+") => Variance::Covariant,
-                Some("-") => Variance::Contravariant,
-                _ => unreachable!("variance spelling was checked above"),
-            };
-            self.advance();
-            Some(variance)
+        let variance = if self.current().kind == TokenKind::Operator {
+            match self.current_text().ok() {
+                Some("+") => {
+                    self.advance();
+                    Some(Variance::Covariant)
+                }
+                Some("-") => {
+                    self.advance();
+                    Some(Variance::Contravariant)
+                }
+                _ => None,
+            }
         } else {
             None
         };
@@ -299,6 +301,26 @@ mod tests {
             vec![Some(Variance::Covariant), Some(Variance::Contravariant)]
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn malformed_variance_token_text_reports_instead_of_panicking() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Class);
+
+        assert_eq!(params.len(), 1);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
