@@ -1550,13 +1550,10 @@ original PR body to be closed before merge:
   *wire* rather than from the walker's own traversal. It finds every
   `LAMBDAtpt`/`REFINEDtpt` node physically present in the AST section — whether
   or not any discovery call ever visited it — and classifies each one as
-  `Entered` (has an owner), `InBody` (its structural ancestor chain includes a
-  `VALDEF`, `DEFDEF`, `BLOCK`, `CASEDEF` or `LAMBDAtpt` — the same tag set
-  `tests/type_corpus.rs`'s pre-existing `inside_a_body` heuristic uses for the
-  analogous question about a missing-symbol reference target — the one class
-  of position pass 1 documents as never entered), or `Unaccounted`: a node
-  discovery's routing table should have reached but did not, always a genuine
-  parity gap. `identity_reachability` is a public function
+  `Entered` (has an owner), `InBody` (a genuinely skipped body or
+  local-definition context), or `Unaccounted`: a node discovery's routing
+  table should have reached but did not, always a genuine parity gap.
+  `identity_reachability` is a public function
   (`dotty_tasty_unpickler::tasty_unpickler::identity_reachability`) so both
   `tests/discovery.rs`'s unit-level fixtures and `tests/type_corpus.rs`'s
   corpus run can call it; the corpus run asserts
@@ -1569,6 +1566,28 @@ original PR body to be closed before merge:
   reference-target/`SHAREDtype` occurrence in either corpus (both routes are
   measured supported, not exercised by real code) — the same "measured, not
   assumed" standard the rest of this milestone holds itself to.
+  **`InBody`'s check is edge-aware, not tag-membership.** A second review pass
+  found the first cut's `in_body` too coarse: it treated *any* `VALDEF`/
+  `DEFDEF` ancestor as proof of a skipped body, but a `VALDEF`'s own
+  declared-type child (or a `DEFDEF`'s own result — the exact position
+  `discover_declared_type_identities`/`enter_definition_body` enter directly)
+  also has that ancestor, so a real regression there — discovery silently
+  failing to enter a definition's own declared type — would have been
+  misreported as the expected, out-of-scope shape instead of a parity gap; the
+  same coarseness also meant an unsupported term (an `APPLY` sitting directly
+  in a `DEFDEF`'s right-hand side, with no `BLOCK` in between) was classified
+  correctly only by accident. Fixed: `in_body` now checks which specific child
+  edge was crossed (a `VALDEF`/`TYPEDEF`'s first child, or a `DEFDEF`'s
+  `TYPEPARAM`/`PARAM` children and its result — the first child that is not a
+  parameter or clause marker — versus every other child, its right-hand side)
+  rather than testing ancestor tag membership alone; `LAMBDAtpt` needs no
+  special case since every one of its own children is itself a declared-type
+  position. Three new `reachability.rs` unit tests cover it:
+  `an_unentered_identity_at_a_valdefs_own_declared_type_position_is_unaccounted`,
+  `an_unentered_identity_at_a_defdefs_own_result_position_is_unaccounted` and
+  `an_unentered_identity_inside_an_unsupported_apply_in_a_defdefs_body_is_in_body`
+  (the last proving the fix did not simply invert into always reporting a
+  `DEFDEF`/`VALDEF` descendant as `Unaccounted`), each mutation-tested.
 
 ### Owner-space references (Milestone 4c1)
 
