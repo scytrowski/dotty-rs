@@ -1,5 +1,5 @@
 {
-  extension (value: Value):
+  extension (value: Value)
     @Ann
     def first = value
   result
