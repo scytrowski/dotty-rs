@@ -108,12 +108,7 @@ where
         self.advance();
         let name = self.parse_object_name();
         let tail = self.parse_template_tail();
-        let parent_start = tail.parents.first().and_then(|parent| {
-            self.ast
-                .get(*parent)
-                .position
-                .map(|position| position.span().range().start())
-        });
+        let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
@@ -192,12 +187,7 @@ where
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
         let tail = self.parse_template_tail();
-        let parent_start = tail.parents.first().and_then(|parent| {
-            self.ast
-                .get(*parent)
-                .position
-                .map(|position| position.span().range().start())
-        });
+        let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
@@ -258,6 +248,23 @@ where
             body: body.members,
             metadata: UntypedTemplateMetadata { derives, uses },
         }
+    }
+
+    fn template_tail_start(&self, tail: &TemplateTail) -> Option<u32> {
+        tail.parents
+            .iter()
+            .chain(tail.metadata.derives.iter())
+            .chain(tail.metadata.uses.iter().map(|use_ref| &use_ref.reference))
+            .copied()
+            .chain(tail.self_val)
+            .chain(tail.body.first().copied())
+            .filter_map(|tree| {
+                self.ast
+                    .get(tree)
+                    .position
+                    .map(|position| position.span().range().start())
+            })
+            .min()
     }
 
     fn parse_derives_clause(&mut self) -> Vec<TreeId<Untyped>> {
@@ -326,14 +333,15 @@ where
                     return self.error_expr(self.current_span());
                 };
                 self.advance();
+                let ident = self.alloc_from(
+                    mark,
+                    TreeKind::Ident(dotty_core::ast::Ident {
+                        name: *name.as_name(),
+                        backquoted,
+                    }),
+                );
                 if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-                    return self.alloc_from(
-                        mark,
-                        TreeKind::Ident(dotty_core::ast::Ident {
-                            name: *name.as_name(),
-                            backquoted,
-                        }),
-                    );
+                    return ident;
                 }
 
                 if self.accept(TokenKind::Keyword(HardKeyword::This)) {
@@ -346,15 +354,7 @@ where
                     return self.parse_capture_selection(mark, qualifier);
                 }
 
-                let mut reference = self.alloc_from(
-                    mark,
-                    TreeKind::Ident(dotty_core::ast::Ident {
-                        name: *name.as_name(),
-                        backquoted,
-                    }),
-                );
-                reference = self.parse_capture_selection_after_dot(mark, reference);
-                reference
+                self.parse_capture_selection_after_dot(mark, ident)
             }
             _ => {
                 self.report(
@@ -446,6 +446,7 @@ where
     }
 
     fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
+        self.consume_newlines_before_template_body();
         if matches!(
             self.current().kind,
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
@@ -479,6 +480,24 @@ where
                 self_val: None,
                 members: Vec::new(),
             },
+        }
+    }
+
+    fn consume_newlines_before_template_body(&mut self) {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        if matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+        ) {
+            for _ in 0..count {
+                self.advance();
+            }
         }
     }
 
@@ -516,7 +535,9 @@ where
         let template_start = if parents.is_empty()
             && constructor_range.is_some_and(|(constructor_start, constructor_end)| {
                 constructor_start == constructor_end
-            }) {
+            })
+            && body_start.is_none_or(|body_start| body_start == start)
+        {
             body_start.unwrap_or(start)
         } else {
             start
@@ -862,6 +883,17 @@ mod tests {
         };
 
         assert_eq!(template.metadata.derives.len(), 2);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .start(),
+            16
+        );
         assert!(matches!(
             parser.ast().get(template.metadata.derives[0]).kind,
             TreeKind::Ident(ident) if ident.name.is_type()
@@ -915,6 +947,20 @@ mod tests {
             parser.ast().get(template.metadata.uses[1].reference).kind,
             TreeKind::Select(_)
         ));
+        let TreeKind::Select(select) = &parser.ast().get(template.metadata.uses[1].reference).kind
+        else {
+            panic!("expected qualified capture reference");
+        };
+        assert_eq!(
+            parser
+                .ast()
+                .get(select.qualifier)
+                .position
+                .expect("capture qualifier span")
+                .span()
+                .range(),
+            dotty_core::TextRange::new(28, 33).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
