@@ -249,12 +249,63 @@ where
 
     fn parse_template_tail(&mut self) -> TemplateTail {
         let parents = self.parse_parent_clause();
+        let derives = self.parse_derives_clause();
         let body = self.parse_optional_template_body();
         TemplateTail {
             parents,
             self_val: None,
             body,
-            metadata: UntypedTemplateMetadata::default(),
+            metadata: UntypedTemplateMetadata {
+                derives,
+                uses: Vec::new(),
+            },
+        }
+    }
+
+    fn parse_derives_clause(&mut self) -> Vec<TreeId<Untyped>> {
+        self.consume_newlines_before_template_name(self.known_names.derives);
+        if !self.current_is_template_name(self.known_names.derives) {
+            return Vec::new();
+        }
+        self.advance();
+
+        let mut derives = Vec::new();
+        loop {
+            let mark = self.mark();
+            let mut derive =
+                self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
+            if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
+                derive = self.parse_type_application(mark, derive);
+            }
+            derives.push(derive);
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                break;
+            }
+        }
+        derives
+    }
+
+    fn current_is_template_name(&mut self, expected: TermName) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self.current_is_known_name(expected).unwrap_or(false)
+    }
+
+    fn consume_newlines_before_template_name(&mut self, expected: TermName) {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        let follows = self.cursor.lookahead(count);
+        let expected_text = self.names.resolve(expected.as_name().text());
+        if follows.kind == TokenKind::Identifier
+            && self.source.slice(follows.span).ok() == Some(expected_text)
+        {
+            for _ in 0..count {
+                self.advance();
+            }
         }
     }
 
@@ -635,6 +686,48 @@ mod tests {
         };
         assert!(template.parents.is_empty());
         assert!(template.body.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_qualified_derives_in_template_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives A, pkg.B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Dot), 22, 23),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.metadata.derives.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[1]).kind,
+            TreeKind::Select(select) if select.name.is_type()
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
