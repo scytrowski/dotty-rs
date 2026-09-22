@@ -125,18 +125,22 @@ pub(crate) fn qualified_segments(
 ///
 /// Dotty spells the root package `<root>` and the default (empty) package
 /// `<empty>`, the latter being what a unit with no `package` clause is written
-/// against. The core has one root that is also the unnamed package, so a
-/// leading `<root>` or `<empty>` segment is dropped, and a bare empty name is
-/// the root too: `<empty>` and `""` are `[]`, `<root>.scala` is `["scala"]`.
+/// against. Source that writes an explicit `_root_.` prefix (`RootPackage` in
+/// `StdNames`, used to disambiguate a name from a shadowing local one) reaches
+/// the wire as a plain name `_root_`, spelled exactly like any other package
+/// segment, so it is recognized alongside the other two rather than by a
+/// dedicated tag. The core has one root that is also the unnamed package, so a
+/// leading `<root>`, `<empty>` or `_root_` segment is dropped, and a bare
+/// empty name is the root too: `<empty>`, `_root_` and `""` are `[]`,
+/// `<root>.scala` and `_root_.scala` are both `["scala"]`.
 pub(crate) fn package_segments(
     names: &NameTable,
     reference: u32,
 ) -> Result<Vec<String>, UnpickleError> {
     let mut segments = qualified_segments(names, reference)?;
-    if segments
-        .first()
-        .is_some_and(|first| first == ROOT_PACKAGE || first == EMPTY_PACKAGE)
-    {
+    if segments.first().is_some_and(|first| {
+        first == ROOT_PACKAGE || first == EMPTY_PACKAGE || first == ROOT_PACKAGE_SOURCE_SPELLING
+    }) {
         segments.remove(0);
     }
     if segments == [""] {
@@ -147,6 +151,12 @@ pub(crate) fn package_segments(
 
 const ROOT_PACKAGE: &str = "<root>";
 const EMPTY_PACKAGE: &str = "<empty>";
+/// `StdNames.nme.ROOTPKG`: the source-level spelling of the root package used
+/// in an explicit `_root_.` qualifier. Distinct from [`ROOT_PACKAGE`], which is
+/// the internal symbol name Dotty uses when it *doesn't* write the source
+/// spelling (e.g. a synthesized `TERMREFpkg` for an unqualified top-level
+/// reference).
+const ROOT_PACKAGE_SOURCE_SPELLING: &str = "_root_";
 
 fn collect_segments(
     names: &NameTable,
@@ -970,5 +980,31 @@ mod tests {
         assert_eq!(package_segments(&names, 5).unwrap(), Vec::<String>::new());
         // Only a leading segment is special.
         assert_eq!(package_segments(&names, 3).unwrap(), ["scala"]);
+    }
+
+    #[test]
+    fn an_explicit_root_package_qualifier_is_the_empty_path() {
+        // Actual table indices, after `table()`'s leading `ASTs` placeholder:
+        // 0 ASTs, 1 _root_, 2 scala, 3 (_root_.scala), 4 Int, 5 (_root_.scala.Int).
+        let names = table(vec![
+            utf8("_root_"),
+            utf8("scala"),
+            RawName::Qualified {
+                prefix: 1,
+                selector: 2,
+            },
+            utf8("Int"),
+            RawName::Qualified {
+                prefix: 3,
+                selector: 4,
+            },
+        ]);
+
+        // A lone `_root_` is the root package.
+        assert_eq!(package_segments(&names, 1).unwrap(), Vec::<String>::new());
+        // `_root_.scala` is `scala` under the root, same as `<root>.scala`.
+        assert_eq!(package_segments(&names, 3).unwrap(), ["scala"]);
+        // `_root_.scala.Int` drops only the leading `_root_`.
+        assert_eq!(package_segments(&names, 5).unwrap(), ["scala", "Int"]);
     }
 }
