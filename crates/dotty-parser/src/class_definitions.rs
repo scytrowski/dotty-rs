@@ -940,6 +940,16 @@ where
                 definition.metadata.modifiers.push(Modifier::PrivateLocal);
             }
         }
+        for parameter in value_param_clauses.iter().flatten() {
+            if let TreeKind::ValDef(definition) = &mut self.ast.get_mut(*parameter).kind
+                && !definition
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::ParamAccessor)
+            {
+                definition.metadata.modifiers.push(Modifier::ParamAccessor);
+            }
+        }
 
         let type_param_start = type_params.first().and_then(|child| {
             self.ast
