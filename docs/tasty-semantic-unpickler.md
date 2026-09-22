@@ -2201,6 +2201,22 @@ sorts later) or to a library the compiler corpus does not contain (549 of 584
 compiler references are to `scala.package`); they need the retry/orchestration
 layer and the classpath, not a fix here.
 
+**Update (#90):** `_root_` now resolves like `<root>` (`package_segments`
+drops a leading, or lone, `_root_` segment the same way). Rerunning the
+measurement above: the library run (with the `Object`/`AnyRef` stubs)
+`UnresolvedPackage` total for class completion drops from 303 to 241 (−62,
+close to the reported 61, since a few of those references also occur outside
+a `ClassInfo` failure's *first* reported cause) and the number of completed
+`ClassInfo`s rises from 1,952 to 1,959; `_root_` no longer appears in the
+unresolved-names table, replaced by the next thing that unit needed (e.g.
+`Serializable`). The compiler run's `UnresolvedPackage` total drops from
+1,541 to 1,297 — exactly 244, matching the reported count — but the number of
+completed classes is unchanged (1,700): with `_root_` resolved, those classes
+now fail one step later on an `UnresolvedMember` (`parent` failures rise from
+165 to 281), because the compiler corpus still has no library to complete
+`scala.*` members against. The `package` (package-object) finding above is
+unaffected and remains open for the orchestration layer, not this fix.
+
 ### Match types after 4d (library / compiler)
 
 `MATCHtype` and `MATCHCASEtype` occur in neither corpus (0 / 0 in both), so 4d
