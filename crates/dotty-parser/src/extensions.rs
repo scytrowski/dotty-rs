@@ -363,4 +363,54 @@ mod tests {
         assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn diagnoses_an_invalid_extension_member_and_keeps_following_methods() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X)\n  val y = x\n  def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Indent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Val), 19, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Newline, 28, 31),
+                token(TokenKind::Keyword(HardKeyword::Def), 31, 34),
+                token(TokenKind::Identifier, 35, 36),
+                token(TokenKind::Operator, 37, 38),
+                token(TokenKind::Identifier, 39, 40),
+                token(TokenKind::Outdent, 40, 40),
+                token(TokenKind::Eof, 40, 40),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        assert_eq!(extension.methods.len(), 2);
+        assert!(matches!(
+            parser.ast.get(extension.methods[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast.get(extension.methods[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
 }
