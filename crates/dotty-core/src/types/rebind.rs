@@ -164,6 +164,162 @@ pub fn rebind_type_lambda(
     result
 }
 
+/// Closes `parent` over `class`: every reachable `ThisType { class }` becomes
+/// the one canonical `RecThis` of a fresh recursive binder (Dotty's
+/// `RecType.closeOver`, used to turn a refinement's own `ThisType` into a
+/// self-reference of the closed refined type).
+///
+/// `parent` and everything reachable from it are read but never mutated;
+/// types that do not depend on `class` are shared with the old graph rather
+/// than copied. Two passes decide the result:
+///
+/// * if nothing reachable from `parent` is `ThisType { class }`, `parent`
+///   itself is returned unchanged and nothing is allocated (Dotty's
+///   `isReferredToBy` check, `RecType.parent` in that case);
+/// * otherwise a `Recursive` binder is allocated first, `parent` is copied
+///   with every matching `ThisType` replaced by that binder's one `RecThis`
+///   (further occurrences share the same `RecThis` id), and the new
+///   `Recursive`'s id is returned.
+///
+/// Nested `Method`, `Poly`, `TypeLambda` and `Recursive` binders reachable
+/// from `parent` are copied (their own bound references stay internally
+/// consistent) and may themselves contain a matching `ThisType`; annotations
+/// and class-literal annotation arguments are transformed the same way
+/// [`rebind_type_lambda`] transforms them.
+///
+/// Returns a [`TypeRebindError`] if `parent` is not filled or the graph is
+/// malformed (cyclic or nested too deeply); the store is rolled back to its
+/// state at the call on any error.
+pub fn close_over_this(
+    store: &mut SemanticStore,
+    parent: TypeId,
+    class: SymbolId,
+) -> Result<TypeId, TypeRebindError> {
+    if !store.types.is_filled(parent) {
+        return Err(TypeRebindError::UnfilledType { id: parent });
+    }
+    if !references_this_type(store, parent, class)? {
+        return Ok(parent);
+    }
+
+    let checkpoint = store.checkpoint();
+    let reserved = store.types.reserve();
+    let binder = reserved.id();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.close_over = Some((class, binder));
+    let result = rebinder.ty(parent).map(|transformed| {
+        rebinder.store.types.fill(
+            reserved,
+            Type::Recursive {
+                parent: transformed,
+            },
+        );
+        binder
+    });
+    if result.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    result
+}
+
+/// Whether `ThisType { class }` is reachable from `root`, without allocating
+/// anything: an iterative, visited-once walk of exactly the shapes
+/// [`Rebinder::build`] copies (a `RecThis` carries no `ThisType` of its own;
+/// its binder is reached, if at all, through the `Recursive` that owns it).
+/// Bounded by the number of distinct types reachable, so a cyclic graph
+/// (a `Recursive` reachable from its own parent) terminates instead of
+/// looping; that is not itself an error here, only in the transforming pass.
+fn references_this_type(
+    store: &SemanticStore,
+    root: TypeId,
+    class: SymbolId,
+) -> Result<bool, TypeRebindError> {
+    let mut stack = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if !store.types.is_filled(id) {
+            return Err(TypeRebindError::UnfilledType { id });
+        }
+        match store.types.get(id) {
+            Type::ThisType { class: found } => {
+                if *found == class {
+                    return Ok(true);
+                }
+            }
+            Type::NoType | Type::Error(_) | Type::NoPrefix => {}
+            Type::Constant(Constant::Class(class)) => stack.push(*class),
+            Type::Constant(_) => {}
+            Type::TermRef { prefix, .. } | Type::TypeRef { prefix, .. } => stack.push(*prefix),
+            Type::SuperType {
+                this_type,
+                super_type,
+            } => stack.extend([*this_type, *super_type]),
+            Type::Applied { tycon, args } => {
+                stack.push(*tycon);
+                stack.extend(args.iter().copied());
+            }
+            Type::Bounds { low, high } => stack.extend([*low, *high]),
+            Type::AliasingBounds { alias } => stack.push(*alias),
+            Type::ByName { result } => stack.push(*result),
+            Type::Flexible { underlying } => stack.push(*underlying),
+            Type::And { left, right } | Type::Or { left, right } => stack.extend([*left, *right]),
+            Type::Refined { parent, info, .. } => stack.extend([*parent, *info]),
+            Type::Recursive { parent } => stack.push(*parent),
+            Type::RecThis { .. } => {}
+            Type::Method(method) => {
+                stack.extend(method.params.iter().map(|param| param.ty));
+                stack.push(method.result);
+            }
+            Type::Poly(poly) => {
+                stack.extend(poly.params.iter().map(|param| param.bounds));
+                stack.push(poly.result);
+            }
+            Type::TypeLambda(lambda) => {
+                stack.extend(lambda.params.iter().map(|param| param.bounds));
+                stack.push(lambda.result);
+            }
+            Type::ParamRef { .. } => {}
+            Type::Match(MatchType {
+                bound,
+                scrutinee,
+                cases,
+            }) => {
+                stack.extend([*bound, *scrutinee]);
+                stack.extend(cases.iter().copied());
+            }
+            Type::MatchCase { pattern, result } => stack.extend([*pattern, *result]),
+            Type::Annotated {
+                underlying,
+                annotation,
+            } => {
+                stack.push(*underlying);
+                let annotation = store.annotations.get(*annotation);
+                stack.push(annotation.ty);
+                if let AnnotationArguments::Known(arguments) = &annotation.arguments {
+                    for argument in arguments {
+                        if let AnnotationValue::Constant(Constant::Class(class)) = argument.value {
+                            stack.push(class);
+                        }
+                    }
+                }
+            }
+            Type::Wildcard { bounds } => stack.push(*bounds),
+            Type::JavaArray { element } => stack.push(*element),
+            Type::ClassInfo(info) => {
+                stack.push(info.prefix);
+                stack.extend(info.parents.iter().copied());
+                if let Some(self_type) = info.self_type {
+                    stack.push(self_type);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// A term parameter of the method being built by
 /// [`method_type_from_symbols`]: the symbol it was entered as, and what its
 /// `MethodParam` will say.
@@ -331,6 +487,13 @@ struct Rebinder<'a> {
     /// Parameter symbol -> the binder position that replaces every reference
     /// to it (`abstract_symbols`). Empty when only rebinding.
     substitution: HashMap<SymbolId, (TypeId, u32)>,
+    /// `(target class, new recursive binder)` for [`close_over_this`]: every
+    /// `ThisType { class: target }` becomes the one canonical `RecThis` of the
+    /// new binder. `None` outside a close-over call.
+    close_over: Option<(SymbolId, TypeId)>,
+    /// The one `RecThis` [`close_over`](Self::close_over) has allocated so
+    /// far, made on first use and reused for every later occurrence.
+    close_over_rec_this: Option<TypeId>,
     /// Types being transformed right now, to refuse a cycle.
     in_progress: HashSet<TypeId>,
     depth: usize,
@@ -344,6 +507,8 @@ impl<'a> Rebinder<'a> {
             binders: HashMap::new(),
             annotations: HashMap::new(),
             substitution: HashMap::new(),
+            close_over: None,
+            close_over_rec_this: None,
             in_progress: HashSet::new(),
             depth: 0,
         }
@@ -377,6 +542,17 @@ impl<'a> Rebinder<'a> {
     fn parameter_ref(&mut self, symbol: SymbolId) -> TypeId {
         let (binder, index) = self.substitution[&symbol];
         self.store.types.alloc(Type::ParamRef { binder, index })
+    }
+
+    /// The one canonical `RecThis` of `binder` for a [`close_over_this`]
+    /// call, allocated on first use.
+    fn close_over_this_ref(&mut self, binder: TypeId) -> TypeId {
+        if let Some(existing) = self.close_over_rec_this {
+            return existing;
+        }
+        let rec_this = self.store.types.alloc(Type::RecThis { binder });
+        self.close_over_rec_this = Some(rec_this);
+        rec_this
     }
 
     fn all(&mut self, ids: &[TypeId]) -> Result<Vec<TypeId>, TypeRebindError> {
@@ -476,7 +652,11 @@ impl<'a> Rebinder<'a> {
     fn build(&mut self, id: TypeId) -> Result<TypeId, TypeRebindError> {
         let ty = self.store.types.get(id).clone();
         Ok(match ty {
-            Type::NoType | Type::Error(_) | Type::NoPrefix | Type::ThisType { .. } => id,
+            Type::NoType | Type::Error(_) | Type::NoPrefix => id,
+            Type::ThisType { class } => match self.close_over {
+                Some((target, binder)) if class == target => self.close_over_this_ref(binder),
+                _ => id,
+            },
             Type::Constant(Constant::Class(class)) => {
                 let new = self.ty(class)?;
                 self.keep_or_alloc(id, new == class, Type::Constant(Constant::Class(new)))
@@ -1885,5 +2065,361 @@ mod tests {
 
         assert!(get_method(&f, method).params.is_empty());
         assert_eq!(get_method(&f, method).result, f.leaf);
+    }
+
+    // --- close_over_this ---
+
+    fn this_type(f: &mut Fixture, class: SymbolId) -> TypeId {
+        f.store.types.alloc(Type::ThisType { class })
+    }
+
+    fn get_recursive(f: &Fixture, id: TypeId) -> TypeId {
+        match f.store.types.get(id) {
+            Type::Recursive { parent } => *parent,
+            other => panic!("not recursive: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_matching_this_type_returns_the_exact_original_id_and_allocates_nothing() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let other = SymbolId::new(2);
+        let parent = this_type(&mut f, other);
+        let before = type_count(&mut f);
+
+        let result = close_over_this(&mut f.store, parent, class).unwrap();
+
+        assert_eq!(result, parent);
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn one_matching_this_type_becomes_recursive_with_one_rec_this() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let leaf = f.leaf;
+        let this = this_type(&mut f, class);
+        let name = dotty_core_test_name(&mut f, "T");
+        let parent = f.store.types.alloc(Type::Refined {
+            parent: leaf,
+            name,
+            info: this,
+        });
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        assert_ne!(closed, parent);
+        let transformed_parent = get_recursive(&f, closed);
+        let Type::Refined { info, .. } = f.store.types.get(transformed_parent) else {
+            panic!("not refined");
+        };
+        assert_eq!(f.store.types.get(*info), &Type::RecThis { binder: closed });
+        // The original graph still names the class directly.
+        assert_eq!(f.store.types.get(this), &Type::ThisType { class });
+    }
+
+    #[test]
+    fn several_occurrences_share_one_rec_this_type_id() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let (this_a, this_b) = (this_type(&mut f, class), this_type(&mut f, class));
+        let parent = f.store.types.alloc(Type::And {
+            left: this_a,
+            right: this_b,
+        });
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        let transformed = get_recursive(&f, closed);
+        let Type::And { left, right } = f.store.types.get(transformed) else {
+            panic!("not an And");
+        };
+        assert_eq!(left, right);
+        assert_eq!(f.store.types.get(*left), &Type::RecThis { binder: closed });
+    }
+
+    #[test]
+    fn a_this_type_of_another_class_is_left_alone() {
+        let mut f = Fixture::new();
+        let (class, other) = (SymbolId::new(1), SymbolId::new(2));
+        let mine = this_type(&mut f, class);
+        let theirs = this_type(&mut f, other);
+        let parent = f.store.types.alloc(Type::And {
+            left: mine,
+            right: theirs,
+        });
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        let transformed = get_recursive(&f, closed);
+        let Type::And { left, right } = f.store.types.get(transformed) else {
+            panic!("not an And");
+        };
+        assert_eq!(f.store.types.get(*left), &Type::RecThis { binder: closed });
+        assert_eq!(*right, theirs);
+    }
+
+    #[test]
+    fn an_occurrence_under_applied_bounds_aliasing_bounds_and_annotated_is_substituted() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let leaf = f.leaf;
+        let this_1 = this_type(&mut f, class);
+        let applied = f.applied(&[this_1]);
+        let this_2 = this_type(&mut f, class);
+        let bounds = f.store.types.alloc(Type::Bounds {
+            low: leaf,
+            high: this_2,
+        });
+        let this_3 = this_type(&mut f, class);
+        let aliasing = f.store.types.alloc(Type::AliasingBounds { alias: this_3 });
+        let this_4 = this_type(&mut f, class);
+        let annotation = f.store.annotations.alloc(Annotation::new(this_4, None));
+        let annotated = f.store.types.alloc(Type::Annotated {
+            underlying: leaf,
+            annotation,
+        });
+        let inner = f.store.types.alloc(Type::And {
+            left: aliasing,
+            right: annotated,
+        });
+        let middle = f.store.types.alloc(Type::And {
+            left: bounds,
+            right: inner,
+        });
+        let parent = f.store.types.alloc(Type::And {
+            left: applied,
+            right: middle,
+        });
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        // Every reachable copy shares the one canonical RecThis.
+        let mut seen = HashSet::new();
+        let mut stack = vec![get_recursive(&f, closed)];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match f.store.types.get(id).clone() {
+                Type::RecThis { binder } => assert_eq!(binder, closed),
+                Type::And { left, right } => stack.extend([left, right]),
+                Type::Applied { tycon, args } => {
+                    stack.push(tycon);
+                    stack.extend(args);
+                }
+                Type::Bounds { low, high } => stack.extend([low, high]),
+                Type::AliasingBounds { alias } => stack.push(alias),
+                Type::Annotated { underlying, .. } => stack.push(underlying),
+                _ => {}
+            }
+        }
+        assert!(
+            seen.iter()
+                .any(|id| matches!(f.store.types.get(*id), Type::RecThis { .. }))
+        );
+    }
+
+    #[test]
+    fn an_occurrence_inside_a_nested_method_poly_or_type_lambda_keeps_its_own_binder() {
+        // `[A] => (x: this.type): this.type`, over a Method inside a fresh
+        // TypeLambda: the ThisType is substituted and the lambda's own
+        // ParamRef is untouched.
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let lambda = f.lambda(&["A"], |f, me| {
+            let a = f.param_ref(me, 0);
+            let method = f.store.types.reserve();
+            let method_id = method.id();
+            let this = this_type(f, class);
+            f.store.types.fill(
+                method,
+                Type::Method(MethodType {
+                    params: vec![MethodParam {
+                        name: TermName::new(f.store.names.intern("x")),
+                        ty: this,
+                        erased: false,
+                        varargs: false,
+                    }],
+                    result: a,
+                    kind: MethodKind::Plain,
+                }),
+            );
+            method_id
+        });
+
+        let closed = close_over_this(&mut f.store, lambda, class).unwrap();
+
+        let transformed = get_recursive(&f, closed);
+        let Type::TypeLambda(outer) = f.store.types.get(transformed) else {
+            panic!("not a lambda");
+        };
+        let Type::Method(method) = f.store.types.get(outer.result) else {
+            panic!("not a method");
+        };
+        assert_eq!(
+            f.store.types.get(method.params[0].ty),
+            &Type::RecThis { binder: closed }
+        );
+        // The lambda's own binder is preserved: its result still names it.
+        assert_eq!(f.param_ref_of(method.result), (transformed, 0));
+    }
+
+    #[test]
+    fn an_occurrence_inside_an_existing_recursive_type_does_not_disturb_its_own_rec_this() {
+        // `Recursive { inner -> Refined("T", ThisType(class)) }`: the inner
+        // Recursive is copied, its own RecThis stays naming the copy, and the
+        // ThisType(class) becomes a RecThis of the *outer* binder.
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let leaf = f.leaf;
+        let inner_reserved = f.store.types.reserve();
+        let inner_old = inner_reserved.id();
+        let inner_this = f.store.types.alloc(Type::RecThis { binder: inner_old });
+        let outer_this = this_type(&mut f, class);
+        let info = f.store.types.alloc(Type::And {
+            left: inner_this,
+            right: outer_this,
+        });
+        let name = dotty_core_test_name(&mut f, "T");
+        let refined = f.store.types.alloc(Type::Refined {
+            parent: leaf,
+            name,
+            info,
+        });
+        f.store
+            .types
+            .fill(inner_reserved, Type::Recursive { parent: refined });
+
+        let closed = close_over_this(&mut f.store, inner_old, class).unwrap();
+
+        assert_ne!(closed, inner_old);
+        let outer_parent = get_recursive(&f, closed);
+        let Type::Recursive {
+            parent: inner_new_parent,
+        } = f.store.types.get(outer_parent)
+        else {
+            panic!("not recursive");
+        };
+        let Type::Refined { info, .. } = f.store.types.get(*inner_new_parent) else {
+            panic!("not refined");
+        };
+        let Type::And { left, right } = f.store.types.get(*info) else {
+            panic!("not an And");
+        };
+        // The inner RecThis was copied to name the copied inner Recursive.
+        assert_eq!(
+            f.store.types.get(*left),
+            &Type::RecThis {
+                binder: outer_parent
+            }
+        );
+        // The outer ThisType became a RecThis of the new outer binder.
+        assert_eq!(f.store.types.get(*right), &Type::RecThis { binder: closed });
+        assert_ne!(outer_parent, closed);
+    }
+
+    #[test]
+    fn sharing_is_preserved_between_two_occurrences_reaching_the_same_dependent_node() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let this = this_type(&mut f, class);
+        let shared = f.applied(&[this]);
+        let parent = f.store.types.alloc(Type::And {
+            left: shared,
+            right: shared,
+        });
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        let transformed = get_recursive(&f, closed);
+        let Type::And { left, right } = f.store.types.get(transformed) else {
+            panic!("not an And");
+        };
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn the_original_graph_is_never_mutated() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let this = this_type(&mut f, class);
+        let leaf = f.leaf;
+        let name = dotty_core_test_name(&mut f, "T");
+        let parent = f.store.types.alloc(Type::Refined {
+            parent: leaf,
+            name,
+            info: this,
+        });
+        let before = f.store.types.get(parent).clone();
+
+        let closed = close_over_this(&mut f.store, parent, class).unwrap();
+
+        assert_ne!(closed, parent);
+        assert_eq!(f.store.types.get(parent), &before);
+        assert_eq!(f.store.types.get(this), &Type::ThisType { class });
+    }
+
+    #[test]
+    fn a_cyclic_graph_is_refused_not_looped_on() {
+        // `root -> And(this, root)`: root reaches itself through the right
+        // branch, with a `ThisType` in the left branch so the reachability
+        // scan (which tolerates a cycle) still finds a match and the
+        // transforming pass is entered.
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let reserved = f.store.types.reserve();
+        let root = reserved.id();
+        let this = this_type(&mut f, class);
+        f.store.types.fill(
+            reserved,
+            Type::And {
+                left: this,
+                right: root,
+            },
+        );
+
+        assert_eq!(
+            close_over_this(&mut f.store, root, class),
+            Err(TypeRebindError::CyclicType { id: root })
+        );
+    }
+
+    #[test]
+    fn an_unfilled_source_is_refused_and_nothing_is_allocated() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let hole = f.store.types.reserve().id();
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            close_over_this(&mut f.store, hole, class),
+            Err(TypeRebindError::UnfilledType { id: hole })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn a_failure_part_way_leaves_no_allocation_behind() {
+        let mut f = Fixture::new();
+        let class = SymbolId::new(1);
+        let this = this_type(&mut f, class);
+        let unfilled = f.store.types.reserve().id();
+        let parent = f.store.types.alloc(Type::And {
+            left: this,
+            right: unfilled,
+        });
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            close_over_this(&mut f.store, parent, class),
+            Err(TypeRebindError::UnfilledType { id: unfilled })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    fn dotty_core_test_name(f: &mut Fixture, text: &str) -> Name {
+        Name::new(f.store.names.intern(text), Namespace::Type)
     }
 }
