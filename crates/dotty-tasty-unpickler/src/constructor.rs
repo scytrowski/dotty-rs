@@ -238,3 +238,214 @@ impl TastyUnpickler<'_, '_, '_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Synthetic-wire regressions for the two owner-validation errors
+    //! (`constructor_owner`), which real Scala 3.9.0 output cannot produce (a
+    //! `<init>` is always owned by a class-like symbol, and class completion
+    //! always publishes a well-formed `ClassInfo`): these need direct access
+    //! to the unpickler's private state, so they live here rather than in
+    //! `tests/constructors.rs`.
+
+    use dotty_core::Definitions;
+    use dotty_core::store::SemanticStore;
+    use dotty_core::symbols::{Scope, SymbolInfo, SymbolKind};
+    use dotty_core::types::{ClassInfo, Type};
+    use dotty_tasty::tasty::{
+        DEFDEF_TAG, Header, IDENTTPT_TAG, NameTable, PACKAGE_TAG, RawName, Section, SectionTable,
+        TEMPLATE_TAG, TERMREFPKG_TAG, TYPEDEF_TAG, TYPEREFPKG_TAG, TastyFile,
+    };
+
+    use crate::error::UnpickleError;
+    use crate::unpickler::TastyUnpickler;
+
+    const NAMES: [&str; 4] = ["ASTs", "p", "C", "<init>"];
+
+    fn n(text: &str) -> u32 {
+        u32::try_from(NAMES.iter().position(|name| *name == text).unwrap()).unwrap()
+    }
+
+    fn nat(value: u32) -> Vec<u8> {
+        let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
+        let mut rest = value >> 7;
+        while rest > 0 {
+            groups.push(u8::try_from(rest & 0x7f).unwrap());
+            rest >>= 7;
+        }
+        groups.reverse();
+        groups
+    }
+
+    fn node(tag: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend(nat(u32::try_from(payload.len()).unwrap()));
+        bytes.extend(payload);
+        bytes
+    }
+
+    fn leaf(tag: u8, value: u32) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend(nat(value));
+        bytes
+    }
+
+    /// The type every constructor's result tree names here: the package `p`.
+    fn p_type() -> Vec<u8> {
+        leaf(TYPEREFPKG_TAG, n("p"))
+    }
+
+    /// `IDENTtpt p`: a type tree whose type is `p`, used as a always-resolves
+    /// placeholder return tree.
+    fn ident() -> Vec<u8> {
+        [&[IDENTTPT_TAG][..], &nat(n("p")), &p_type()].concat()
+    }
+
+    /// `DEFDEF <init>` with no parameters, no rhs, returning `ident()`.
+    fn no_arg_constructor() -> Vec<u8> {
+        node(DEFDEF_TAG, &[nat(n("<init>")), ident()].concat())
+    }
+
+    fn names() -> NameTable {
+        NameTable::from_entries(
+            NAMES
+                .iter()
+                .map(|text| RawName::Utf8((*text).to_owned()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn file_from(ast: &[u8]) -> Vec<u8> {
+        TastyFile::from_parts(
+            Header {
+                major_version: 28,
+                minor_version: 9,
+                experimental_version: 0,
+                tooling_version: "Scala 3.9.0".to_owned(),
+                uuid: [0; 16],
+            },
+            names(),
+            SectionTable::from_sections(vec![Section::new(0, ast)]),
+        )
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    #[test]
+    fn a_constructor_directly_under_a_package_has_a_non_class_like_owner() {
+        // `<init>` is classified by name alone (`def_def_kind`), so a bare
+        // DEFDEF entered as a direct package member (never inside a
+        // TEMPLATE) is still a Constructor, owned by the package.
+        let ast = node(
+            PACKAGE_TAG,
+            &[leaf(TERMREFPKG_TAG, n("p")), no_arg_constructor()].concat(),
+        );
+        let bytes = file_from(&ast);
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+        unpickler.enter_symbols().unwrap();
+        let at = u32::try_from(
+            file.ast_address_index()
+                .unwrap()
+                .iter_nodes()
+                .find(|found| found.tag == DEFDEF_TAG)
+                .unwrap()
+                .offset,
+        )
+        .unwrap();
+        let owner = unpickler.index().symbol_at(0); // the package symbol.
+
+        let result = unpickler.complete_symbol(at);
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::ConstructorOwnerNotClassLike { address: at, owner })
+        );
+    }
+
+    #[test]
+    fn a_constructor_whose_owner_is_complete_but_not_its_own_class_info_is_malformed() {
+        let ast = node(
+            PACKAGE_TAG,
+            &[
+                leaf(TERMREFPKG_TAG, n("p")),
+                node(
+                    TYPEDEF_TAG,
+                    &[nat(n("C")), node(TEMPLATE_TAG, &no_arg_constructor())].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let bytes = file_from(&ast);
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+        unpickler.enter_symbols().unwrap();
+        let index = file.ast_address_index().unwrap();
+        let class_at = u32::try_from(
+            index
+                .iter_nodes()
+                .find(|found| found.tag == TYPEDEF_TAG)
+                .unwrap()
+                .offset,
+        )
+        .unwrap();
+        let class = unpickler.index().symbol_at(class_at).expect("the class C");
+        assert_eq!(
+            unpickler.symbol_state_at(class_at).map(|(kind, _)| kind),
+            Some(SymbolKind::Class)
+        );
+
+        // Corrupt the class's info directly: `Complete`, but not the
+        // `ClassInfo` class completion would ever publish for it (a
+        // `ClassInfo` naming a *different* symbol). Real class completion
+        // never produces this; it is a defensive check.
+        let other_class = unpickler
+            .store
+            .symbols
+            .alloc(unpickler.store.symbols.get(class).clone());
+        let scope = unpickler.store.scopes.alloc(Scope::new(Some(other_class)));
+        let bogus = unpickler.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: unpickler.definitions.no_prefix,
+            class: other_class,
+            parents: Vec::new(),
+            declarations: scope,
+            self_type: None,
+        }));
+        unpickler.set_symbol_info(class, SymbolInfo::Complete(bogus));
+
+        let ctor_at = {
+            // The constructor is the TEMPLATE's only child, right after the
+            // TYPEDEF's name and the TEMPLATE's own length header.
+            let file_index = file.ast_address_index().unwrap();
+            file_index
+                .iter_nodes()
+                .find(|found| found.tag == DEFDEF_TAG)
+                .map(|found| u32::try_from(found.offset).unwrap())
+                .unwrap()
+        };
+
+        let result = unpickler.complete_symbol(ctor_at);
+
+        assert_eq!(
+            result,
+            Err(UnpickleError::MalformedOwnerClassInfo {
+                address: ctor_at,
+                owner: class,
+                info: bogus,
+            })
+        );
+        // The corruption survives (complete_symbol only rolls back what it
+        // itself touched, and it never reached the point of touching the
+        // constructor).
+        assert_eq!(
+            unpickler.symbol_state_at(ctor_at),
+            Some((SymbolKind::Constructor, SymbolInfo::Missing))
+        );
+    }
+}
