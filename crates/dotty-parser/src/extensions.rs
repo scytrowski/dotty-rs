@@ -147,13 +147,10 @@ where
             return;
         }
 
-        if self.cursor.lookahead(count).kind == TokenKind::Indent {
-            for _ in 0..count {
-                self.advance();
-            }
-        } else if self.cursor.lookahead(count).kind
-            == TokenKind::Punctuation(Punctuation::LeftBrace)
-        {
+        if matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+        ) {
             for _ in 0..count {
                 self.advance();
             }
