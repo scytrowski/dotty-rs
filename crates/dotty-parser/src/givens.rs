@@ -16,6 +16,7 @@ struct GivenSignature {
     name: dotty_core::TermName,
     type_params: Vec<TreeId<Untyped>>,
     value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+    method_like: bool,
     tpt: TreeId<Untyped>,
     rhs: TreeId<Untyped>,
     metadata: dotty_core::ast::Modifiers,
@@ -59,9 +60,15 @@ where
         } else {
             Vec::new()
         };
+        let mut method_like = !type_params.is_empty();
         let value_param_clauses =
             if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
-                let clauses = self.parse_term_param_clauses(ParamOwner::Given);
+                method_like = true;
+                let clauses = self
+                    .parse_term_param_clauses(ParamOwner::Given)
+                    .into_iter()
+                    .filter(|clause| !clause.is_empty())
+                    .collect();
                 self.expect_arrow();
                 clauses
             } else {
@@ -87,9 +94,6 @@ where
         if !metadata.modifiers.contains(&Modifier::Given) {
             metadata.modifiers.push(Modifier::Given);
         }
-        if !metadata.modifiers.contains(&Modifier::Final) {
-            metadata.modifiers.push(Modifier::Final);
-        }
 
         if !self.current_is_bare_assignment() {
             self.report(
@@ -103,6 +107,7 @@ where
                     name,
                     type_params,
                     value_param_clauses,
+                    method_like,
                     tpt,
                     rhs,
                     metadata,
@@ -111,11 +116,11 @@ where
         }
 
         self.advance();
-        if type_params.is_empty()
-            && value_param_clauses.is_empty()
+        if !method_like
             && !metadata.modifiers.contains(&Modifier::Inline)
             && !metadata.modifiers.contains(&Modifier::Erased)
         {
+            metadata.modifiers.push(Modifier::Final);
             metadata.modifiers.push(Modifier::Lazy);
         }
         let rhs = self.with_location(location, |parser| parser.expr());
@@ -125,6 +130,7 @@ where
                 name,
                 type_params,
                 value_param_clauses,
+                method_like,
                 tpt,
                 rhs,
                 metadata,
@@ -196,7 +202,7 @@ where
         mark: crate::Mark,
         signature: GivenSignature,
     ) -> ParsedStatement {
-        if signature.type_params.is_empty() && signature.value_param_clauses.is_empty() {
+        if !signature.method_like {
             ParsedStatement::Definition(self.alloc_from(
                 mark,
                 TreeKind::ValDef(ValDef {
@@ -369,7 +375,7 @@ mod tests {
         assert_eq!(definition.type_params.len(), 1);
         assert!(definition.value_param_clauses.is_empty());
         assert!(definition.metadata.modifiers.contains(&Modifier::Given));
-        assert!(definition.metadata.modifiers.contains(&Modifier::Final));
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Final));
         assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
         assert!(parser.diagnostics().is_empty());
     }
@@ -520,5 +526,55 @@ mod tests {
             TreeKind::DefDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_an_explicit_empty_given_clause_as_a_method_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given () => Empty = makeEmpty",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        assert!(definition.value_param_clauses.is_empty());
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Final));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_given_signature_without_its_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A] Show",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_statement(Location::Elsewhere);
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 }
