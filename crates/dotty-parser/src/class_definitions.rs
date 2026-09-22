@@ -165,6 +165,20 @@ where
         ))
     }
 
+    fn validate_enum_modifiers(&mut self, mut metadata: Modifiers) -> Modifiers {
+        metadata.modifiers.retain(|modifier| {
+            if matches!(modifier, Modifier::Infix) {
+                return true;
+            }
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                format!("modifier `{modifier:?}` is not allowed on an enum"),
+            );
+            false
+        });
+        metadata
+    }
+
     fn parse_type_like_definition(
         &mut self,
         is_trait: bool,
@@ -229,6 +243,9 @@ where
         );
         self.ast.get_mut(template).position = Some(template_position);
         let mut metadata = prefix.metadata;
+        if is_enum {
+            metadata = self.validate_enum_modifiers(metadata);
+        }
         if is_case {
             metadata.modifiers.push(Modifier::Case);
         }
@@ -1092,6 +1109,64 @@ mod tests {
         };
         assert_eq!(metadata.modifiers, vec![Modifier::Enum]);
         assert!(matches!(parser.ast().get(*rhs).kind, TreeKind::Template(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_disallowed_enum_modifier_without_losing_the_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "final enum E",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Enum), 6, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(definition.metadata.modifiers, vec![Modifier::Enum]);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
+    }
+
+    #[test]
+    fn preserves_allowed_enum_visibility_and_infix_modifiers() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "private infix enum E",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::Keyword(HardKeyword::Enum), 14, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(
+            definition.metadata.modifiers,
+            vec![Modifier::Infix, Modifier::Enum]
+        );
+        assert!(definition.metadata.visibility.is_some());
         assert!(parser.diagnostics().is_empty());
     }
 
