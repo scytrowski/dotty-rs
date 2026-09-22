@@ -433,10 +433,15 @@ fn walk_lambda_tpt(
 }
 
 /// Mirrors [`crate::unpickler::TastyUnpickler::enter_refined_tpt`]'s
-/// reachability: the parent type tree, a declared-type position of its own.
-/// The refinement's own members are not walked from here — every `VALDEF`/
-/// `DEFDEF`/`TYPEDEF` in the file is already its own root (see
-/// [`declared_type_roots`]), refinement member or not.
+/// reachability: every immediate member's declared type ([`walk_member`],
+/// exactly the same dispatch `enter_refined_tpt`'s own two-stage member
+/// entering — header, then `enter_definition_body` — ends up calling), then
+/// the parent type tree, a declared-type position of its own. A refinement's
+/// members are *not* `TEMPLATE`/`PACKAGE` children, so unlike an ordinary
+/// class's members, nothing else in this module's root enumeration would
+/// ever reach them; skipping this walk would silently exempt a whole
+/// `REFINEDtpt` member's declared type from ever being checked, review found
+/// (issue #101 PR #102).
 fn walk_refined_tpt(
     ast: &AstView<'_>,
     tree: u32,
@@ -446,9 +451,16 @@ fn walk_refined_tpt(
     reachable: &mut HashSet<u32>,
 ) -> Result<(), UnpickleError> {
     reachable.insert(tree);
-    let Some((&parent, _stats)) = children.split_first() else {
+    let Some((&parent, stats)) = children.split_first() else {
         return Ok(());
     };
+    for &stat in stats {
+        if let Some(stat_tag) = ast.tag_at(stat)
+            && matches!(stat_tag, TYPEDEF_TAG | VALDEF_TAG | DEFDEF_TAG)
+        {
+            walk_member(ast, stat, stat_tag, visited, reachable)?;
+        }
+    }
     walk(ast, parent, Mode::TypeTree, depth + 1, visited, reachable)
 }
 
@@ -990,6 +1002,41 @@ mod tests {
             identity.outcome,
             IdentityOutcome::OutOfScope,
             "a local DEFDEF nested in an enclosing DEFDEF's BLOCK body is never entered, real or mirrored: {report:?}"
+        );
+    }
+
+    /// Regression for the review's second `reachability.rs` finding (issue
+    /// #101 PR #102): a `REFINEDtpt`'s own members are not `TEMPLATE`/
+    /// `PACKAGE` children — `enter_refined_tpt`'s own two-stage entering
+    /// (header, then `enter_definition_body`) is the *only* thing that ever
+    /// reaches them — so a `LAMBDAtpt` sitting at a refinement member's own
+    /// declared-type position must still be `Unaccounted` when unentered.
+    /// `walk_refined_tpt` not walking `stats` at all would have reported this
+    /// `LAMBDAtpt` as `OutOfScope`, silently exempting every refinement
+    /// member's declared type from the oracle.
+    #[test]
+    fn an_unentered_identity_at_a_refinement_members_own_declared_type_position_is_unaccounted() {
+        let member = node(
+            VALDEF_TAG,
+            &[vec![nat(0)], node(LAMBDATPT_TAG, &[])].concat(),
+        );
+        let parent = leaf(TERMREFPKG_TAG, 0);
+        let refined = node(REFINEDTPT_TAG, &[parent, member].concat());
+        let outer = node(VALDEF_TAG, &[vec![nat(0)], refined].concat());
+        let bytes = build_file(&package(&outer));
+        let parsed = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let index = TastySemanticIndex::new();
+
+        let report = identity_reachability(&parsed, &index).unwrap();
+
+        let identity = report
+            .iter()
+            .find(|node| node.tag == LAMBDATPT_TAG)
+            .unwrap();
+        assert_eq!(
+            identity.outcome,
+            IdentityOutcome::Unaccounted,
+            "a refinement member's own declared-type position is a supported position, never out of scope: {report:?}"
         );
     }
 }
