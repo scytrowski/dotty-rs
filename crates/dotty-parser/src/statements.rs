@@ -244,7 +244,10 @@ where
     }
 
     fn parse_top_level_statement(&mut self, location: Location) -> ParsedStatement {
-        if is_top_level_statement_start(self.current().kind) || self.starts_definition_prefix() {
+        if self.starts_extension_definition()
+            || is_top_level_statement_start(self.current().kind)
+            || self.starts_definition_prefix()
+        {
             return self.parse_statement(location);
         }
 
@@ -427,6 +430,34 @@ mod tests {
         );
 
         assert!(!parser.starts_extension_definition());
+    }
+
+    #[test]
+    fn accepts_an_extension_as_a_top_level_definition_start() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X) def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Def), 17, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Operator, 23, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        assert!(matches!(
+            parser.parse_top_level_statement(Location::Elsewhere),
+            ParsedStatement::Definition(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
