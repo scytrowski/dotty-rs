@@ -841,6 +841,7 @@ pub struct Modifiers {
 
 pub enum Modifier {
     Trait,
+    Enum,
     Abstract,
     Final,
     Sealed,
@@ -863,9 +864,10 @@ pub enum Modifier {
 }
 ```
 
-`Trait` is a parser-level definition flag. It preserves the source
+`Trait` and `Enum` are parser-level definition flags. They preserve the source
 distinction between `trait T` and `class T` when both use the shared
-`TypeDef`/`Template` tree family; it must not be inferred from constructor
+`TypeDef`/`Template` tree family; enum definitions use the same family rather
+than a dedicated tree kind. These flags must not be inferred from constructor
 shape or body contents. Later source flags such as `Case` can compose with
 this metadata without changing the phase boundary.
 
