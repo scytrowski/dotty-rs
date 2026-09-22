@@ -15,7 +15,7 @@ use dotty_core::{
 
 use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
-use crate::templates::TemplateBody;
+use crate::templates::{TemplateBody, TemplateBodyResult};
 use crate::{Location, ParseDiagnosticKind, Parser};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,8 +254,8 @@ where
         let body = self.parse_optional_template_body();
         TemplateTail {
             parents,
-            self_val: None,
-            body,
+            self_val: body.self_val,
+            body: body.members,
             metadata: UntypedTemplateMetadata { derives, uses },
         }
     }
@@ -445,7 +445,7 @@ where
         }
     }
 
-    fn parse_optional_template_body(&mut self) -> Vec<TreeId<Untyped>> {
+    fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
         if matches!(
             self.current().kind,
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
@@ -463,7 +463,10 @@ where
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an indented template body after `:`",
                 );
-                return Vec::new();
+                return TemplateBodyResult {
+                    self_val: None,
+                    members: Vec::new(),
+                };
             }
         }
 
@@ -472,7 +475,10 @@ where
                 self.parse_template_body(TemplateBody::Braced)
             }
             TokenKind::Indent => self.parse_template_body(TemplateBody::Indented),
-            _ => Vec::new(),
+            _ => TemplateBodyResult {
+                self_val: None,
+                members: Vec::new(),
+            },
         }
     }
 
