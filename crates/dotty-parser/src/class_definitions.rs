@@ -126,8 +126,7 @@ where
                 body_start,
             },
         );
-        let template_position =
-            self.template_position(constructor, constructor_start, &tail.parents, &tail.body);
+        let template_position = self.template_position(constructor, constructor_start, &tail);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -205,8 +204,7 @@ where
                 body_start,
             },
         );
-        let template_position =
-            self.template_position(constructor, constructor_start, &tail.parents, &tail.body);
+        let template_position = self.template_position(constructor, constructor_start, &tail);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
@@ -505,8 +503,7 @@ where
         &self,
         constructor: TreeId<Untyped>,
         start: u32,
-        parents: &[TreeId<Untyped>],
-        body: &[TreeId<Untyped>],
+        tail: &TemplateTail,
     ) -> dotty_core::SourceSpan {
         let constructor_range = self.ast.get(constructor).position.map(|position| {
             (
@@ -514,25 +511,25 @@ where
                 position.span().range().end(),
             )
         });
-        let body_start = body.first().and_then(|tree| {
+        let body_start = tail.body.first().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().start())
         });
-        let body_end = body.last().and_then(|tree| {
+        let body_end = tail.body.last().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().end())
         });
-        let parent_end = parents.last().and_then(|tree| {
+        let parent_end = tail.parents.last().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().end())
         });
-        let template_start = if parents.is_empty()
+        let template_start = if tail.parents.is_empty()
             && constructor_range.is_some_and(|(constructor_start, constructor_end)| {
                 constructor_start == constructor_end
             })
@@ -542,7 +539,21 @@ where
         } else {
             start
         };
+        let metadata_end = tail
+            .metadata
+            .derives
+            .iter()
+            .chain(tail.metadata.uses.iter().map(|use_ref| &use_ref.reference))
+            .chain(tail.self_val.iter())
+            .filter_map(|tree| {
+                self.ast
+                    .get(*tree)
+                    .position
+                    .map(|position| position.span().range().end())
+            })
+            .max();
         let template_end = body_end
+            .or(metadata_end)
             .or(parent_end)
             .or_else(|| constructor_range.map(|(_, end)| end))
             .unwrap_or(template_start);
@@ -937,6 +948,17 @@ mod tests {
         };
 
         assert_eq!(template.metadata.uses.len(), 2);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .end(),
+            37
+        );
         assert!(template.metadata.uses[0].initially);
         assert!(!template.metadata.uses[1].initially);
         assert!(matches!(
