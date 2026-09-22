@@ -1,4 +1,4 @@
-use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef, VisibilitySyntax};
+use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
 use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -83,14 +83,7 @@ where
                 .current_text()
                 .ok()
                 .is_some_and(|text| text.trim_matches('`').starts_with("$type_wildcard_"));
-        if is_synthetic_wildcard_name {
-            if matches!(
-                self.context.param_owner,
-                Some(ParamOwner::Class | ParamOwner::CaseClass)
-            ) {
-                metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
-            }
-        } else {
+        if !is_synthetic_wildcard_name {
             metadata.modifiers.push(dotty_core::ast::Modifier::Param);
             if matches!(
                 self.context.param_owner,
@@ -457,10 +450,7 @@ mod tests {
             panic!("expected a type definition");
         };
         assert!(metadata.modifiers.is_empty());
-        assert_eq!(
-            metadata.visibility,
-            Some(VisibilitySyntax::Private { qualifier: None })
-        );
+        assert!(metadata.visibility.is_none());
         assert!(parser.diagnostics().is_empty());
     }
 

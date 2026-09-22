@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -218,8 +218,8 @@ object Main:
     val prefixWords = prefixText.split("[^A-Za-z]+").toSet
     val modifiers = ordered.map(name => quote(name)).mkString("[", ",", "]")
     val visibility =
-      if mods.is(Private) || prefixWords.contains("private") then "private"
-      else if mods.is(Protected) || prefixWords.contains("protected") then "protected"
+      if prefixWords.contains("private") then "private"
+      else if prefixWords.contains("protected") then "protected"
       else ""
     val sourceQualifier =
       prefixText
