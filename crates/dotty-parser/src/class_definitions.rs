@@ -275,7 +275,7 @@ where
         let parents = self.parse_parent_clause();
         let derives = self.parse_derives_clause();
         let uses = self.parse_uses_clause();
-        let body = self.with_enum_body(false, |parser| parser.parse_optional_template_body());
+        let body = self.parse_optional_template_body();
         TemplateTail {
             parents,
             self_val: body.self_val,
