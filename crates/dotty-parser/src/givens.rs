@@ -158,7 +158,9 @@ where
             metadata.modifiers.push(Modifier::Given);
         }
 
-        let body = self.parse_optional_template_body().members;
+        let body = self
+            .with_enum_body(false, |parser| parser.parse_optional_template_body())
+            .members;
         let template = self.allocate_given_template(
             mark.start(),
             type_params.clone(),

@@ -102,10 +102,13 @@ where
 
         let kind = self.current().kind;
         let methods = match kind {
-            TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                self.parse_template_body(TemplateBody::Braced).members
-            }
-            TokenKind::Indent => self.parse_template_body(TemplateBody::Indented).members,
+            TokenKind::Punctuation(Punctuation::LeftBrace) => self
+                .with_enum_body(false, |parser| {
+                    parser.parse_template_body(TemplateBody::Braced).members
+                }),
+            TokenKind::Indent => self.with_enum_body(false, |parser| {
+                parser.parse_template_body(TemplateBody::Indented).members
+            }),
             TokenKind::Keyword(HardKeyword::Def) | TokenKind::Keyword(HardKeyword::Export) => {
                 self.parse_one_extension_method()
             }

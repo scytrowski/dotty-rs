@@ -118,7 +118,7 @@ where
         };
         self.advance();
         let name = self.parse_object_name();
-        let tail = self.parse_template_tail();
+        let tail = self.with_enum_body(false, |parser| parser.parse_template_tail());
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast
@@ -212,9 +212,9 @@ where
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
         let tail = if is_enum {
-            self.with_enum_body(|parser| parser.parse_template_tail())
+            self.with_enum_body(true, |parser| parser.parse_template_tail())
         } else {
-            self.parse_template_tail()
+            self.with_enum_body(false, |parser| parser.parse_template_tail())
         };
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
@@ -275,7 +275,7 @@ where
         let parents = self.parse_parent_clause();
         let derives = self.parse_derives_clause();
         let uses = self.parse_uses_clause();
-        let body = self.parse_optional_template_body();
+        let body = self.with_enum_body(false, |parser| parser.parse_optional_template_body());
         TemplateTail {
             parents,
             self_val: body.self_val,
@@ -1223,6 +1223,49 @@ mod tests {
             1
         );
         assert!(parser.diagnostics()[0].message().contains("enum cases"));
+    }
+
+    #[test]
+    fn does_not_treat_case_classes_in_nested_templates_as_enum_cases() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { class Inner { case class C } }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Class), 9, 14),
+                token(TokenKind::Identifier, 15, 20),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 21, 22),
+                token(TokenKind::CaseClass, 23, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 36, 37),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 38, 39),
+                token(TokenKind::Eof, 39, 39),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        let TreeKind::Template(enum_template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected the enum template");
+        };
+        let TreeKind::TypeDef(inner) = &parser.ast().get(enum_template.body[0]).kind else {
+            panic!("expected the nested class");
+        };
+        let TreeKind::Template(inner_template) = &parser.ast().get(inner.rhs).kind else {
+            panic!("expected the nested class template");
+        };
+        let TreeKind::TypeDef(case_class) = &parser.ast().get(inner_template.body[0]).kind else {
+            panic!("expected the nested case class");
+        };
+        assert!(case_class.metadata.modifiers.contains(&Modifier::Case));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]

@@ -182,10 +182,14 @@ where
         result
     }
 
-    /// Runs a nested template parse with enum-case handling enabled.
-    pub(crate) fn with_enum_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+    /// Runs a nested template parse with the requested enum-case policy.
+    pub(crate) fn with_enum_body<T>(
+        &mut self,
+        enabled: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let previous = self.context.enum_body;
-        self.context.enum_body = true;
+        self.context.enum_body = enabled;
         let result = parse(self);
         self.context.enum_body = previous;
         result
