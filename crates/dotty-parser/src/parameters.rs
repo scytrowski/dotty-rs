@@ -107,9 +107,12 @@ where
         let mut params = Vec::new();
         let mut metadata = Modifiers::default();
 
+        if is_using || owner == ParamOwner::Given {
+            metadata.modifiers.push(Modifier::Given);
+        }
+
         if is_using {
             self.advance();
-            metadata.modifiers.push(Modifier::Given);
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,

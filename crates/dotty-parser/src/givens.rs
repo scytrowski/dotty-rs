@@ -438,6 +438,43 @@ mod tests {
     }
 
     #[test]
+    fn marks_ordinary_conditional_given_parameters_as_contextual() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given (ctx: Ctx) => Service = makeService",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Colon), 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 27),
+                token(TokenKind::Operator, 28, 29),
+                token(TokenKind::Identifier, 30, 40),
+                token(TokenKind::Eof, 40, 40),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        let [parameter] = definition.value_param_clauses[0].as_slice() else {
+            panic!("expected one conditional parameter");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+            panic!("expected a value parameter");
+        };
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_inline_prefix_without_synthesizing_lazy() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
