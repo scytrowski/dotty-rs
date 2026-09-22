@@ -26,6 +26,7 @@ mod binders;
 mod class;
 mod completion;
 mod constructor;
+mod discovery;
 mod enter;
 mod error;
 mod index;
@@ -34,6 +35,7 @@ mod mapping;
 mod method;
 mod names;
 mod packages;
+mod reachability;
 mod recursive;
 mod refined;
 mod refinement;
@@ -46,5 +48,6 @@ mod unpickler;
 pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
     pub use crate::index::TastySemanticIndex;
+    pub use crate::reachability::{IdentityNode, IdentityOutcome, identity_reachability};
     pub use crate::unpickler::TastyUnpickler;
 }

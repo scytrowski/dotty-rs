@@ -149,7 +149,7 @@ impl TastyUnpickler<'_, '_, '_> {
 
 /// The tags of the trees `readTree` reads that are type trees too, which the
 /// type-tree projection owns.
-fn is_type_tree_tag(tag: u8) -> bool {
+pub(crate) fn is_type_tree_tag(tag: u8) -> bool {
     matches!(
         tag,
         IDENTTPT_TAG

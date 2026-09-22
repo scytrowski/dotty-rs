@@ -310,11 +310,30 @@ fn a_constructor_selection_that_is_not_on_new_is_malformed() {
 }
 
 #[test]
-fn a_parent_that_cannot_be_projected_leaves_the_class_missing() {
-    let completed = complete(&class_unit(&[ident(), poison_type()], None));
+fn a_parent_naming_an_address_that_does_not_exist_fails_enter_symbols() {
+    // `poison_type()` is a bare `TYPEREFdirect` parent naming an
+    // out-of-range address. Milestone 5d2c's broadened pass-1 discovery
+    // scans every parent through `discover_identities` (`TypeTree` mode's
+    // fallback to `SemanticType` for a bare reference tag), which validates
+    // a direct/symbol reference's target address (`reference_target`) — so
+    // this is caught eagerly, during `enter_symbols`, rather than deferred
+    // to `type_of_parent`/completion the way the pre-5d2c narrow whitelist
+    // (which never inspected a `TYPEREFdirect` parent at all) left it.
+    let bytes = class_unit(&[ident(), poison_type()], None);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    packages.enter(&mut store, SymbolOrigin::Synthetic, &["p"]);
+    let mut unpickler = TastyUnpickler::with_packages(&file, &mut store, definitions, packages);
 
-    assert!(completed.result.is_err());
-    assert_eq!(completed.class_state, SymbolInfo::Missing);
+    assert_eq!(
+        unpickler.enter_symbols().map(|_| ()),
+        Err(UnpickleError::InvalidReferenceTarget {
+            from: 13,
+            to: 0x3fff,
+        })
+    );
 }
 
 #[test]

@@ -133,6 +133,27 @@ impl<'bytes> AstView<'bytes> {
         Err(UnpickleError::InvalidReferenceTarget { from, to: current })
     }
 
+    /// The address of the first tree at or after `start` that is not a
+    /// `SHAREDtype`: mirrors [`resolve_shared_term`](Self::resolve_shared_term)
+    /// exactly, for `SHAREDtype` links. Used wherever a `SHAREDtype` chain
+    /// must be bounded on its own terms (the same [`MAX_SHARED_DEPTH`] real
+    /// projection's `type_at`/`this_class` use for it), independent of
+    /// whatever general nesting-depth budget the caller is separately
+    /// tracking.
+    pub(crate) fn resolve_shared_type(&self, start: u32, from: u32) -> Result<u32, UnpickleError> {
+        let mut current = start;
+        for _ in 0..=MAX_SHARED_DEPTH {
+            match self.tree_at(current, from)? {
+                RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => match term.value {
+                    TermValue::AstRef(target) => current = target,
+                    _ => return Err(UnpickleError::InvalidReferenceTarget { from, to: current }),
+                },
+                _ => return Ok(current),
+            }
+        }
+        Err(UnpickleError::InvalidReferenceTarget { from, to: current })
+    }
+
     pub(crate) fn node(&self, at: u32) -> Result<&RawNode<'bytes>, UnpickleError> {
         self.index
             .get(at)
@@ -255,6 +276,31 @@ mod tests {
         ));
         assert_eq!(
             ast.resolve_shared_term(18, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 1 })
+        );
+    }
+
+    #[test]
+    fn a_shared_type_chain_resolves_to_the_first_other_tree() {
+        let bytes = file();
+        let ast = view(&bytes);
+        // 4 is a SHAREDtype directly to the TYPEREFpkg at 2.
+        assert_eq!(ast.resolve_shared_type(4, 0), Ok(2));
+        assert_eq!(ast.resolve_shared_type(2, 0), Ok(2));
+    }
+
+    #[test]
+    fn a_shared_type_self_link_or_bad_target_is_an_invalid_reference() {
+        let bytes = file();
+        let ast = view(&bytes);
+        // 8 is a SHAREDtype to itself.
+        assert_eq!(
+            ast.resolve_shared_type(8, 0),
+            Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 8 })
+        );
+        // 10 is a SHAREDtype to address 1, not a node.
+        assert_eq!(
+            ast.resolve_shared_type(10, 0),
             Err(UnpickleError::InvalidReferenceTarget { from: 0, to: 1 })
         );
     }
