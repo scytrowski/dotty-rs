@@ -63,6 +63,21 @@ where
         Vec::new()
     }
 
+    /// Parses one term parameter clause for a grammar production that needs
+    /// to enforce its own clause ordering, such as `extension`.
+    pub(crate) fn parse_single_term_param_clause(
+        &mut self,
+        owner: ParamOwner,
+        first_ordinary_clause: bool,
+        is_using: bool,
+    ) -> Vec<TreeId<Untyped>> {
+        if self.current_is_unsupported_parameter_clause() {
+            self.parse_unsupported_term_param_clause()
+        } else {
+            self.parse_term_param_clause_with_policy(owner, first_ordinary_clause, is_using)
+        }
+    }
+
     /// Consumes layout separators only when they lead to the requested
     /// parameter-clause delimiter. A newline before a return type or method
     /// body remains available to the enclosing grammar.
@@ -210,7 +225,7 @@ where
         )
     }
 
-    fn current_is_using_parameter_clause(&mut self) -> bool {
+    pub(crate) fn current_is_using_parameter_clause(&mut self) -> bool {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return false;
         }
@@ -223,7 +238,7 @@ where
                 .unwrap_or(false)
     }
 
-    fn current_is_unsupported_parameter_clause(&mut self) -> bool {
+    pub(crate) fn current_is_unsupported_parameter_clause(&mut self) -> bool {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return false;
         }

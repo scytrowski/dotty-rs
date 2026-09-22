@@ -255,6 +255,7 @@ fn render_tree(
                 source,
             ));
         }
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => {}
         TreeKind::ValDef(definition) => {
             let source_text = source_slice(tree, source);
             let name = names.resolve(definition.name.as_name().text());
@@ -605,6 +606,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         }
         TreeKind::Template(_) => "Template",
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => "ExtMethods",
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::TypeTree(_) => "TypeTree",
@@ -804,6 +806,17 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => vec![module.template],
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+            let mut children = Vec::new();
+            children.extend(
+                extension
+                    .param_clauses
+                    .iter()
+                    .flat_map(|clause| clause.iter().copied()),
+            );
+            children.extend(extension.methods.iter().copied());
+            children
+        }
         TreeKind::LambdaTypeTree(lambda) => {
             let mut children = lambda.type_params.clone();
             children.push(lambda.body);
