@@ -18,7 +18,7 @@ object Main:
         return
       case _ =>
         throw IllegalArgumentException(
-          "usage: scala-parser-oracle [--mode pattern|compilation] <source-file> | --batch manifest"
+          "usage: scala-parser-oracle [--mode pattern|block|compilation] <source-file> | --batch manifest"
         )
 
     println(parseAndRender(mode, path))

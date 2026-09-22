@@ -16,12 +16,15 @@ fn main() {
 
     let (mode, path) = match args.as_slice() {
         [path] => ("expr", path.as_str()),
-        [flag, mode, path] if flag == "--mode" && (mode == "pattern" || mode == "compilation") => {
+        [flag, mode, path]
+            if flag == "--mode"
+                && (mode == "pattern" || mode == "compilation" || mode == "block") =>
+        {
             (mode.as_str(), path.as_str())
         }
         _ => {
             eprintln!(
-                "usage: dotty-parser-smoke-dump [--mode pattern|compilation] <source-file> | --batch manifest"
+                "usage: dotty-parser-smoke-dump [--mode pattern|block|compilation] <source-file> | --batch manifest"
             );
             process::exit(2);
         }
@@ -29,7 +32,7 @@ fn main() {
 
     if path.is_empty() {
         eprintln!(
-            "usage: dotty-parser-smoke-dump [--mode pattern|compilation] <source-file> | --batch manifest"
+            "usage: dotty-parser-smoke-dump [--mode pattern|block|compilation] <source-file> | --batch manifest"
         );
         process::exit(2);
     }

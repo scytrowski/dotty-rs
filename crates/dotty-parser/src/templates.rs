@@ -163,7 +163,7 @@ where
                 Err(_) => return None,
             }
         };
-        let tpt = if self.accept(TokenKind::Punctuation(Punctuation::Colon)) {
+        let tpt = if self.accept_self_colon() {
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
         } else {
             self.synthetic_type_tree_at(mark.start())
@@ -204,7 +204,7 @@ where
         {
             return true;
         }
-        if self.cursor.lookahead(1).kind != TokenKind::Punctuation(Punctuation::Colon) {
+        if !is_self_colon(self.cursor.lookahead(1).kind) {
             return false;
         }
         let mut offset = 2;
@@ -227,6 +227,15 @@ where
                 return true;
             }
             offset = offset.saturating_add(1);
+        }
+    }
+
+    fn accept_self_colon(&mut self) -> bool {
+        if is_self_colon(self.current().kind) {
+            self.advance();
+            true
+        } else {
+            false
         }
     }
 
@@ -281,6 +290,16 @@ where
             .take_while(|character| matches!(character, ' ' | '\t'))
             .collect()
     }
+}
+
+const fn is_self_colon(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Punctuation(Punctuation::Colon)
+            | TokenKind::ColonFollow
+            | TokenKind::ColonOp
+            | TokenKind::ColonEol
+    )
 }
 
 #[cfg(test)]
