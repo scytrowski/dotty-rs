@@ -255,7 +255,39 @@ fn render_tree(
                 source,
             ));
         }
-        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => {}
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+            fields.push(format!(
+                "\"param_clause_sizes\":[{}]",
+                extension
+                    .param_clauses
+                    .iter()
+                    .map(|clause| clause.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            fields.push(format!(
+                "\"using_clauses\":[{}]",
+                extension
+                    .param_clauses
+                    .iter()
+                    .map(|clause| {
+                        clause
+                            .first()
+                            .is_some_and(|parameter| {
+                                matches!(
+                                    &arena.get(*parameter).kind,
+                                    TreeKind::ValDef(value)
+                                        if value.metadata.modifiers.contains(
+                                            &dotty_core::ast::Modifier::Given
+                                        )
+                                )
+                            })
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
         TreeKind::ValDef(definition) => {
             let source_text = source_slice(tree, source);
             let name = names.resolve(definition.name.as_name().text());

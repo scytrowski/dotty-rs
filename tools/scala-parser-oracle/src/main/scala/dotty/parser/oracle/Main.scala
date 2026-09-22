@@ -145,6 +145,17 @@ object Main:
           .mkString("[", ",", "]")
         )
         fields ++= renderDefinitionMetadata(ddef.mods, ddef, source, placeholderBase, includeMutable = false)
+      case ext if normalizedKind == "ExtMethods" =>
+        val clauses = ext.productElement(0).asInstanceOf[List[List[dotty.tools.dotc.ast.Trees.Tree[?]]]]
+        fields += field("param_clause_sizes", clauses.map(_.size).mkString("[", ",", "]"))
+        fields += field(
+          "using_clauses",
+          clauses.map: clause =>
+            clause.headOption match
+              case Some(value: dotty.tools.dotc.ast.Trees.ValDef[?]) => value.mods.is(Given).toString
+              case _ => "false"
+          .mkString("[", ",", "]")
+        )
       case patdef: dotty.tools.dotc.ast.untpd.PatDef =>
         fields ++= renderDefinitionMetadata(patdef.mods, patdef, source, placeholderBase)
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
