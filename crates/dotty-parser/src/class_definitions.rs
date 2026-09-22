@@ -548,6 +548,12 @@ where
                     .map(|position| position.span().range().end()),
                 _ => None,
             })
+            .or_else(|| {
+                type_params
+                    .last()
+                    .and_then(|parameter| self.ast.get(*parameter).position)
+                    .map(|position| position.span().range().end())
+            })
             .unwrap_or(constructor_end);
         let tpt = self.synthetic_type_tree_at(tpt_start);
         let position = if has_constructor_parameters
@@ -855,6 +861,14 @@ mod tests {
                 .type_params
                 .iter()
                 .all(|param| matches!(parser.ast().get(*param).kind, TreeKind::TypeDef(_)))
+        );
+        assert_eq!(
+            parser
+                .ast()
+                .get(constructor.tpt)
+                .position
+                .map(|position| position.span().range()),
+            Some(dotty_core::TextRange::new(14, 14).unwrap())
         );
         assert!(parser.diagnostics().is_empty());
     }

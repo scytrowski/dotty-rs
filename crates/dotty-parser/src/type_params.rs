@@ -1,4 +1,4 @@
-use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef, VisibilitySyntax};
 use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -83,7 +83,14 @@ where
                 .current_text()
                 .ok()
                 .is_some_and(|text| text.trim_matches('`').starts_with("$type_wildcard_"));
-        if !is_synthetic_wildcard_name {
+        if is_synthetic_wildcard_name {
+            if matches!(
+                self.context.param_owner,
+                Some(ParamOwner::Class | ParamOwner::CaseClass)
+            ) {
+                metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+            }
+        } else {
             metadata.modifiers.push(dotty_core::ast::Modifier::Param);
             if matches!(
                 self.context.param_owner,
@@ -426,6 +433,34 @@ mod tests {
             panic!("expected a type definition");
         };
         assert!(metadata.modifiers.is_empty());
+        assert!(metadata.visibility.is_none());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn class_wildcard_name_collision_has_no_parameter_roles() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[`$type_wildcard_0`]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::BackquotedIdentifier, 1, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Class);
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert!(metadata.modifiers.is_empty());
+        assert_eq!(
+            metadata.visibility,
+            Some(VisibilitySyntax::Private { qualifier: None })
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
