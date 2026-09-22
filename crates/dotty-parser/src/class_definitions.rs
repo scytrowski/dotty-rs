@@ -118,7 +118,7 @@ where
         };
         self.advance();
         let name = self.parse_object_name();
-        let tail = self.with_enum_body(false, |parser| parser.parse_template_tail());
+        let tail = self.with_enum_body(false, |parser| parser.parse_template_tail(false));
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast
@@ -212,9 +212,9 @@ where
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
         let tail = if is_enum {
-            self.with_enum_body(true, |parser| parser.parse_template_tail())
+            self.with_enum_body(true, |parser| parser.parse_template_tail(true))
         } else {
-            self.with_enum_body(false, |parser| parser.parse_template_tail())
+            self.with_enum_body(false, |parser| parser.parse_template_tail(false))
         };
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
@@ -271,17 +271,33 @@ where
         ))
     }
 
-    fn parse_template_tail(&mut self) -> TemplateTail {
+    fn parse_template_tail(&mut self, required_body: bool) -> TemplateTail {
         let parents = self.parse_parent_clause();
         let derives = self.parse_derives_clause();
         let uses = self.parse_uses_clause();
-        let body = self.parse_optional_template_body();
+        let body = if required_body {
+            self.parse_required_template_body()
+        } else {
+            self.parse_optional_template_body()
+        };
         TemplateTail {
             parents,
             self_val: body.self_val,
             body: body.members,
             metadata: UntypedTemplateMetadata { derives, uses },
         }
+    }
+
+    fn parse_required_template_body(&mut self) -> TemplateBodyResult {
+        let checkpoint = self.cursor.checkpoint();
+        let body = self.parse_optional_template_body();
+        if !self.cursor.progressed_since(checkpoint) {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected an enum body after its header",
+            );
+        }
+        body
     }
 
     fn template_tail_start(&self, tail: &TemplateTail) -> Option<u32> {
@@ -1093,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_an_enum_without_changing_the_shared_type_def_shape() {
+    fn reports_a_missing_enum_body_without_losing_the_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "enum E",
@@ -1113,7 +1129,12 @@ mod tests {
         };
         assert_eq!(metadata.modifiers, vec![Modifier::Enum]);
         assert!(matches!(parser.ast().get(*rhs).kind, TreeKind::Template(_)));
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert!(parser.diagnostics()[0].message().contains("enum body"));
     }
 
     #[test]
@@ -1149,13 +1170,15 @@ mod tests {
     fn preserves_allowed_enum_visibility_and_infix_modifiers() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
-            "private infix enum E",
+            "private infix enum E {}",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
                 token(TokenKind::Identifier, 8, 13),
                 token(TokenKind::Keyword(HardKeyword::Enum), 14, 18),
                 token(TokenKind::Identifier, 19, 20),
-                token(TokenKind::Eof, 20, 20),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 21, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
             ],
             &mut names,
         );
