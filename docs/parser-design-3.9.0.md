@@ -87,7 +87,7 @@ Scoped helpers restore the previous context after nested parsing, including
 recovery paths. `KnownNames` pre-interns the Scala 3.9 soft keywords `as`,
 `derives`, `extension`, `infix`, `inline`, `opaque`, `open`, `transparent`,
 and `using`. It also interns the future feature-dependent names `into`,
-`erased`, and `tracked`. The lexer still emits all of these as identifiers;
+`erased`, `tracked`, and `update`. The lexer still emits all of these as identifiers;
 parser context gives them grammar meaning only in the appropriate production.
 `ParserFeatures` currently exposes independent switches for capture checking,
 erased definitions, `into`, legacy `postfix_ops`, and experimental single-case
@@ -225,11 +225,13 @@ type-definition bounds.
 Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
 inside a brace or indented `Block`; a typed declaration without `=` has no
-RHS. The parser deliberately does not yet handle definition modifiers,
-annotations, constructors, legacy `(implicit ...)` clauses, anonymous
-`(using T)` clauses, context-type shorthand, or the remaining definition
-forms. Those parameter forms produce an explicit unsupported-syntax
-diagnostic and synchronize at the closing parenthesis.
+RHS. The shared definition-prefix layer now preserves source annotations,
+hard modifiers, the supported soft modifiers, and private/protected visibility
+including qualifiers on the definition nodes. It deliberately does not yet
+handle constructors, legacy `(implicit ...)` clauses, anonymous `(using T)`
+clauses, context-type shorthand, or the remaining definition forms.
+Unsupported parameter forms produce an explicit unsupported-syntax diagnostic
+and synchronize at the closing parenthesis.
 
 Type definitions are statement-level `TypeDef` trees. The implemented subset
 covers simple aliases (`type A = B`), abstract declarations, lower and upper
@@ -261,9 +263,29 @@ source order, including nested definitions and expressions. This is
 deliberately different from an expression block, whose last expression is its
 result. Layout classification remains owned by the scanner; the parser only
 feeds back the `ColonEol`, `Indented`, and `Outdented` events needed to close a
-template region. Case classes/objects, enum definitions, general modifiers,
-self types, auxiliary constructors, and semantic template processing remain
-future work.
+template region. Case classes/objects, enum definitions, case-specific
+modifiers, self types, auxiliary constructors, and semantic template
+processing remain future work.
+
+### Definition prefixes and source metadata
+
+Definitions share a parser-owned prefix step before dispatching to `val`,
+`var`, `def`, `type`, `class`, `trait`, or `object`. The current subset
+preserves annotations, source order for hard modifiers (`abstract`, `final`,
+`sealed`, `implicit`, `lazy`, and `override`), supported soft modifiers
+(`inline`, `transparent`, `open`, and `infix`), and `private`/`protected`
+visibility with an optional qualifier. The prefix is recognized only in a
+definition position; soft words remain ordinary identifiers everywhere else.
+Duplicate modifiers and malformed annotations produce diagnostics while
+retaining a recoverable source tree.
+
+The resulting `Modifiers` value is parser metadata, not a resolved symbol-flag
+set. It is attached to the existing definition nodes, including
+`ModuleDef.metadata`, so later phases can distinguish source syntax from
+semantic resolution. Annotation trees use the source-level
+`Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
+annotations, `case`/`given`/`enum` definitions, and feature-dependent
+`opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
 
@@ -278,8 +300,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms (including modifiers, case classes,
-enums, and full template semantics), remaining control flow (`do`/`while`),
+`RefinedType`, remaining definition forms (including case classes, enums, and
+full template semantics), remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including

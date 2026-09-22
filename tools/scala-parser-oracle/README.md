@@ -63,7 +63,11 @@ arguments as they appear before semantic extractor lowering.
 Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, and object nodes; primary
 constructor clauses; simple parent applications; and braced or indented
-template bodies. The renderer exposes the source-level `Trait` distinction
+template bodies. They also cover source annotations, hard and supported soft
+modifiers, and qualified visibility. The normalized definition metadata
+compares modifier order, visibility, visibility qualifiers, and annotation
+trees; `ModuleDef.metadata` is included just like metadata on the other
+definition nodes. The renderer exposes the source-level `Trait` distinction
 and keeps constructor parent applications in the same `New`/`Select`/`Apply`
 shape as the Scala parser.
 
