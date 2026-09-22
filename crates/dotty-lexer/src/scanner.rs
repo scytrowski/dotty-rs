@@ -234,6 +234,11 @@ impl TokenSource for ContextualScanner {
                     self.feedback_regions += 1;
                 }
             }
+            ScannerEvent::SelfArrow => {
+                // A template self arrow is already inside the template's
+                // layout region. Unlike a lambda arrow it must not open a
+                // second synthetic indentation region.
+            }
         }
     }
 }

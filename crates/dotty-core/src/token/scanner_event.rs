@@ -5,4 +5,5 @@ pub enum ScannerEvent {
     Indented,
     Outdented,
     ArrowIndented,
+    SelfArrow,
 }
