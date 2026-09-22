@@ -293,12 +293,19 @@ where
     }
 
     fn feedback_template_outdent(&mut self, body_indent: &str) {
-        if self.defer_template_outdent_feedback
-            && self.current().kind != TokenKind::Eof
+        let indent_offset = if matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            self.cursor.lookahead(1).span.start()
+        } else {
+            self.current().span.start()
+        };
+        if self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Outdent
             && self.current().kind != TokenKind::Punctuation(dotty_core::Punctuation::RightBrace)
             && self
-                .source_line_indent_prefix(self.current().span.start())
+                .source_line_indent_prefix(indent_offset)
                 .starts_with(body_indent)
         {
             return;
@@ -306,8 +313,13 @@ where
         self.defer_template_outdent_feedback = false;
         if self.current().kind != TokenKind::Outdent
             && self.current().kind != TokenKind::Eof
-            && !self.is_template_separator(self.current().kind)
+            && self.current().kind != TokenKind::Punctuation(dotty_core::Punctuation::RightBrace)
         {
+            self.observe_outdented();
+        } else if matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
             self.observe_outdented();
         }
     }
