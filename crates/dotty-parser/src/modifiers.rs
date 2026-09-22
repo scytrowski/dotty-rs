@@ -66,6 +66,12 @@ where
 
         loop {
             if is_annotation_start(self) {
+                if !prefix.metadata.modifiers.is_empty() || prefix.metadata.visibility.is_some() {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        "annotations must precede definition modifiers",
+                    );
+                }
                 let annotation = self.parse_annotation();
                 prefix.metadata.annotations.push(annotation);
                 self.consume_prefix_newlines();
@@ -449,6 +455,30 @@ mod tests {
             panic!("expected the class to remain parseable");
         };
         assert_eq!(parser.diagnostics().len(), 1);
+        assert!(parser.current().kind == TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_annotations_after_modifiers() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "final @Ann class A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Keyword(HardKeyword::Class), 11, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition");
+        };
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.diagnostics()[0].span().start(), 6);
         assert!(parser.current().kind == TokenKind::Eof);
     }
 
