@@ -39,7 +39,7 @@ where
             return Vec::new();
         }
 
-        let body_indent = self.source_line_indent(self.current().span.start());
+        let body_indent = self.source_line_indent_prefix(self.current().span.start());
 
         let members = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
@@ -68,7 +68,7 @@ where
     fn parse_template_members(
         &mut self,
         closing: TokenKind,
-        body_indent: usize,
+        body_indent: String,
     ) -> Vec<TreeId<Untyped>> {
         let mut members = Vec::new();
         self.consume_template_separators(closing);
@@ -78,7 +78,7 @@ where
                 && closing == TokenKind::Outdent
                 && !self.last_advance_was_outdent
             {
-                self.feedback_template_outdent(body_indent);
+                self.feedback_template_outdent(&body_indent);
             }
             if self.template_body_ended(closing) {
                 break;
@@ -110,7 +110,7 @@ where
             }
 
             if closing == TokenKind::Outdent && !ended_nested_indented_body {
-                self.feedback_template_outdent(body_indent);
+                self.feedback_template_outdent(&body_indent);
             }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
@@ -134,12 +134,14 @@ where
         members
     }
 
-    fn feedback_template_outdent(&mut self, body_indent: usize) {
+    fn feedback_template_outdent(&mut self, body_indent: &str) {
         if self.defer_template_outdent_feedback
             && self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Outdent
             && self.current().kind != TokenKind::Punctuation(dotty_core::Punctuation::RightBrace)
-            && self.source_line_indent(self.current().span.start()) >= body_indent
+            && self
+                .source_line_indent_prefix(self.current().span.start())
+                .starts_with(body_indent)
         {
             return;
         }
@@ -172,7 +174,7 @@ where
         }
     }
 
-    fn source_line_indent(&self, offset: u32) -> usize {
+    fn source_line_indent_prefix(&self, offset: u32) -> String {
         let source = self.source.as_str();
         let end = (offset as usize).min(source.len());
         let line_start = source[..end]
@@ -181,7 +183,7 @@ where
         source[line_start..end]
             .chars()
             .take_while(|character| matches!(character, ' ' | '\t'))
-            .count()
+            .collect()
     }
 }
 
@@ -251,6 +253,24 @@ mod tests {
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn compares_indentation_prefixes_instead_of_their_widths() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "\tinner\n value",
+            vec![token(TokenKind::Identifier, 1, 6)],
+            &mut names,
+        );
+
+        assert_eq!(parser.source_line_indent_prefix(1), "\t");
+        assert_eq!(parser.source_line_indent_prefix(8), " ");
+        assert!(
+            !parser
+                .source_line_indent_prefix(8)
+                .starts_with(parser.source_line_indent_prefix(1).as_str())
+        );
     }
 
     #[test]
