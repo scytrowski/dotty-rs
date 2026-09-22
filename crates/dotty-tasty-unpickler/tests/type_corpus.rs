@@ -875,7 +875,12 @@ fn complete_unit(
             Err(UnpickleError::UnstableSelectQualifier { .. }) => "unstable select qualifier",
             Err(UnpickleError::InvalidSingletonTypeTree { .. }) => "invalid singleton",
             Err(UnpickleError::OpaqueAliasDeferred { .. }) => "opaque alias",
-            Err(UnpickleError::ConstructorCompletionDeferred { .. }) => "constructor deferred (5d)",
+            Err(UnpickleError::ConstructorOwnerNotClassLike { .. }) => {
+                "constructor owner not class-like"
+            }
+            Err(UnpickleError::MalformedOwnerClassInfo { .. }) => {
+                "constructor owner ClassInfo malformed"
+            }
             Err(UnpickleError::UnsupportedMethodParameterSemantics { .. }) => {
                 "unsupported parameter semantics"
             }
