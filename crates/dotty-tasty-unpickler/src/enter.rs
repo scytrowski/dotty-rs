@@ -43,13 +43,16 @@
 //! class, and, being entered as non-members, never reach its declaration scope.
 
 use dotty_core::ids::SymbolId;
-use dotty_core::names::Name;
-use dotty_core::symbols::{Scope, Symbol, SymbolInfo, SymbolKind, SymbolLinks, Visibility};
+use dotty_core::names::{Name, Namespace};
+use dotty_core::symbols::{
+    Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+};
+use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
     ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, APPLY_TAG, BLOCK_TAG, BYNAMETPT_TAG, DEFDEF_TAG,
     DefinitionBody, EMPTYCLAUSE_TAG, EXPLICITTPT_TAG, LAMBDATPT_TAG, NEW_TAG, PACKAGE_TAG,
-    PARAM_TAG, ParameterNode, RawTree, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
-    SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
+    PARAM_TAG, ParameterNode, REFINEDTPT_TAG, RawTree, SELECTIN_TAG, SHAREDTERM_TAG,
+    SHAREDTYPE_TAG, SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
     TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
     VALDEF_TAG,
 };
@@ -58,8 +61,8 @@ use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::class::{parent_constructor_is_applied, template_parts};
 use crate::error::UnpickleError;
 use crate::mapping::{
-    DeclaredModifiers, QualifiedAccess, QualifierRef, def_def_kind, namespace_of, term_param_kind,
-    type_def_kind, type_param_kind, val_def_kind,
+    DeclaredModifiers, QualifiedAccess, QualifierRef, REFINEMENT_CLASS_NAME, def_def_kind,
+    namespace_of, term_param_kind, type_def_kind, type_param_kind, val_def_kind,
 };
 use crate::names::{package_segments, wire_name};
 use crate::packages::enter_in_scope;
@@ -67,6 +70,21 @@ use crate::unpickler::TastyUnpickler;
 
 /// How deep a type tree may nest before pass 1 refuses it.
 const MAX_TREE_DEPTH: usize = 256;
+
+/// What [`TastyUnpickler::enter_definition_header`] learned, for
+/// [`TastyUnpickler::enter_definition_body`] to continue with.
+enum DefinitionHeader {
+    Ty {
+        symbol: SymbolId,
+        has_template: bool,
+    },
+    Val {
+        symbol: SymbolId,
+    },
+    Method {
+        symbol: SymbolId,
+    },
+}
 
 /// What is known about a definition when its symbol is allocated.
 struct Declaration<'a> {
@@ -151,7 +169,12 @@ impl TastyUnpickler<'_, '_, '_> {
     }
 
     /// Enters a `TYPEDEF`, `VALDEF` or `DEFDEF` owned by `owner`, and the
-    /// definitions nested in it.
+    /// definitions nested in it. This is [`enter_definition_header`] followed
+    /// immediately by [`enter_definition_body`], for every call site that has
+    /// no reason to keep them apart.
+    ///
+    /// [`enter_definition_header`]: Self::enter_definition_header
+    /// [`enter_definition_body`]: Self::enter_definition_body
     fn enter_definition(
         &mut self,
         ast: &AstView<'_>,
@@ -159,10 +182,32 @@ impl TastyUnpickler<'_, '_, '_> {
         tag: u8,
         owner: SymbolId,
     ) -> Result<(), UnpickleError> {
+        let header = self.enter_definition_header(ast, at, tag, owner)?;
+        self.enter_definition_body(ast, at, header, 0)
+    }
+
+    /// The identity half of entering a `TYPEDEF`, `VALDEF` or `DEFDEF`
+    /// owned by `owner`: decodes its header and allocates its symbol
+    /// (declaring it in `owner`'s scope, as every member is), but scans
+    /// nothing nested in it.
+    ///
+    /// Split from [`enter_definition_body`](Self::enter_definition_body) so a
+    /// refinement (Milestone 5d2b) can enter every one of its immediate
+    /// members' identities before any of them is scanned, mirroring
+    /// upstream's `readStats` (Dotty indexes a block of statements before
+    /// reading any of them, which is what lets them refer to one another
+    /// regardless of wire order).
+    fn enter_definition_header(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        tag: u8,
+        owner: SymbolId,
+    ) -> Result<DefinitionHeader, UnpickleError> {
         let node = ast.node(at)?;
         let owner_kind = self.store.symbols.get(owner).kind;
 
-        match node.decode_structured()? {
+        Ok(match node.decode_structured()? {
             StructuredNode::TypeDef(DefinitionBody::TypeDef {
                 name,
                 type_or_template,
@@ -186,11 +231,9 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
-                if has_template {
-                    self.enter_class_scope(symbol)?;
-                    self.enter_template(ast, at, symbol)?;
-                } else {
-                    self.enter_declared_lambdas(ast, at, symbol)?;
+                DefinitionHeader::Ty {
+                    symbol,
+                    has_template,
                 }
             }
             StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) => {
@@ -208,7 +251,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
-                self.enter_declared_lambdas(ast, at, symbol)?;
+                DefinitionHeader::Val { symbol }
             }
             StructuredNode::DefDef(body) => {
                 let modifiers = DeclaredModifiers::from_tail(&body.tail)?;
@@ -225,7 +268,43 @@ impl TastyUnpickler<'_, '_, '_> {
                         member: true,
                     },
                 )?;
-                self.enter_parameters(ast, at, method, false)?;
+                DefinitionHeader::Method { symbol: method }
+            }
+            _ => return Err(UnpickleError::MissingDefinition { address: at }),
+        })
+    }
+
+    /// The scanning half of entering a definition: its own class scope and
+    /// template, or parameters and result, or declared-type `LAMBDAtpt`/
+    /// `REFINEDtpt` scan, following [`enter_definition_header`](Self::enter_definition_header).
+    /// `depth` bounds the walk the way [`enter_lambdas_in`](Self::enter_lambdas_in) does; a
+    /// definition reached directly from a package or a class template passes
+    /// `0`, and a refinement member passes the depth its `REFINEDtpt` was
+    /// found at.
+    fn enter_definition_body(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        header: DefinitionHeader,
+        depth: usize,
+    ) -> Result<(), UnpickleError> {
+        match header {
+            DefinitionHeader::Ty {
+                symbol,
+                has_template,
+            } => {
+                if has_template {
+                    self.enter_class_scope(symbol)?;
+                    self.enter_template(ast, at, symbol)?;
+                } else {
+                    self.enter_declared_lambdas(ast, at, symbol, depth)?;
+                }
+            }
+            DefinitionHeader::Val { symbol } => {
+                self.enter_declared_lambdas(ast, at, symbol, depth)?;
+            }
+            DefinitionHeader::Method { symbol: method } => {
+                self.enter_parameters(ast, at, method, false, depth)?;
                 // The result type is the first child that is not a parameter
                 // or a clause marker.
                 let result = ast.children(at).iter().find(|child| {
@@ -235,10 +314,9 @@ impl TastyUnpickler<'_, '_, '_> {
                     )
                 });
                 if let Some(result) = result {
-                    self.enter_lambdas_in(ast, address(result.offset), method, 0)?;
+                    self.enter_lambdas_in(ast, address(result.offset), method, depth)?;
                 }
             }
-            _ => return Err(UnpickleError::MissingDefinition { address: at }),
         }
         Ok(())
     }
@@ -260,7 +338,7 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(UnpickleError::MissingDefinition { address: class_at });
         };
         let template_at = address(template_node.offset);
-        self.enter_parameters(ast, template_at, class, true)?;
+        self.enter_parameters(ast, template_at, class, true, 0)?;
         for child in ast.children(template_at) {
             if matches!(child.tag, TYPEDEF_TAG | VALDEF_TAG | DEFDEF_TAG) {
                 self.enter_definition(ast, address(child.offset), child.tag, class)?;
@@ -356,6 +434,7 @@ impl TastyUnpickler<'_, '_, '_> {
         parent_at: u32,
         owner: SymbolId,
         in_class: bool,
+        depth: usize,
     ) -> Result<(), UnpickleError> {
         for child in ast.children(parent_at) {
             if !matches!(child.tag, TYPEPARAM_TAG | PARAM_TAG) {
@@ -363,7 +442,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             let at = address(child.offset);
             let parameter = ast.node(at)?.decode_parameter()?;
-            self.enter_parameter(ast, at, &parameter, owner, in_class)?;
+            self.enter_parameter(ast, at, &parameter, owner, in_class, depth)?;
         }
         Ok(())
     }
@@ -377,6 +456,7 @@ impl TastyUnpickler<'_, '_, '_> {
         parameter: &ParameterNode<'_>,
         owner: SymbolId,
         in_class: bool,
+        depth: usize,
     ) -> Result<(), UnpickleError> {
         let tag = parameter.tag();
         let modifiers = DeclaredModifiers::from_tail(&parameter.decode_body()?.tail)?;
@@ -398,21 +478,22 @@ impl TastyUnpickler<'_, '_, '_> {
                 member: is_member,
             },
         )?;
-        self.enter_declared_lambdas(ast, at, symbol)?;
+        self.enter_declared_lambdas(ast, at, symbol, depth)?;
         Ok(())
     }
 
     /// Scans the declared type tree of the definition at `at` (its first
-    /// child: a type, bounds or right-hand side) for `LAMBDAtpt` parameters
-    /// owned by `owner`.
+    /// child: a type, bounds or right-hand side) for `LAMBDAtpt`/`REFINEDtpt`
+    /// identities owned by `owner`.
     fn enter_declared_lambdas(
         &mut self,
         ast: &AstView<'_>,
         at: u32,
         owner: SymbolId,
+        depth: usize,
     ) -> Result<(), UnpickleError> {
         if let Some(tree) = ast.children(at).first() {
-            self.enter_lambdas_in(ast, address(tree.offset), owner, 0)?;
+            self.enter_lambdas_in(ast, address(tree.offset), owner, depth)?;
         }
         Ok(())
     }
@@ -440,12 +521,13 @@ impl TastyUnpickler<'_, '_, '_> {
             tag,
             SHAREDTERM_TAG
                 | LAMBDATPT_TAG
+                | REFINEDTPT_TAG
                 | APPLIEDTPT_TAG
                 | BYNAMETPT_TAG
                 | EXPLICITTPT_TAG
                 | TYPEBOUNDSTPT_TAG
                 | ANNOTATEDTPT_TAG
-        ) || !self.index.first_lambda_scan(tree, owner)
+        ) || !self.index.first_declared_tree_scan(tree, owner)
         {
             return Ok(());
         }
@@ -487,10 +569,11 @@ impl TastyUnpickler<'_, '_, '_> {
                         });
                     }
                     let parameter = ast.node(*param)?.decode_parameter()?;
-                    self.enter_parameter(ast, *param, &parameter, owner, false)?;
+                    self.enter_parameter(ast, *param, &parameter, owner, false, depth + 1)?;
                 }
                 self.enter_lambdas_in(ast, *body, owner, depth + 1)
             }
+            REFINEDTPT_TAG => self.enter_refined_tpt(ast, tree, &children, owner, depth),
             // A type tree with the annotation to be ignored: only the base.
             ANNOTATEDTPT_TAG => match children.first() {
                 Some(base) => self.enter_lambdas_in(ast, *base, owner, depth + 1),
@@ -503,6 +586,109 @@ impl TastyUnpickler<'_, '_, '_> {
                 Ok(())
             }
         }
+    }
+
+    /// Enters the `REFINEDtpt` at `tree`, owned by `owner`: its synthetic
+    /// `<refinement>` class (Dotty's `newRefinedClassSymbol`) with its own
+    /// declaration scope and a complete, parent-less `ClassInfo` (the
+    /// refinement class needs no parents to be usable for member lookup and
+    /// `THIS` resolution while its own members are decoded), then every
+    /// immediate refinement member's identity — entered in full before any of
+    /// them is scanned, so forward and mutually-referencing refinement
+    /// declarations resolve regardless of wire order — and finally the parent
+    /// type tree, scanned like any other declared type tree.
+    ///
+    /// A second owner reaching the same `REFINEDtpt` through a `SHAREDterm`
+    /// does not get a second class: the synthetic class has one fixed owner,
+    /// and reaching it from elsewhere is a conflict
+    /// (`has_refined_owner_conflict`), the same policy `LAMBDAtpt` follows.
+    ///
+    /// Identity: the synthetic class is entered through the ordinary
+    /// `symbols` map, keyed by this exact `REFINEDtpt` address — the same map
+    /// an ordinary definition's symbol lives in. `type_tree_type_at(tree)`
+    /// (the final `Refined`/`Recursive` graph, Milestone 5d2b's projection)
+    /// is therefore a second, independent thing this same address names; see
+    /// the index module's documentation.
+    fn enter_refined_tpt(
+        &mut self,
+        ast: &AstView<'_>,
+        tree: u32,
+        children: &[u32],
+        owner: SymbolId,
+        depth: usize,
+    ) -> Result<(), UnpickleError> {
+        match self.index.refined_owner(tree) {
+            Some(first) if first == owner => return Ok(()),
+            Some(_) => {
+                self.index.mark_refined_conflict(tree);
+                return Ok(());
+            }
+            None => self.index.insert_refined_owner(tree, owner),
+        }
+        ast.node(tree)?.decode_refined_tpt()?;
+        let Some((parent, stats)) = children.split_first() else {
+            return Err(UnpickleError::MalformedType {
+                address: tree,
+                reason: "a refined type tree has a parent",
+            });
+        };
+
+        let name = Name::new(
+            self.store.names.intern(REFINEMENT_CLASS_NAME),
+            Namespace::Type,
+        );
+        let class = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.index.insert_symbol(tree, class)?;
+        let scope = self.store.scopes.alloc(Scope::new(Some(class)));
+        self.index.insert_scope(class, scope)?;
+        let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: self.definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: scope,
+            self_type: None,
+        }));
+        // A fresh symbol allocated within this same `enter_symbols`
+        // transaction: on rollback the arena truncation that removes it also
+        // discards this info, so no journal entry is needed (unlike
+        // `set_symbol_info`, which is for completion's own transactions).
+        self.store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(info));
+
+        // Stage 1: every immediate member's identity, before any is scanned.
+        let mut headers = Vec::with_capacity(stats.len());
+        for &stat in stats {
+            let Some(stat_tag) = ast.tag_at(stat) else {
+                return Err(UnpickleError::MissingDefinition { address: stat });
+            };
+            if !matches!(stat_tag, TYPEDEF_TAG | VALDEF_TAG | DEFDEF_TAG) {
+                return Err(UnpickleError::UnsupportedRefinementStat {
+                    address: stat,
+                    tag: stat_tag,
+                });
+            }
+            let header = self.enter_definition_header(ast, stat, stat_tag, class)?;
+            headers.push((stat, header));
+        }
+        // Stage 2: only now is a member's declared type (and, for `TYPEDEF`
+        // with a template, its own nested scope) scanned.
+        for (stat, header) in headers {
+            self.enter_definition_body(ast, stat, header, depth + 1)?;
+        }
+
+        self.enter_lambdas_in(ast, *parent, owner, depth + 1)
     }
 
     /// Allocates the symbol for a definition, records its address, and

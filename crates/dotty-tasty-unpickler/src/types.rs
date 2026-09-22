@@ -207,9 +207,9 @@ use dotty_core::types::{Constant, MatchType, TermRefTarget, Type, TypeRefTarget}
 use dotty_tasty::tasty::{
     ANDTYPE_TAG, ANNOTATEDTYPE_TAG, APPLIEDTYPE_TAG, AstError, BYNAMETYPE_TAG, CLASSCONST_TAG,
     ConstantValue, FLEXIBLETYPE_TAG, MATCHCASETYPE_TAG, MATCHTYPE_TAG, METHODTYPE_TAG, ORTYPE_TAG,
-    PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG, RECTYPE_TAG, REFINEDTYPE_TAG, RawNode, RawTree,
-    SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
+    PARAMTYPE_TAG, POLYTYPE_TAG, RECTHIS_TAG, RECTYPE_TAG, REFINEDTPT_TAG, REFINEDTYPE_TAG,
+    RawNode, RawTree, SHAREDTYPE_TAG, SUPERTYPE_TAG, TERMREF_TAG, TERMREFDIRECT_TAG, TERMREFIN_TAG,
+    TERMREFPKG_TAG, TERMREFSYMBOL_TAG, THIS_TAG, TYPEBOUNDS_TAG, TYPELAMBDATYPE_TAG, TYPEREF_TAG,
     TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
 };
 
@@ -931,6 +931,17 @@ impl TastyUnpickler<'_, '_, '_> {
                     _ => Err(UnpickleError::InvalidReferenceKind { from: at, to: at }),
                 }
             }
+            // A `this` inside a `REFINEDtpt`'s own member (a self reference,
+            // or a sibling member named relative to the structural instance)
+            // names the synthetic refinement class Milestone 5d2b's pass 1
+            // enters at the `REFINEDtpt`'s own address — Dotty's
+            // `typeAtAddr(start) = refineCls.typeRef`, registered as soon as
+            // the tree is read and reached here through the `SHAREDtype` the
+            // reference makes back to that same address. The tree at that
+            // address is a full `REFINEDtpt` node, never a type-reference
+            // shape, so it is resolved through the entered symbol directly
+            // rather than decoded as an ordinary type node.
+            _ if tag == REFINEDTPT_TAG => self.referenced_class(ast, at, at),
             _ => Err(UnpickleError::UnsupportedType { tag, address: at }),
         }
     }

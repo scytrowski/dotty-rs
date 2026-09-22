@@ -1341,6 +1341,26 @@ textual lookup. This is why a constructor can complete before, after, or
 regardless of whether its owner's `ClassInfo` ever completes: both read the
 same session-wide canonical prefix rather than depending on each other.
 
+`close_over_this` (the TASTy adapter's Milestone 5d2b, `types/rebind.rs`) is
+built by extending the same `Rebinder` graph transformer that
+`rebind_type_lambda` and the symbol-abstraction primitives already use, rather
+than writing a second graph copier: a `close_over: Option<(SymbolId,
+TypeId)>` field on `Rebinder` turns every reachable `ThisType { class }`
+matching the target into the one canonical `RecThis` of a given binder,
+allocated once and reused for every further occurrence, the same "reserve the
+binder first, then transform" order the lambda and recursive-type binders
+already follow. A bounded, memoized, allocation-free pre-scan decides whether
+anything actually depends on the target class at all; if not, the input id is
+returned unchanged (mirroring `rebind_type_lambda`'s existing "a subgraph with
+no dependency on the binder being built keeps its own id"), so no `Recursive`
+is reserved, let alone left unfilled, for the common non-recursive case.
+`ClassInfo.prefix`'s `no_prefix` convention and this operation are
+independent: closing a refinement's `ThisType` over its own synthetic class
+needs nothing from that class's `ClassInfo` (which, per the pass-1/projection
+split above, is complete and parent-less from the moment the class is
+entered), the same non-dependence a constructor's completed info already has
+on its owner's.
+
 A term's `SymbolInfo::Complete(TypeId)` is its declared type. Member lookup
 may read it (read-only, never completing) to find the declaration scope of a
 *stable* term prefix (`x.T`): an immutable field, value or by-name-free

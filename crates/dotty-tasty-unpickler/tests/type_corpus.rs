@@ -886,6 +886,23 @@ fn complete_unit(
             }
             Err(UnpickleError::MalformedDefinition { .. }) => "clause malformed",
             Err(UnpickleError::SharedLambdaOwnerConflict { .. }) => "shared lambda owner conflict",
+            Err(UnpickleError::SharedRefinementOwnerConflict { .. }) => {
+                "shared refinement owner conflict"
+            }
+            Err(UnpickleError::UnsupportedRefinementStat { tag, .. }) => {
+                *survey.unsupported_trees.entry(tag).or_default() += 1;
+                "unsupported refinement stat"
+            }
+            Err(
+                UnpickleError::MissingRefinementClass { .. }
+                | UnpickleError::InvalidRefinementClass { .. }
+                | UnpickleError::MissingRefinementScope { .. },
+            ) => "refinement semantic-state error",
+            Err(UnpickleError::MalformedRefinedTypeTree { .. }) => "malformed refined type tree",
+            Err(UnpickleError::UnsupportedRefinementOverload { .. }) => {
+                "unsupported refinement overload"
+            }
+            Err(UnpickleError::CloseOverThis { .. }) => "close-over-this failed",
             Err(UnpickleError::ParameterAbstraction { .. }) => "abstraction failed",
             Err(UnpickleError::UnsupportedSymbolCompletion { .. }) => "kind deferred (5d)",
             Err(UnpickleError::MissingClassScope { .. }) => "missing class scope",
