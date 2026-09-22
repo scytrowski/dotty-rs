@@ -81,9 +81,24 @@ pub enum UnpickleError {
     /// (`MethodType.fromSymbols`) `dotty-core` cannot represent. The method is
     /// not completed rather than completed with it dropped.
     UnsupportedMethodParameterSemantics { address: u32, tag: u8 },
-    /// The constructor at `address` is not completed: its info is the
-    /// effective result type of its owner class, which needs the class model.
-    ConstructorCompletionDeferred { address: u32 },
+    /// The constructor at `address` has no entered owner, or its owner is
+    /// not `Class`, `Trait` or `ModuleClass` (Milestone 5d2a). `owner` is the
+    /// entered owner, if any.
+    ConstructorOwnerNotClassLike {
+        address: u32,
+        owner: Option<SymbolId>,
+    },
+    /// The constructor at `address`'s owner already holds
+    /// `SymbolInfo::Complete(info)`, but `info` is not the `ClassInfo` class
+    /// completion always publishes for it (naming `owner` itself, with the
+    /// canonical `no_prefix`). Constructor completion never triggers class
+    /// completion, but a completed owner's info is a real invariant, checked
+    /// rather than trusted (Milestone 5d2a).
+    MalformedOwnerClassInfo {
+        address: u32,
+        owner: SymbolId,
+        info: TypeId,
+    },
     /// The `LAMBDAtpt` at `address` was reached from two different owners
     /// (through a `SHAREDterm`), and its type parameters are owned once: it
     /// is not projected rather than given a second owner.
@@ -340,9 +355,15 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the method parameter at address {address} has the modifier with tag {tag}, whose method-type adaptation is not modeled"
             ),
-            Self::ConstructorCompletionDeferred { address } => write!(
+            Self::ConstructorOwnerNotClassLike { address, owner } => write!(
                 formatter,
-                "the constructor at address {address} is not completed until class completion"
+                "the constructor at address {address} has owner {}, which is not a class, trait or module class",
+                owner.map_or("none".to_owned(), |owner| owner.index().to_string())
+            ),
+            Self::MalformedOwnerClassInfo { address, owner, .. } => write!(
+                formatter,
+                "the constructor at address {address}'s owner {} is Complete but not its own canonical ClassInfo",
+                owner.index()
             ),
             Self::SharedLambdaOwnerConflict { address } => write!(
                 formatter,
@@ -554,7 +575,8 @@ impl std::error::Error for UnpickleError {
             | Self::MalformedParentTree { .. }
             | Self::InvalidSelfTypeTree { .. }
             | Self::UnsupportedMethodParameterSemantics { .. }
-            | Self::ConstructorCompletionDeferred { .. }
+            | Self::ConstructorOwnerNotClassLike { .. }
+            | Self::MalformedOwnerClassInfo { .. }
             | Self::ParameterAbstraction { .. }
             | Self::InvalidSingletonTypeTree { .. }
             | Self::MissingEnteredSymbol { .. }

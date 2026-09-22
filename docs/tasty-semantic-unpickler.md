@@ -1049,8 +1049,8 @@ reads the body:
   make `fromSymbols` add an annotation (or, for `TRACKED`, a result refinement)
   that needs annotation classes `dotty-core` does not have: the method is
   `UnsupportedMethodParameterSemantics { address, tag }` and stays `Missing`.
-  Constructors are `ConstructorCompletionDeferred`: their info is the owner
-  class's effective result type, not the serialized return tree.
+  Constructors are completed too (Milestone 5d2a, below): their info is the
+  owner class's effective result type, not the serialized return tree.
 * *No cycle.* Completion never forces another method: a reference through a
   term still `Missing` is `UnsupportedResolutionPrefix` (a regression test), and
   the only nested completions are the method's own and lambda parameters, so no
@@ -1137,13 +1137,93 @@ ClassInfo {
   owner-conflict logic of 5c applies unchanged: a lambda reached through a
   `SHAREDterm` from a second class is refused for both. (`SharedLambdaOwnerConflict`
   is per address, as in 5c.)
-* **Deferred.** Constructors keep `ConstructorCompletionDeferred`, `REFINEDtpt`
-  and `MATCHtpt` stay unsupported trees (5d2), and nothing sets symbol
+* **Deferred.** Constructors complete as of 5d2a (below); `REFINEDtpt` and
+  `MATCHtpt` stay unsupported trees (5d2b), and nothing sets symbol
   annotations or companion links (5e).
 
 New errors: `MissingClassScope`, `UnsupportedParentTree`, `MalformedParentTree`,
 `InvalidSelfTypeTree`; everything else is the existing external, unsupported or
 malformed error that names the real cause.
+
+### Constructor completion (Milestone 5d2a)
+
+A `Constructor` `DEFDEF` symbol (the `<init>` of a `Class`, `Trait` or
+`ModuleClass`) becomes `Complete`, mirroring `TreeUnpickler.readNewDef`:
+
+```scala
+val paramDefss = readParamss()
+val tpt = readTpt()
+val normalizedParamss = normalizeIfConstructor(paramDefss.nestedMap(_.symbol), true)
+val resType = effectiveResultType(sym, normalizedParamss)
+sym.info = methodType(normalizedParamss, resType)
+```
+
+* **The serialized return type tree is not the semantic result.** `readTpt()`
+  still runs — a real Scala 3.9.0 constructor's wire return type is `Unit`,
+  not the owner class, so its validation and its own type-tree projection
+  cache entry are real, but the projected `TypeId` is discarded. The
+  constructor's info is built from the owner class instead.
+* **Clause grouping and the parameter guard are unchanged from 5c**: the same
+  `clauses_of` and `INLINE`/`TRACKED`/`INTO` refusal
+  (`UnsupportedMethodParameterSemantics`) apply to a constructor's clauses,
+  unmodified — no second DEFDEF header parser, no constructor-specific
+  parameter-semantics error.
+* **Normalization** (`normalizeIfConstructor`), over the already-grouped
+  clauses, once every clause's parameters are completed (the rule reads
+  parameter flags): a leading type clause is kept and the rest normalized
+  recursively; otherwise a leading implicit term clause gets an empty
+  ordinary clause prepended; otherwise an all-`GIVEN` (contextual) sequence of
+  term clauses gets an empty ordinary clause appended (a type clause never
+  disqualifies the append; an *explicit* empty clause does, since it already
+  satisfies the "at least one non-implicit, non-contextual clause" invariant);
+  otherwise the clauses are unchanged. The inserted clause is a real empty
+  `Clause::EmptyTerm`, turned into an ordinary empty `Method` binder by the
+  same [`build_clause`] every ordinary method uses — normalization only
+  changes the semantic clause sequence, never the wire or the AST.
+* **Effective result.** Before any clause wraps it, the result is the owner
+  class's plain reference (`Type::type_ref(no_prefix, owner)`), or — if the
+  *normalized* clauses start with a type clause — the owner applied to that
+  clause's own type-parameter symbols (`ctor.owner.typeRef.appliedTo(...)`).
+  Both use the repository's canonical `no_prefix` convention (never a copied
+  `ClassInfo.prefix`, a fresh `ThisType`, or a textual lookup), so a
+  constructor's result and its owner's `ClassInfo.prefix` are always the same
+  shape. The existing 5c abstraction (`poly_type_from_symbols` via
+  `build_clause`) then turns references to the constructor's own
+  type-parameter symbols into `ParamRef`s of its own `Poly` binder — the
+  **constructor's** leading type clause, never the class header's type
+  parameters of the same name: TASTy enters the two at different addresses,
+  so pass 1 gives them different `SymbolId`s, and no substitution by name or
+  `SymbolId` equality between the two is ever assumed.
+* **The owner's `ClassInfo` completion is never required or triggered.** Only
+  the owner's `SymbolId` and its class-like kind (`Class`/`Trait`/
+  `ModuleClass`) matter (`ConstructorOwnerNotClassLike` otherwise); a class
+  blocked on an external parent can still give its constructor a complete
+  info. If the owner already holds `Complete(ClassInfo)`, that info is
+  checked for `class == owner` and `prefix == no_prefix`
+  (`MalformedOwnerClassInfo` on a mismatch), but its parents, self type and
+  declarations are never read.
+* **Parameter semantics** follow 5c unchanged: `erased` from the `ERASED`
+  flag, `varargs` always `false` (TASTy has no JVM `ACC_VARARGS`), a method
+  type parameter's `declared_variance: None`. Neither `TRACKED` nor `ERASED`
+  constructor parameters occur in the 3.9.0 library or compiler corpora (0/0,
+  confirming PR #85's count still holds); `TRACKED`'s `addParamRefinements`
+  result-refinement semantics remain unimplemented and would refuse the
+  constructor with the same `UnsupportedMethodParameterSemantics` as an
+  ordinary method's.
+
+New errors: `ConstructorOwnerNotClassLike`, `MalformedOwnerClassInfo`. The
+now-unreachable `ConstructorCompletionDeferred` was removed.
+
+Measured (real Scala 3.9.0 fixtures, `tests/constructors.rs`): a no-arg
+constructor, an ordinary term clause, a class-header field's `PARAM` versus
+the constructor's own distinct `PARAM` copy, a generic constructor's `Poly`
+abstraction, a leading-implicit and a using-only constructor (with and
+without a leading type clause), a curried generic constructor whose first
+term clause is already ordinary (no synthetic clause), an object's
+module-class constructor (never the `Object` term symbol), and a nested
+class (`no_prefix`, no `Outer.this`) — see the file for the exact shapes.
+Mutation-checked: disabling either the implicit-prepend or the
+contextual-append normalization branch fails exactly the test for that shape.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1491,7 +1571,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      parameters, over a symbol-abstraction primitive in `dotty-core` — complete;
    - 5d1: `ClassInfo` for classes, traits and module classes, parents, self
      types and cross-unit declaration scopes — complete;
-   - 5d2: constructor completion and `REFINEDtpt`'s synthetic class;
+   - 5d2a: constructor completion (`normalizeIfConstructor`, the effective
+     owner-class result) — complete;
+   - 5d2b: `REFINEDtpt`'s synthetic refinement class;
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -1534,7 +1616,7 @@ Deliberately not supported yet:
   `UnsupportedType`;
 - signed term references and inherited members (§4, "Name-based references");
   cross-unit class members resolve through a completed `ClassInfo` only;
-- constructor completion and `REFINEDtpt` (5d2);
+- `REFINEDtpt`'s synthetic refinement class (5d2b);
 - packages and members outside the entered state with no resolver that knows
   them — `UnresolvedPackage`, `UnresolvedMember`;
 - wiring the classloader in as a `SymbolResolver` (Milestone 6).
@@ -2200,6 +2282,39 @@ path order (226 of 405 library references to `<package>.package` name a unit tha
 sorts later) or to a library the compiler corpus does not contain (549 of 584
 compiler references are to `scala.package`); they need the retry/orchestration
 layer and the classpath, not a fix here.
+
+### Constructors after 5d2a (library / compiler)
+
+7,446 constructors total (2,921 library / 4,525 compiler, matching PR #85's
+count exactly — no constructor gained or lost an entry). Completion, path
+order, with the `Object`/`AnyRef` stubs, class completion first:
+
+| corpus | entered | completed | external child failure |
+|--------|---------|-----------|--------------------------|
+| library | 2,921 | 2,264 (77.5%) | 657 |
+| compiler | 4,525 | 0 (0%) | 4,525 |
+
+The library number is real signal: it rises through the run permutations
+exactly as class completion's own numbers do (2,147 / 2,197 / 2,202 / 2,264
+across the four library configurations), tracking the same processing-order
+and classpath dependencies class completion already has, because a
+constructor's *parameters* go through the same completion path as an
+ordinary method's — only its own *result* is classpath-independent. The
+compiler number is not a constructor-completion regression: **every**
+compiler-corpus constructor fails on a parameter or the discarded return
+tree needing a library type the compiler-only corpus does not contain (the
+same "the compiler corpus has no library" limitation 5d1's measurement
+already found for classes), confirmed by `unexpected errors: 0` in every one
+of the twelve run permutations and by neither `ConstructorOwnerNotClassLike`
+nor `MalformedOwnerClassInfo` appearing even once anywhere in the corpus —
+every entered constructor has a well-formed class-like owner.
+
+Class and ordinary-method completion counts are byte-for-byte unchanged from
+the 5d1/5c measurements at every one of the twelve run permutations (`class
+completion (5d1)` reports the identical `1,959 / 1,700 / 224 / 209 / 394 /
+224 / 0 / 0 / 1,262 / 1,592` `ClassInfo` counts, and `Method (DEFDEF)`
+reports the identical completed/failed counts): constructor completion adds
+new completions without touching any existing one.
 
 **Update (#90):** `_root_` now resolves like `<root>` (`package_segments`
 drops a leading, or lone, `_root_` segment the same way). Rerunning the
