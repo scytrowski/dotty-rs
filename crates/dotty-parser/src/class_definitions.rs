@@ -121,7 +121,6 @@ where
                 parent_start,
                 body_start,
             },
-            false,
         );
         let template_position =
             self.template_position(constructor, constructor_start, &parents, &body);
@@ -176,16 +175,6 @@ where
             Vec::new()
         };
         let value_param_clauses = self.parse_term_param_clauses(owner);
-        let mutable_constructor = value_param_clauses
-            .first()
-            .and_then(|clause| clause.first())
-            .is_some_and(|parameter| {
-                matches!(
-                    self.ast.get(*parameter).kind,
-                    TreeKind::ValDef(ref definition)
-                        if definition.metadata.modifiers.contains(&Modifier::Var)
-                )
-            });
         let constructor_end = self.last_real_token_end;
         let parents = self.parse_parent_clause();
         let body = self.parse_optional_template_body();
@@ -210,7 +199,6 @@ where
                 parent_start,
                 body_start,
             },
-            mutable_constructor,
         );
         let template_position =
             self.template_position(constructor, constructor_start, &parents, &body);
@@ -228,9 +216,6 @@ where
         let mut metadata = prefix.metadata;
         if is_case {
             metadata.modifiers.push(Modifier::Case);
-        }
-        if mutable_constructor {
-            metadata.modifiers.push(Modifier::Var);
         }
         if is_trait {
             metadata.modifiers.push(Modifier::Trait);
@@ -513,7 +498,6 @@ where
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
         parameter_end: u32,
         boundary: ConstructorBoundary,
-        mutable: bool,
     ) -> (TreeId<Untyped>, u32) {
         let name = TermName::new(self.names.intern("<init>"));
         let first_child_start = type_params
@@ -569,15 +553,7 @@ where
                 value_param_clauses,
                 tpt,
                 rhs: None,
-                metadata: Modifiers {
-                    visibility: None,
-                    modifiers: if mutable {
-                        vec![Modifier::Var]
-                    } else {
-                        Vec::new()
-                    },
-                    annotations: Vec::new(),
-                },
+                metadata: Modifiers::default(),
             }),
             Some(position),
         );
@@ -669,6 +645,53 @@ mod tests {
             panic!("expected a constructor parameter");
         };
         assert_eq!(parameter.metadata.modifiers, vec![Modifier::ParamAccessor]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_var_on_the_constructor_parameter_only() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case class C(var x: Int)",
+            vec![
+                token(TokenKind::CaseClass, 0, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Var), 13, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::Colon), 18, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a case class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        assert_eq!(definition.metadata.modifiers, vec![Modifier::Case]);
+
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected a synthetic constructor");
+        };
+        assert!(constructor.metadata.modifiers.is_empty());
+
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(constructor.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected a constructor parameter");
+        };
+        assert_eq!(
+            parameter.metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::Var]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
