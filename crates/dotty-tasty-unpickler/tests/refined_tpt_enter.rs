@@ -383,6 +383,35 @@ fn a_refined_tree_reached_from_two_owners_keeps_the_first_and_records_the_confli
     assert_eq!(owner, Some(m1));
 }
 
+#[test]
+fn a_shared_refinement_with_a_conflicting_owner_is_refused_at_projection_not_silently_bound_to_the_first()
+ {
+    // `enter_symbols` records the conflict on `__shared__` (asserted above);
+    // projecting it — through either owner's declared type, `m1`'s or
+    // `m2`'s — must not silently succeed with the first owner's class: it is
+    // the same policy `type_of_lambda_tpt` already follows for
+    // `SharedLambdaOwnerConflict`, and `type_of_refined_tpt` guards on it the
+    // same way, before `refinement_class` is ever consulted.
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    assert!(
+        unpickler
+            .index()
+            .has_refined_owner_conflict(unit.at("__shared__"))
+    );
+
+    let types_before = unpickler.index().type_count();
+    assert_eq!(
+        unpickler.unpickle_type_tree_type(unit.at("__shared__")),
+        Err(UnpickleError::SharedRefinementOwnerConflict {
+            address: unit.at("__shared__")
+        })
+    );
+    assert_eq!(unpickler.index().type_count(), types_before);
+}
+
 // --- unsupported stat kinds ---
 
 #[test]

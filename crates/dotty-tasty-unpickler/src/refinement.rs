@@ -69,6 +69,9 @@ impl TastyUnpickler<'_, '_, '_> {
         children: &[u32],
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
+        if self.index.has_refined_owner_conflict(at) {
+            return Err(UnpickleError::SharedRefinementOwnerConflict { address: at });
+        }
         ast.node(at)?.decode_refined_tpt()?;
         let Some((parent, stats)) = children.split_first() else {
             return Err(UnpickleError::MalformedRefinedTypeTree {
