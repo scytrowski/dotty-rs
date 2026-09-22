@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Private, Protected, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -108,6 +108,12 @@ object Main:
           fields += field("name", quote(vdef.name.toString))
         if vdef.mods.is(Given) then
           fields += field("given", "true")
+        if vdef.mods.is(ParamAccessor) then
+          fields += field("param_accessor", "true")
+        if vdef.mods.isAllOf(PrivateLocal) then
+          fields += field("private_local", "true")
+        if vdef.mods.is(Mutable) && (vdef.mods.is(ParamAccessor) || vdef.mods.isAllOf(PrivateLocal)) then
+          fields += field("mutable", "true")
         if isValueDefinitionSource(slice(vdef, source)) then
           fields ++= renderDefinitionMetadata(vdef.mods, vdef, source, placeholderBase)
       case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] =>
@@ -166,6 +172,7 @@ object Main:
       "abstract" -> Abstract,
       "final" -> Final,
       "sealed" -> Sealed,
+      "case" -> Case,
       "implicit" -> Implicit,
       "lazy" -> Lazy,
       "override" -> Override,

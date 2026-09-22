@@ -242,6 +242,35 @@ fn render_tree(
             {
                 fields.push("\"given\":true".to_owned());
             }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::ParamAccessor)
+            {
+                fields.push("\"param_accessor\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PrivateLocal)
+            {
+                fields.push("\"private_local\":true".to_owned());
+            }
+            if (definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::ParamAccessor)
+                || definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::PrivateLocal))
+                && definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::Var)
+            {
+                fields.push("\"mutable\":true".to_owned());
+            }
             if is_value_definition_source(&source_text) {
                 fields.extend(render_definition_metadata(
                     &definition.metadata,
