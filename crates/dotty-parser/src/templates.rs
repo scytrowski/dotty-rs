@@ -311,15 +311,7 @@ where
             return;
         }
         self.defer_template_outdent_feedback = false;
-        if self.current().kind != TokenKind::Outdent
-            && self.current().kind != TokenKind::Eof
-            && self.current().kind != TokenKind::Punctuation(dotty_core::Punctuation::RightBrace)
-        {
-            self.observe_outdented();
-        } else if matches!(
-            self.current().kind,
-            TokenKind::Newline | TokenKind::Newlines
-        ) {
+        if self.current().kind != TokenKind::Outdent && self.current().kind != TokenKind::Eof {
             self.observe_outdented();
         }
     }
