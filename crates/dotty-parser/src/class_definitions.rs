@@ -274,11 +274,17 @@ where
 
         let mut derives = Vec::new();
         loop {
-            let mark = self.mark();
-            let mut derive =
+            let derive =
                 self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
-            if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
-                derive = self.parse_type_application(mark, derive);
+            if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+            {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "type applications are not supported in `derives` clauses",
+                );
+                self.recover_unsupported_derives_type_application();
             }
             derives.push(derive);
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
@@ -286,6 +292,25 @@ where
             }
         }
         derives
+    }
+
+    fn recover_unsupported_derives_type_application(&mut self) {
+        let mut depth = 0u32;
+        while self.current().kind != TokenKind::Eof {
+            match self.current().kind {
+                TokenKind::Punctuation(Punctuation::LeftBracket) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightBracket) => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+            let closes_application = depth == 0;
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) || closes_application {
+                break;
+            }
+        }
     }
 
     fn parse_uses_clause(&mut self) -> Vec<dotty_core::ast::UseRef> {
@@ -947,6 +972,47 @@ mod tests {
             TreeKind::Select(select) if select.name.is_type()
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_type_applications_in_derives_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives Foo[Bar]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 19, 20),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
     }
 
     #[test]
