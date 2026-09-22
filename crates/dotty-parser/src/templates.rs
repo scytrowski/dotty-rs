@@ -151,7 +151,8 @@ where
         }
 
         let mark = self.mark();
-        let name = if self.current().kind == TokenKind::Keyword(HardKeyword::This) {
+        let is_this = self.current().kind == TokenKind::Keyword(HardKeyword::This);
+        let name = if is_this {
             self.advance();
             TermName::new(self.names.intern("_"))
         } else {
@@ -163,7 +164,14 @@ where
                 Err(_) => return None,
             }
         };
-        let tpt = if self.accept_self_colon() {
+        let has_colon = self.accept_self_colon();
+        if is_this && !has_colon {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `:` after `this` in a template self type",
+            );
+        }
+        let tpt = if has_colon {
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
         } else {
             self.synthetic_type_tree_at(mark.start())
@@ -545,5 +553,33 @@ mod tests {
         ));
         assert_eq!(result.members.len(), 1);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_untyped_this_self_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ this => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::This), 2, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
     }
 }
