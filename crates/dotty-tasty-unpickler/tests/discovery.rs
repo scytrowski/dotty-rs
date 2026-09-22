@@ -22,9 +22,9 @@ use dotty_tasty::tasty::{
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
-const NAMES: [&str; 13] = [
-    "ASTs", "p", "Holder", "m1", "m2", "m3", "dup1", "dup2", "poison", "modesens", "selfref", "x",
-    "sel",
+const NAMES: [&str; 14] = [
+    "ASTs", "p", "Holder", "m1", "m2", "m3", "m4", "dup1", "dup2", "poison", "modesens", "selfref",
+    "x", "sel",
 ];
 
 fn n(text: &str) -> u32 {
@@ -116,8 +116,8 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
 }
 
 /// Every definition of the unit, in document order.
-const DEFINITIONS: [&str; 9] = [
-    "Holder", "m1", "m2", "m3", "dup1", "dup2", "poison", "modesens", "selfref",
+const DEFINITIONS: [&str; 10] = [
+    "Holder", "m1", "m2", "m3", "m4", "dup1", "dup2", "poison", "modesens", "selfref",
 ];
 
 struct Unit {
@@ -184,6 +184,18 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         DEFDEF_TAG,
         "m3",
         wrap(THIS_TAG, &leaf(SHAREDTYPE_TAG, addr("hidden_e"))),
+    );
+
+    // `m4` reaches the *same* `hidden_b` tree `m2` already owns, also
+    // through `THIS`, but `m4` is not a member of `hidden_b`'s own
+    // refinement — a genuinely independent owner reaching an
+    // already-entered identity through a hidden route, which must still
+    // conflict (§17), unlike a member referring to its own enclosing
+    // refinement (see `selfref`/`x` below).
+    let m4 = def(
+        DEFDEF_TAG,
+        "m4",
+        wrap(THIS_TAG, &leaf(TYPEREFDIRECT_TAG, addr("hidden_b"))),
     );
 
     // `dup1`/`dup2` both reach the *same* hidden tree through a `SELECTtpt`
@@ -259,6 +271,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
                     m1,
                     m2,
                     m3,
+                    m4,
                     dup1,
                     dup2,
                     poison,
@@ -383,6 +396,24 @@ fn a_refinement_hidden_behind_a_this_class_reference_through_a_sharedtype_link_i
     assert!(unpickler.index().symbol_at(hidden_e).is_some());
     let m3 = unpickler.index().symbol_at(unit.at("m3")).unwrap();
     assert_eq!(unpickler.index().refined_owner(hidden_e), Some(m3));
+}
+
+#[test]
+fn a_hidden_refinement_reached_from_two_owners_through_this_still_conflicts() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let unpickler = entered(&file, &mut session).unwrap();
+
+    // `m2` and `m4` are both unrelated top-level members of `Holder`,
+    // neither a member of `hidden_b`'s own refinement: unlike
+    // `selfref`/`x` (a genuine self-reference), this is a real,
+    // independent second owner reaching an already-entered identity
+    // through a hidden `THIS` route, and must still conflict.
+    let hidden_b = unit.at("hidden_b");
+    assert!(unpickler.index().has_refined_owner_conflict(hidden_b));
+    let m2 = unpickler.index().symbol_at(unit.at("m2")).unwrap();
+    assert_eq!(unpickler.index().refined_owner(hidden_b), Some(m2));
 }
 
 #[test]

@@ -165,11 +165,15 @@ impl TastyUnpickler<'_, '_, '_> {
         Ok(())
     }
 
-    /// Visits `tree` under `mode`, owned by `owner`. `depth` bounds nesting,
-    /// links and identity forms alike, exactly as the pre-5d2c walk did; a
-    /// tree already visited under this exact `(owner, mode)` is not walked
-    /// twice. An address that is not a visible node (an unresolved or
-    /// malformed link) is left for projection to report; pass 1 simply stops.
+    /// Visits `tree` under `mode`, owned by `owner`. `depth` bounds general
+    /// structural nesting, exactly as the pre-5d2c walk did; a tree already
+    /// visited under this exact `(owner, mode)` is not walked twice. Every
+    /// caller reaches `tree` either as a structural child (always a valid
+    /// node, by construction of the AST address index) or as a link target
+    /// already validated by the link-following helper that found it
+    /// ([`AstView::resolve_shared_term`], [`AstView::resolve_shared_type`],
+    /// [`reference_target`]), so an invalid address here is defensive: it
+    /// still fails typed, never silently.
     pub(crate) fn discover_identities(
         &mut self,
         ast: &AstView<'_>,
@@ -182,7 +186,10 @@ impl TastyUnpickler<'_, '_, '_> {
             return Err(malformed(tree, "a type tree nests too deeply"));
         }
         let Some(tag) = ast.tag_at(tree) else {
-            return Ok(());
+            return Err(UnpickleError::InvalidReferenceTarget {
+                from: tree,
+                to: tree,
+            });
         };
         if !self.index.first_identity_scan(tree, owner, mode) {
             return Ok(());
@@ -329,9 +336,13 @@ impl TastyUnpickler<'_, '_, '_> {
         use DiscoveryMode::{ClassRef, SemanticType};
 
         if tag == SHAREDTYPE_TAG {
-            let Some(target) = shared_type_target(ast, tree)? else {
-                return Ok(());
-            };
+            // The whole chain is resolved and bounded in one call, by the
+            // same `MAX_SHARED_DEPTH` policy `type_at`'s own `SHAREDtype`
+            // handling uses — never the general nesting `depth` this
+            // function otherwise threads (§9/§18 of the module
+            // documentation: a `SHAREDtype` chain is its own, separately
+            // bounded concern).
+            let target = ast.resolve_shared_type(tree, tree)?;
             return self.discover_identities(ast, target, owner, SemanticType, depth + 1);
         }
         let children = children_of(ast, tree);
@@ -419,9 +430,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             TYPEREFPKG_TAG => Ok(()),
             SHAREDTYPE_TAG => {
-                let Some(target) = shared_type_target(ast, tree)? else {
-                    return Ok(());
-                };
+                let target = ast.resolve_shared_type(tree, tree)?;
                 self.discover_identities(ast, target, owner, DiscoveryMode::ClassRef, depth + 1)
             }
             TYPEREF_TAG => match children_of(ast, tree).first() {
@@ -463,9 +472,7 @@ impl TastyUnpickler<'_, '_, '_> {
         owner: SymbolId,
         depth: usize,
     ) -> Result<(), UnpickleError> {
-        let Some(target) = reference_target(ast, at)? else {
-            return Ok(());
-        };
+        let target = reference_target(ast, at)?;
         if ast.tag_at(target) == Some(REFINEDTPT_TAG) {
             return self.enter_referenced_refined_tpt(ast, target, owner, depth);
         }
@@ -476,16 +483,33 @@ impl TastyUnpickler<'_, '_, '_> {
     /// to it — never a declared-type position of its own — is allowed to:
     /// Dotty's `symAtAddr.getOrElse(start, newRefinedClassSymbol(...))` gets
     /// the already-registered class when one exists and only creates a fresh
-    /// one when none does. A member of a refinement referring to its own
-    /// enclosing refinement (an explicit `this.type`, or a sibling member
-    /// name resolved relative to the structural instance — both encoded as
-    /// `THIS` of the refinement's own synthetic class, see [`crate::types`])
-    /// is exactly this case: the identity was already entered, by the
-    /// refinement's *own* declared-type position, before any member's type is
-    /// scanned (Milestone 5d2b's two-stage entering), so this call must
-    /// simply resolve to it — never re-derive ownership from the member that
-    /// happens to mention it, which would misreport a genuine self-reference
-    /// as a cross-owner conflict.
+    /// one when none does.
+    ///
+    /// When the identity already exists, two cases are told apart:
+    ///
+    /// * a member *of the refinement itself* referring to its own enclosing
+    ///   refinement (an explicit `this.type`, or a sibling member name
+    ///   resolved relative to the structural instance — both encoded as
+    ///   `THIS` of the refinement's own synthetic class, see
+    ///   [`crate::types`]) is not a second owner at all: `owner` here is the
+    ///   *member's* own symbol, and its ownership chain leads back to the
+    ///   refinement class itself ([`owner_is_within`](Self::owner_is_within)).
+    ///   The identity was already entered by the refinement's *own*
+    ///   declared-type position before any member's type is scanned
+    ///   (Milestone 5d2b's two-stage entering), so this simply resolves to
+    ///   it — re-deriving ownership from the member that happens to mention
+    ///   it would misreport a genuine self-reference as a cross-owner
+    ///   conflict (found and fixed by mutation testing during 5d2c's
+    ///   development: `tests/discovery.rs`'s
+    ///   `a_member_naming_its_own_enclosing_refinement_through_this_keeps_the_refinements_true_owner`,
+    ///   plus two of 5d2b's own real-fixture tests, catch a regression here);
+    /// * a genuinely independent owner — one whose ownership chain does
+    ///   *not* lead to this refinement — reaching the address through a
+    ///   hidden route is exactly the shared-identity case §17 of issue #101
+    ///   describes, and gets the same `SharedRefinementOwnerConflict` policy
+    ///   `enter_refined_tpt` applies to a direct `SHAREDterm` share
+    ///   (`tests/discovery.rs`'s
+    ///   `a_hidden_refinement_reached_from_two_owners_through_this_still_conflicts`).
     ///
     /// Only when the address has *no* entry yet (a genuinely hidden route
     /// discovering it for the first time, e.g. the real library self-types
@@ -498,50 +522,74 @@ impl TastyUnpickler<'_, '_, '_> {
         owner: SymbolId,
         depth: usize,
     ) -> Result<(), UnpickleError> {
-        if self.index.symbol_at(tree).is_some() {
+        if let Some(class) = self.index.symbol_at(tree) {
+            if !self.owner_is_within(owner, class) && self.index.refined_owner(tree) != Some(owner)
+            {
+                self.index.mark_refined_conflict(tree);
+            }
             return Ok(());
         }
         let children = children_of(ast, tree);
         self.enter_refined_tpt(ast, tree, &children, owner, depth)
     }
+
+    /// Whether `owner`'s ownership chain — `owner` itself, then its own
+    /// owner, and so on — reaches `class`: i.e. `owner` is `class` or is
+    /// nested inside it. Owner chains are acyclic by construction (a
+    /// symbol's owner is always allocated, and therefore holds a strictly
+    /// smaller [`SymbolId`], before the symbol itself is), so this walk is
+    /// unbounded, the same way [`resolve_qualifier`](crate::enter) already
+    /// walks an owner chain without a bound.
+    fn owner_is_within(&self, owner: SymbolId, class: SymbolId) -> bool {
+        let mut current = Some(owner);
+        while let Some(symbol) = current {
+            if symbol == class {
+                return true;
+            }
+            current = self.store.symbols.get(symbol).owner;
+        }
+        false
+    }
 }
 
 /// The target address a `TYPEREFdirect`/`TERMREFdirect`/`TYPEREFsymbol`/
-/// `TERMREFsymbol` at `at` names, if any. Never itself a declared-type scan
-/// target (see [`TastyUnpickler::enter_reference_target`]); only used to
-/// detect the one case (§11) where the target is a `REFINEDtpt`'s own
-/// address.
-fn reference_target(ast: &AstView<'_>, at: u32) -> Result<Option<u32>, UnpickleError> {
+/// `TERMREFsymbol` at `at` names. Never itself a declared-type scan target
+/// (see [`TastyUnpickler::enter_reference_target`]); only used to detect the
+/// one case (§11) where the target is a `REFINEDtpt`'s own address. The
+/// target is validated as a visible node — an out-of-range address, or one
+/// that points into the middle of another node, is the typed
+/// `InvalidReferenceTarget`, never silently ignored (§18 of the module
+/// documentation).
+fn reference_target(ast: &AstView<'_>, at: u32) -> Result<u32, UnpickleError> {
     use dotty_tasty::tasty::{RawTree, TermValue};
-    Ok(match ast.tree_at(at, at)? {
+    let malformed = || UnpickleError::MalformedType {
+        address: at,
+        reason: "not a direct or symbol reference",
+    };
+    let target = match ast.tree_at(at, at)? {
         RawTree::Leaf(term) => match term.value {
             TermValue::AstRef(target)
                 if matches!(term.tag, TYPEREFDIRECT_TAG | TERMREFDIRECT_TAG) =>
             {
-                Some(target)
+                target
             }
-            _ => None,
+            _ => return Err(malformed()),
         },
         RawTree::NatAst {
             value,
             tag: TYPEREFSYMBOL_TAG | TERMREFSYMBOL_TAG,
             ..
-        } => Some(value),
-        _ => None,
-    })
-}
-
-/// The target address a `SHAREDtype` at `at` names, if it decodes to one
-/// (the format's only valid shape for it).
-fn shared_type_target(ast: &AstView<'_>, at: u32) -> Result<Option<u32>, UnpickleError> {
-    use dotty_tasty::tasty::{RawTree, TermValue};
-    Ok(match ast.tree_at(at, at)? {
-        RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => match term.value {
-            TermValue::AstRef(target) => Some(target),
-            _ => None,
-        },
-        _ => None,
-    })
+        } => value,
+        _ => return Err(malformed()),
+    };
+    if ast.is_node(target) {
+        Ok(target)
+    } else {
+        Err(UnpickleError::InvalidReferenceTarget {
+            from: at,
+            to: target,
+        })
+    }
 }
 
 /// The address and tag of an annotation tree's root, following a
