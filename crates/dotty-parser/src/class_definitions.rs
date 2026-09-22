@@ -23,6 +23,12 @@ enum ParentSeparator {
     With,
 }
 
+#[derive(Clone, Copy)]
+struct ConstructorBoundary {
+    parent_start: Option<u32>,
+    body_start: Option<u32>,
+}
+
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
@@ -111,8 +117,10 @@ where
             Vec::new(),
             Vec::new(),
             mark.start(),
-            parent_start,
-            body_start,
+            ConstructorBoundary {
+                parent_start,
+                body_start,
+            },
             false,
         );
         let template_position =
@@ -198,8 +206,10 @@ where
             type_params,
             value_param_clauses,
             constructor_end,
-            parent_start,
-            body_start,
+            ConstructorBoundary {
+                parent_start,
+                body_start,
+            },
             mutable_constructor,
         );
         let template_position =
@@ -502,8 +512,7 @@ where
         type_params: Vec<TreeId<Untyped>>,
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
         parameter_end: u32,
-        parent_start: Option<u32>,
-        body_start: Option<u32>,
+        boundary: ConstructorBoundary,
         mutable: bool,
     ) -> (TreeId<Untyped>, u32) {
         let name = TermName::new(self.names.intern("<init>"));
@@ -518,13 +527,13 @@ where
             .map(|position| position.span().range().start());
         let constructor_start = first_child_start
             .map(|child_start| child_start.saturating_sub(1))
-            .or(parent_start)
-            .or(body_start)
+            .or(boundary.parent_start)
+            .or(boundary.body_start)
             .unwrap_or(start);
         let constructor_end = first_child_start
             .map(|_| parameter_end)
-            .or(parent_start)
-            .or(body_start)
+            .or(boundary.parent_start)
+            .or(boundary.body_start)
             .unwrap_or(start);
         let tpt_start = value_param_clauses
             .last()
@@ -539,18 +548,20 @@ where
             })
             .unwrap_or(constructor_end);
         let tpt = self.synthetic_type_tree_at(tpt_start);
-        let position =
-            if first_child_start.is_some() || parent_start.is_some() || body_start.is_some() {
-                dotty_core::SourceSpan::new(
-                    self.source_id,
-                    dotty_core::Span::without_point(
-                        dotty_core::TextRange::new(constructor_start, constructor_end)
-                            .expect("constructor span is ordered"),
-                    ),
-                )
-            } else {
-                self.zero_width_span(start)
-            };
+        let position = if first_child_start.is_some()
+            || boundary.parent_start.is_some()
+            || boundary.body_start.is_some()
+        {
+            dotty_core::SourceSpan::new(
+                self.source_id,
+                dotty_core::Span::without_point(
+                    dotty_core::TextRange::new(constructor_start, constructor_end)
+                        .expect("constructor span is ordered"),
+                ),
+            )
+        } else {
+            self.zero_width_span(start)
+        };
         let constructor = self.alloc(
             TreeKind::DefDef(DefDef {
                 name,
