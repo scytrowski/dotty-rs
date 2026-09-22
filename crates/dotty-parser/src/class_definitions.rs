@@ -113,6 +113,7 @@ where
             mark.start(),
             parent_start,
             body_start,
+            false,
         );
         let template_position =
             self.template_position(constructor, constructor_start, &parents, &body);
@@ -167,6 +168,16 @@ where
             Vec::new()
         };
         let value_param_clauses = self.parse_term_param_clauses(owner);
+        let mutable_constructor = value_param_clauses
+            .first()
+            .and_then(|clause| clause.first())
+            .is_some_and(|parameter| {
+                matches!(
+                    self.ast.get(*parameter).kind,
+                    TreeKind::ValDef(ref definition)
+                        if definition.metadata.modifiers.contains(&Modifier::Var)
+                )
+            });
         let constructor_end = self.last_real_token_end;
         let parents = self.parse_parent_clause();
         let body = self.parse_optional_template_body();
@@ -189,6 +200,7 @@ where
             constructor_end,
             parent_start,
             body_start,
+            mutable_constructor,
         );
         let template_position =
             self.template_position(constructor, constructor_start, &parents, &body);
@@ -206,6 +218,9 @@ where
         let mut metadata = prefix.metadata;
         if is_case {
             metadata.modifiers.push(Modifier::Case);
+        }
+        if mutable_constructor {
+            metadata.modifiers.push(Modifier::Var);
         }
         if is_trait {
             metadata.modifiers.push(Modifier::Trait);
@@ -489,6 +504,7 @@ where
         parameter_end: u32,
         parent_start: Option<u32>,
         body_start: Option<u32>,
+        mutable: bool,
     ) -> (TreeId<Untyped>, u32) {
         let name = TermName::new(self.names.intern("<init>"));
         let first_child_start = type_params
@@ -514,10 +530,10 @@ where
             .last()
             .and_then(|clause| clause.last())
             .and_then(|parameter| match &self.ast.get(*parameter).kind {
-                TreeKind::ValDef(parameter) => self
-                    .ast
-                    .get(parameter.tpt)
-                    .position
+                TreeKind::ValDef(parameter) => parameter
+                    .rhs
+                    .and_then(|rhs| self.ast.get(rhs).position)
+                    .or_else(|| self.ast.get(parameter.tpt).position)
                     .map(|position| position.span().range().end()),
                 _ => None,
             })
@@ -542,7 +558,15 @@ where
                 value_param_clauses,
                 tpt,
                 rhs: None,
-                metadata: Modifiers::default(),
+                metadata: Modifiers {
+                    visibility: None,
+                    modifiers: if mutable {
+                        vec![Modifier::Var]
+                    } else {
+                        Vec::new()
+                    },
+                    annotations: Vec::new(),
+                },
             }),
             Some(position),
         );
@@ -1226,6 +1250,70 @@ mod tests {
         let _ = parser.parse_class_definition(Location::Elsewhere);
 
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nested_indented_case_definitions_stay_in_the_outer_template_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{\n  class Outer:\n    case class Inner(value: A):\n      def get = value\n    case object Empty\n    val done = true\n}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 4, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::ColonEol, 15, 16),
+                token(TokenKind::Indent, 16, 16),
+                token(TokenKind::CaseClass, 21, 31),
+                token(TokenKind::Identifier, 32, 37),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 37, 38),
+                token(TokenKind::Identifier, 38, 43),
+                token(TokenKind::ColonFollow, 43, 44),
+                token(TokenKind::Identifier, 45, 46),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 46, 47),
+                token(TokenKind::ColonEol, 47, 48),
+                token(TokenKind::Indent, 48, 48),
+                token(TokenKind::Keyword(HardKeyword::Def), 55, 58),
+                token(TokenKind::Identifier, 59, 62),
+                token(TokenKind::Operator, 63, 64),
+                token(TokenKind::Identifier, 65, 69),
+                token(TokenKind::Newline, 69, 70),
+                token(TokenKind::Outdent, 70, 70),
+                token(TokenKind::CaseObject, 75, 86),
+                token(TokenKind::Identifier, 87, 92),
+                token(TokenKind::Newline, 92, 93),
+                token(TokenKind::Keyword(HardKeyword::Val), 97, 100),
+                token(TokenKind::Identifier, 101, 105),
+                token(TokenKind::Operator, 106, 107),
+                token(TokenKind::Keyword(HardKeyword::True), 108, 112),
+                token(TokenKind::Outdent, 113, 113),
+                token(TokenKind::Eof, 113, 113),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected outer TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected outer Template");
+        };
+        assert_eq!(template.body.len(), 3);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[2]).kind,
+            TreeKind::ValDef(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 }

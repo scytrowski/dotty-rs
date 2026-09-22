@@ -39,10 +39,12 @@ where
             return Vec::new();
         }
 
+        let body_indent = self.source_line_indent(self.current().span.start());
+
         let members = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
-                    parser.parse_template_members(closing)
+                    parser.parse_template_members(closing, body_indent)
                 })
             })
         });
@@ -60,20 +62,32 @@ where
         members
     }
 
-    fn parse_template_members(&mut self, closing: TokenKind) -> Vec<TreeId<Untyped>> {
+    fn parse_template_members(
+        &mut self,
+        closing: TokenKind,
+        body_indent: usize,
+    ) -> Vec<TreeId<Untyped>> {
         let mut members = Vec::new();
         self.consume_template_separators(closing);
 
         loop {
-            if !members.is_empty() && closing == TokenKind::Outdent {
-                self.feedback_template_outdent();
+            if !members.is_empty()
+                && closing == TokenKind::Outdent
+                && !self.last_advance_was_outdent
+            {
+                self.feedback_template_outdent(body_indent);
             }
             if self.template_body_ended(closing) {
                 break;
             }
 
             let checkpoint = self.cursor.checkpoint();
+            self.last_advance_was_outdent = false;
             let statement = self.parse_statement(Location::InBlock);
+            let ended_nested_indented_body = self.last_advance_was_outdent;
+            if ended_nested_indented_body {
+                self.defer_template_outdent_feedback = true;
+            }
             match statement {
                 crate::statements::ParsedStatement::Definition(tree)
                 | crate::statements::ParsedStatement::Expression(tree) => members.push(tree),
@@ -92,11 +106,18 @@ where
                 }
             }
 
-            if closing == TokenKind::Outdent {
-                self.feedback_template_outdent();
+            if closing == TokenKind::Outdent && !ended_nested_indented_body {
+                self.feedback_template_outdent(body_indent);
             }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
+            } else if ended_nested_indented_body
+                && closing == TokenKind::Outdent
+                && !self.template_body_ended(closing)
+            {
+                // The separator newline belongs to the nested body. Its
+                // synthetic Outdent is the boundary between that body and
+                // the next member of the enclosing template.
             } else if !self.template_body_ended(closing) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -110,7 +131,16 @@ where
         members
     }
 
-    fn feedback_template_outdent(&mut self) {
+    fn feedback_template_outdent(&mut self, body_indent: usize) {
+        if self.defer_template_outdent_feedback
+            && self.current().kind != TokenKind::Eof
+            && self.current().kind != TokenKind::Outdent
+            && self.current().kind != TokenKind::Punctuation(dotty_core::Punctuation::RightBrace)
+            && self.source_line_indent(self.current().span.start()) >= body_indent
+        {
+            return;
+        }
+        self.defer_template_outdent_feedback = false;
         if self.current().kind != TokenKind::Outdent
             && self.current().kind != TokenKind::Eof
             && !self.is_template_separator(self.current().kind)
@@ -137,6 +167,18 @@ where
         {
             self.advance();
         }
+    }
+
+    fn source_line_indent(&self, offset: u32) -> usize {
+        let source = self.source.as_str();
+        let end = (offset as usize).min(source.len());
+        let line_start = source[..end]
+            .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
+            .map_or(0, |index| index + 1);
+        source[line_start..end]
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .count()
     }
 }
 

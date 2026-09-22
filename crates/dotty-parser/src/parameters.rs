@@ -176,7 +176,11 @@ where
         } else if is_class_parameter_owner(owner) {
             if owner == ParamOwner::CaseClass && first_ordinary_clause {
                 metadata.modifiers.push(Modifier::ParamAccessor);
+            } else if owner == ParamOwner::CaseClass {
+                metadata.modifiers.push(Modifier::ParamAccessor);
+                metadata.modifiers.push(Modifier::PrivateLocal);
             } else {
+                metadata.modifiers.push(Modifier::ParamAccessor);
                 metadata.modifiers.push(Modifier::PrivateLocal);
             }
         }
@@ -378,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_a_plain_class_parameter_as_private_local() {
+    fn marks_a_plain_class_parameter_as_accessor_and_private_local() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(x: A)",
@@ -398,7 +402,10 @@ mod tests {
         else {
             panic!("expected a constructor parameter");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::PrivateLocal]);
+        assert_eq!(
+            metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -469,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_case_class_clause_makes_plain_parameters_accessors() {
+    fn later_case_class_clauses_keep_accessor_and_private_local_roles() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(x: A)(y: B)",
@@ -499,7 +506,10 @@ mod tests {
         else {
             panic!("expected second parameter");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::PrivateLocal]);
+        assert_eq!(
+            metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
