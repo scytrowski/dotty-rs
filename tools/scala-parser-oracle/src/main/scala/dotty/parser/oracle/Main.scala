@@ -195,14 +195,23 @@ object Main:
       .split("[^A-Za-z]+")
       .toList
       .filter(enabledWithSource.contains)
+    val prefixText = sourceText.take(keywordIndex)
+    val prefixWords = prefixText.split("[^A-Za-z]+").toSet
     val modifiers = ordered.map(name => quote(name)).mkString("[", ",", "]")
     val visibility =
-      if mods.is(Private) then "private"
-      else if mods.is(Protected) then "protected"
+      if mods.is(Private) || prefixWords.contains("private") then "private"
+      else if mods.is(Protected) || prefixWords.contains("protected") then "protected"
       else ""
+    val sourceQualifier =
+      prefixText
+        .drop(prefixText.indexOf('[') + 1)
+        .takeWhile(_ != ']')
+        .trim
     val qualifier =
-      if visibility.isEmpty || mods.privateWithin.isEmpty then "null"
-      else quote(mods.privateWithin.toString)
+      if visibility.isEmpty then "null"
+      else if !mods.privateWithin.isEmpty then quote(mods.privateWithin.toString)
+      else if prefixText.contains('[') && sourceQualifier.nonEmpty then quote(sourceQualifier)
+      else "null"
     val annotationTrees = mods.annotations.map(annotation =>
       render(annotation, source, placeholderBase(annotation, source))
     ).mkString("[", ",", "]")
