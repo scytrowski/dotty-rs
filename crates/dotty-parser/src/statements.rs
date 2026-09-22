@@ -65,6 +65,9 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
             return self.parse_type_definition(location);
         }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Enum) {
+            return self.parse_enum_definition(location);
+        }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Class) {
             return self.parse_class_definition(location);
         }
@@ -113,6 +116,7 @@ where
             TokenKind::Keyword(HardKeyword::Type) => {
                 self.parse_type_definition_with_prefix(location, prefix)
             }
+            TokenKind::Keyword(HardKeyword::Enum) => self.parse_enum_definition_with_prefix(prefix),
             TokenKind::Keyword(HardKeyword::Class) => {
                 self.parse_class_definition_with_prefix(prefix)
             }
@@ -367,9 +371,7 @@ pub(crate) const fn is_block_separator(kind: TokenKind) -> bool {
 const fn is_unsupported_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Keyword(
-            HardKeyword::Match | HardKeyword::Val | HardKeyword::Var | HardKeyword::Enum
-        )
+        TokenKind::Keyword(HardKeyword::Match | HardKeyword::Val | HardKeyword::Var)
     )
 }
 

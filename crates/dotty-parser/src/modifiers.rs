@@ -311,6 +311,7 @@ fn is_definition_keyword(kind: TokenKind) -> bool {
                 | HardKeyword::Class
                 | HardKeyword::Trait
                 | HardKeyword::Object
+                | HardKeyword::Enum
                 | HardKeyword::Given
         ) | TokenKind::CaseClass
             | TokenKind::CaseObject

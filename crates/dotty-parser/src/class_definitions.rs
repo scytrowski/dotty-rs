@@ -50,7 +50,18 @@ where
         &mut self,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
-        self.parse_type_like_definition(false, false, prefix)
+        self.parse_type_like_definition(false, false, false, prefix)
+    }
+
+    pub(crate) fn parse_enum_definition(&mut self, _location: Location) -> ParsedStatement {
+        self.parse_enum_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_enum_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_type_like_definition(false, false, true, prefix)
     }
 
     pub(crate) fn parse_case_class_definition(&mut self, _location: Location) -> ParsedStatement {
@@ -61,7 +72,7 @@ where
         &mut self,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
-        self.parse_type_like_definition(false, true, prefix)
+        self.parse_type_like_definition(false, true, false, prefix)
     }
 
     pub(crate) fn parse_trait_definition(&mut self, _location: Location) -> ParsedStatement {
@@ -72,7 +83,7 @@ where
         &mut self,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
-        self.parse_type_like_definition(true, false, prefix)
+        self.parse_type_like_definition(true, false, false, prefix)
     }
 
     pub(crate) fn parse_object_definition(&mut self, _location: Location) -> ParsedStatement {
@@ -158,6 +169,7 @@ where
         &mut self,
         is_trait: bool,
         is_case: bool,
+        is_enum: bool,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
         let mark = crate::Mark {
@@ -222,6 +234,9 @@ where
         }
         if is_trait {
             metadata.modifiers.push(Modifier::Trait);
+        }
+        if is_enum {
+            metadata.modifiers.push(Modifier::Enum);
         }
 
         ParsedStatement::Definition(self.alloc_from(
@@ -1053,6 +1068,30 @@ mod tests {
         };
         assert!(template.parents.is_empty());
         assert!(template.body.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn marks_an_enum_without_changing_the_shared_type_def_shape() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, metadata, .. }) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::Enum]);
+        assert!(matches!(parser.ast().get(*rhs).kind, TreeKind::Template(_)));
         assert!(parser.diagnostics().is_empty());
     }
 
