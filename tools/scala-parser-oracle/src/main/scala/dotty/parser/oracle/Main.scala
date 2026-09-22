@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -100,6 +100,10 @@ object Main:
           case Some('+') => fields += field("variance", quote("covariant"))
           case Some('-') => fields += field("variance", quote("contravariant"))
           case _ =>
+        if !isTypeDefinitionSource(slice(tdef, source)) && tdef.mods.is(Param) then
+          fields += field("param", "true")
+        if !isTypeDefinitionSource(slice(tdef, source)) && tdef.mods.isAllOf(PrivateLocal) then
+          fields += field("private_local", "true")
         if tdef.mods.is(Trait) then
           fields += field("trait", "true")
         if isTypeDefinitionSource(slice(tdef, source)) then

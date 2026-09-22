@@ -77,6 +77,16 @@ where
 
     fn type_param(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        let mut metadata = Modifiers::default();
+        metadata.modifiers.push(dotty_core::ast::Modifier::Param);
+        if matches!(
+            self.context.param_owner,
+            Some(ParamOwner::Class | ParamOwner::CaseClass)
+        ) {
+            metadata
+                .modifiers
+                .push(dotty_core::ast::Modifier::PrivateLocal);
+        }
         let variance = if self.current().kind == TokenKind::Operator {
             match self.current_text().ok() {
                 Some("+") => {
@@ -132,7 +142,7 @@ where
             TreeKind::TypeDef(TypeDef {
                 name,
                 rhs: bounds,
-                metadata: Modifiers::default(),
+                metadata,
                 variance,
             }),
         )
@@ -300,6 +310,40 @@ mod tests {
             variances,
             vec![Some(Variance::Covariant), Some(Variance::Contravariant)]
         );
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert_eq!(
+            metadata.modifiers,
+            vec![
+                dotty_core::ast::Modifier::Param,
+                dotty_core::ast::Modifier::PrivateLocal,
+            ]
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn polymorphic_type_parameters_do_not_get_private_local_role() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert_eq!(metadata.modifiers, vec![dotty_core::ast::Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
     }
 

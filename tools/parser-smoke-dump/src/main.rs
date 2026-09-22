@@ -213,6 +213,20 @@ fn render_tree(
             if definition
                 .metadata
                 .modifiers
+                .contains(&dotty_core::ast::Modifier::Param)
+            {
+                fields.push("\"param\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PrivateLocal)
+            {
+                fields.push("\"private_local\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
                 .contains(&dotty_core::ast::Modifier::Trait)
             {
                 fields.push("\"trait\":true".to_owned());
@@ -427,9 +441,9 @@ fn render_definition_metadata(
         .iter()
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
-            dotty_core::ast::Modifier::ParamAccessor | dotty_core::ast::Modifier::PrivateLocal => {
-                None
-            }
+            dotty_core::ast::Modifier::Param
+            | dotty_core::ast::Modifier::ParamAccessor
+            | dotty_core::ast::Modifier::PrivateLocal => None,
             dotty_core::ast::Modifier::Abstract => Some("abstract"),
             dotty_core::ast::Modifier::Final => Some("final"),
             dotty_core::ast::Modifier::Sealed => Some("sealed"),

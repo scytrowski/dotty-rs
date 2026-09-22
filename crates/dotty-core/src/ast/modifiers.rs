@@ -34,6 +34,8 @@ pub enum Modifier {
     /// This is metadata synthesized from the constructor-parameter context,
     /// not a source modifier keyword.
     ParamAccessor,
+    /// Parser-level role for a declared type parameter.
+    Param,
     /// Parser-level role for a plain constructor parameter that is not an
     /// accessor. This must not be represented as written `private` visibility.
     PrivateLocal,
@@ -108,6 +110,12 @@ mod tests {
     fn constructor_parameter_roles_are_distinct_from_source_visibility() {
         assert_ne!(Modifier::ParamAccessor, Modifier::PrivateLocal);
         assert_ne!(Modifier::PrivateLocal, Modifier::Var);
+    }
+
+    #[test]
+    fn type_parameter_role_is_distinct_from_constructor_accessor_role() {
+        assert_ne!(Modifier::Param, Modifier::ParamAccessor);
+        assert_ne!(Modifier::Param, Modifier::PrivateLocal);
     }
 
     #[test]
