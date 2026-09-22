@@ -28,6 +28,12 @@ pub enum Modifier {
     /// shape, because a trait and a class share the same `TypeDef`/`Template`
     /// tree family but have different source meaning.
     Trait,
+    /// Parser-level distinction for an enum definition.
+    ///
+    /// Enums share the source-level `TypeDef`/`Template` shape with classes,
+    /// so the marker preserves their identity without introducing a separate
+    /// enum AST node.
+    Enum,
     /// Parser-level role for a constructor parameter that contributes an
     /// accessor on its owning class.
     ///
@@ -137,5 +143,11 @@ mod tests {
     fn trait_is_a_distinct_source_definition_modifier() {
         assert_ne!(Modifier::Trait, Modifier::Abstract);
         assert_ne!(Modifier::Trait, Modifier::Case);
+    }
+
+    #[test]
+    fn enum_is_a_distinct_source_definition_modifier() {
+        assert_ne!(Modifier::Enum, Modifier::Trait);
+        assert_ne!(Modifier::Enum, Modifier::Case);
     }
 }

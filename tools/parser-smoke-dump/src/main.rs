@@ -545,6 +545,7 @@ fn render_definition_metadata(
         .iter()
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
+            dotty_core::ast::Modifier::Enum => None,
             dotty_core::ast::Modifier::Param
             | dotty_core::ast::Modifier::ParamAccessor
             | dotty_core::ast::Modifier::PrivateLocal => None,
