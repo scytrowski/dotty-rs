@@ -227,6 +227,7 @@ where
                 name,
                 rhs: template,
                 metadata,
+                variance: None,
             }),
         ))
     }

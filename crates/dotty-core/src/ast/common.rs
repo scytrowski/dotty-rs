@@ -15,7 +15,7 @@
 use crate::ast::phase::AstPhase;
 use crate::ids::TreeId;
 use crate::names::{Name, TermName, TypeName};
-use crate::types::Constant;
+use crate::types::{Constant, Variance};
 
 /// `name`, preserving whether the source used backquotes around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +203,12 @@ pub struct TypeDef<P: AstPhase> {
     pub name: TypeName,
     pub rhs: TreeId<P>,
     pub metadata: P::DefMetadata,
+    /// Declared variance when this `TypeDef` is used as a type parameter.
+    ///
+    /// Type parameters share the existing `TypeDef` representation in the
+    /// untyped AST. Keeping the variance here prevents `+A` and `-A` from
+    /// collapsing into the same source tree as `A`.
+    pub variance: Option<Variance>,
 }
 
 /// `extends parents { self_val => body }`.
@@ -475,6 +481,7 @@ mod tests {
             name: TypeName::new(NameId::new(1)),
             rhs: tree_id(2),
             metadata: crate::ast::modifiers::Modifiers::default(),
+            variance: None,
         };
 
         assert_eq!(val_def.tpt, tree_id(2));

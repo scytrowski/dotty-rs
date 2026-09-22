@@ -96,13 +96,17 @@ object Main:
       case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
         val name = tdef.name.toString
         fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
+        slice(tdef, source).trim.headOption match
+          case Some('+') => fields += field("variance", quote("covariant"))
+          case Some('-') => fields += field("variance", quote("contravariant"))
+          case _ =>
         if tdef.mods.is(Trait) then
           fields += field("trait", "true")
         if isTypeDefinitionSource(slice(tdef, source)) then
-          fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase)
+          fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase, includeMutable = false)
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
         fields += field("name", quote(module.name.toString))
-        fields ++= renderDefinitionMetadata(module.mods, module, source, placeholderBase)
+        fields ++= renderDefinitionMetadata(module.mods, module, source, placeholderBase, includeMutable = false)
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] =>
         if !slice(vdef, source).trim.startsWith("_") && !vdef.name.toString.startsWith("_$") then
           fields += field("name", quote(vdef.name.toString))
@@ -135,7 +139,7 @@ object Main:
               case _ => "false"
           .mkString("[", ",", "]")
         )
-        fields ++= renderDefinitionMetadata(ddef.mods, ddef, source, placeholderBase)
+        fields ++= renderDefinitionMetadata(ddef.mods, ddef, source, placeholderBase, includeMutable = false)
       case patdef: dotty.tools.dotc.ast.untpd.PatDef =>
         fields ++= renderDefinitionMetadata(patdef.mods, patdef, source, placeholderBase)
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
@@ -166,7 +170,8 @@ object Main:
       mods: dotty.tools.dotc.ast.untpd.Modifiers,
       tree: dotty.tools.dotc.ast.Trees.Tree[?],
       source: String,
-      base: Int
+      base: Int,
+      includeMutable: Boolean = true
   ): List[String] =
     val enabled = List(
       "abstract" -> Abstract,
@@ -182,10 +187,13 @@ object Main:
       "infix" -> Infix,
       "var" -> Mutable,
       "given" -> Given
-    ).collect { case (name, flag) if mods.is(flag) => name }.toSet
+    ).collect {
+      case (name, flag) if (includeMutable || name != "var") && mods.is(flag) => name
+    }.toSet
     val sourceText = slice(tree, source)
     val sourceWords = sourceText.split("[^A-Za-z]+").toSet
-    val enabledWithSource = enabled ++ (if sourceWords.contains("var") then Set("var") else Set.empty)
+    val enabledWithSource =
+      enabled ++ (if includeMutable && sourceWords.contains("var") then Set("var") else Set.empty)
     val keywordIndex =
       if isValueDefinitionSource(sourceText) then
         List(sourceText.indexOf('='), sourceText.indexOf(':'))

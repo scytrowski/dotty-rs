@@ -101,6 +101,7 @@ where
                 name,
                 rhs,
                 metadata: prefix.metadata,
+                variance: None,
             }),
         );
         ParsedStatement::Definition(definition)

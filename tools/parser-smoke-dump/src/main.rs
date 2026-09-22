@@ -200,6 +200,16 @@ fn render_tree(
                     name
                 })
             ));
+            if let Some(variance) = definition.variance {
+                fields.push(format!(
+                    "\"variance\":{}",
+                    quote(match variance {
+                        dotty_core::types::Variance::Covariant => "covariant",
+                        dotty_core::types::Variance::Contravariant => "contravariant",
+                        dotty_core::types::Variance::Invariant => "invariant",
+                    })
+                ));
+            }
             if definition
                 .metadata
                 .modifiers

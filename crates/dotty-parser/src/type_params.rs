@@ -1,4 +1,5 @@
 use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
 };
@@ -79,7 +80,11 @@ where
         let variance = if self.current().kind == TokenKind::Operator
             && matches!(self.current_text().ok(), Some("+" | "-"))
         {
-            let variance = self.current_text().ok().unwrap_or_default().to_owned();
+            let variance = match self.current_text().ok() {
+                Some("+") => Variance::Covariant,
+                Some("-") => Variance::Contravariant,
+                _ => unreachable!("variance spelling was checked above"),
+            };
             self.advance();
             Some(variance)
         } else {
@@ -126,6 +131,7 @@ where
                 name,
                 rhs: bounds,
                 metadata: Modifiers::default(),
+                variance,
             }),
         )
     }
@@ -250,6 +256,47 @@ mod tests {
         assert_eq!(
             parser.ast().get(rhs).position.unwrap().span().range(),
             TextRange::new(1, 1).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_declared_type_parameter_variance() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[+A, -B]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(1, 2).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Comma), 3, 4),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(5, 6).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Class);
+        let variances = params
+            .iter()
+            .map(|param| match parser.ast().get(*param).kind {
+                TreeKind::TypeDef(TypeDef { variance, .. }) => variance,
+                _ => panic!("expected a type definition"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            variances,
+            vec![Some(Variance::Covariant), Some(Variance::Contravariant)]
         );
         assert!(parser.diagnostics().is_empty());
     }
