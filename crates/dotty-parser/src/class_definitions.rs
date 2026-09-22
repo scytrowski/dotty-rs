@@ -35,7 +35,18 @@ where
         &mut self,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
-        self.parse_type_like_definition(false, prefix)
+        self.parse_type_like_definition(false, false, prefix)
+    }
+
+    pub(crate) fn parse_case_class_definition(&mut self, _location: Location) -> ParsedStatement {
+        self.parse_case_class_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_case_class_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_type_like_definition(false, true, prefix)
     }
 
     pub(crate) fn parse_trait_definition(&mut self, _location: Location) -> ParsedStatement {
@@ -46,7 +57,7 @@ where
         &mut self,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
-        self.parse_type_like_definition(true, prefix)
+        self.parse_type_like_definition(true, false, prefix)
     }
 
     pub(crate) fn parse_object_definition(&mut self, _location: Location) -> ParsedStatement {
@@ -56,6 +67,25 @@ where
     pub(crate) fn parse_object_definition_with_prefix(
         &mut self,
         prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_object_definition_with_case(prefix, false)
+    }
+
+    pub(crate) fn parse_case_object_definition(&mut self, _location: Location) -> ParsedStatement {
+        self.parse_case_object_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_case_object_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_object_definition_with_case(prefix, true)
+    }
+
+    fn parse_object_definition_with_case(
+        &mut self,
+        prefix: DefinitionPrefix,
+        is_case: bool,
     ) -> ParsedStatement {
         let mark = crate::Mark {
             start: prefix.start,
@@ -98,12 +128,17 @@ where
         );
         self.ast.get_mut(template).position = Some(template_position);
 
+        let mut metadata = prefix.metadata;
+        if is_case {
+            metadata.modifiers.push(Modifier::Case);
+        }
+
         ParsedStatement::Definition(self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
                 name,
                 template,
-                metadata: prefix.metadata,
+                metadata,
             })),
         ))
     }
@@ -111,6 +146,7 @@ where
     fn parse_type_like_definition(
         &mut self,
         is_trait: bool,
+        is_case: bool,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
         let mark = crate::Mark {
@@ -118,14 +154,19 @@ where
         };
         self.advance();
         let name = self.parse_type_name();
+        let owner = if is_case {
+            crate::ParamOwner::CaseClass
+        } else {
+            crate::ParamOwner::Class
+        };
         let type_params = if self.current().kind
             == TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket)
         {
-            self.parse_type_param_clause(crate::ParamOwner::Class)
+            self.parse_type_param_clause(owner)
         } else {
             Vec::new()
         };
-        let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::Class);
+        let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
         let parents = self.parse_parent_clause();
         let body = self.parse_optional_template_body();
@@ -163,6 +204,9 @@ where
         );
         self.ast.get_mut(template).position = Some(template_position);
         let mut metadata = prefix.metadata;
+        if is_case {
+            metadata.modifiers.push(Modifier::Case);
+        }
         if is_trait {
             metadata.modifiers.push(Modifier::Trait);
         }
@@ -539,6 +583,108 @@ mod tests {
         };
         assert!(template.parents.is_empty());
         assert!(template.body.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_case_class_with_case_metadata_and_case_parameter_policy() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case class C(x: A)",
+            vec![
+                token(TokenKind::CaseClass, 0, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::Colon), 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a case class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        assert_eq!(definition.metadata.modifiers, vec![Modifier::Case]);
+        assert_eq!(
+            parser
+                .ast()
+                .get(id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .start(),
+            0
+        );
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected a synthetic constructor");
+        };
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(constructor.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected a constructor parameter");
+        };
+        assert_eq!(parameter.metadata.modifiers, vec![Modifier::ParamAccessor]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_case_object_as_a_module_with_case_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case object Empty",
+            vec![
+                token(TokenKind::CaseObject, 0, 11),
+                token(TokenKind::Identifier, 12, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a case object definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a ModuleDef");
+        };
+        assert_eq!(module.metadata.modifiers, vec![Modifier::Case]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn composes_a_prefix_modifier_with_a_case_class() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "final case class C",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::CaseClass, 6, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a case class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        assert_eq!(
+            definition.metadata.modifiers,
+            vec![Modifier::Final, Modifier::Case]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
