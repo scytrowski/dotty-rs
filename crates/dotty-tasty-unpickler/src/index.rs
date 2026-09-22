@@ -59,9 +59,21 @@ pub struct TastySemanticIndex {
     /// different owner than the one that entered them: their parameters are
     /// owned once, so projecting them is refused (`SharedLambdaOwnerConflict`).
     lambda_conflicts: HashSet<u32>,
-    /// `(type tree, owner)` pairs the lambda scan has walked, so a tree shared
-    /// by many definitions is walked once per owner, not once per path.
-    lambda_scans: HashSet<(u32, SymbolId)>,
+    /// `(type tree, owner)` pairs the declared-type-tree scan has walked
+    /// (`LAMBDAtpt` type parameters, Milestone 5c; `REFINEDtpt` synthetic
+    /// classes, Milestone 5d2b), so a tree shared by many definitions is
+    /// walked once per owner, not once per path.
+    declared_tree_scans: HashSet<(u32, SymbolId)>,
+    /// The owner each `REFINEDtpt` entered its synthetic refinement class
+    /// for (Milestone 5d2b, pass 1): the first semantic owner to reach the
+    /// tree. The class itself is entered through the ordinary `symbols` map,
+    /// keyed by the `REFINEDtpt` address like every other definition; this is
+    /// only the owner-conflict bookkeeping, mirroring `lambda_owners`.
+    refined_owners: HashMap<u32, SymbolId>,
+    /// `REFINEDtpt` addresses reached again, through a `SHAREDterm`, from a
+    /// different owner than the one that entered them
+    /// (`SharedRefinementOwnerConflict`), mirroring `lambda_conflicts`.
+    refined_conflicts: HashSet<u32>,
 }
 
 impl TastySemanticIndex {
@@ -101,6 +113,19 @@ impl TastySemanticIndex {
     /// owner (a `SHAREDterm` shared across definitions).
     pub fn has_lambda_owner_conflict(&self, address: u32) -> bool {
         self.lambda_conflicts.contains(&address)
+    }
+
+    /// The symbol that owns the synthetic refinement class entered for the
+    /// `REFINEDtpt` at `address`, if it was reached in a declared type-tree
+    /// position.
+    pub fn refined_owner(&self, address: u32) -> Option<SymbolId> {
+        self.refined_owners.get(&address).copied()
+    }
+
+    /// Whether the `REFINEDtpt` at `address` was reached from more than one
+    /// owner (a `SHAREDterm` shared across definitions).
+    pub fn has_refined_owner_conflict(&self, address: u32) -> bool {
+        self.refined_conflicts.contains(&address)
     }
 
     /// The semantic type projected for the term tree at `address`, if any.
@@ -193,9 +218,17 @@ impl TastySemanticIndex {
         self.lambda_conflicts.insert(address);
     }
 
+    pub(crate) fn insert_refined_owner(&mut self, address: u32, owner: SymbolId) {
+        self.refined_owners.insert(address, owner);
+    }
+
+    pub(crate) fn mark_refined_conflict(&mut self, address: u32) {
+        self.refined_conflicts.insert(address);
+    }
+
     /// Whether `(tree, owner)` had not been scanned before; records it.
-    pub(crate) fn first_lambda_scan(&mut self, tree: u32, owner: SymbolId) -> bool {
-        self.lambda_scans.insert((tree, owner))
+    pub(crate) fn first_declared_tree_scan(&mut self, tree: u32, owner: SymbolId) -> bool {
+        self.declared_tree_scans.insert((tree, owner))
     }
 
     /// Records the type projected for a term-tree address; a second one for

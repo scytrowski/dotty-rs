@@ -28,6 +28,10 @@ use crate::error::UnpickleError;
 /// The name TASTy gives every constructor.
 pub(crate) const CONSTRUCTOR_NAME: &str = "<init>";
 
+/// The name Dotty gives a `REFINEDtpt`'s synthetic refinement class
+/// (`tpnme.REFINE_CLASS`, Milestone 5d2b).
+pub(crate) const REFINEMENT_CLASS_NAME: &str = "<refinement>";
+
 /// What the modifier list of a definition says about its symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DeclaredModifiers {
