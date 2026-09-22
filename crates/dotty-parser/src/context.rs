@@ -67,6 +67,8 @@ pub struct ParseContext {
     /// Whether the current block is a case/catch body that also ends before
     /// the next `case` clause.
     pub case_body: bool,
+    /// Whether the current template body belongs to an enum definition.
+    pub enum_body: bool,
 }
 
 impl Default for ParseContext {
@@ -78,6 +80,7 @@ impl Default for ParseContext {
             features: ParserFeatures::default(),
             block_end: None,
             case_body: false,
+            enum_body: false,
         }
     }
 }
@@ -97,6 +100,7 @@ mod tests {
                 features: ParserFeatures::default(),
                 block_end: None,
                 case_body: false,
+                enum_body: false,
             }
         );
     }
@@ -177,5 +181,10 @@ mod tests {
         assert!(features.into);
         assert!(!features.postfix_ops);
         assert!(!features.sub_cases);
+    }
+
+    #[test]
+    fn enum_body_is_disabled_by_default() {
+        assert!(!ParseContext::default().enum_body);
     }
 }

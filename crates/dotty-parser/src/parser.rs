@@ -182,6 +182,15 @@ where
         result
     }
 
+    /// Runs a nested template parse with enum-case handling enabled.
+    pub(crate) fn with_enum_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.context.enum_body;
+        self.context.enum_body = true;
+        let result = parse(self);
+        self.context.enum_body = previous;
+        result
+    }
+
     /// Forwards a scanner feedback event.
     pub fn observe(&mut self, event: ScannerEvent) {
         self.cursor.observe(event);

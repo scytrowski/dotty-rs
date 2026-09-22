@@ -43,6 +43,9 @@ where
 
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        if self.context.enum_body && is_enum_case_start(self.current().kind) {
+            return self.parse_unsupported_enum_case();
+        }
         if self.starts_extension_definition() {
             return self.parse_extension_definition(location);
         }
@@ -345,6 +348,17 @@ where
         self.recover_until(RecoverySet::Statement);
         self.error_expr(position)
     }
+
+    fn parse_unsupported_enum_case(&mut self) -> ParsedStatement {
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "enum cases are not supported by this parser milestone",
+        );
+        self.advance();
+        self.recover_until(RecoverySet::Statement);
+        ParsedStatement::Expression(self.error_expr(position))
+    }
 }
 
 const fn is_statement_separator(kind: TokenKind) -> bool {
@@ -372,6 +386,13 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Keyword(HardKeyword::Match | HardKeyword::Val | HardKeyword::Var)
+    )
+}
+
+const fn is_enum_case_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(HardKeyword::Case) | TokenKind::CaseClass | TokenKind::CaseObject
     )
 }
 
