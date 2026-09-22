@@ -89,7 +89,8 @@ where
     fn parse_extension_methods(&mut self) -> Vec<TreeId<Untyped>> {
         self.consume_newlines_before_extension_body();
 
-        let methods = match self.current().kind {
+        let kind = self.current().kind;
+        let methods = match kind {
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol => {
                 self.parse_optional_template_body().members
             }
@@ -100,6 +101,7 @@ where
             TokenKind::Keyword(HardKeyword::Def) | TokenKind::Keyword(HardKeyword::Export) => {
                 self.parse_one_extension_method()
             }
+            _ if self.starts_definition_prefix() => self.parse_one_extension_method(),
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
@@ -359,6 +361,92 @@ mod tests {
         ));
         assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_direct_extension_method_with_a_modifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X) private def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Keyword(HardKeyword::Private), 17, 24),
+                token(TokenKind::Keyword(HardKeyword::Def), 25, 28),
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Operator, 31, 32),
+                token(TokenKind::Identifier, 33, 34),
+                token(TokenKind::Eof, 34, 34),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        let [method] = extension.methods.as_slice() else {
+            panic!("expected one extension method");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast.get(*method).kind else {
+            panic!("expected a method definition");
+        };
+        assert!(matches!(
+            definition.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_direct_extension_method_with_an_annotation() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X) @Ann def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Keyword(HardKeyword::Def), 22, 25),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Operator, 28, 29),
+                token(TokenKind::Identifier, 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        let [method] = extension.methods.as_slice() else {
+            panic!("expected one extension method");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast.get(*method).kind else {
+            panic!("expected a method definition");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
