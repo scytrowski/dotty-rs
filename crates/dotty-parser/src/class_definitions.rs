@@ -7,6 +7,7 @@
 
 use dotty_core::ast::{
     Apply, ApplyKind, DefDef, Modifier, Modifiers, ModuleDef, New, Select, Template, TypeDef,
+    UntypedTemplateMetadata,
 };
 use dotty_core::{
     HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -28,6 +29,13 @@ struct ConstructorBoundary {
     parameter_start: Option<u32>,
     parent_start: Option<u32>,
     body_start: Option<u32>,
+}
+
+struct TemplateTail {
+    parents: Vec<TreeId<Untyped>>,
+    self_val: Option<TreeId<Untyped>>,
+    body: Vec<TreeId<Untyped>>,
+    metadata: UntypedTemplateMetadata,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -99,15 +107,14 @@ where
         };
         self.advance();
         let name = self.parse_object_name();
-        let parents = self.parse_parent_clause();
-        let body = self.parse_optional_template_body();
-        let parent_start = parents.first().and_then(|parent| {
+        let tail = self.parse_template_tail();
+        let parent_start = tail.parents.first().and_then(|parent| {
             self.ast
                 .get(*parent)
                 .position
                 .map(|position| position.span().range().start())
         });
-        let body_start = body.first().and_then(|member| {
+        let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
                 .position
@@ -125,15 +132,15 @@ where
             },
         );
         let template_position =
-            self.template_position(constructor, constructor_start, &parents, &body);
+            self.template_position(constructor, constructor_start, &tail.parents, &tail.body);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents,
-                self_val: None,
-                body,
-                metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
@@ -184,15 +191,14 @@ where
         .then_some(self.current().span.start());
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
-        let parents = self.parse_parent_clause();
-        let body = self.parse_optional_template_body();
-        let parent_start = parents.first().and_then(|parent| {
+        let tail = self.parse_template_tail();
+        let parent_start = tail.parents.first().and_then(|parent| {
             self.ast
                 .get(*parent)
                 .position
                 .map(|position| position.span().range().start())
         });
-        let body_start = body.first().and_then(|member| {
+        let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
                 .position
@@ -210,15 +216,15 @@ where
             },
         );
         let template_position =
-            self.template_position(constructor, constructor_start, &parents, &body);
+            self.template_position(constructor, constructor_start, &tail.parents, &tail.body);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents,
-                self_val: None,
-                body,
-                metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
@@ -239,6 +245,17 @@ where
                 variance: None,
             }),
         ))
+    }
+
+    fn parse_template_tail(&mut self) -> TemplateTail {
+        let parents = self.parse_parent_clause();
+        let body = self.parse_optional_template_body();
+        TemplateTail {
+            parents,
+            self_val: None,
+            body,
+            metadata: UntypedTemplateMetadata::default(),
+        }
     }
 
     fn parse_optional_template_body(&mut self) -> Vec<TreeId<Untyped>> {
