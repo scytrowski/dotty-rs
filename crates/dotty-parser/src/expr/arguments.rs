@@ -43,7 +43,7 @@ where
         }
     }
 
-    pub(super) fn parse_application(
+    pub(crate) fn parse_application(
         &mut self,
         mark: crate::Mark,
         function: TreeId<Untyped>,

@@ -62,7 +62,7 @@ out-of-band tree convention or a lossy lowering step.
 
 | Scala/Dotty construct | Current Rust representation | Decision | Audit result |
 | --- | --- | --- | --- |
-| `ModuleDef` | `UntypedNode::ModuleDef` | REPRESENT | Correct parser-only representation; later lowering creates the synthetic module definition/type definition pair. |
+| `ModuleDef` | `UntypedNode::ModuleDef` | REPRESENT | Correct parser-only representation; later lowering creates the synthetic module definition/type definition pair. Its `Modifiers` metadata preserves source annotations, visibility, and definition modifiers before semantic lowering. |
 | `Function` | `UntypedNode::Function` | REPRESENT | Preserves lambda parameters and body. |
 | `WildcardFunction` | None | LOWER | Placeholder bookkeeping belongs inside the parser. Emit `Function` with generated parameters once the enclosing expression is complete; do not expose Dotty's overlap-testing subclass. |
 | `PolyFunction` | `UntypedNode::PolyFunction` | REPRESENT | The parser must preserve the polymorphic function-literal shape before typing. |

@@ -24,6 +24,8 @@ pub struct KnownNames {
     pub erased: TermName,
     /// Name reserved for future capture-checking grammar.
     pub tracked: TermName,
+    /// Name reserved for future capture-checking grammar.
+    pub update: TermName,
 }
 
 impl KnownNames {
@@ -42,6 +44,7 @@ impl KnownNames {
             into: term_name(names, "into"),
             erased: term_name(names, "erased"),
             tracked: term_name(names, "tracked"),
+            update: term_name(names, "update"),
         }
     }
 }
@@ -71,6 +74,7 @@ mod tests {
             (known.into, "into"),
             (known.erased, "erased"),
             (known.tracked, "tracked"),
+            (known.update, "update"),
         ];
 
         for (name, expected) in entries {

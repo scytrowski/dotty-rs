@@ -12,6 +12,7 @@ use dotty_core::{
     HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped,
 };
 
+use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
 use crate::templates::TemplateBody;
 use crate::{Location, ParseDiagnosticKind, Parser};
@@ -27,15 +28,38 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn parse_class_definition(&mut self, _location: Location) -> ParsedStatement {
-        self.parse_type_like_definition(false)
+        self.parse_class_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_class_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_type_like_definition(false, prefix)
     }
 
     pub(crate) fn parse_trait_definition(&mut self, _location: Location) -> ParsedStatement {
-        self.parse_type_like_definition(true)
+        self.parse_trait_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_trait_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        self.parse_type_like_definition(true, prefix)
     }
 
     pub(crate) fn parse_object_definition(&mut self, _location: Location) -> ParsedStatement {
-        let mark = self.mark();
+        self.parse_object_definition_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_object_definition_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         self.advance();
         let name = self.parse_object_name();
         let parents = self.parse_parent_clause();
@@ -79,12 +103,19 @@ where
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
                 name,
                 template,
+                metadata: prefix.metadata,
             })),
         ))
     }
 
-    fn parse_type_like_definition(&mut self, is_trait: bool) -> ParsedStatement {
-        let mark = self.mark();
+    fn parse_type_like_definition(
+        &mut self,
+        is_trait: bool,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         self.advance();
         let name = self.parse_type_name();
         let type_params = if self.current().kind
@@ -131,7 +162,7 @@ where
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
-        let mut metadata = Modifiers::default();
+        let mut metadata = prefix.metadata;
         if is_trait {
             metadata.modifiers.push(Modifier::Trait);
         }

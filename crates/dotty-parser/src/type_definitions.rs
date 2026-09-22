@@ -4,9 +4,10 @@
 //! type bounds. Parameterized definitions reuse `type_params.rs` and preserve
 //! the source-level abstraction in `LambdaTypeTree`.
 
-use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, TypeBoundsTree, TypeDef};
 use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
+use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
 use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
 
@@ -15,7 +16,18 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn parse_type_definition(&mut self, location: Location) -> ParsedStatement {
-        let mark = self.mark();
+        let prefix = DefinitionPrefix::empty(self.mark().start());
+        self.parse_type_definition_with_prefix(location, prefix)
+    }
+
+    pub(crate) fn parse_type_definition_with_prefix(
+        &mut self,
+        location: Location,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         self.advance();
 
         let name = self.parse_type_definition_name();
@@ -88,7 +100,7 @@ where
             TreeKind::TypeDef(TypeDef {
                 name,
                 rhs,
-                metadata: Modifiers::default(),
+                metadata: prefix.metadata,
             }),
         );
         ParsedStatement::Definition(definition)

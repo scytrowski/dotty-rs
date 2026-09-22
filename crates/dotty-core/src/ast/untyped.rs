@@ -43,6 +43,7 @@ pub struct ErrorNode {
 pub struct ModuleDef {
     pub name: TermName,
     pub template: TreeId<Untyped>,
+    pub metadata: Modifiers,
 }
 
 /// `(params) => body`.
@@ -369,6 +370,7 @@ mod tests {
         let node = UntypedNode::ModuleDef(ModuleDef {
             name: TermName::new(NameId::new(1)),
             template: tree_id(2),
+            metadata: Modifiers::default(),
         });
 
         assert_eq!(
@@ -376,6 +378,7 @@ mod tests {
             UntypedNode::ModuleDef(ModuleDef {
                 name: TermName::new(NameId::new(1)),
                 template: tree_id(2),
+                metadata: Modifiers::default(),
             })
         );
     }

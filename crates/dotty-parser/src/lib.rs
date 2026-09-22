@@ -19,6 +19,7 @@ mod expr;
 mod imports;
 mod infix;
 mod literals;
+mod modifiers;
 mod names;
 mod packages;
 mod parameters;
