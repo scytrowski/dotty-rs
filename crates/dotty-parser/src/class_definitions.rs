@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn class_accessor_parameter_clause_is_unsupported_but_bounded() {
+    fn parses_a_class_accessor_parameter_clause() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "class A(val x: X)",
@@ -1080,13 +1080,6 @@ mod tests {
         let _ = parser.parse_class_definition(Location::Elsewhere);
 
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert_eq!(
-            parser
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
-                .count(),
-            1
-        );
+        assert!(parser.diagnostics().is_empty());
     }
 }
