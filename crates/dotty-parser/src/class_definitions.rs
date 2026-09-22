@@ -473,7 +473,7 @@ where
         }
     }
 
-    fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
+    pub(crate) fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if matches!(
             self.current().kind,
@@ -882,6 +882,60 @@ where
             Some(position),
         );
         (constructor, constructor_start)
+    }
+    /// Builds the existing source-level template shape used by a structural
+    /// given. A given has no class name of its own, but its parent and body use
+    /// exactly the same template machinery as class-like definitions.
+    pub(crate) fn allocate_given_template(
+        &mut self,
+        start: u32,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        parent: TreeId<Untyped>,
+        body: Vec<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        let parent_start = self
+            .ast
+            .get(parent)
+            .position
+            .map(|position| position.span().range().start());
+        let body_start = body.first().and_then(|member| {
+            self.ast
+                .get(*member)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let parameter_end = parent_start.unwrap_or(self.last_real_token_end);
+        let (constructor, constructor_start) = self.synthetic_primary_constructor(
+            start,
+            type_params,
+            value_param_clauses,
+            parameter_end,
+            ConstructorBoundary {
+                parameter_start: None,
+                parent_start,
+                body_start,
+            },
+        );
+        let tail = TemplateTail {
+            parents: vec![parent],
+            self_val: None,
+            body,
+            metadata: UntypedTemplateMetadata::default(),
+        };
+        let position = self.template_position(constructor, constructor_start, &tail);
+        let template = self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Template(Template {
+                constructor,
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
+            }),
+        );
+        self.ast.get_mut(template).position = Some(position);
+        template
     }
 }
 

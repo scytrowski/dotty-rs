@@ -1,4 +1,4 @@
-use dotty_core::{NameInterner, TermName};
+use dotty_core::{NameInterner, TermName, TypeName};
 
 /// Returns the canonical source-level name used for an anonymous definition.
 ///
@@ -7,6 +7,11 @@ use dotty_core::{NameInterner, TermName};
 /// would turn an anonymous definition into a named one for later phases.
 pub(crate) fn anonymous_term_name(names: &mut NameInterner) -> TermName {
     TermName::new(names.intern(""))
+}
+
+/// Returns the type-namespace counterpart of the canonical anonymous name.
+pub(crate) fn anonymous_type_name(names: &mut NameInterner) -> TypeName {
+    TypeName::new(names.intern(""))
 }
 
 /// Parser-known Scala 3.9.0 soft keywords.
@@ -77,7 +82,10 @@ mod tests {
         let mut names = NameInterner::new();
 
         let term = anonymous_term_name(&mut names);
+        let ty = anonymous_type_name(&mut names);
         assert_eq!(names.resolve(term.as_name().text()), "");
+        assert_eq!(names.resolve(ty.as_name().text()), "");
+        assert_ne!(term.as_name(), ty.as_name());
     }
 
     #[test]

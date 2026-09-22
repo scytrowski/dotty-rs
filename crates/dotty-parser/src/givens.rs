@@ -4,11 +4,11 @@
 //! conditional signatures are layered on the same dispatch in later
 //! increments.
 
-use dotty_core::ast::{DefDef, Modifier, ValDef};
+use dotty_core::ast::{DefDef, Modifier, ModuleDef, TypeDef, ValDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::modifiers::DefinitionPrefix;
-use crate::names::anonymous_term_name;
+use crate::names::{anonymous_term_name, anonymous_type_name};
 use crate::statements::ParsedStatement;
 use crate::{Location, ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
 
@@ -71,6 +71,18 @@ where
         let tpt = self.with_location(location, |parser| {
             parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
         });
+
+        if self.current_is_given_colon() {
+            return self.parse_structural_given(
+                mark,
+                name,
+                type_params,
+                value_param_clauses,
+                tpt,
+                prefix.metadata,
+            );
+        }
+
         let mut metadata = prefix.metadata;
         if !metadata.modifiers.contains(&Modifier::Given) {
             metadata.modifiers.push(Modifier::Given);
@@ -120,6 +132,65 @@ where
         )
     }
 
+    fn parse_structural_given(
+        &mut self,
+        mark: crate::Mark,
+        name: dotty_core::TermName,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        parent: TreeId<Untyped>,
+        mut metadata: dotty_core::ast::Modifiers,
+    ) -> ParsedStatement {
+        if !metadata.modifiers.contains(&Modifier::Given) {
+            metadata.modifiers.push(Modifier::Given);
+        }
+
+        let body = if self.cursor.lookahead(1).kind == TokenKind::Keyword(HardKeyword::Def) {
+            self.advance();
+            vec![match self.parse_method_definition(Location::InBlock) {
+                ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => tree,
+                ParsedStatement::Many(mut trees) => trees
+                    .pop()
+                    .unwrap_or_else(|| self.error_expr(self.current_span())),
+            }]
+        } else {
+            self.parse_optional_template_body().members
+        };
+        let template = self.allocate_given_template(
+            mark.start(),
+            type_params.clone(),
+            value_param_clauses.clone(),
+            parent,
+            body,
+        );
+
+        if type_params.is_empty() && value_param_clauses.is_empty() {
+            ParsedStatement::Definition(self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
+                    name,
+                    template,
+                    metadata,
+                })),
+            ))
+        } else {
+            let name = if self.names.resolve(name.as_name().text()).is_empty() {
+                anonymous_type_name(self.names)
+            } else {
+                dotty_core::TypeName::new(name.as_name().text())
+            };
+            ParsedStatement::Definition(self.alloc_from(
+                mark,
+                TreeKind::TypeDef(TypeDef {
+                    name,
+                    rhs: template,
+                    metadata,
+                    variance: None,
+                }),
+            ))
+        }
+    }
+
     fn alloc_given_definition(
         &mut self,
         mark: crate::Mark,
@@ -158,13 +229,28 @@ where
             return false;
         }
         let next = self.cursor.lookahead(1).clone();
-        matches!(
+        let has_colon = matches!(
             next.kind,
             TokenKind::ColonFollow
                 | TokenKind::ColonEol
                 | TokenKind::ColonOp
                 | TokenKind::Punctuation(Punctuation::Colon)
-        ) && self.token_text(&next).ok() == Some(":")
+        ) && self.token_text(&next).ok() == Some(":");
+        has_colon
+            && matches!(
+                self.cursor.lookahead(2).kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            )
+    }
+
+    fn current_is_given_colon(&mut self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::ColonFollow
+                | TokenKind::ColonEol
+                | TokenKind::ColonOp
+                | TokenKind::Punctuation(Punctuation::Colon)
+        ) && self.current_text_is(":")
     }
 
     fn expect_arrow(&mut self) {
@@ -392,6 +478,46 @@ mod tests {
         assert!(matches!(
             definition.metadata.visibility,
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_indented_structural_given_through_template_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given Service:\n  def run = result",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 13),
+                token(TokenKind::ColonEol, 13, 14),
+                token(TokenKind::Indent, 15, 15),
+                token(TokenKind::Keyword(HardKeyword::Def), 17, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Identifier, 27, 33),
+                token(TokenKind::Outdent, 33, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a structural given");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(given)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a module definition");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(given.template).kind else {
+            panic!("expected a template");
+        };
+        assert_eq!(template.parents.len(), 1);
+        assert_eq!(template.body.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::DefDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }
