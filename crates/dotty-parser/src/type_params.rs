@@ -78,14 +78,21 @@ where
     fn type_param(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let mut metadata = Modifiers::default();
-        metadata.modifiers.push(dotty_core::ast::Modifier::Param);
-        if matches!(
-            self.context.param_owner,
-            Some(ParamOwner::Class | ParamOwner::CaseClass)
-        ) {
-            metadata
-                .modifiers
-                .push(dotty_core::ast::Modifier::PrivateLocal);
+        let is_synthetic_wildcard_name = self.current().kind == TokenKind::BackquotedIdentifier
+            && self
+                .current_text()
+                .ok()
+                .is_some_and(|text| text.trim_matches('`').starts_with("$type_wildcard_"));
+        if !is_synthetic_wildcard_name {
+            metadata.modifiers.push(dotty_core::ast::Modifier::Param);
+            if matches!(
+                self.context.param_owner,
+                Some(ParamOwner::Class | ParamOwner::CaseClass)
+            ) {
+                metadata
+                    .modifiers
+                    .push(dotty_core::ast::Modifier::PrivateLocal);
+            }
         }
         let variance = if self.current().kind == TokenKind::Operator {
             match self.current_text().ok() {
@@ -344,6 +351,81 @@ mod tests {
             panic!("expected a type definition");
         };
         assert_eq!(metadata.modifiers, vec![dotty_core::ast::Modifier::Param]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn wildcard_type_parameters_get_parameter_role() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[_]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert_eq!(metadata.modifiers, vec![dotty_core::ast::Modifier::Param]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn wildcard_type_parameters_with_bounds_get_parameter_role() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[_ <: Foo]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(3, 5).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert_eq!(metadata.modifiers, vec![dotty_core::ast::Modifier::Param]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_dotty_wildcard_name_collision_without_parameter_roles() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[`$type_wildcard_0`]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::BackquotedIdentifier, 1, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { ref metadata, .. }) = parser.ast().get(params[0]).kind
+        else {
+            panic!("expected a type definition");
+        };
+        assert!(metadata.modifiers.is_empty());
         assert!(parser.diagnostics().is_empty());
     }
 
