@@ -552,11 +552,23 @@ where
                     .map(|position| position.span().range().end())
             })
             .max();
-        let template_end = body_end
-            .or(metadata_end)
-            .or(parent_end)
-            .or_else(|| constructor_range.map(|(_, end)| end))
-            .unwrap_or(template_start);
+        let uses_end = tail
+            .metadata
+            .uses
+            .iter()
+            .filter_map(|use_ref| self.use_ref_end(use_ref))
+            .max();
+        let template_end = [
+            body_end,
+            metadata_end,
+            uses_end,
+            parent_end,
+            constructor_range.map(|(_, end)| end),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(template_start);
         dotty_core::SourceSpan::new(
             self.source_id,
             dotty_core::Span::without_point(
@@ -564,6 +576,22 @@ where
                     .expect("template span is ordered"),
             ),
         )
+    }
+
+    fn use_ref_end(&self, use_ref: &dotty_core::ast::UseRef) -> Option<u32> {
+        let position = self.ast.get(use_ref.reference).position?;
+        let end = position.span().range().end() as usize;
+        if !use_ref.initially {
+            return Some(end as u32);
+        }
+        let remainder = self.source.as_str().get(end..)?;
+        let limit = remainder
+            .find([',', ':', '\n', '\r', '}'])
+            .unwrap_or(remainder.len());
+        remainder[..limit]
+            .find("initially")
+            .map(|offset| end.saturating_add(offset + "initially".len()) as u32)
+            .or(Some(end as u32))
     }
 
     fn parse_parent_clause(&mut self) -> Vec<TreeId<Untyped>> {
@@ -982,6 +1010,48 @@ mod tests {
                 .span()
                 .range(),
             dotty_core::TextRange::new(28, 33).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn includes_initially_marker_in_template_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses cap initially",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Identifier, 17, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(template.metadata.uses[0].initially);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .end(),
+            26
         );
         assert!(parser.diagnostics().is_empty());
     }
