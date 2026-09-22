@@ -1,5 +1,6 @@
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, Untyped};
 
+use crate::modifiers::DefinitionPrefix;
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 
 /// A parser-only classification used while building statement sequences.
@@ -23,6 +24,10 @@ where
 {
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        if self.starts_definition_prefix() {
+            let prefix = self.parse_definition_prefix();
+            return self.parse_prefixed_definition(location, prefix);
+        }
         if matches!(
             self.current().kind,
             TokenKind::Keyword(HardKeyword::Val | HardKeyword::Var)
@@ -60,6 +65,40 @@ where
             self.with_location(location, |parser| parser.expr())
         };
         ParsedStatement::Expression(tree)
+    }
+
+    fn parse_prefixed_definition(
+        &mut self,
+        location: Location,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        match self.current().kind {
+            TokenKind::Keyword(HardKeyword::Val | HardKeyword::Var) => {
+                self.parse_value_definition_with_prefix(location, prefix)
+            }
+            TokenKind::Keyword(HardKeyword::Def) => {
+                self.parse_method_definition_with_prefix(location, prefix)
+            }
+            TokenKind::Keyword(HardKeyword::Type) => {
+                self.parse_type_definition_with_prefix(location, prefix)
+            }
+            TokenKind::Keyword(HardKeyword::Class) => {
+                self.parse_class_definition_with_prefix(prefix)
+            }
+            TokenKind::Keyword(HardKeyword::Trait) => {
+                self.parse_trait_definition_with_prefix(prefix)
+            }
+            TokenKind::Keyword(HardKeyword::Object) => {
+                self.parse_object_definition_with_prefix(prefix)
+            }
+            _ => {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a definition after its annotations and modifiers",
+                );
+                ParsedStatement::Expression(self.parse_unsupported_syntax())
+            }
+        }
     }
 
     /// Parses statements up to a compilation-unit or block boundary.
@@ -169,7 +208,7 @@ where
     }
 
     fn parse_top_level_statement(&mut self, location: Location) -> ParsedStatement {
-        if is_top_level_statement_start(self.current().kind) {
+        if is_top_level_statement_start(self.current().kind) || self.starts_definition_prefix() {
             return self.parse_statement(location);
         }
 

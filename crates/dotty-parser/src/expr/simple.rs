@@ -276,7 +276,7 @@ where
         }
     }
 
-    pub(super) fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
+    pub(crate) fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
         let position = self.ast.get(function).position;
         let name = dotty_core::TermName::new(self.names.intern("<init>"));
         self.alloc(

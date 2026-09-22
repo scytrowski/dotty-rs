@@ -9,6 +9,7 @@ use dotty_core::{
     HardKeyword, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
 
+use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 
@@ -17,19 +18,41 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn parse_value_definition(&mut self, location: Location) -> ParsedStatement {
-        let mark = self.mark();
+        let prefix = DefinitionPrefix::empty(self.mark().start());
+        self.parse_value_definition_with_prefix(location, prefix)
+    }
+
+    pub(crate) fn parse_value_definition_with_prefix(
+        &mut self,
+        location: Location,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         let is_var = self.current().kind == TokenKind::Keyword(HardKeyword::Var);
         self.advance();
 
         if !starts_simple_value_definition(self) {
-            return self.parse_pattern_definition(mark, is_var, location);
+            return self.parse_pattern_definition(mark, is_var, location, prefix.metadata);
         }
 
-        self.parse_simple_value_definition(mark, is_var, location)
+        self.parse_simple_value_definition(mark, is_var, location, prefix.metadata)
     }
 
     pub(crate) fn parse_method_definition(&mut self, location: Location) -> ParsedStatement {
-        let mark = self.mark();
+        let prefix = DefinitionPrefix::empty(self.mark().start());
+        self.parse_method_definition_with_prefix(location, prefix)
+    }
+
+    pub(crate) fn parse_method_definition_with_prefix(
+        &mut self,
+        location: Location,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         self.advance();
 
         let name = self.parse_method_name();
@@ -89,7 +112,7 @@ where
                 value_param_clauses,
                 tpt,
                 rhs,
-                metadata: Modifiers::default(),
+                metadata: prefix.metadata,
             }),
         );
         ParsedStatement::Definition(definition)
@@ -135,6 +158,7 @@ where
         mark: crate::Mark,
         is_var: bool,
         location: Location,
+        mut metadata: Modifiers,
     ) -> ParsedStatement {
         let name = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -184,9 +208,8 @@ where
             None
         };
 
-        let mut modifiers = Modifiers::default();
         if is_var {
-            modifiers.modifiers.push(Modifier::Var);
+            metadata.modifiers.push(Modifier::Var);
         }
         let definition = self.alloc_from(
             mark,
@@ -194,7 +217,7 @@ where
                 name,
                 tpt,
                 rhs,
-                metadata: modifiers,
+                metadata,
             }),
         );
         ParsedStatement::Definition(definition)
@@ -205,6 +228,7 @@ where
         mark: crate::Mark,
         is_var: bool,
         location: Location,
+        mut metadata: Modifiers,
     ) -> ParsedStatement {
         if is_definition_boundary(self.current().kind) {
             self.report(
@@ -274,14 +298,13 @@ where
             Some(self.error_expr(self.current_span()))
         };
 
-        let mut modifiers = Modifiers::default();
         if is_var {
-            modifiers.modifiers.push(Modifier::Var);
+            metadata.modifiers.push(Modifier::Var);
         }
         let definition = self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(UntypedNode::PatDef(PatDef {
-                modifiers,
+                modifiers: metadata,
                 patterns,
                 tpt,
                 rhs,
