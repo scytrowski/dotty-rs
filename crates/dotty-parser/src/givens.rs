@@ -240,11 +240,21 @@ where
                 | TokenKind::ColonOp
                 | TokenKind::Punctuation(Punctuation::Colon)
         ) && self.token_text(&next).ok() == Some(":");
+        let candidate = self.cursor.lookahead(2).clone();
         has_colon
             && matches!(
-                self.cursor.lookahead(2).kind,
+                candidate.kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
             )
+            && !self.has_line_break_between(next.span.end(), candidate.span.start())
+    }
+
+    fn has_line_break_between(&self, start: u32, end: u32) -> bool {
+        self.source
+            .as_str()
+            .get(start as usize..end as usize)
+            .map(|text| text.chars().any(dotty_core::is_line_break_char))
+            .unwrap_or(true)
     }
 
     fn current_is_given_colon(&mut self) -> bool {
@@ -575,5 +585,24 @@ mod tests {
         let _ = parser.parse_statement(Location::Elsewhere);
         assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn does_not_treat_a_multiline_colon_as_a_named_given() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given named:\nvalue",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::ColonEol, 11, 12),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        parser.advance();
+        assert!(!parser.starts_named_given());
     }
 }
