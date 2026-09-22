@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Given, Trait}
+import dotty.tools.dotc.core.Flags.{Abstract, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Private, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -98,13 +98,18 @@ object Main:
         fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))
         if tdef.mods.is(Trait) then
           fields += field("trait", "true")
+        if isTypeDefinitionSource(slice(tdef, source)) then
+          fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase)
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
         fields += field("name", quote(module.name.toString))
+        fields ++= renderDefinitionMetadata(module.mods, module, source, placeholderBase)
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] =>
         if !slice(vdef, source).trim.startsWith("_") && !vdef.name.toString.startsWith("_$") then
           fields += field("name", quote(vdef.name.toString))
         if vdef.mods.is(Given) then
           fields += field("given", "true")
+        if isValueDefinitionSource(slice(vdef, source)) then
+          fields ++= renderDefinitionMetadata(vdef.mods, vdef, source, placeholderBase)
       case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] =>
         fields += field("name", quote(ddef.name.toString))
         val clauses = ddef.paramss
@@ -124,6 +129,9 @@ object Main:
               case _ => "false"
           .mkString("[", ",", "]")
         )
+        fields ++= renderDefinitionMetadata(ddef.mods, ddef, source, placeholderBase)
+      case patdef: dotty.tools.dotc.ast.untpd.PatDef =>
+        fields ++= renderDefinitionMetadata(patdef.mods, patdef, source, placeholderBase)
       case literal: dotty.tools.dotc.ast.Trees.Literal[?] =>
         fields += field("literal", quote(slice(literal, source)))
       case number: dotty.tools.dotc.ast.untpd.Number =>
@@ -147,6 +155,75 @@ object Main:
       .mkString("[", ",", "]")
     fields += field("children", children)
     fields.mkString("{", ",", "}")
+
+  private def renderDefinitionMetadata(
+      mods: dotty.tools.dotc.ast.untpd.Modifiers,
+      tree: dotty.tools.dotc.ast.Trees.Tree[?],
+      source: String,
+      base: Int
+  ): List[String] =
+    val enabled = List(
+      "abstract" -> Abstract,
+      "final" -> Final,
+      "sealed" -> Sealed,
+      "implicit" -> Implicit,
+      "lazy" -> Lazy,
+      "override" -> Override,
+      "inline" -> Inline,
+      "transparent" -> Transparent,
+      "open" -> Open,
+      "infix" -> Infix,
+      "var" -> Mutable,
+      "given" -> Given
+    ).collect { case (name, flag) if mods.is(flag) => name }.toSet
+    val sourceText = slice(tree, source)
+    val sourceWords = sourceText.split("[^A-Za-z]+").toSet
+    val enabledWithSource = enabled ++ (if sourceWords.contains("var") then Set("var") else Set.empty)
+    val keywordIndex =
+      if isValueDefinitionSource(sourceText) then
+        List(sourceText.indexOf('='), sourceText.indexOf(':'))
+          .filter(_ >= 0)
+          .minOption
+          .getOrElse(sourceText.length)
+      else
+        List("def", "type", "class", "trait", "object")
+          .flatMap(indexOfWord(sourceText, _))
+          .minOption
+          .getOrElse(sourceText.length)
+    val ordered = sourceText
+      .take(keywordIndex)
+      .split("[^A-Za-z]+")
+      .toList
+      .filter(enabledWithSource.contains)
+    val modifiers = ordered.map(name => quote(name)).mkString("[", ",", "]")
+    val visibility =
+      if mods.is(Private) then "private"
+      else if mods.is(Protected) then "protected"
+      else ""
+    val qualifier =
+      if visibility.isEmpty || mods.privateWithin.isEmpty then "null"
+      else quote(mods.privateWithin.toString)
+    val annotationTrees = mods.annotations.map(annotation =>
+      render(annotation, source, placeholderBase(annotation, source))
+    ).mkString("[", ",", "]")
+    List(
+      field("modifiers", modifiers),
+      field("visibility", if visibility.isEmpty then "null" else quote(visibility)),
+      field("visibility_qualifier", qualifier),
+      field("annotations", annotationTrees)
+    )
+
+  private def indexOfWord(source: String, word: String): Option[Int] =
+    val index = source.indexOf(word)
+    if index >= 0 then Some(index) else None
+
+  private def isValueDefinitionSource(source: String): Boolean =
+    source.split("[^A-Za-z]+").exists(word => word == "val" || word == "var")
+
+  private def isTypeDefinitionSource(source: String): Boolean =
+    source.split("[^A-Za-z]+").exists(word =>
+      word == "type" || word == "class" || word == "trait" || word == "object"
+    )
 
   private def childTrees(tree: dotty.tools.dotc.ast.Trees.Tree[?]): List[dotty.tools.dotc.ast.Trees.Tree[?]] =
     def collect(value: Any): List[dotty.tools.dotc.ast.Trees.Tree[?]] = value match

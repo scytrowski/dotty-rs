@@ -207,11 +207,25 @@ fn render_tree(
             {
                 fields.push("\"trait\":true".to_owned());
             }
+            if is_type_definition_source(&source_text) {
+                fields.extend(render_definition_metadata(
+                    &definition.metadata,
+                    arena,
+                    names,
+                    source,
+                ));
+            }
         }
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => {
             fields.push(format!(
                 "\"name\":{}",
                 quote(names.resolve(module.name.as_name().text()))
+            ));
+            fields.extend(render_definition_metadata(
+                &module.metadata,
+                arena,
+                names,
+                source,
             ));
         }
         TreeKind::ValDef(definition) => {
@@ -227,6 +241,14 @@ fn render_tree(
                 .contains(&dotty_core::ast::Modifier::Given)
             {
                 fields.push("\"given\":true".to_owned());
+            }
+            if is_value_definition_source(&source_text) {
+                fields.extend(render_definition_metadata(
+                    &definition.metadata,
+                    arena,
+                    names,
+                    source,
+                ));
             }
         }
         TreeKind::DefDef(definition) => {
@@ -263,8 +285,21 @@ fn render_tree(
                 clause_sizes.join(",")
             ));
             fields.push(format!("\"using_clauses\":[{}]", using_clauses.join(",")));
+            fields.extend(render_definition_metadata(
+                &definition.metadata,
+                arena,
+                names,
+                source,
+            ));
         }
-        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => {}
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+            fields.extend(render_definition_metadata(
+                &definition.modifiers,
+                arena,
+                names,
+                source,
+            ));
+        }
         TreeKind::Alternative(_) | TreeKind::Typed(_) => {}
         TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
             fields.push(format!("\"literal\":{}", quote(source_slice(tree, source))));
@@ -340,6 +375,83 @@ fn render_tree(
     }
     fields.push(format!("\"children\":[{}]", rendered_children.join(",")));
     format!("{{{}}}", fields.join(","))
+}
+
+fn render_definition_metadata(
+    metadata: &dotty_core::ast::Modifiers,
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+    source: &str,
+) -> Vec<String> {
+    let modifiers = metadata
+        .modifiers
+        .iter()
+        .filter_map(|modifier| match modifier {
+            dotty_core::ast::Modifier::Trait => None,
+            dotty_core::ast::Modifier::Abstract => Some("abstract"),
+            dotty_core::ast::Modifier::Final => Some("final"),
+            dotty_core::ast::Modifier::Sealed => Some("sealed"),
+            dotty_core::ast::Modifier::Case => Some("case"),
+            dotty_core::ast::Modifier::Var => Some("var"),
+            dotty_core::ast::Modifier::Update => Some("update"),
+            dotty_core::ast::Modifier::Implicit => Some("implicit"),
+            dotty_core::ast::Modifier::Given => Some("given"),
+            dotty_core::ast::Modifier::Impure => Some("impure"),
+            dotty_core::ast::Modifier::Lazy => Some("lazy"),
+            dotty_core::ast::Modifier::Override => Some("override"),
+            dotty_core::ast::Modifier::Inline => Some("inline"),
+            dotty_core::ast::Modifier::Transparent => Some("transparent"),
+            dotty_core::ast::Modifier::Opaque => Some("opaque"),
+            dotty_core::ast::Modifier::Open => Some("open"),
+            dotty_core::ast::Modifier::Infix => Some("infix"),
+            dotty_core::ast::Modifier::Tracked => Some("tracked"),
+            dotty_core::ast::Modifier::Into => Some("into"),
+            dotty_core::ast::Modifier::Erased => Some("erased"),
+        })
+        .map(quote)
+        .collect::<Vec<_>>();
+    let visibility = metadata.visibility.map_or_else(
+        || "null".to_owned(),
+        |visibility| {
+            quote(match visibility {
+                dotty_core::ast::VisibilitySyntax::Private { .. } => "private",
+                dotty_core::ast::VisibilitySyntax::Protected { .. } => "protected",
+            })
+        },
+    );
+    let qualifier = metadata.visibility.and_then(|visibility| match visibility {
+        dotty_core::ast::VisibilitySyntax::Private { qualifier }
+        | dotty_core::ast::VisibilitySyntax::Protected { qualifier } => qualifier,
+    });
+    let qualifier = qualifier.map_or_else(
+        || "null".to_owned(),
+        |name| quote(names.resolve(name.text())),
+    );
+    let annotations = metadata
+        .annotations
+        .iter()
+        .map(|annotation| render_tree(*annotation, arena, names, source))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    vec![
+        format!("\"modifiers\":[{}]", modifiers.join(",")),
+        format!("\"visibility\":{visibility}"),
+        format!("\"visibility_qualifier\":{qualifier}"),
+        format!("\"annotations\":[{annotations}]"),
+    ]
+}
+
+fn is_value_definition_source(source: &str) -> bool {
+    source
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .any(|word| matches!(word, "val" | "var"))
+}
+
+fn is_type_definition_source(source: &str) -> bool {
+    source
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .any(|word| matches!(word, "type" | "class" | "trait" | "object"))
 }
 
 fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
