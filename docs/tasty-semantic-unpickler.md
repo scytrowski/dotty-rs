@@ -1459,7 +1459,7 @@ discovers an identity, not what `REFINEDtpt`/`LAMBDAtpt` project to.
 Corpus impact: the 2 library `Trait` self-types 5d2b measured as
 `MissingRefinementClass`/`InvalidRefinementClass` no longer fail for a missing
 pass-1 identity (no occurrence of either error, or of the "refinement
-semantic-state error" completion bucket, anywhere in any of the twelve run
+semantic-state error" completion bucket, anywhere in any of the sixteen run
 permutations). `unexpected errors: 0` holds throughout, and no existing
 completion count regresses (`Trait`, `Class`, `Method`, `Constructor`,
 `Field`, `Parameter`, `TypeParameter`, `TypeAlias`, `ModuleClass` completion
@@ -1468,6 +1468,107 @@ counts are byte-identical to the pre-5d2c corpus run in every permutation).
 Milestone 5d is closed by this issue; the roadmap continues at 5e (symbol
 annotations, companion links, opaque aliases), driven by the next measured
 corpus gap.
+
+#### Review follow-up: three logic bugs, route attribution, a reachability oracle
+
+PR #102's review of this milestone found three real logic bugs in the
+first cut of `discovery.rs`, all fixed in the same PR before merge:
+
+* **Owner-conflict suppression.** The idempotency check above
+  (`enter_referenced_refined_tpt` returning early once `symbol_at` exists) also
+  suppressed a *genuine* independent owner reaching an already-entered
+  identity through a hidden route — it could never tell that case apart from a
+  member naming its own enclosing refinement. Fixed by `owner_is_within`:
+  `owner`'s ownership chain is walked to check whether it leads to the
+  refinement class itself; only then is the visit treated as a self-reference.
+  A genuinely independent owner still gets `SharedRefinementOwnerConflict`,
+  the same policy a direct `SHAREDterm` share already had.
+  `tests/discovery.rs`'s
+  `a_hidden_refinement_reached_from_two_owners_through_this_still_conflicts`
+  is the regression, mutation-checked (reverting `owner_is_within` to the
+  unconditional idempotent version makes it fail as expected, without
+  disturbing the self-reference test above).
+* **Silent invalid reference targets.** `discover_identities`'s top-level
+  `tag_at`-is-`None` fallback returned `Ok(())`, and `reference_target` (the
+  direct/symbol reference-target helper) checked only that a leaf shape
+  decoded, never that its target address was a visible node. Both silently
+  swallowed a malformed or out-of-range address that issue #101 §18 requires
+  to fail typed. Fixed: the fallback is now `InvalidReferenceTarget`, and
+  `reference_target` validates its result through `AstView::is_node` before
+  returning it. This is a deliberate tightening from some pre-5d2c code's
+  "defer the error to projection" habit to "pass 1 fails eagerly," so five
+  pre-existing tests whose fixtures relied on the old, lenient behavior
+  (`tests/class_parents.rs`'s parent-cannot-be-projected test,
+  `tests/type_identity.rs`'s four shared-link/invalid-target tests) were
+  updated to assert the (correct) eager failure instead.
+* **`SHAREDtype` depth inconsistency.** Discovery threaded `SHAREDtype`
+  resolution through the same general nesting-depth counter (`MAX_TREE_DEPTH`,
+  256) every other structural descent uses, while real projection
+  (`type_at`/`this_class`) bounds a `SHAREDtype` *chain* on its own, much
+  tighter `MAX_SHARED_DEPTH` (16). A long-enough chain of unrelated nesting
+  could let a genuinely cyclic or overlong `SHAREDtype` chain through pass 1,
+  only to fail later at projection. Fixed by `AstView::resolve_shared_type`,
+  an exact mirror of the pre-existing `resolve_shared_term`: it resolves and
+  validates a whole `SHAREDtype` chain in one bounded call, independent of the
+  caller's own depth budget. Two new `AstView` unit tests exercise it directly.
+
+All three were mutation-tested (revert the fix, confirm the regression test
+fails, restore, confirm the restoration is byte-identical to the pre-fix
+file), and the full corpus run afterward was byte-identical to the run before
+these fixes: none of the three bugs was ever triggered by real Scala library
+or compiler code, only by adversarial fixtures built to reach them.
+
+The same review asked for the three items disclosed as scope gaps in the
+original PR body to be closed before merge:
+
+* **A dedicated hidden-`LAMBDAtpt` regression**
+  (`tests/discovery.rs`'s `a_lambdatpt_hidden_behind_a_selecttpt_qualifier_is_entered`):
+  a `LAMBDAtpt` reached only through a `SELECTtpt` qualifier's `SHAREDterm`
+  link (`discover_term_type`'s `is_type_tree_tag` redirect, the same mechanism
+  that finds a hidden `REFINEDtpt` this way) is entered with every immediate
+  `TYPEPARAM` symbol present, and projecting it never fails with
+  `MissingEnteredSymbol`.
+* **Route attribution** (`DiscoveryRoute`, in `discovery.rs`): every recursive
+  call threads a small enum naming the nearest named hop it is about to visit
+  through (`SHAREDterm`, `SHAREDtype`, `IDENTtpt`, `IDENT`, `SELECTtpt`,
+  `SINGLETONtpt`, `SELECT`, `QUALTHIS`, `THIS`, a §11 reference target, an
+  ordinary structural descent, or the root declared-type position itself). The
+  route active when a `LAMBDAtpt`/`REFINEDtpt`'s *first* owner is recorded is
+  kept in the index (`lambda_route`/`refined_route`) purely for reporting — no
+  arm of the walker branches on it. The label always names the *nearest* hop,
+  not a distant one: a `REFINEDtpt` reached through `SELECTtpt`'s qualifier's
+  own `SHAREDterm` link is attributed to `SHAREDterm`, not `SELECTtpt`,
+  because the link, not the qualifier, is the last hop before the identity;
+  when the same `SELECTtpt` names its target *directly* (no link in between —
+  the real library shape this milestone was built for), the route is
+  `SELECTtpt` itself. `tests/discovery.rs`'s
+  `each_entered_identity_is_attributed_to_the_hop_that_led_to_it` fixes both
+  shapes, plus the `THIS`-direct (§11 reference target) and `THIS → SHAREDtype`
+  (§10 critical case) distinction, and the direct declared-type-position case.
+* **A projection-reachability oracle** (`reachability.rs`, new module): an
+  independent cross-check, run after `enter_symbols`, that starts from the
+  *wire* rather than from the walker's own traversal. It finds every
+  `LAMBDAtpt`/`REFINEDtpt` node physically present in the AST section — whether
+  or not any discovery call ever visited it — and classifies each one as
+  `Entered` (has an owner), `InBody` (its structural ancestor chain includes a
+  `VALDEF`, `DEFDEF`, `BLOCK`, `CASEDEF` or `LAMBDAtpt` — the same tag set
+  `tests/type_corpus.rs`'s pre-existing `inside_a_body` heuristic uses for the
+  analogous question about a missing-symbol reference target — the one class
+  of position pass 1 documents as never entered), or `Unaccounted`: a node
+  discovery's routing table should have reached but did not, always a genuine
+  parity gap. `identity_reachability` is a public function
+  (`dotty_tasty_unpickler::tasty_unpickler::identity_reachability`) so both
+  `tests/discovery.rs`'s unit-level fixtures and `tests/type_corpus.rs`'s
+  corpus run can call it; the corpus run asserts
+  `lambda_unaccounted + refined_unaccounted == 0` and prints reachable/entered/
+  in-body counts, owner-conflict counts and the route-attribution histogram
+  per identity kind. Measured (all sixteen run permutations): `unaccounted: 0`
+  throughout; scala3-library's real `REFINEDtpt` route histogram shows
+  `SELECTtpt: 3` (the exact real-library shape this milestone fixes) alongside
+  the ordinary `root`/`structural` routes pass 1 always had, and no `THIS`
+  reference-target/`SHAREDtype` occurrence in either corpus (both routes are
+  measured supported, not exercised by real code) — the same "measured, not
+  assumed" standard the rest of this milestone holds itself to.
 
 ### Owner-space references (Milestone 4c1)
 

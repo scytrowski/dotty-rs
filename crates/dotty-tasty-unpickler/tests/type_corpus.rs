@@ -13,7 +13,9 @@ use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
 use dotty_core::{Definitions, Packages};
 use dotty_tasty::tasty::{TastyFile, is_compact_annot_type_tag};
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    IdentityOutcome, TastyUnpickler, UnpickleError, identity_reachability,
+};
 
 /// Every node tag that is a type reference, or a `THIS` prefix.
 const REFERENCE_TAGS: [u8; 10] = [61, 62, 63, 64, 65, 90, 114, 115, 116, 117];
@@ -590,6 +592,33 @@ struct OwnerOracle {
     owner_failures: BTreeMap<String, usize>,
 }
 
+/// The identity-reachability oracle's corpus-wide measurement (Milestone
+/// 5d2c's follow-up review of issue #101): every `LAMBDAtpt`/`REFINEDtpt`
+/// physically present in the wire, classified by
+/// [`dotty_tasty_unpickler::tasty_unpickler::identity_reachability`], plus
+/// the route (`crate::discovery::DiscoveryRoute`'s name) each *entered*
+/// identity's first owner was found through. `unaccounted` is the number the
+/// milestone's own parity claim lives or dies by: any corpus unit that
+/// reports one has a real, undiscovered `LAMBDAtpt`/`REFINEDtpt`, not merely
+/// an unmeasured one.
+#[derive(Default)]
+struct IdentitySurvey {
+    lambda_entered: usize,
+    lambda_in_body: usize,
+    lambda_unaccounted: usize,
+    lambda_conflicts: usize,
+    refined_entered: usize,
+    refined_in_body: usize,
+    refined_unaccounted: usize,
+    refined_conflicts: usize,
+    /// The route each entered `LAMBDAtpt`'s first owner was found through.
+    lambda_routes: BTreeMap<&'static str, usize>,
+    /// The route each entered `REFINEDtpt`'s first owner was found through.
+    refined_routes: BTreeMap<&'static str, usize>,
+    /// `unit label @address, tag` of every `Unaccounted` node, for triage.
+    unaccounted_examples: Vec<String>,
+}
+
 #[derive(Default)]
 struct Tally {
     /// Simple symbol completion (Milestone 5a).
@@ -643,6 +672,8 @@ struct Tally {
     /// type-lambda aliases); anything else would be a definition pass 1 should
     /// have entered.
     missing_outside_bodies: usize,
+    /// The identity-reachability oracle (Milestone 5d2c's follow-up review).
+    identity: IdentitySurvey,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: Vec<String>,
 }
@@ -706,6 +737,67 @@ fn tree_root_name(
 /// Completes every eligible symbol of the unit, in document order, and
 /// records what happened, and surveys the type trees each definition context
 /// carries (whether or not completion supports them).
+/// Runs the identity-reachability oracle over `file`'s whole AST section
+/// (independent of the top-down declared-type walk `enter_symbols` already
+/// did) and folds the result into `survey`: every `LAMBDAtpt`/`REFINEDtpt`
+/// discovery should have entered, in fact did, plus the route each one's
+/// first owner was found through.
+fn survey_identity_reachability(
+    file: &TastyFile<'_>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    label: &str,
+    survey: &mut IdentitySurvey,
+) {
+    const LAMBDATPT_TAG: u8 = 171;
+    for node in identity_reachability(file, unpickler.index()).unwrap() {
+        let is_lambda = node.tag == LAMBDATPT_TAG;
+        match node.outcome {
+            IdentityOutcome::Entered => {
+                let (route, routes) = if is_lambda {
+                    (
+                        unpickler.index().lambda_route(node.address),
+                        &mut survey.lambda_routes,
+                    )
+                } else {
+                    (
+                        unpickler.index().refined_route(node.address),
+                        &mut survey.refined_routes,
+                    )
+                };
+                *routes.entry(route.unwrap_or("?")).or_default() += 1;
+                if is_lambda {
+                    survey.lambda_entered += 1;
+                    survey.lambda_conflicts +=
+                        usize::from(unpickler.index().has_lambda_owner_conflict(node.address));
+                } else {
+                    survey.refined_entered += 1;
+                    survey.refined_conflicts +=
+                        usize::from(unpickler.index().has_refined_owner_conflict(node.address));
+                }
+            }
+            IdentityOutcome::InBody => {
+                if is_lambda {
+                    survey.lambda_in_body += 1;
+                } else {
+                    survey.refined_in_body += 1;
+                }
+            }
+            IdentityOutcome::Unaccounted => {
+                if is_lambda {
+                    survey.lambda_unaccounted += 1;
+                } else {
+                    survey.refined_unaccounted += 1;
+                }
+                if survey.unaccounted_examples.len() < 20 {
+                    survey
+                        .unaccounted_examples
+                        .push(format!("{label} @{}: tag {}", node.address, node.tag));
+                }
+            }
+        }
+    }
+}
+
 fn complete_unit(
     unpickler: &mut TastyUnpickler<'_, '_, '_>,
     file: &TastyFile<'_>,
@@ -2226,6 +2318,7 @@ fn run(
     let mut other_methods: Vec<dotty_core::ids::TypeId> = Vec::new();
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
+    survey_identity_reachability(&file, &unpickler, label, &mut tally.identity);
     if completion != Completion::Off {
         complete_unit(
             &mut unpickler,
@@ -3181,11 +3274,36 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             }
             assert!(survey.unexpected.is_empty());
         }
+        {
+            let id = &tally.identity;
+            println!(
+                "identity reachability (Milestone 5d2c review): LAMBDAtpt entered {} (conflicts {}), in body {}, unaccounted {}; REFINEDtpt entered {} (conflicts {}), in body {}, unaccounted {}",
+                id.lambda_entered,
+                id.lambda_conflicts,
+                id.lambda_in_body,
+                id.lambda_unaccounted,
+                id.refined_entered,
+                id.refined_conflicts,
+                id.refined_in_body,
+                id.refined_unaccounted,
+            );
+            println!("  LAMBDAtpt route attribution: {:?}", id.lambda_routes);
+            println!("  REFINEDtpt route attribution: {:?}", id.refined_routes);
+            if !id.unaccounted_examples.is_empty() {
+                println!("  unaccounted examples: {:?}", id.unaccounted_examples);
+            }
+        }
         println!("unexpected errors: {}", tally.unexpected.len());
         for error in tally.unexpected.iter().take(10) {
             println!("  {error}");
         }
         assert!(tally.unexpected.is_empty());
+        assert_eq!(
+            tally.identity.lambda_unaccounted + tally.identity.refined_unaccounted,
+            0,
+            "the identity-reachability oracle found a LAMBDAtpt/REFINEDtpt discovery should have entered but did not: {:?}",
+            tally.identity.unaccounted_examples
+        );
         assert_eq!(tally.missing_outside_bodies, 0);
         // Every annotated type is either compact or a full tree, and every
         // compact one is filed under an outcome.

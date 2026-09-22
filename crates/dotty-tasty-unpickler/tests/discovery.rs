@@ -16,15 +16,16 @@ use dotty_core::Packages;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolOrigin;
 use dotty_tasty::tasty::{
-    APPLIEDTPT_TAG, APPLY_TAG, DEFDEF_TAG, Header, IDENT_TAG, NameTable, PACKAGE_TAG, RawName,
-    SELECTTPT_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, Section, SectionTable, TEMPLATE_TAG,
-    TERMREFPKG_TAG, THIS_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TastyFile, VALDEF_TAG,
+    APPLIEDTPT_TAG, APPLY_TAG, DEFDEF_TAG, Header, IDENT_TAG, LAMBDATPT_TAG, NameTable,
+    PACKAGE_TAG, RawName, SELECTTPT_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, Section, SectionTable,
+    TEMPLATE_TAG, TERMREFPKG_TAG, THIS_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+    TYPEREF_TAG, TYPEREFDIRECT_TAG, TastyFile, VALDEF_TAG,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
-const NAMES: [&str; 14] = [
+const NAMES: [&str; 16] = [
     "ASTs", "p", "Holder", "m1", "m2", "m3", "m4", "dup1", "dup2", "poison", "modesens", "selfref",
-    "x", "sel",
+    "x", "sel", "lam", "X",
 ];
 
 fn n(text: &str) -> u32 {
@@ -116,8 +117,8 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
 }
 
 /// Every definition of the unit, in document order.
-const DEFINITIONS: [&str; 10] = [
-    "Holder", "m1", "m2", "m3", "m4", "dup1", "dup2", "poison", "modesens", "selfref",
+const DEFINITIONS: [&str; 11] = [
+    "Holder", "m1", "m2", "m3", "m4", "dup1", "dup2", "poison", "modesens", "selfref", "lam",
 ];
 
 struct Unit {
@@ -260,6 +261,23 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
     )
     .unwrap();
 
+    // `lam` reaches a `LAMBDAtpt` through the *same* `SELECTtpt`-qualifier
+    // hidden route as `m1`, but the linked tree is itself a `LAMBDAtpt` — not
+    // a `REFINEDtpt` — exercising `type_of_term`'s `is_type_tree_tag`
+    // redirect for the other identity-bearing form pass 1 knows about
+    // (Milestone 5c): `discover_term_type` resolves the `SHAREDterm`, sees
+    // the target is a type-tree tag, and hands off to `TypeTree` mode under
+    // the *same* address, which is exactly how `enter_lambda_tpt` gets
+    // called from a route the pre-5d2c direct-child-only scanner never
+    // walked at all (`SELECTtpt` was not in its whitelist). Requested by the
+    // PR #102 review of issue #101 as a dedicated hidden-`LAMBDAtpt`
+    // regression, alongside `m1`'s hidden `REFINEDtpt`.
+    let lam = def(
+        DEFDEF_TAG,
+        "lam",
+        select_via_shared_term(addr("hidden_lambda")),
+    );
+
     let holder = node(
         TYPEDEF_TAG,
         &[
@@ -277,6 +295,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
                     poison,
                     modesens,
                     selfref,
+                    lam,
                 ]
                 .concat(),
             ),
@@ -297,6 +316,15 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
     let poisoned = refined(any_type(), &[]);
     let hidden_c = refined(any_type(), &[]);
     let hidden_e = refined(any_type(), &[]);
+    let lambda_param = node(
+        TYPEPARAM_TAG,
+        &[
+            nat(n("X")),
+            node(TYPEBOUNDSTPT_TAG, &[any_type(), any_type()].concat()),
+        ]
+        .concat(),
+    );
+    let hidden_lambda = node(LAMBDATPT_TAG, &[lambda_param, any_type()].concat());
     let loose = [
         hidden_a,
         hidden_b,
@@ -304,6 +332,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         poisoned,
         hidden_c,
         hidden_e,
+        hidden_lambda,
     ];
     let labels = [
         "hidden_a",
@@ -312,6 +341,7 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         "poisoned",
         "hidden_c",
         "hidden_e",
+        "hidden_lambda",
     ];
 
     let mut ast = package;
@@ -501,6 +531,103 @@ fn result_type_at(file: &TastyFile<'_>, defdef_at: u32) -> u32 {
         .find(|edge| u32::try_from(edge.parent.offset).unwrap() == defdef_at)
         .map(|edge| u32::try_from(edge.child.offset).unwrap())
         .unwrap()
+}
+
+#[test]
+fn each_entered_identity_is_attributed_to_the_hop_that_led_to_it() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let unpickler = entered(&file, &mut session).unwrap();
+    let route = |label: &str| unpickler.index().refined_route(unit.at(label));
+
+    // `m1`'s `hidden_a`: `SELECTtpt` -> `SHAREDterm` -> `REFINEDtpt`. The
+    // route names the *nearest* hop, the `SHAREDterm` link, not the outer
+    // `SELECTtpt` qualifier that led to it (`DiscoveryRoute`'s own
+    // documentation): the qualifier itself is not a hop to a new address, the
+    // link is.
+    assert_eq!(route("hidden_a"), Some("SHAREDterm"));
+
+    // `m2`'s `hidden_b`: `THIS` wraps a *direct* `TYPEREFDIRECT` reference
+    // whose target happens to be the `REFINEDtpt`'s own address — the §11
+    // reference-target special case, distinct from the §10 critical case
+    // below even though both start at `THIS`.
+    assert_eq!(route("hidden_b"), Some("reference target (§11)"));
+
+    // `m3`'s `hidden_e`: `THIS` reaches a `SHAREDtype` link whose target is
+    // the `REFINEDtpt` itself — the §10 critical case this milestone exists
+    // for, attributed to the `SHAREDtype` hop.
+    assert_eq!(route("hidden_e"), Some("SHAREDtype"));
+
+    // `selfref`'s own result type *is* the `REFINEDtpt`: a direct declared
+    // type position, not a hidden route at all.
+    assert_eq!(
+        route("selfref.refined"),
+        Some("root (direct declared-type position)")
+    );
+
+    // `lam`'s hidden `LAMBDAtpt`, reached the same way as `hidden_a`.
+    assert_eq!(
+        unpickler.index().lambda_route(unit.at("hidden_lambda")),
+        Some("SHAREDterm")
+    );
+}
+
+/// The address of `parent_at`'s first child tagged `tag`.
+fn child_with_tag(file: &TastyFile<'_>, parent_at: u32, tag: u8) -> u32 {
+    let index = file.ast_address_index().unwrap();
+    index
+        .iter_tree_edges()
+        .filter(|edge| u32::try_from(edge.parent.offset).unwrap() == parent_at)
+        .find(|edge| edge.child.tag == tag)
+        .map(|edge| u32::try_from(edge.child.offset).unwrap())
+        .unwrap_or_else(|| panic!("no child tagged {tag} under {parent_at}"))
+}
+
+#[test]
+fn a_lambdatpt_hidden_behind_a_selecttpt_qualifier_is_entered() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session).unwrap();
+
+    // Requested by the PR #102 review of issue #101: a dedicated regression
+    // for a `LAMBDAtpt` reached only through a hidden route, mirroring the
+    // `REFINEDtpt` cases above.
+    let hidden_lambda = unit.at("hidden_lambda");
+    let lam = unpickler.index().symbol_at(unit.at("lam")).unwrap();
+    assert_eq!(unpickler.index().lambda_owner(hidden_lambda), Some(lam));
+    assert!(!unpickler.index().has_lambda_owner_conflict(hidden_lambda));
+
+    // Every immediate `TYPEPARAM` has a symbol.
+    let param_at = child_with_tag(&file, hidden_lambda, dotty_tasty::tasty::TYPEPARAM_TAG);
+    assert!(unpickler.index().symbol_at(param_at).is_some());
+
+    // Projecting the `LAMBDAtpt` itself (its type parameters, entered only
+    // because discovery followed the hidden `SELECTtpt` route) never fails
+    // with `MissingEnteredSymbol`: pass 1 had already entered every type
+    // parameter discovery alone found, before projection ran.
+    let lambda_projection = unpickler.unpickle_type_tree_type(hidden_lambda);
+    assert!(
+        !matches!(
+            lambda_projection,
+            Err(UnpickleError::MissingEnteredSymbol { .. })
+        ),
+        "projection reported a missing entered symbol: {lambda_projection:?}"
+    );
+
+    // Projecting the full `SELECTtpt` qualifier that hides it fails only on
+    // the unrelated, expected member-resolution gap of this synthetic
+    // fixture (`sel` names no real member) — never on a missing identity.
+    let declared_type_at = result_type_at(&file, unit.at("lam"));
+    let select_projection = unpickler.unpickle_type_tree_type(declared_type_at);
+    assert!(
+        !matches!(
+            select_projection,
+            Err(UnpickleError::MissingEnteredSymbol { .. })
+        ),
+        "projection reported a missing entered symbol: {select_projection:?}"
+    );
 }
 
 #[test]

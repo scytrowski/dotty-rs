@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 
-use crate::discovery::DiscoveryMode;
+use crate::discovery::{DiscoveryMode, DiscoveryRoute};
 use crate::error::UnpickleError;
 
 /// Maps TASTy definition addresses to the semantic entities entered for them.
@@ -60,6 +60,10 @@ pub struct TastySemanticIndex {
     /// different owner than the one that entered them: their parameters are
     /// owned once, so projecting them is refused (`SharedLambdaOwnerConflict`).
     lambda_conflicts: HashSet<u32>,
+    /// The structural hop that led discovery to each `LAMBDAtpt`'s *first*
+    /// owner (Milestone 5d2c's follow-up review, route-attribution metrics):
+    /// see [`DiscoveryRoute`](crate::discovery::DiscoveryRoute).
+    lambda_routes: HashMap<u32, DiscoveryRoute>,
     /// `(tree, owner, mode)` triples the identity-discovery walker has
     /// visited (Milestone 5d2c; `LAMBDAtpt` type parameters, Milestone 5c;
     /// `REFINEDtpt` synthetic classes, Milestone 5d2b), so a tree shared by
@@ -81,6 +85,9 @@ pub struct TastySemanticIndex {
     /// different owner than the one that entered them
     /// (`SharedRefinementOwnerConflict`), mirroring `lambda_conflicts`.
     refined_conflicts: HashSet<u32>,
+    /// The structural hop that led discovery to each `REFINEDtpt`'s *first*
+    /// owner, mirroring `lambda_routes`.
+    refined_routes: HashMap<u32, DiscoveryRoute>,
 }
 
 impl TastySemanticIndex {
@@ -225,12 +232,33 @@ impl TastySemanticIndex {
         self.lambda_conflicts.insert(address);
     }
 
+    pub(crate) fn insert_lambda_route(&mut self, address: u32, route: DiscoveryRoute) {
+        self.lambda_routes.insert(address, route);
+    }
+
+    /// The name of the structural hop that led discovery to the `LAMBDAtpt`
+    /// at `address`, for the corpus route-attribution report; `None` when the
+    /// address was never entered.
+    pub fn lambda_route(&self, address: u32) -> Option<&'static str> {
+        self.lambda_routes.get(&address).map(|route| route.name())
+    }
+
     pub(crate) fn insert_refined_owner(&mut self, address: u32, owner: SymbolId) {
         self.refined_owners.insert(address, owner);
     }
 
     pub(crate) fn mark_refined_conflict(&mut self, address: u32) {
         self.refined_conflicts.insert(address);
+    }
+
+    pub(crate) fn insert_refined_route(&mut self, address: u32, route: DiscoveryRoute) {
+        self.refined_routes.insert(address, route);
+    }
+
+    /// The name of the structural hop that led discovery to the `REFINEDtpt`
+    /// at `address`, mirroring [`lambda_route`](Self::lambda_route).
+    pub fn refined_route(&self, address: u32) -> Option<&'static str> {
+        self.refined_routes.get(&address).map(|route| route.name())
     }
 
     /// Whether `(tree, owner, mode)` had not been visited by the identity

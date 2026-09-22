@@ -57,7 +57,7 @@ use dotty_tasty::tasty::{
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::class::{parent_constructor_is_applied, template_parts};
-use crate::discovery::DiscoveryMode;
+use crate::discovery::{DiscoveryMode, DiscoveryRoute};
 use crate::error::UnpickleError;
 use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, REFINEMENT_CLASS_NAME, def_def_kind,
@@ -320,6 +320,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         address(result.offset),
                         method,
                         DiscoveryMode::TypeTree,
+                        DiscoveryRoute::Root,
                         depth,
                     )?;
                 }
@@ -361,7 +362,14 @@ impl TastyUnpickler<'_, '_, '_> {
         if let Some(self_def) = parts.self_def
             && let Some(tree) = ast.children(self_def).first()
         {
-            self.discover_identities(ast, address(tree.offset), class, DiscoveryMode::TypeTree, 0)?;
+            self.discover_identities(
+                ast,
+                address(tree.offset),
+                class,
+                DiscoveryMode::TypeTree,
+                DiscoveryRoute::Root,
+                0,
+            )?;
         }
         Ok(())
     }
@@ -420,6 +428,7 @@ impl TastyUnpickler<'_, '_, '_> {
                             *argument,
                             class,
                             DiscoveryMode::TypeTree,
+                            DiscoveryRoute::Root,
                             depth + 1,
                         )?;
                     }
@@ -434,6 +443,7 @@ impl TastyUnpickler<'_, '_, '_> {
                             address(tpt.offset),
                             class,
                             DiscoveryMode::TypeTree,
+                            DiscoveryRoute::Root,
                             depth + 1,
                         )?;
                     }
@@ -441,7 +451,14 @@ impl TastyUnpickler<'_, '_, '_> {
                 }
                 _ => Ok(()),
             },
-            _ => self.discover_identities(ast, at, class, DiscoveryMode::TypeTree, depth + 1),
+            _ => self.discover_identities(
+                ast,
+                at,
+                class,
+                DiscoveryMode::TypeTree,
+                DiscoveryRoute::Root,
+                depth + 1,
+            ),
         }
     }
 
@@ -517,6 +534,7 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         children: &[u32],
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         match self.index.lambda_owner(tree) {
@@ -525,7 +543,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 self.index.mark_lambda_conflict(tree);
                 return Ok(());
             }
-            None => self.index.insert_lambda_owner(tree, owner),
+            None => {
+                self.index.insert_lambda_owner(tree, owner);
+                self.index.insert_lambda_route(tree, route);
+            }
         }
         ast.node(tree)?.decode_lambda_tpt()?;
         let Some((body, params)) = children.split_last() else {
@@ -546,7 +567,14 @@ impl TastyUnpickler<'_, '_, '_> {
             let parameter = ast.node(*param)?.decode_parameter()?;
             self.enter_parameter(ast, *param, &parameter, owner, false, depth + 1)?;
         }
-        self.discover_identities(ast, *body, owner, DiscoveryMode::TypeTree, depth + 1)
+        self.discover_identities(
+            ast,
+            *body,
+            owner,
+            DiscoveryMode::TypeTree,
+            DiscoveryRoute::Root,
+            depth + 1,
+        )
     }
 
     /// Enters the `REFINEDtpt` at `tree`, owned by `owner`: its synthetic
@@ -576,6 +604,7 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         children: &[u32],
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         match self.index.refined_owner(tree) {
@@ -584,7 +613,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 self.index.mark_refined_conflict(tree);
                 return Ok(());
             }
-            None => self.index.insert_refined_owner(tree, owner),
+            None => {
+                self.index.insert_refined_owner(tree, owner);
+                self.index.insert_refined_route(tree, route);
+            }
         }
         ast.node(tree)?.decode_refined_tpt()?;
         let Some((parent, stats)) = children.split_first() else {
@@ -649,7 +681,14 @@ impl TastyUnpickler<'_, '_, '_> {
             self.enter_definition_body(ast, stat, header, depth + 1)?;
         }
 
-        self.discover_identities(ast, *parent, owner, DiscoveryMode::TypeTree, depth + 1)
+        self.discover_identities(
+            ast,
+            *parent,
+            owner,
+            DiscoveryMode::TypeTree,
+            DiscoveryRoute::Root,
+            depth + 1,
+        )
     }
 
     /// Allocates the symbol for a definition, records its address, and

@@ -129,6 +129,73 @@ pub(crate) enum DiscoveryMode {
     ClassRef,
 }
 
+/// The immediate structural hop that led discovery to an address, recorded
+/// only for a `LAMBDAtpt`/`REFINEDtpt` the walk actually enters (its first
+/// owner), for the corpus route-attribution metrics that answer "how many of
+/// the identities this milestone finds are reached through which hidden
+/// route" (the review of issue #101's PR). Purely observational: no arm of
+/// the walker branches on it, and it never affects which identity is entered
+/// or which owner it gets.
+///
+/// Each recursive call sets the route fresh for the address it is about to
+/// visit; an uninteresting structural descent (an `APPLIEDtpt` argument, a
+/// reference's prefix, a compound type's child, ...) resets it to
+/// [`Structural`](Self::Structural) rather than propagating the outer route,
+/// so the label always names the *nearest* named hop, not a distant one. The
+/// one deliberate exception is [`discover_term_type`]'s `is_type_tree_tag`
+/// redirect: it reinterprets the very same address as a type tree rather than
+/// stepping to a new one, so it keeps the incoming route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscoveryRoute {
+    /// The declared-type position discovery started from (a `VALDEF`'s type,
+    /// a `DEFDEF`'s result, a `TYPEPARAM`'s bounds, a parent, a self type).
+    Root,
+    /// A `SHAREDterm` link.
+    SharedTerm,
+    /// A `SHAREDtype` link.
+    SharedType,
+    /// An `IDENTtpt`'s embedded type child.
+    IdentTpt,
+    /// An `IDENT`'s embedded type child.
+    Ident,
+    /// A `SELECTtpt`'s qualifier.
+    SelectTpt,
+    /// A `SINGLETONtpt`'s reference.
+    SingletonTpt,
+    /// A `SELECT`'s qualifier.
+    Select,
+    /// A `QUALTHIS`'s class reference.
+    QualThis,
+    /// A `THIS`'s class reference.
+    This,
+    /// A direct/symbol reference target that turned out to be the
+    /// `REFINEDtpt`'s own address (§11 of the module documentation) —
+    /// recorded regardless of how the referencing node itself was reached.
+    ReferenceTarget,
+    /// Any other structural descent that is not itself a named hop.
+    Structural,
+}
+
+impl DiscoveryRoute {
+    /// The name used in the corpus route-attribution report.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            DiscoveryRoute::Root => "root (direct declared-type position)",
+            DiscoveryRoute::SharedTerm => "SHAREDterm",
+            DiscoveryRoute::SharedType => "SHAREDtype",
+            DiscoveryRoute::IdentTpt => "IDENTtpt",
+            DiscoveryRoute::Ident => "IDENT",
+            DiscoveryRoute::SelectTpt => "SELECTtpt",
+            DiscoveryRoute::SingletonTpt => "SINGLETONtpt",
+            DiscoveryRoute::Select => "SELECT",
+            DiscoveryRoute::QualThis => "QUALTHIS",
+            DiscoveryRoute::This => "THIS",
+            DiscoveryRoute::ReferenceTarget => "reference target (§11)",
+            DiscoveryRoute::Structural => "structural (ordinary nesting)",
+        }
+    }
+}
+
 /// The absolute addresses of `at`'s direct children, in wire order.
 fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
     ast.children(at)
@@ -159,6 +226,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 address(tree.offset),
                 owner,
                 DiscoveryMode::TypeTree,
+                DiscoveryRoute::Root,
                 depth,
             )?;
         }
@@ -180,6 +248,7 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         owner: SymbolId,
         mode: DiscoveryMode,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         if depth > MAX_TREE_DEPTH {
@@ -195,12 +264,12 @@ impl TastyUnpickler<'_, '_, '_> {
             return Ok(());
         }
         match mode {
-            DiscoveryMode::TypeTree => self.discover_type_tree(ast, tree, tag, owner, depth),
-            DiscoveryMode::TermType => self.discover_term_type(ast, tree, tag, owner, depth),
+            DiscoveryMode::TypeTree => self.discover_type_tree(ast, tree, tag, owner, route, depth),
+            DiscoveryMode::TermType => self.discover_term_type(ast, tree, tag, owner, route, depth),
             DiscoveryMode::SemanticType => {
-                self.discover_semantic_type(ast, tree, tag, owner, depth)
+                self.discover_semantic_type(ast, tree, tag, owner, route, depth)
             }
-            DiscoveryMode::ClassRef => self.discover_class_ref(ast, tree, tag, owner, depth),
+            DiscoveryMode::ClassRef => self.discover_class_ref(ast, tree, tag, owner, route, depth),
         }
     }
 
@@ -211,34 +280,55 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         tag: u8,
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         use DiscoveryMode::{SemanticType, TermType, TypeTree};
+        use DiscoveryRoute::Structural;
 
         if tag == SHAREDTERM_TAG {
             let target = ast.resolve_shared_term(tree, tree)?;
-            return self.discover_identities(ast, target, owner, TypeTree, depth + 1);
+            return self.discover_identities(
+                ast,
+                target,
+                owner,
+                TypeTree,
+                DiscoveryRoute::SharedTerm,
+                depth + 1,
+            );
         }
         let children = children_of(ast, tree);
         match tag {
             IDENTTPT_TAG => match children.first() {
-                Some(&embedded) => {
-                    self.discover_identities(ast, embedded, owner, SemanticType, depth + 1)
-                }
+                Some(&embedded) => self.discover_identities(
+                    ast,
+                    embedded,
+                    owner,
+                    SemanticType,
+                    DiscoveryRoute::IdentTpt,
+                    depth + 1,
+                ),
                 None => Ok(()),
             },
             EXPLICITTPT_TAG | BYNAMETPT_TAG | APPLIEDTPT_TAG | TYPEBOUNDSTPT_TAG => {
                 for child in children {
-                    self.discover_identities(ast, child, owner, TypeTree, depth + 1)?;
+                    self.discover_identities(ast, child, owner, TypeTree, Structural, depth + 1)?;
                 }
                 Ok(())
             }
-            SELECTTPT_TAG | SINGLETONTPT_TAG => match children.first() {
-                Some(&reference) => {
-                    self.discover_identities(ast, reference, owner, TermType, depth + 1)
+            SELECTTPT_TAG | SINGLETONTPT_TAG => {
+                let route = if tag == SELECTTPT_TAG {
+                    DiscoveryRoute::SelectTpt
+                } else {
+                    DiscoveryRoute::SingletonTpt
+                };
+                match children.first() {
+                    Some(&reference) => {
+                        self.discover_identities(ast, reference, owner, TermType, route, depth + 1)
+                    }
+                    None => Ok(()),
                 }
-                None => Ok(()),
-            },
+            }
             ANNOTATEDTPT_TAG => {
                 // The base is walked as any other declared type tree. The
                 // annotation itself is not: its only type-bearing portion
@@ -250,17 +340,19 @@ impl TastyUnpickler<'_, '_, '_> {
                 // gain. The corpus oracle (Milestone 5d2c, Commit 5) reports
                 // this as zero missing identities, not assumed.
                 match children.first() {
-                    Some(&base) => self.discover_identities(ast, base, owner, TypeTree, depth + 1),
+                    Some(&base) => {
+                        self.discover_identities(ast, base, owner, TypeTree, Structural, depth + 1)
+                    }
                     None => Ok(()),
                 }
             }
-            LAMBDATPT_TAG => self.enter_lambda_tpt(ast, tree, &children, owner, depth),
-            REFINEDTPT_TAG => self.enter_refined_tpt(ast, tree, &children, owner, depth),
+            LAMBDATPT_TAG => self.enter_lambda_tpt(ast, tree, &children, owner, route, depth),
+            REFINEDTPT_TAG => self.enter_refined_tpt(ast, tree, &children, owner, route, depth),
             // `MATCHtpt`, a `BLOCK` used as a tree, and `HOLE` are not
             // projected yet: their identities need not be discovered either.
             tag if is_deferred_tree(tag) => Ok(()),
             // `readTpt` falls back to `readType` for every other tag.
-            _ => self.discover_identities(ast, tree, owner, SemanticType, depth + 1),
+            _ => self.discover_identities(ast, tree, owner, SemanticType, Structural, depth + 1),
         }
     }
 
@@ -271,29 +363,53 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         tag: u8,
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         use DiscoveryMode::{ClassRef, SemanticType, TermType, TypeTree};
+        use DiscoveryRoute::Structural;
 
         if tag == SHAREDTERM_TAG {
             let target = ast.resolve_shared_term(tree, tree)?;
-            return self.discover_identities(ast, target, owner, TermType, depth + 1);
+            return self.discover_identities(
+                ast,
+                target,
+                owner,
+                TermType,
+                DiscoveryRoute::SharedTerm,
+                depth + 1,
+            );
         }
         if is_type_tree_tag(tag) {
-            return self.discover_identities(ast, tree, owner, TypeTree, depth + 1);
+            // Not a hop to a new address, only a reinterpretation of this
+            // exact one as a type tree: the incoming route is kept (see the
+            // `DiscoveryRoute` documentation). This is how a `LAMBDAtpt`
+            // "hidden" directly behind a `SELECTtpt`/`SINGLETONtpt` qualifier
+            // is reached and correctly attributed to that qualifier's route.
+            return self.discover_identities(ast, tree, owner, TypeTree, route, depth + 1);
         }
         let children = children_of(ast, tree);
         match tag {
             IDENT_TAG => match children.first() {
-                Some(&embedded) => {
-                    self.discover_identities(ast, embedded, owner, SemanticType, depth + 1)
-                }
+                Some(&embedded) => self.discover_identities(
+                    ast,
+                    embedded,
+                    owner,
+                    SemanticType,
+                    DiscoveryRoute::Ident,
+                    depth + 1,
+                ),
                 None => Ok(()),
             },
             SELECT_TAG => match children.first() {
-                Some(&qualifier) => {
-                    self.discover_identities(ast, qualifier, owner, TermType, depth + 1)
-                }
+                Some(&qualifier) => self.discover_identities(
+                    ast,
+                    qualifier,
+                    owner,
+                    TermType,
+                    DiscoveryRoute::Select,
+                    depth + 1,
+                ),
                 None => Ok(()),
             },
             QUALTHIS_TAG => {
@@ -308,9 +424,14 @@ impl TastyUnpickler<'_, '_, '_> {
                     return Ok(());
                 }
                 match children_of(ast, qualifier).first() {
-                    Some(&embedded) => {
-                        self.discover_identities(ast, embedded, owner, ClassRef, depth + 1)
-                    }
+                    Some(&embedded) => self.discover_identities(
+                        ast,
+                        embedded,
+                        owner,
+                        ClassRef,
+                        DiscoveryRoute::QualThis,
+                        depth + 1,
+                    ),
                     None => Ok(()),
                 }
             }
@@ -318,7 +439,7 @@ impl TastyUnpickler<'_, '_, '_> {
             // (`APPLY`, `BLOCK`, `INLINED`, ... are simply not matched here,
             // so the walk stops rather than descending into them — pass 1
             // never becomes a general term-body walker).
-            _ => self.discover_identities(ast, tree, owner, SemanticType, depth + 1),
+            _ => self.discover_identities(ast, tree, owner, SemanticType, Structural, depth + 1),
         }
     }
 
@@ -331,9 +452,15 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         tag: u8,
         owner: SymbolId,
+        // Every arm below sets its own outgoing route explicitly (`Structural`,
+        // `This`, or — through `enter_reference_target` — `ReferenceTarget`),
+        // so the route the caller arrived under plays no part in this mode's
+        // own routing and is not read.
+        _route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         use DiscoveryMode::{ClassRef, SemanticType};
+        use DiscoveryRoute::Structural;
 
         if tag == SHAREDTYPE_TAG {
             // The whole chain is resolved and bounded in one call, by the
@@ -343,7 +470,14 @@ impl TastyUnpickler<'_, '_, '_> {
             // documentation: a `SHAREDtype` chain is its own, separately
             // bounded concern).
             let target = ast.resolve_shared_type(tree, tree)?;
-            return self.discover_identities(ast, target, owner, SemanticType, depth + 1);
+            return self.discover_identities(
+                ast,
+                target,
+                owner,
+                SemanticType,
+                DiscoveryRoute::SharedType,
+                depth + 1,
+            );
         }
         let children = children_of(ast, tree);
         match tag {
@@ -357,21 +491,40 @@ impl TastyUnpickler<'_, '_, '_> {
                 // `ASTRef Type` (prefix): the prefix is a semantic type, and
                 // the target follows the same reference-target policy.
                 if let Some(&prefix) = children.first() {
-                    self.discover_identities(ast, prefix, owner, SemanticType, depth + 1)?;
+                    self.discover_identities(
+                        ast,
+                        prefix,
+                        owner,
+                        SemanticType,
+                        Structural,
+                        depth + 1,
+                    )?;
                 }
                 self.enter_reference_target(ast, tree, owner, depth)
             }
             TYPEREF_TAG | TERMREF_TAG => match children.first() {
                 // `NameRef Type` (prefix): the member is not resolved by
                 // pass 1 (§15), only its prefix's own reachability.
-                Some(&prefix) => {
-                    self.discover_identities(ast, prefix, owner, SemanticType, depth + 1)
-                }
+                Some(&prefix) => self.discover_identities(
+                    ast,
+                    prefix,
+                    owner,
+                    SemanticType,
+                    Structural,
+                    depth + 1,
+                ),
                 None => Ok(()),
             },
             TYPEREFPKG_TAG | TERMREFPKG_TAG => Ok(()),
             THIS_TAG => match children.first() {
-                Some(&class) => self.discover_identities(ast, class, owner, ClassRef, depth + 1),
+                Some(&class) => self.discover_identities(
+                    ast,
+                    class,
+                    owner,
+                    ClassRef,
+                    DiscoveryRoute::This,
+                    depth + 1,
+                ),
                 None => Ok(()),
             },
             // `RECthis`/`PARAMtype` name a binder's own `TypeId`, reserved
@@ -383,13 +536,20 @@ impl TastyUnpickler<'_, '_, '_> {
             | METHODTYPE_TAG | RECTYPE_TAG | TYPEREFIN_TAG | TERMREFIN_TAG | REFINEDTYPE_TAG
             | FLEXIBLETYPE_TAG | BYNAMETYPE_TAG => {
                 for child in children {
-                    self.discover_identities(ast, child, owner, SemanticType, depth + 1)?;
+                    self.discover_identities(
+                        ast,
+                        child,
+                        owner,
+                        SemanticType,
+                        Structural,
+                        depth + 1,
+                    )?;
                 }
                 Ok(())
             }
             CLASSCONST_TAG => match children.first() {
                 Some(&class) => {
-                    self.discover_identities(ast, class, owner, SemanticType, depth + 1)
+                    self.discover_identities(ast, class, owner, SemanticType, Structural, depth + 1)
                 }
                 None => Ok(()),
             },
@@ -397,7 +557,14 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [underlying, annotation] = children[..] else {
                     return Ok(());
                 };
-                self.discover_identities(ast, underlying, owner, SemanticType, depth + 1)?;
+                self.discover_identities(
+                    ast,
+                    underlying,
+                    owner,
+                    SemanticType,
+                    Structural,
+                    depth + 1,
+                )?;
                 // Only the compact (type-only) annotation form is a semantic
                 // type; the full constructor form (`APPLY`/`NEW`, possibly
                 // through `SHAREDterm`) is a term and is not walked, per the
@@ -405,7 +572,14 @@ impl TastyUnpickler<'_, '_, '_> {
                 if let Some((root, root_tag)) = annotation_root(ast, annotation)?
                     && is_compact_annot_type_tag(root_tag)
                 {
-                    self.discover_identities(ast, root, owner, SemanticType, depth + 1)?;
+                    self.discover_identities(
+                        ast,
+                        root,
+                        owner,
+                        SemanticType,
+                        Structural,
+                        depth + 1,
+                    )?;
                 }
                 Ok(())
             }
@@ -422,6 +596,7 @@ impl TastyUnpickler<'_, '_, '_> {
         tree: u32,
         tag: u8,
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         match tag {
@@ -431,7 +606,14 @@ impl TastyUnpickler<'_, '_, '_> {
             TYPEREFPKG_TAG => Ok(()),
             SHAREDTYPE_TAG => {
                 let target = ast.resolve_shared_type(tree, tree)?;
-                self.discover_identities(ast, target, owner, DiscoveryMode::ClassRef, depth + 1)
+                self.discover_identities(
+                    ast,
+                    target,
+                    owner,
+                    DiscoveryMode::ClassRef,
+                    DiscoveryRoute::SharedType,
+                    depth + 1,
+                )
             }
             TYPEREF_TAG => match children_of(ast, tree).first() {
                 // The prefix of an external `this`; the member is not
@@ -442,6 +624,7 @@ impl TastyUnpickler<'_, '_, '_> {
                     prefix,
                     owner,
                     DiscoveryMode::SemanticType,
+                    DiscoveryRoute::Structural,
                     depth + 1,
                 ),
                 None => Ok(()),
@@ -450,8 +633,11 @@ impl TastyUnpickler<'_, '_, '_> {
             // reached a `SHAREDtype` whose target is the `REFINEDtpt` node
             // itself (Dotty's `typeAtAddr(start) = refineCls.typeRef`). The
             // synthetic class is entered directly; it is never routed
-            // through `SemanticType` decoding.
-            REFINEDTPT_TAG => self.enter_referenced_refined_tpt(ast, tree, owner, depth),
+            // through `SemanticType` decoding. `route` is whatever named hop
+            // led here (`This`, `QualThis`, or `SharedType` when a link sat
+            // between the two) — the route-attribution report names that
+            // hop, not this dispatch.
+            REFINEDTPT_TAG => self.enter_referenced_refined_tpt(ast, tree, owner, route, depth),
             _ => Ok(()),
         }
     }
@@ -474,7 +660,16 @@ impl TastyUnpickler<'_, '_, '_> {
     ) -> Result<(), UnpickleError> {
         let target = reference_target(ast, at)?;
         if ast.tag_at(target) == Some(REFINEDTPT_TAG) {
-            return self.enter_referenced_refined_tpt(ast, target, owner, depth);
+            // Recorded as `ReferenceTarget` regardless of how `at` itself was
+            // reached: §11's policy is a property of the reference, not of
+            // the route to it.
+            return self.enter_referenced_refined_tpt(
+                ast,
+                target,
+                owner,
+                DiscoveryRoute::ReferenceTarget,
+                depth,
+            );
         }
         Ok(())
     }
@@ -520,6 +715,7 @@ impl TastyUnpickler<'_, '_, '_> {
         ast: &AstView<'_>,
         tree: u32,
         owner: SymbolId,
+        route: DiscoveryRoute,
         depth: usize,
     ) -> Result<(), UnpickleError> {
         if let Some(class) = self.index.symbol_at(tree) {
@@ -530,7 +726,7 @@ impl TastyUnpickler<'_, '_, '_> {
             return Ok(());
         }
         let children = children_of(ast, tree);
-        self.enter_refined_tpt(ast, tree, &children, owner, depth)
+        self.enter_refined_tpt(ast, tree, &children, owner, route, depth)
     }
 
     /// Whether `owner`'s ownership chain — `owner` itself, then its own
