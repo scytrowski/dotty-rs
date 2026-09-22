@@ -853,7 +853,8 @@ simple symbols. A projected type is a tree's `tpe`, not a typed AST node: no
 | a semantic type node | that type, through `type_at` (`readTpt` falls back to `readType`) |
 | `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` | see "Selected, singleton and annotated type trees" (5b) |
 | `LAMBDAtpt` | see "Lambda type trees and method completion" (5c) |
-| `REFINEDtpt`, `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
+| `REFINEDtpt` | see "Refined type trees" (5d2b) |
+| `MATCHtpt`, `BLOCK`, `HOLE`, any other non-type tree | `UnsupportedTypeTree { address, tag }` |
 
 *Identity.* The projection is cached by tree address in its own map
 (`type_tree_type_at`), never in the type-node map: a tree address is not a
@@ -1137,9 +1138,9 @@ ClassInfo {
   owner-conflict logic of 5c applies unchanged: a lambda reached through a
   `SHAREDterm` from a second class is refused for both. (`SharedLambdaOwnerConflict`
   is per address, as in 5c.)
-* **Deferred.** Constructors complete as of 5d2a (below); `REFINEDtpt` and
-  `MATCHtpt` stay unsupported trees (5d2b), and nothing sets symbol
-  annotations or companion links (5e).
+* **Deferred.** Constructors complete as of 5d2a (below), and `REFINEDtpt` as
+  of 5d2b (below); `MATCHtpt` stays an unsupported tree (Milestone 7), and
+  nothing sets symbol annotations or companion links (5e).
 
 New errors: `MissingClassScope`, `UnsupportedParentTree`, `MalformedParentTree`,
 `InvalidSelfTypeTree`; everything else is the existing external, unsupported or
@@ -1224,6 +1225,135 @@ module-class constructor (never the `Object` term symbol), and a nested
 class (`no_prefix`, no `Outer.this`) — see the file for the exact shapes.
 Mutation-checked: disabling either the implicit-prepend or the
 contextual-append normalization branch fails exactly the test for that shape.
+
+### Refined type trees (Milestone 5d2b)
+
+`REFINEDtpt` — a structural refinement written as a declared type, `Base {
+type T = Int; def run(x: Int): Int }` — projects to `Refined`/`Recursive`,
+mirroring Scala 3.9's `TreeUnpickler`:
+
+```scala
+val refineCls = symAtAddr.getOrElse(start, newRefinedClassSymbol(coordAt(start))).asClass
+registerSym(start, refineCls)
+typeAtAddr(start) = refineCls.typeRef
+val parent = readTpt()
+val refinements = readStats(refineCls, end)(using localContext(refineCls))
+RefinedTypeTree(parent, refinements, refineCls)
+```
+
+and `TypeAssigner` folds the stats and closes over the refinement class's own
+`ThisType`:
+
+```scala
+val refined = refinements.foldLeft(parent.tpe)(addRefinement)
+tree.withType(RecType.closeOver(rt => refined.substThis(refineCls, rt.recThis)))
+```
+
+* **A synthetic `<refinement>` class, entered in pass 1.** Every `REFINEDtpt`
+  reached while scanning a declared type tree gets one synthetic `Class`
+  symbol (`tpnme.REFINE_CLASS`, `SymbolOrigin::Synthetic`), owned by the
+  current semantic owner and **not** a member of its scope, entered through
+  the *same* address-keyed `symbols` map every ordinary definition uses — at
+  the `REFINEDtpt`'s own address. That address therefore legitimately names
+  two independent things in two different maps: `symbol_at` gives the
+  synthetic class, `type_tree_type_at` (after projection) the final
+  `Refined`/`Recursive` graph. The class owns one real `Scope` and is
+  immediately `SymbolInfo::Complete(ClassInfo { parents: vec![], self_type:
+  None, prefix: no_prefix, declarations: <that scope> })` — pass 1 needs
+  nothing external to know this (Dotty's `newRefinedClassSymbol` is a
+  `newCompleteClassSymbol` with no parents), and constructing it does not
+  require, or trigger, anything about the class's *own* eventual completion,
+  the same non-triggering discipline 5d2a's constructors follow.
+* **Every immediate member's identity is entered before any is scanned**
+  (`enter_definition_header`/`enter_definition_body`, split out of the single
+  `enter_definition` every other call site still uses as both halves back to
+  back), mirroring upstream's `readStats` indexing a block before reading any
+  of it: a member's declared type may name a sibling regardless of wire
+  order. An immediate stat that is not `TYPEDEF`/`VALDEF`/`DEFDEF` is the
+  explicit `UnsupportedRefinementStat`, never silently dropped. A `REFINEDtpt`
+  reached again through a `SHAREDterm` from a different owner keeps its first
+  owner and records a conflict (`SharedRefinementOwnerConflict`), the same
+  policy `LAMBDAtpt` (5c) follows; none occur in the real corpora (below).
+* **Projection** (`refinement.rs`): the pass-1 class is looked up and
+  validated (never allocated again); the parent is projected first through
+  the ordinary `type_of_tpt`, its `TypeId` preserved exactly; every immediate
+  member's info is completed through the ordinary per-symbol `complete_in`
+  and folded into an ordered `Refined` chain in wire order — never sorted,
+  never flattened, a repeated member name the explicit
+  `UnsupportedRefinementOverload` rather than a second binding or a
+  first-wins shadow; the chain is closed over the synthetic class's
+  `ThisType` with the new core operation `close_over_this` (below).
+* **`close_over_this(store, parent, class)`** (`dotty-core`, format-agnostic)
+  is Dotty's `RecType.closeOver`, built by extending the existing
+  `rebind_type_lambda` graph transformer rather than writing a second copier:
+  a bounded, memoized, allocation-free scan decides whether `ThisType { class
+  }` is reachable at all (absent, `parent` itself is returned, exactly as
+  `rebind_type_lambda` already returns an unchanged id for a subgraph that
+  does not depend on the binder being built); present, one `Recursive` is
+  reserved first, `parent` is copied with every matching `ThisType` replaced
+  by that binder's *one* canonical `RecThis` (allocated once, shared by every
+  further occurrence), and the `Recursive` is filled and returned. Nested
+  `Method`/`Poly`/`TypeLambda`/`Recursive` binders are copied the same way
+  `rebind_type_lambda` already copies them, keeping their own bound
+  references consistent while a `ThisType` nested inside them is substituted
+  too.
+* **TASTy's actual encoding, found empirically against the real fixture
+  (below), not assumed from source syntax: *any* reference to a member of the
+  same refinement — an explicit `this.type` and a plain sibling-name alias
+  (`type T2 = T1`) alike — goes through `THIS` of the refinement's own
+  synthetic class**, reached through a `SHAREDtype` link back to the
+  `REFINEDtpt` node's own address (upstream's `typeAtAddr(start) =
+  refineCls.typeRef`, registered as soon as the tree starts being read).
+  `TastyUnpickler::this_class` (`types.rs`) needed one new arm for this: a
+  `THIS` argument whose tree is a full `REFINEDtpt` node resolves through
+  `referenced_class` at its own address (the same address-based resolution
+  `TYPEREFDIRECT`/`TYPEREFSYMBOL` already use), instead of falling to the
+  generic `UnsupportedType`. This was found only once real-fixture tests
+  existed to reach it; no synthetic wire test predicted it.
+* **A known, measured gap.** A `REFINEDtpt` reached *only* through a
+  `SELECTtpt` qualifier's own type resolution (`SELECTTPT_TAG` is not among
+  the tags the declared-type-tree scanner walks into) or *only* through a
+  `SHAREDtype` link rather than a `SHAREDterm` one is not entered in pass 1,
+  so projection reaches it with no synthetic class and fails with the
+  explicit `MissingRefinementClass`/`InvalidRefinementClass` — a real, typed
+  failure, never silently wrong, but not yet a completion. Measured at 2
+  library `Trait` self-types (of 669 entered) across every corpus
+  permutation; `unexpected errors: 0` throughout. Left for a follow-up rather
+  than widening this PR's scope further.
+
+New errors: `SharedRefinementOwnerConflict`, `UnsupportedRefinementStat`,
+`MissingRefinementClass`, `InvalidRefinementClass`, `MissingRefinementScope`,
+`MalformedRefinedTypeTree`, `UnsupportedRefinementOverload`, `CloseOverThis`
+(wraps a `close_over_this` failure).
+
+Measured (real Scala 3.9.0 output, `tests/refined_tpt_enter.rs`,
+`tests/refined_tpt_project.rs`, `tests/refined_tpt_real.rs`): pass-1 identity,
+scope and `ClassInfo` shape; two-stage member entering; shared-owner conflict;
+an unsupported stat kind; atomic rollback and a clean retry on a malformed
+refinement; a plain non-recursive chain; a self-reference closing into one
+`Recursive`; identity/idempotence of repeated projection; a duplicate member
+name refused as an overload, with atomic rollback; and, against the real
+`tests/fixtures/semantic/RecursiveRefined.scala` fixture (all 8 of its
+`REFINEDtpt` trees, one per structural-type parameter) — a type-alias member,
+an upper-bound member, a method member, members folding in wire order, a
+sibling reference and an explicit `this.type` (both close over), a
+`SHAREDtype`-shared `Int` bounds instance between two members' own fresh
+`AliasingBounds` wrappers, structural lookup on the resulting graph, and that
+closing an already-closed graph a second time is a no-op. `close_over_this`
+itself has 13 core, format-agnostic tests in `dotty-core`, independent of
+TASTy. Mutation-checked: disabling the overload check, disabling
+`close_over_this` entirely, disabling its reachability pre-scan, and
+disabling its `RecThis` canonicalization each independently fail exactly the
+tests built to catch them.
+
+Corpus impact: of the real `REFINEDtpt` roots measured by type-tree context
+(library: 16 `DEFDEF` results, 5 `PARAM` types, 4 non-template `TYPEDEF`
+right-hand sides, 2 `VALDEF` types — 27 total; a handful more in the
+compiler), all but the 2 documented `Trait` self-types above now complete
+instead of failing with the pre-5d2b `UnsupportedTypeTree`. `unexpected
+errors: 0` holds across every one of the twelve run permutations
+`type_corpus.rs` exercises (both corpora; with and without compiler builtins;
+symbols-then-classes ordering; the classes-not-completed ablation).
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1573,7 +1703,8 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      types and cross-unit declaration scopes — complete;
    - 5d2a: constructor completion (`normalizeIfConstructor`, the effective
      owner-class result) — complete;
-   - 5d2b: `REFINEDtpt`'s synthetic refinement class;
+   - 5d2b: `REFINEDtpt`'s synthetic refinement class, `close_over_this` and the
+     `Refined`/`Recursive` projection — complete;
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
@@ -1616,7 +1747,11 @@ Deliberately not supported yet:
   `UnsupportedType`;
 - signed term references and inherited members (§4, "Name-based references");
   cross-unit class members resolve through a completed `ClassInfo` only;
-- `REFINEDtpt`'s synthetic refinement class (5d2b);
+- a `REFINEDtpt` reached only through a `SELECTtpt` qualifier's own type
+  resolution, or only through a `SHAREDtype` (rather than `SHAREDterm`) link
+  to it, is not entered in pass 1 and fails projection with the explicit
+  `MissingRefinementClass`/`InvalidRefinementClass` rather than completing (2
+  library self-types measured, §5d2b below);
 - packages and members outside the entered state with no resolver that knows
   them — `UnresolvedPackage`, `UnresolvedMember`;
 - wiring the classloader in as a `SymbolResolver` (Milestone 6).

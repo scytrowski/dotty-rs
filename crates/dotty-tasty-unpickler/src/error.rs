@@ -103,6 +103,43 @@ pub enum UnpickleError {
     /// (through a `SHAREDterm`), and its type parameters are owned once: it
     /// is not projected rather than given a second owner.
     SharedLambdaOwnerConflict { address: u32 },
+    /// The `REFINEDtpt` at `address` was reached from two different owners
+    /// (through a `SHAREDterm`); its synthetic refinement class has one fixed
+    /// owner, the same policy `SharedLambdaOwnerConflict` follows (Milestone
+    /// 5d2b).
+    SharedRefinementOwnerConflict { address: u32 },
+    /// An immediate statement of the `REFINEDtpt` at `address` is not a
+    /// `TYPEDEF`, `VALDEF` or `DEFDEF` (Milestone 5d2b): an unsupported
+    /// refinement stat, never silently dropped.
+    UnsupportedRefinementStat { address: u32, tag: u8 },
+    /// Projecting the `REFINEDtpt` at `address` found no synthetic refinement
+    /// class entered for it: pass 1 either did not run or did not reach this
+    /// address (Milestone 5d2b).
+    MissingRefinementClass { address: u32 },
+    /// The symbol entered at the `REFINEDtpt` address `address` exists but is
+    /// not the synthetic refinement class pass 1 makes there (wrong kind or
+    /// name), or its `SymbolInfo` is not the complete, parent-less
+    /// `ClassInfo` pass 1 publishes for it (Milestone 5d2b).
+    InvalidRefinementClass { address: u32, symbol: SymbolId },
+    /// The synthetic refinement class at `address` has no declaration scope
+    /// recorded for it, which pass 1 always allocates (Milestone 5d2b).
+    MissingRefinementScope { address: u32, symbol: SymbolId },
+    /// The `REFINEDtpt` at `address` has a shape structured decoding does not
+    /// agree with (its indexed children disagree with its wire shape), or a
+    /// member's projected `Refined.info` reason `reason` describes (Milestone
+    /// 5d2b).
+    MalformedRefinedTypeTree { address: u32, reason: &'static str },
+    /// Two immediate stats of the `REFINEDtpt` at `address` declare the same
+    /// `name` in the same namespace: Dotty rejects an overloaded refinement
+    /// member, so the second declaration is refused rather than shadowing or
+    /// stacking with the first (Milestone 5d2b).
+    UnsupportedRefinementOverload { address: u32, name: String },
+    /// Closing a `REFINEDtpt`'s projected chain over its synthetic class's
+    /// `ThisType` (`close_over_this`) failed at `address`.
+    CloseOverThis {
+        address: u32,
+        error: dotty_core::TypeRebindError,
+    },
     /// Abstracting the parameter symbols of the binder written at `address`
     /// into `ParamRef`s failed.
     ParameterAbstraction {
@@ -369,6 +406,40 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the lambda type tree at address {address} is shared by definitions with different owners"
             ),
+            Self::SharedRefinementOwnerConflict { address } => write!(
+                formatter,
+                "the refined type tree at address {address} is shared by definitions with different owners"
+            ),
+            Self::UnsupportedRefinementStat { address, tag } => write!(
+                formatter,
+                "the refinement stat at address {address} has tag {tag}, which is not a supported refinement member"
+            ),
+            Self::MissingRefinementClass { address } => write!(
+                formatter,
+                "the refined type tree at address {address} has no synthetic refinement class entered for it"
+            ),
+            Self::InvalidRefinementClass { address, symbol } => write!(
+                formatter,
+                "the symbol {} entered at refined type tree address {address} is not its synthetic refinement class",
+                symbol.index()
+            ),
+            Self::MissingRefinementScope { address, symbol } => write!(
+                formatter,
+                "the synthetic refinement class {} at address {address} has no declaration scope",
+                symbol.index()
+            ),
+            Self::MalformedRefinedTypeTree { address, reason } => write!(
+                formatter,
+                "the refined type tree at address {address} is malformed: {reason}"
+            ),
+            Self::UnsupportedRefinementOverload { address, name } => write!(
+                formatter,
+                "the refined type tree at address {address} declares '{name}' more than once"
+            ),
+            Self::CloseOverThis { address, error } => write!(
+                formatter,
+                "closing the refined type tree at address {address} over its synthetic class failed: {error}"
+            ),
             Self::ParameterAbstraction { address, error } => write!(
                 formatter,
                 "abstracting the parameters of the binder at address {address} failed: {error}"
@@ -569,6 +640,14 @@ impl std::error::Error for UnpickleError {
             | Self::UnsupportedTermTree { .. }
             | Self::UnstableSelectQualifier { .. }
             | Self::SharedLambdaOwnerConflict { .. }
+            | Self::SharedRefinementOwnerConflict { .. }
+            | Self::UnsupportedRefinementStat { .. }
+            | Self::MissingRefinementClass { .. }
+            | Self::InvalidRefinementClass { .. }
+            | Self::MissingRefinementScope { .. }
+            | Self::MalformedRefinedTypeTree { .. }
+            | Self::UnsupportedRefinementOverload { .. }
+            | Self::CloseOverThis { .. }
             | Self::MalformedDefinition { .. }
             | Self::MissingClassScope { .. }
             | Self::UnsupportedParentTree { .. }

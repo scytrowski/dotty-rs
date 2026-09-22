@@ -36,6 +36,7 @@ mod names;
 mod packages;
 mod recursive;
 mod refined;
+mod refinement;
 mod term_type;
 mod type_tree;
 mod types;

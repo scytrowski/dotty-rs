@@ -33,7 +33,12 @@ fn n(text: &str) -> u32 {
 const IDENTTPT: u8 = 111;
 const APPLIEDTPT: u8 = 162;
 const LAMBDATPT: u8 = 171;
-const REFINEDTPT: u8 = 160;
+// A tag `enter_lambdas_in` never walks into and `type_of_tpt` never builds a
+// type for, used below as an inert "this fails at projection, not at
+// entering" body. `REFINEDTPT` no longer fits since Milestone 5d2b: pass 1
+// now enters a synthetic refinement class for it, and it is a projectable
+// type tree.
+const MATCHTPT: u8 = 191;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -279,7 +284,7 @@ fn assemble(at: &HashMap<&'static str, u32>, bad: bool) -> (Vec<u8>, HashMap<&'s
         ),
         lambda(
             vec![param("B1", plain_bounds())],
-            node(REFINEDTPT, &any_type()),
+            node(MATCHTPT, &any_type()),
         ),
     ];
     let payload = loose.concat();
@@ -775,10 +780,7 @@ fn a_lambda_whose_body_fails_undoes_the_completed_parameters_and_can_be_retried(
     assert!(
         matches!(
             result,
-            Err(UnpickleError::UnsupportedTypeTree {
-                tag: REFINEDTPT,
-                ..
-            })
+            Err(UnpickleError::UnsupportedTypeTree { tag: MATCHTPT, .. })
         ),
         "{result:?}"
     );

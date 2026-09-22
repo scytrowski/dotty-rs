@@ -53,7 +53,10 @@ const ANNOTATEDTYPE: u8 = 153;
 const NEW: u8 = 95;
 const SELECTIN: u8 = 176;
 const STRINGCONST: u8 = 74;
-const REFINEDTPT: u8 = 160;
+// A tag `is_deferred_tree` still refuses (`HOLE_TAG`), used below as a
+// base type tree that fails to project. `REFINEDTPT` filled this role
+// before Milestone 5d2b made it a projectable type tree.
+const HOLE: u8 = 255;
 
 fn nat(value: u32) -> Vec<u8> {
     let mut groups = vec![u8::try_from(value & 0x7f).unwrap() | 0x80];
@@ -486,7 +489,7 @@ fn roots(at: &Addresses<'_>) -> Roots {
             "annotated bad base",
             node(
                 ANNOTATEDTPT,
-                &[node(REFINEDTPT, &any_type()), annotation(&ident_tag(), &[])].concat(),
+                &[node(HOLE, &any_type()), annotation(&ident_tag(), &[])].concat(),
             ),
         ),
         (
@@ -1659,10 +1662,7 @@ fn a_base_that_is_not_projected_fails_before_the_annotation_is_read() {
 
     assert!(matches!(
         unpickler.unpickle_type_tree_type(unit.at("annotated bad base")),
-        Err(UnpickleError::UnsupportedTypeTree {
-            tag: REFINEDTPT,
-            ..
-        })
+        Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
     ));
 }
 

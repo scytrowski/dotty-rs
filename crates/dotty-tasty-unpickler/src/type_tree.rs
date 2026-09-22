@@ -18,11 +18,12 @@
 //! | `SINGLETONtpt ref` | exactly the `tpe` of `ref`, which must be a stable singleton (5b) |
 //! | `ANNOTATEDtpt tpt annotation` | `Annotated { tpt's type, annotation }`, the annotation decoded as `ANNOTATEDtype`'s is (5b) |
 //! | `LAMBDAtpt tparams body` | `TypeLambda`, built by `type_lambda_from_symbols` from the type parameters entered in pass 1 (completed first) and the projected body: parameter references become `ParamRef`s of that binder (Milestone 5c) |
+//! | `REFINEDtpt parent stats...` | `Refined`/`Recursive`, folding the completed member infos over the projected parent and closing over the synthetic refinement class's `ThisType` (Milestone 5d2b, [`crate::refinement`]) |
 //! | any other tag | a semantic type wire node (`readType`), through `type_at` |
 //!
-//! `REFINEDtpt`, `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and
-//! any other tree that is not a type are `UnsupportedTypeTree`: they are
-//! counted, not guessed from their syntax.
+//! `MATCHtpt`, a `BLOCK` used as a tree, `HOLE` and any other tree that is
+//! not a type are `UnsupportedTypeTree`: they are counted, not guessed from
+//! their syntax.
 //!
 //! ## Identity
 //!
@@ -43,8 +44,8 @@ use dotty_core::types::Type;
 use dotty_core::{TypeParamSpec, Variance, type_lambda_from_symbols};
 use dotty_tasty::tasty::{
     ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, BYNAMETPT_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG,
-    DefinitionTail, EXPLICITTPT_TAG, IDENTTPT_TAG, LAMBDATPT_TAG, RawTree, SELECTTPT_TAG,
-    SHAREDTERM_TAG, SINGLETONTPT_TAG, STABLE_TAG, TYPEBOUNDSTPT_TAG,
+    DefinitionTail, EXPLICITTPT_TAG, IDENTTPT_TAG, LAMBDATPT_TAG, REFINEDTPT_TAG, RawTree,
+    SELECTTPT_TAG, SHAREDTERM_TAG, SINGLETONTPT_TAG, STABLE_TAG, TYPEBOUNDSTPT_TAG,
 };
 
 use crate::annotated::FullAnnotation;
@@ -233,6 +234,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 }
             }
             LAMBDATPT_TAG => self.type_of_lambda_tpt(ast, at, &children, depth)?,
+            REFINEDTPT_TAG => self.type_of_refined_tpt(ast, at, &children, depth)?,
             // A dedicated tree with no projection yet.
             tag if is_deferred_tree(tag) => {
                 return Err(UnpickleError::UnsupportedTypeTree { address: at, tag });
@@ -329,8 +331,8 @@ impl TastyUnpickler<'_, '_, '_> {
 /// list is documentation; anything else that is not a type is refused in the
 /// same way by the fall-through.
 fn is_deferred_tree(tag: u8) -> bool {
-    use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, MATCHTPT_TAG, REFINEDTPT_TAG};
-    matches!(tag, REFINEDTPT_TAG | MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG)
+    use dotty_tasty::tasty::{BLOCK_TAG, HOLE_TAG, MATCHTPT_TAG};
+    matches!(tag, MATCHTPT_TAG | BLOCK_TAG | HOLE_TAG)
 }
 
 fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
