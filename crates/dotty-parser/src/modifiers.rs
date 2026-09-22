@@ -223,23 +223,25 @@ where
         let mark = self.mark();
         self.advance(); // `@` is scanner-facing Operator punctuation.
 
-        let type_mark = self.mark();
         let tpt = self.with_location(Location::Elsewhere, |parser| {
             parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
         });
-        let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
+        let new_tree = self.alloc_from(mark, TreeKind::New(New { tpt }));
         let constructor = self.constructor_select(new_tree);
-        let mut annotation = self.alloc_from(
-            mark,
-            TreeKind::Apply(Apply {
-                function: constructor,
-                args: Vec::new(),
-                kind: ApplyKind::Regular,
-            }),
-        );
+        let mut annotation = constructor;
 
         while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
             annotation = self.parse_application(mark, annotation);
+        }
+        if annotation == constructor {
+            annotation = self.alloc_from(
+                mark,
+                TreeKind::Apply(Apply {
+                    function: constructor,
+                    args: Vec::new(),
+                    kind: ApplyKind::Regular,
+                }),
+            );
         }
         annotation
     }
@@ -310,7 +312,8 @@ fn is_soft_modifier<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) 
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{NameInterner, TokenKind};
+    use crate::statements::ParsedStatement;
+    use dotty_core::{NameInterner, TokenKind, TreeKind};
 
     #[test]
     fn parses_hard_modifiers_in_source_order() {
@@ -373,5 +376,135 @@ mod tests {
         ];
         let mut parser = parser_for("inline", tokens, &mut names);
         assert!(!parser.starts_definition_prefix());
+    }
+
+    #[test]
+    fn dispatches_a_prefixed_class_with_source_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "final class A",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Class), 6, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        assert_eq!(definition.metadata.modifiers, vec![Modifier::Final]);
+        assert_eq!(
+            parser
+                .ast()
+                .get(id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .start(),
+            0
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn builds_an_annotation_as_a_constructor_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "@Ann(1) class A",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Identifier, 1, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::IntegerLiteral, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Class), 8, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        let annotation = definition.metadata.annotations[0];
+        assert!(matches!(
+            parser.ast().get(annotation).kind,
+            TreeKind::Apply(_)
+        ));
+        let TreeKind::Apply(application) = &parser.ast().get(annotation).kind else {
+            unreachable!();
+        };
+        assert_eq!(application.args.len(), 1);
+        assert!(matches!(
+            parser.ast().get(application.function).kind,
+            TreeKind::Select(_)
+        ));
+        let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            parser.ast().get(selection.qualifier).kind,
+            TreeKind::New(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(annotation)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .start(),
+            0
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn passes_qualified_visibility_to_a_value_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "private[pkg] val x = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 7, 8),
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Val), 13, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::IntegerLiteral, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a ValDef");
+        };
+        assert!(parser.diagnostics().is_empty());
+        let qualifier = match definition.metadata.visibility {
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier }) => qualifier,
+            _ => panic!("expected private visibility"),
+        };
+        drop(parser);
+        assert!(matches!(
+            qualifier,
+            Some(name) if names.resolve(name.text()) == "pkg"
+        ));
     }
 }
