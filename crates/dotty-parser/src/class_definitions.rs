@@ -25,6 +25,7 @@ enum ParentSeparator {
 
 #[derive(Clone, Copy)]
 struct ConstructorBoundary {
+    parameter_start: Option<u32>,
     parent_start: Option<u32>,
     body_start: Option<u32>,
 }
@@ -118,6 +119,7 @@ where
             Vec::new(),
             mark.start(),
             ConstructorBoundary {
+                parameter_start: None,
                 parent_start,
                 body_start,
             },
@@ -174,6 +176,12 @@ where
         } else {
             Vec::new()
         };
+        self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+            Punctuation::LeftParen,
+        ));
+        let parameter_start = (self.current().kind
+            == TokenKind::Punctuation(Punctuation::LeftParen))
+        .then_some(self.current().span.start());
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
         let parents = self.parse_parent_clause();
@@ -196,6 +204,7 @@ where
             value_param_clauses,
             constructor_end,
             ConstructorBoundary {
+                parameter_start,
                 parent_start,
                 body_start,
             },
@@ -501,22 +510,30 @@ where
         boundary: ConstructorBoundary,
     ) -> (TreeId<Untyped>, u32) {
         let name = TermName::new(self.names.intern("<init>"));
-        let first_child_start = type_params
+        let type_param_start = type_params
             .first()
-            .or_else(|| {
-                value_param_clauses
-                    .first()
-                    .and_then(|clause| clause.first())
-            })
             .and_then(|child| self.ast.get(*child).position)
             .map(|position| position.span().range().start());
-        let constructor_start = first_child_start
+        let value_param_start = value_param_clauses
+            .iter()
+            .flat_map(|clause| clause.iter())
+            .next()
+            .and_then(|child| self.ast.get(*child).position)
+            .map(|position| position.span().range().start());
+        let constructor_start = type_param_start
             .map(|child_start| child_start.saturating_sub(1))
+            .or(boundary.parameter_start)
+            .or_else(|| value_param_start.map(|child_start| child_start.saturating_sub(1)))
             .or(boundary.parent_start)
             .or(boundary.body_start)
             .unwrap_or(start);
-        let constructor_end = first_child_start
+        let has_constructor_parameters = type_param_start.is_some()
+            || value_param_start.is_some()
+            || boundary.parameter_start.is_some();
+        let constructor_end = boundary
+            .parameter_start
             .map(|_| parameter_end)
+            .or(has_constructor_parameters.then_some(parameter_end))
             .or(boundary.parent_start)
             .or(boundary.body_start)
             .unwrap_or(start);
@@ -533,7 +550,7 @@ where
             })
             .unwrap_or(constructor_end);
         let tpt = self.synthetic_type_tree_at(tpt_start);
-        let position = if first_child_start.is_some()
+        let position = if has_constructor_parameters
             || boundary.parent_start.is_some()
             || boundary.body_start.is_some()
         {
@@ -881,6 +898,44 @@ mod tests {
         assert_eq!(constructor.value_param_clauses.len(), 2);
         assert_eq!(constructor.value_param_clauses[0].len(), 1);
         assert_eq!(constructor.value_param_clauses[1].len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn spans_a_constructor_from_an_empty_first_parameter_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C()(value: X)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Punctuation(Punctuation::Colon), 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let constructor = parser.ast().get(template.constructor);
+        assert_eq!(
+            constructor.position.unwrap().span().range(),
+            dotty_core::TextRange::new(7, 19).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
