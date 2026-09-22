@@ -1,0 +1,3 @@
+{
+  enum Child extends Parent {}
+}
