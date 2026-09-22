@@ -211,6 +211,7 @@ where
         match self.current().kind {
             TokenKind::Operator | TokenKind::ColonOp => !self.current_text_is("=>"),
             TokenKind::Keyword(HardKeyword::With) => true,
+            TokenKind::Punctuation(Punctuation::LeftBracket) => true,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 matches!(
                     self.cursor.lookahead(1).kind,
@@ -507,6 +508,39 @@ mod tests {
                 token(TokenKind::Identifier, 17, 22),
                 token(TokenKind::Punctuation(Punctuation::RightBrace), 23, 24),
                 token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn recovers_an_unsupported_self_type_application_at_the_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ self: Parent[T] => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 14),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 14, 15),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 27, 28),
+                token(TokenKind::Eof, 28, 28),
             ],
             &mut names,
         );
