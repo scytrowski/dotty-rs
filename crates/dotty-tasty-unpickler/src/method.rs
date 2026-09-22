@@ -66,8 +66,12 @@
 //!   annotation (or, for `TRACKED`, a result refinement) that `dotty-core`
 //!   cannot represent without the annotation classes: the method is
 //!   `UnsupportedMethodParameterSemantics`, not completed with it dropped.
-//! * Constructors are `ConstructorCompletionDeferred`: their info is the owner
-//!   class's effective result type, not the serialized return tree.
+//! * Constructors reuse every piece of this module (clause grouping, the
+//!   parameter guard, `build_clause`) but are completed by
+//!   [`complete_constructor`](crate::constructor::TastyUnpickler::complete_constructor)
+//!   in the [`constructor`](crate::constructor) module: their info is the
+//!   owner class's effective result type, not the serialized return tree, and
+//!   their clauses are normalized first (`normalizeIfConstructor`).
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::names::{TermName, TypeName};
@@ -77,8 +81,8 @@ use dotty_core::{
     MethodParamSpec, TypeParamSpec, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_tasty::tasty::{
-    DefDefHeaderItem, DefinitionTail, EMPTYCLAUSE_TAG, INLINE_TAG, INTO_TAG, TRACKED_TAG,
-    TYPEPARAM_TAG,
+    DefDefBody, DefDefHeaderItem, DefinitionTail, EMPTYCLAUSE_TAG, INLINE_TAG, INTO_TAG,
+    TRACKED_TAG, TYPEPARAM_TAG,
 };
 
 use crate::ast_view::{AstView, address};
@@ -148,6 +152,78 @@ pub(crate) fn clauses_of(
     Ok(clauses)
 }
 
+/// A `DEFDEF`'s header, decoded and grouped once: the structural body, its
+/// children as `(address, tag)` pairs, the clauses [`clauses_of`] built from
+/// them, and the address of the result type tree that follows the
+/// parameters. Shared by ordinary methods and constructors so there is one
+/// `DEFDEF` header parser.
+pub(crate) struct DefDefHeader<'a> {
+    pub(crate) body: DefDefBody<'a>,
+    pub(crate) parameter_nodes: Vec<(u32, u8)>,
+    pub(crate) clauses: Vec<Clause>,
+    pub(crate) result_at: u32,
+}
+
+/// Decodes and groups the header of the `DEFDEF` at `at`.
+pub(crate) fn defdef_header<'a>(
+    ast: &AstView<'a>,
+    at: u32,
+) -> Result<DefDefHeader<'a>, UnpickleError> {
+    let body = ast.node(at)?.decode_defdef_body()?;
+    let parameter_nodes: Vec<(u32, u8)> = ast
+        .children(at)
+        .iter()
+        .map(|child| (address(child.offset), child.tag))
+        .collect();
+    let count = body
+        .header_items
+        .iter()
+        .filter(|item| matches!(item, DefDefHeaderItem::Parameter(_)))
+        .count();
+    let Some(&(result_at, _)) = parameter_nodes.get(count) else {
+        return Err(UnpickleError::MalformedDefinition {
+            address: at,
+            reason: "a method has a result type after its parameters",
+        });
+    };
+    let clauses = clauses_of(at, &body.header_items, &parameter_nodes[..count])?;
+    Ok(DefDefHeader {
+        body,
+        parameter_nodes,
+        clauses,
+        result_at,
+    })
+}
+
+/// Refuses a parameter modifier (`INLINE`, `TRACKED`, `INTO`) whose
+/// `MethodType.fromSymbols` adaptation `dotty-core` cannot represent, before
+/// anything is completed. Shared by ordinary methods and constructors: the
+/// method or constructor is not completed with the adaptation dropped.
+pub(crate) fn guard_parameter_modifiers(header: &DefDefHeader<'_>) -> Result<(), UnpickleError> {
+    // The parameter items and the parameter nodes were aligned by
+    // `clauses_of`, so they zip.
+    let items = header
+        .body
+        .header_items
+        .iter()
+        .filter_map(|item| match item {
+            DefDefHeaderItem::Parameter(parameter) => Some(parameter),
+            DefDefHeaderItem::Clause(_) => None,
+        })
+        .zip(&header.parameter_nodes);
+    for (parameter, (param_at, _)) in items {
+        for entry in &parameter.decode_body()?.tail {
+            if let DefinitionTail::Modifier(tag @ (INLINE_TAG | TRACKED_TAG | INTO_TAG)) = entry {
+                return Err(UnpickleError::UnsupportedMethodParameterSemantics {
+                    address: *param_at,
+                    tag: *tag,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl TastyUnpickler<'_, '_, '_> {
     /// The info of the ordinary method `symbol`, the `DEFDEF` at `at`. Sets
     /// `SymbolInfo::Complete`; not atomic by itself (the public entry points
@@ -159,73 +235,58 @@ impl TastyUnpickler<'_, '_, '_> {
         symbol: SymbolId,
         depth: usize,
     ) -> Result<TypeId, UnpickleError> {
-        let body = ast.node(at)?.decode_defdef_body()?;
-        let kids: Vec<(u32, u8)> = ast
-            .children(at)
-            .iter()
-            .map(|child| (address(child.offset), child.tag))
-            .collect();
-        let count = body
-            .header_items
-            .iter()
-            .filter(|item| matches!(item, DefDefHeaderItem::Parameter(_)))
-            .count();
-        let Some(&(result_at, _)) = kids.get(count) else {
-            return Err(UnpickleError::MalformedDefinition {
-                address: at,
-                reason: "a method has a result type after its parameters",
-            });
-        };
-        let clauses = clauses_of(at, &body.header_items, &kids[..count])?;
+        let header = defdef_header(ast, at)?;
+        guard_parameter_modifiers(&header)?;
+        self.complete_clause_parameters(ast, &header.clauses, depth)?;
+        let result = self.type_of_tpt(ast, header.result_at, at, depth)?;
+        let current = self.build_signature(at, &header.clauses, result)?;
+        self.set_symbol_info(symbol, SymbolInfo::Complete(current));
+        Ok(current)
+    }
 
-        // A parameter modifier whose adaptation is not modeled is refused
-        // before anything is completed. The parameter items and the parameter
-        // nodes were aligned by `clauses_of`, so they zip.
-        let items = body
-            .header_items
-            .iter()
-            .filter_map(|item| match item {
-                DefDefHeaderItem::Parameter(parameter) => Some(parameter),
-                DefDefHeaderItem::Clause(_) => None,
-            })
-            .zip(&kids[..count]);
-        for (parameter, (param_at, _)) in items {
-            for entry in &parameter.decode_body()?.tail {
-                if let DefinitionTail::Modifier(tag @ (INLINE_TAG | TRACKED_TAG | INTO_TAG)) = entry
-                {
-                    return Err(UnpickleError::UnsupportedMethodParameterSemantics {
-                        address: *param_at,
-                        tag: *tag,
-                    });
-                }
-            }
-        }
-
-        // Parameters first, in clause order: a later one may depend on an
-        // earlier one's completed type.
-        for clause in &clauses {
+    /// Completes every parameter of `clauses`, in clause order: a later one
+    /// may depend on an earlier one's completed type. Shared by ordinary
+    /// methods and constructors.
+    pub(crate) fn complete_clause_parameters(
+        &mut self,
+        ast: &AstView<'_>,
+        clauses: &[Clause],
+        depth: usize,
+    ) -> Result<(), UnpickleError> {
+        for clause in clauses {
             if let Clause::Type(params) | Clause::Term(params) = clause {
                 for param in params {
                     self.complete_in(ast, *param, depth)?;
                 }
             }
         }
-        let result = self.type_of_tpt(ast, result_at, at, depth)?;
+        Ok(())
+    }
 
+    /// `clauses` wrapped around `result`, right to left, each by
+    /// [`build_clause`](Self::build_clause): `def f(x: A): T` becomes
+    /// `Method(x: A): T`, and no clause at all is `ByName { result }`
+    /// (`paramss.isEmpty`). Shared by ordinary methods and constructors: a
+    /// constructor's normalized clauses are never empty, so the `ByName`
+    /// branch never triggers for one.
+    pub(crate) fn build_signature(
+        &mut self,
+        at: u32,
+        clauses: &[Clause],
+        result: TypeId,
+    ) -> Result<TypeId, UnpickleError> {
         let mut current = result;
         for clause in clauses.iter().rev() {
             current = self.build_clause(at, clause, current)?;
         }
         if clauses.is_empty() {
-            // `paramss.isEmpty`: `def f: T`.
             current = self.store.types.alloc(Type::ByName { result: current });
         }
-        self.set_symbol_info(symbol, SymbolInfo::Complete(current));
         Ok(current)
     }
 
     /// One clause around `inner`, by symbol abstraction.
-    fn build_clause(
+    pub(crate) fn build_clause(
         &mut self,
         at: u32,
         clause: &Clause,
@@ -253,24 +314,11 @@ impl TastyUnpickler<'_, '_, '_> {
                 poly_type_from_symbols(self.store, &specs, inner).map_err(abstraction)
             }
             Clause::Term(params) => {
+                let kind = self.clause_kind(params)?;
                 let mut specs = Vec::with_capacity(params.len());
-                let mut kind = MethodKind::Plain;
-                for (position, param) in params.iter().enumerate() {
+                for param in params {
                     let (symbol, info) = self.parameter_symbol(*param)?;
                     let flags = self.store.symbols.get(symbol).flags;
-                    if position == 0 {
-                        // The first parameter decides. `IMPLICIT` is tested
-                        // before `GIVEN`, as `METHODtype`'s `method_kind` does
-                        // (`methodTypeCompanion`), so a parameter with both
-                        // is `Implicit` on both paths.
-                        kind = if flags.contains(SymbolFlags::IMPLICIT) {
-                            MethodKind::Implicit
-                        } else if flags.contains(SymbolFlags::GIVEN) {
-                            MethodKind::Contextual
-                        } else {
-                            MethodKind::Plain
-                        };
-                    }
                     specs.push(MethodParamSpec {
                         symbol,
                         name: TermName::new(self.store.symbols.get(symbol).name.text()),
@@ -284,9 +332,31 @@ impl TastyUnpickler<'_, '_, '_> {
         }
     }
 
+    /// The `MethodKind` a term clause's *first* parameter decides (Dotty's
+    /// `methodTypeCompanion`, the order `METHODtype` uses too): `IMPLICIT` is
+    /// tested before `GIVEN`, so a parameter with both is `Implicit` on both
+    /// paths. An empty clause (used only to probe a would-be term clause, as
+    /// [`crate::constructor`]'s normalization does) is `Plain`.
+    pub(crate) fn clause_kind(&self, params: &[u32]) -> Result<MethodKind, UnpickleError> {
+        let Some(&first) = params.first() else {
+            return Ok(MethodKind::Plain);
+        };
+        let Some(symbol) = self.index.symbol_at(first) else {
+            return Err(UnpickleError::MissingEnteredSymbol { address: first });
+        };
+        let flags = self.store.symbols.get(symbol).flags;
+        Ok(if flags.contains(SymbolFlags::IMPLICIT) {
+            MethodKind::Implicit
+        } else if flags.contains(SymbolFlags::GIVEN) {
+            MethodKind::Contextual
+        } else {
+            MethodKind::Plain
+        })
+    }
+
     /// The entered symbol of the parameter node at `param` and its completed
     /// info.
-    fn parameter_symbol(&self, param: u32) -> Result<(SymbolId, TypeId), UnpickleError> {
+    pub(crate) fn parameter_symbol(&self, param: u32) -> Result<(SymbolId, TypeId), UnpickleError> {
         let Some(symbol) = self.index.symbol_at(param) else {
             return Err(UnpickleError::MissingEnteredSymbol { address: param });
         };
