@@ -60,7 +60,15 @@ where
         } else {
             Vec::new()
         };
-        let mut method_like = !type_params.is_empty();
+        let mut method_like = !type_params.is_empty()
+            || prefix
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Inline)
+            || prefix
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Erased);
         let value_param_clauses =
             if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
                 method_like = true;
@@ -151,17 +159,7 @@ where
             metadata.modifiers.push(Modifier::Given);
         }
 
-        let body = if self.cursor.lookahead(1).kind == TokenKind::Keyword(HardKeyword::Def) {
-            self.advance();
-            vec![match self.parse_method_definition(Location::InBlock) {
-                ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => tree,
-                ParsedStatement::Many(mut trees) => trees
-                    .pop()
-                    .unwrap_or_else(|| self.error_expr(self.current_span())),
-            }]
-        } else {
-            self.parse_optional_template_body().members
-        };
+        let body = self.parse_optional_template_body().members;
         let template = self.allocate_given_template(
             mark.start(),
             type_params.clone(),
@@ -449,10 +447,11 @@ mod tests {
         let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
             panic!("expected a given definition");
         };
-        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
-            panic!("expected a value definition");
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
         };
         assert!(definition.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
         assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
         assert!(parser.diagnostics().is_empty());
     }

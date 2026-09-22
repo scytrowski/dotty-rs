@@ -894,28 +894,12 @@ where
         parent: TreeId<Untyped>,
         body: Vec<TreeId<Untyped>>,
     ) -> TreeId<Untyped> {
-        let parent_start = self
-            .ast
-            .get(parent)
-            .position
-            .map(|position| position.span().range().start());
-        let body_start = body.first().and_then(|member| {
-            self.ast
-                .get(*member)
-                .position
-                .map(|position| position.span().range().start())
-        });
-        let parameter_end = parent_start.unwrap_or(self.last_real_token_end);
-        let (constructor, constructor_start) = self.synthetic_primary_constructor(
+        let (constructor, constructor_start) = self.synthetic_given_constructor(
             start,
             type_params,
             value_param_clauses,
-            parameter_end,
-            ConstructorBoundary {
-                parameter_start: None,
-                parent_start,
-                body_start,
-            },
+            parent,
+            &body,
         );
         let tail = TemplateTail {
             parents: vec![parent],
@@ -936,6 +920,93 @@ where
         );
         self.ast.get_mut(template).position = Some(position);
         template
+    }
+
+    fn synthetic_given_constructor(
+        &mut self,
+        start: u32,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        parent: TreeId<Untyped>,
+        body: &[TreeId<Untyped>],
+    ) -> (TreeId<Untyped>, u32) {
+        for type_param in &type_params {
+            if let TreeKind::TypeDef(definition) = &mut self.ast.get_mut(*type_param).kind
+                && !definition
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::PrivateLocal)
+            {
+                definition.metadata.modifiers.push(Modifier::PrivateLocal);
+            }
+        }
+
+        let type_param_start = type_params.first().and_then(|child| {
+            self.ast
+                .get(*child)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let value_param_start = value_param_clauses
+            .iter()
+            .flat_map(|clause| clause.iter())
+            .next()
+            .and_then(|child| {
+                self.ast
+                    .get(*child)
+                    .position
+                    .map(|position| position.span().range().start())
+            });
+        let parent_start = self
+            .ast
+            .get(parent)
+            .position
+            .map(|position| position.span().range().start());
+        let body_start = body.first().and_then(|member| {
+            self.ast
+                .get(*member)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let constructor_start = type_param_start
+            .or(value_param_start)
+            .or(parent_start)
+            .or(body_start)
+            .unwrap_or(start);
+        let constructor_end = value_param_clauses
+            .last()
+            .and_then(|clause| clause.last())
+            .and_then(|parameter| self.ast.get(*parameter).position)
+            .map(|position| position.span().range().end())
+            .or_else(|| {
+                type_params
+                    .last()
+                    .and_then(|parameter| self.ast.get(*parameter).position)
+                    .map(|position| position.span().range().end())
+            })
+            .or(parent_start)
+            .or(body_start)
+            .unwrap_or(constructor_start);
+        let tpt = self.synthetic_type_tree_at(constructor_end);
+        let constructor_name = TermName::new(self.names.intern("<init>"));
+        let constructor = self.alloc(
+            TreeKind::DefDef(DefDef {
+                name: constructor_name,
+                type_params,
+                value_param_clauses,
+                tpt,
+                rhs: None,
+                metadata: Modifiers::default(),
+            }),
+            Some(dotty_core::SourceSpan::new(
+                self.source_id,
+                dotty_core::Span::without_point(
+                    dotty_core::TextRange::new(constructor_start, constructor_end)
+                        .expect("given constructor span is ordered"),
+                ),
+            )),
+        );
+        (constructor, constructor_start)
     }
 }
 

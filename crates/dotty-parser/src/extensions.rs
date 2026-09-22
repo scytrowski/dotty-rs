@@ -90,6 +90,9 @@ where
         self.consume_newlines_before_extension_body();
 
         let methods = match self.current().kind {
+            TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol => {
+                self.parse_optional_template_body().members
+            }
             TokenKind::Punctuation(Punctuation::LeftBrace) => {
                 self.parse_template_body(TemplateBody::Braced).members
             }
