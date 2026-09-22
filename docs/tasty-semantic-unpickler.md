@@ -1550,44 +1550,56 @@ original PR body to be closed before merge:
   *wire* rather than from the walker's own traversal. It finds every
   `LAMBDAtpt`/`REFINEDtpt` node physically present in the AST section — whether
   or not any discovery call ever visited it — and classifies each one as
-  `Entered` (has an owner), `InBody` (a genuinely skipped body or
-  local-definition context), or `Unaccounted`: a node discovery's routing
-  table should have reached but did not, always a genuine parity gap.
-  `identity_reachability` is a public function
-  (`dotty_tasty_unpickler::tasty_unpickler::identity_reachability`) so both
-  `tests/discovery.rs`'s unit-level fixtures and `tests/type_corpus.rs`'s
-  corpus run can call it; the corpus run asserts
+  `Entered` (has an owner), `OutOfScope` (not structurally reachable — a local
+  definition's declared type or a pattern binder's, or a node only reachable
+  through an unsupported term shape), or `Unaccounted`: reachable but not
+  entered, always a genuine parity gap. `identity_reachability` is a public
+  function (`dotty_tasty_unpickler::tasty_unpickler::identity_reachability`)
+  so both `tests/discovery.rs`'s unit-level fixtures and
+  `tests/type_corpus.rs`'s corpus run can call it; the corpus run asserts
   `lambda_unaccounted + refined_unaccounted == 0` and prints reachable/entered/
-  in-body counts, owner-conflict counts and the route-attribution histogram
-  per identity kind. Measured (all sixteen run permutations): `unaccounted: 0`
-  throughout; scala3-library's real `REFINEDtpt` route histogram shows
-  `SELECTtpt: 3` (the exact real-library shape this milestone fixes) alongside
-  the ordinary `root`/`structural` routes pass 1 always had, and no `THIS`
-  reference-target/`SHAREDtype` occurrence in either corpus (both routes are
-  measured supported, not exercised by real code) — the same "measured, not
-  assumed" standard the rest of this milestone holds itself to.
-  **`InBody`'s check is edge-aware, not tag-membership.** A second review pass
-  found the first cut's `in_body` too coarse: it treated *any* `VALDEF`/
-  `DEFDEF` ancestor as proof of a skipped body, but a `VALDEF`'s own
-  declared-type child (or a `DEFDEF`'s own result — the exact position
-  `discover_declared_type_identities`/`enter_definition_body` enter directly)
-  also has that ancestor, so a real regression there — discovery silently
-  failing to enter a definition's own declared type — would have been
-  misreported as the expected, out-of-scope shape instead of a parity gap; the
-  same coarseness also meant an unsupported term (an `APPLY` sitting directly
-  in a `DEFDEF`'s right-hand side, with no `BLOCK` in between) was classified
-  correctly only by accident. Fixed: `in_body` now checks which specific child
-  edge was crossed (a `VALDEF`/`TYPEDEF`'s first child, or a `DEFDEF`'s
-  `TYPEPARAM`/`PARAM` children and its result — the first child that is not a
-  parameter or clause marker — versus every other child, its right-hand side)
-  rather than testing ancestor tag membership alone; `LAMBDAtpt` needs no
-  special case since every one of its own children is itself a declared-type
-  position. Three new `reachability.rs` unit tests cover it:
-  `an_unentered_identity_at_a_valdefs_own_declared_type_position_is_unaccounted`,
-  `an_unentered_identity_at_a_defdefs_own_result_position_is_unaccounted` and
-  `an_unentered_identity_inside_an_unsupported_apply_in_a_defdefs_body_is_in_body`
-  (the last proving the fix did not simply invert into always reporting a
-  `DEFDEF`/`VALDEF` descendant as `Unaccounted`), each mutation-tested.
+  out-of-scope counts, owner-conflict counts and the route-attribution
+  histogram per identity kind. Measured (all sixteen run permutations):
+  `unaccounted: 0` throughout; scala3-library's real `REFINEDtpt` route
+  histogram shows `SELECTtpt: 3` (the exact real-library shape this milestone
+  fixes) alongside the ordinary `root`/`structural` routes pass 1 always had.
+  **Two review passes hardened what "reachable" means**, both against the same
+  underlying risk: a wire-driven check is only as trustworthy as its own
+  definition of reachability.
+  * The first cut's `in_body` tested only physical ancestor tag membership
+    (`VALDEF`/`DEFDEF`/`BLOCK`/`CASEDEF`/`LAMBDAtpt` anywhere above an
+    address), which is too coarse in two directions: a `VALDEF`'s own
+    declared-type child (or a `DEFDEF`'s own result) has a `VALDEF`/`DEFDEF`
+    ancestor too, so a real regression there would have been misreported as
+    an expected shape rather than a parity gap; and a node reachable only
+    through an unsupported term shape with *no* `VALDEF`/`DEFDEF`/`BLOCK`/
+    `CASEDEF` ancestor at all (a loose tree named only by a `SHAREDterm` link
+    sitting inside an `APPLY` argument, `tests/discovery.rs`'s own
+    `poison`/`poisoned` fixture) would have been misreported as `Unaccounted`
+    — a false-positive parity gap on a shape discovery is *correct* to skip.
+  * Fixed by replacing the ancestor check with a second, independent
+    implementation of discovery's own four dispatch tables (`TypeTree`/
+    `TermType`/`SemanticType`/`ClassRef`, mirrored, not called — a bug in
+    discovery's own dispatch cannot also hide from this check), walked from
+    every declared-type root found by structurally re-deriving the *same*
+    top-down topology `enter_all`/`enter_package`/`enter_template`/
+    `enter_definition_body`/`enter_parameters` themselves follow (a file's
+    top-level `PACKAGE`s, their `TYPEDEF`/`VALDEF`/`DEFDEF` members, a
+    class's own header parameters/parents/self type) — never a flat "every
+    `VALDEF`/`DEFDEF`/`TYPEPARAM` tag anywhere in the file" scan, which an
+    intermediate version of this fix tried and which wrongly treated a local
+    definition buried in a method's own `BLOCK` body as a root, turning two
+    real `scala3-library` files ($eq$colon$eq, $less$colon$less: nineteen
+    `LAMBDAtpt`s each reachable only from within a local method's body) into
+    false-positive `Unaccounted` corpus failures — caught immediately by the
+    corpus run itself, before merge. Five `reachability.rs` unit tests cover
+    the final shape, each mutation-tested: an identity at a `VALDEF`'s/
+    `DEFDEF`'s own declared-type/result position (`Unaccounted` when
+    unentered), one inside an unsupported `APPLY` in a `DEFDEF`'s
+    right-hand side (`OutOfScope`), the `poisoned`-shaped case (a loose tree
+    named only through a link inside an unsupported `APPLY` argument,
+    `OutOfScope`), and a local `DEFDEF` nested in an enclosing `DEFDEF`'s
+    `BLOCK` body (`OutOfScope`, the regression the corpus run itself caught).
 
 ### Owner-space references (Milestone 4c1)
 

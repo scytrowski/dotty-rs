@@ -604,11 +604,11 @@ struct OwnerOracle {
 #[derive(Default)]
 struct IdentitySurvey {
     lambda_entered: usize,
-    lambda_in_body: usize,
+    lambda_out_of_scope: usize,
     lambda_unaccounted: usize,
     lambda_conflicts: usize,
     refined_entered: usize,
-    refined_in_body: usize,
+    refined_out_of_scope: usize,
     refined_unaccounted: usize,
     refined_conflicts: usize,
     /// The route each entered `LAMBDAtpt`'s first owner was found through.
@@ -775,11 +775,11 @@ fn survey_identity_reachability(
                         usize::from(unpickler.index().has_refined_owner_conflict(node.address));
                 }
             }
-            IdentityOutcome::InBody => {
+            IdentityOutcome::OutOfScope => {
                 if is_lambda {
-                    survey.lambda_in_body += 1;
+                    survey.lambda_out_of_scope += 1;
                 } else {
-                    survey.refined_in_body += 1;
+                    survey.refined_out_of_scope += 1;
                 }
             }
             IdentityOutcome::Unaccounted => {
@@ -3277,14 +3277,14 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
         {
             let id = &tally.identity;
             println!(
-                "identity reachability (Milestone 5d2c review): LAMBDAtpt entered {} (conflicts {}), in body {}, unaccounted {}; REFINEDtpt entered {} (conflicts {}), in body {}, unaccounted {}",
+                "identity reachability (Milestone 5d2c review): LAMBDAtpt entered {} (conflicts {}), out of scope {}, unaccounted {}; REFINEDtpt entered {} (conflicts {}), out of scope {}, unaccounted {}",
                 id.lambda_entered,
                 id.lambda_conflicts,
-                id.lambda_in_body,
+                id.lambda_out_of_scope,
                 id.lambda_unaccounted,
                 id.refined_entered,
                 id.refined_conflicts,
-                id.refined_in_body,
+                id.refined_out_of_scope,
                 id.refined_unaccounted,
             );
             println!("  LAMBDAtpt route attribution: {:?}", id.lambda_routes);

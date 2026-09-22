@@ -197,7 +197,7 @@ impl DiscoveryRoute {
 }
 
 /// The absolute addresses of `at`'s direct children, in wire order.
-fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
+pub(crate) fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
     ast.children(at)
         .iter()
         .map(|child| address(child.offset))
@@ -756,7 +756,7 @@ impl TastyUnpickler<'_, '_, '_> {
 /// that points into the middle of another node, is the typed
 /// `InvalidReferenceTarget`, never silently ignored (§18 of the module
 /// documentation).
-fn reference_target(ast: &AstView<'_>, at: u32) -> Result<u32, UnpickleError> {
+pub(crate) fn reference_target(ast: &AstView<'_>, at: u32) -> Result<u32, UnpickleError> {
     use dotty_tasty::tasty::{RawTree, TermValue};
     let malformed = || UnpickleError::MalformedType {
         address: at,
@@ -792,7 +792,10 @@ fn reference_target(ast: &AstView<'_>, at: u32) -> Result<u32, UnpickleError> {
 /// `SHAREDterm` link when there is one — the same classification
 /// [`crate::annotated`]'s `decode_annotation_tree` makes, without decoding
 /// anything. `None` when `at` is not a visible node.
-fn annotation_root(ast: &AstView<'_>, at: u32) -> Result<Option<(u32, u8)>, UnpickleError> {
+pub(crate) fn annotation_root(
+    ast: &AstView<'_>,
+    at: u32,
+) -> Result<Option<(u32, u8)>, UnpickleError> {
     let Some(tag) = ast.tag_at(at) else {
         return Ok(None);
     };
