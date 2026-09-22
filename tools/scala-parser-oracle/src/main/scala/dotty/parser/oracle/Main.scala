@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -107,6 +107,8 @@ object Main:
           fields += field("private_local", "true")
         if tdef.mods.is(Trait) then
           fields += field("trait", "true")
+        if tdef.mods.is(Enum) then
+          fields += field("enum", "true")
         if isTypeDefinitionSource(slice(tdef, source)) then
           fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase, includeMutable = false)
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
@@ -262,7 +264,7 @@ object Main:
 
   private def isTypeDefinitionSource(source: String): Boolean =
     source.split("[^A-Za-z]+").exists(word =>
-      word == "type" || word == "class" || word == "trait" || word == "object"
+      word == "type" || word == "class" || word == "trait" || word == "object" || word == "enum"
     )
 
   private def childTrees(tree: dotty.tools.dotc.ast.Trees.Tree[?]): List[dotty.tools.dotc.ast.Trees.Tree[?]] =
