@@ -79,6 +79,7 @@ where
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
                 name,
                 template,
+                metadata: Modifiers::default(),
             })),
         ))
     }
