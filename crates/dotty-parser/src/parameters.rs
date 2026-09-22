@@ -176,9 +176,6 @@ where
         } else if is_class_parameter_owner(owner) {
             if owner == ParamOwner::CaseClass && first_ordinary_clause {
                 metadata.modifiers.push(Modifier::ParamAccessor);
-            } else if owner == ParamOwner::CaseClass {
-                metadata.modifiers.push(Modifier::ParamAccessor);
-                metadata.modifiers.push(Modifier::PrivateLocal);
             } else {
                 metadata.modifiers.push(Modifier::ParamAccessor);
                 metadata.modifiers.push(Modifier::PrivateLocal);
