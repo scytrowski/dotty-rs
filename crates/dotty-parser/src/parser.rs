@@ -29,6 +29,8 @@ where
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
+    pub(crate) last_advance_was_outdent: bool,
+    pub(crate) defer_template_outdent_feedback: bool,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -63,6 +65,8 @@ where
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
             placeholder_params: Vec::new(),
+            last_advance_was_outdent: false,
+            defer_template_outdent_feedback: false,
         }
     }
 
@@ -205,9 +209,13 @@ where
 
     /// Advances the parser and records the end of a real token.
     pub fn advance(&mut self) {
-        let token = self.current();
-        if !is_zero_width_synthetic(token.kind) && token.kind != TokenKind::Eof {
-            self.last_real_token_end = token.span.end();
+        let (kind, end) = {
+            let token = self.current();
+            (token.kind, token.span.end())
+        };
+        self.last_advance_was_outdent = kind == TokenKind::Outdent;
+        if !is_zero_width_synthetic(kind) && kind != TokenKind::Eof {
+            self.last_real_token_end = end;
         }
         self.cursor.advance();
     }
@@ -421,7 +429,10 @@ where
 }
 
 const fn is_zero_width_synthetic(kind: TokenKind) -> bool {
-    matches!(kind, TokenKind::Indent | TokenKind::Outdent)
+    matches!(
+        kind,
+        TokenKind::Indent | TokenKind::Outdent | TokenKind::Newline | TokenKind::Newlines
+    )
 }
 
 #[cfg(test)]

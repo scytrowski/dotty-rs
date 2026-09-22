@@ -875,6 +875,13 @@ parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
 capture-checking dialect; enabling that dialect still requires its separate
 capture-set AST contract.
 
+`ParamAccessor` and `PrivateLocal` are parser-level constructor-parameter role
+markers rather than written keywords. `ParamAccessor` records that a class
+constructor parameter contributes an accessor; `PrivateLocal` records a plain
+constructor parameter that does not. The latter must not be represented as
+`VisibilitySyntax::Private`, because that would falsely claim that `private`
+was written in the source.
+
 `[MAJOR 2]` `Modifiers.annotations: Vec<TreeId<Untyped>>` is safe now that
 `Modifiers` only exists as `Untyped::DefMetadata` — a `Modifiers` value can
 only ever be reached from an untyped definition node, so its

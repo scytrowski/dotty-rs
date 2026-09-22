@@ -200,6 +200,30 @@ fn render_tree(
                     name
                 })
             ));
+            if let Some(variance) = definition.variance {
+                fields.push(format!(
+                    "\"variance\":{}",
+                    quote(match variance {
+                        dotty_core::types::Variance::Covariant => "covariant",
+                        dotty_core::types::Variance::Contravariant => "contravariant",
+                        dotty_core::types::Variance::Invariant => "invariant",
+                    })
+                ));
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Param)
+            {
+                fields.push("\"param\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PrivateLocal)
+            {
+                fields.push("\"private_local\":true".to_owned());
+            }
             if definition
                 .metadata
                 .modifiers
@@ -241,6 +265,35 @@ fn render_tree(
                 .contains(&dotty_core::ast::Modifier::Given)
             {
                 fields.push("\"given\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::ParamAccessor)
+            {
+                fields.push("\"param_accessor\":true".to_owned());
+            }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PrivateLocal)
+            {
+                fields.push("\"private_local\":true".to_owned());
+            }
+            if (definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::ParamAccessor)
+                || definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::PrivateLocal))
+                && definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::Var)
+            {
+                fields.push("\"mutable\":true".to_owned());
             }
             if is_value_definition_source(&source_text) {
                 fields.extend(render_definition_metadata(
@@ -388,6 +441,9 @@ fn render_definition_metadata(
         .iter()
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
+            dotty_core::ast::Modifier::Param
+            | dotty_core::ast::Modifier::ParamAccessor
+            | dotty_core::ast::Modifier::PrivateLocal => None,
             dotty_core::ast::Modifier::Abstract => Some("abstract"),
             dotty_core::ast::Modifier::Final => Some("final"),
             dotty_core::ast::Modifier::Sealed => Some("sealed"),

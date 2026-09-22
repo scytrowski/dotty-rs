@@ -202,10 +202,16 @@ parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
-class, trait, and object definitions with type parameters, primary constructor
-clauses, simple `extends` parent applications, and braced or indented template
-bodies. The class/trait distinction is preserved in `TypeDef` metadata; the
+class, trait, object, case class, and case object definitions with type
+parameters, primary constructor clauses, simple `extends` parent applications,
+and braced or indented template bodies. The class/trait/case distinctions are
+preserved in definition metadata; case objects remain `ModuleDef` trees. The
 synthetic primary constructor and template body remain parser-level structure.
+Constructor parameters preserve Dotty's parser-level role combinations:
+explicit `val`/`var` parameters are accessors, while plain class and later
+case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed
+by later phases. This metadata describes constructor roles, not source-level
+visibility.
 simple type aliases and abstract type declarations with lower and/or upper
 bounds
 parameterized type aliases and abstract declarations using the shared
@@ -263,14 +269,15 @@ source order, including nested definitions and expressions. This is
 deliberately different from an expression block, whose last expression is its
 result. Layout classification remains owned by the scanner; the parser only
 feeds back the `ColonEol`, `Indented`, and `Outdented` events needed to close a
-template region. Case classes/objects, enum definitions, case-specific
-modifiers, self types, auxiliary constructors, and semantic template
-processing remain future work.
+template region, including nested case definitions. Enum definitions,
+case-specific syntax beyond the supported class/object forms, self types,
+auxiliary constructors, and semantic template processing remain future work.
 
 ### Definition prefixes and source metadata
 
 Definitions share a parser-owned prefix step before dispatching to `val`,
-`var`, `def`, `type`, `class`, `trait`, or `object`. The current subset
+`var`, `def`, `type`, `class`, `trait`, `object`, `case class`, or `case object`.
+The current subset
 preserves annotations, source order for hard modifiers (`abstract`, `final`,
 `sealed`, `implicit`, `lazy`, and `override`), supported soft modifiers
 (`inline`, `transparent`, `open`, and `infix`), and `private`/`protected`
@@ -284,7 +291,7 @@ set. It is attached to the existing definition nodes, including
 `ModuleDef.metadata`, so later phases can distinguish source syntax from
 semantic resolution. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-annotations, `case`/`given`/`enum` definitions, and feature-dependent
+annotations, `given`/`enum` definitions, and feature-dependent
 `opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
@@ -300,8 +307,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms (including case classes, enums, and
-full template semantics), remaining control flow (`do`/`while`),
+`RefinedType`, remaining definition forms (including enums and full template
+semantics), remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including

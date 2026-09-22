@@ -21,6 +21,7 @@ where
     ) -> Vec<Vec<TreeId<Untyped>>> {
         self.with_param_owner(Some(owner), |parser| {
             let mut clauses = Vec::new();
+            let mut first_ordinary_clause = true;
             loop {
                 parser.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
                     Punctuation::LeftParen,
@@ -28,20 +29,21 @@ where
                 if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
                     break;
                 }
-                if owner == ParamOwner::Class && parser.current_is_class_accessor_parameter_clause()
-                {
-                    clauses.push(parser.parse_unsupported_class_accessor_parameter_clause());
-                    continue;
-                }
                 if parser.current_is_unsupported_parameter_clause() {
                     clauses.push(parser.parse_unsupported_term_param_clause());
                     continue;
                 }
                 let is_using = parser.current_is_using_parameter_clause();
                 clauses.push(if is_using {
-                    parser.parse_term_param_clause_with_modifiers(true)
+                    parser.parse_term_param_clause_with_policy(owner, false, true)
                 } else {
-                    parser.parse_term_param_clause()
+                    let clause = parser.parse_term_param_clause_with_policy(
+                        owner,
+                        first_ordinary_clause,
+                        false,
+                    );
+                    first_ordinary_clause = false;
+                    clause
                 });
             }
             clauses
@@ -57,16 +59,6 @@ where
                 "anonymous `using` parameter clauses are not supported; name the context parameter"
             };
         self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
-        self.recover_term_param_clause();
-        Vec::new()
-    }
-
-    fn parse_unsupported_class_accessor_parameter_clause(&mut self) -> Vec<TreeId<Untyped>> {
-        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "class constructor accessor parameters using `val` or `var` are not supported",
-        );
         self.recover_term_param_clause();
         Vec::new()
     }
@@ -90,12 +82,12 @@ where
         }
     }
 
-    /// Parses one ordinary `(x: T, y: U)` clause.
-    pub(crate) fn parse_term_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
-        self.parse_term_param_clause_with_modifiers(false)
-    }
-
-    fn parse_term_param_clause_with_modifiers(&mut self, is_using: bool) -> Vec<TreeId<Untyped>> {
+    fn parse_term_param_clause_with_policy(
+        &mut self,
+        owner: ParamOwner,
+        first_ordinary_clause: bool,
+        is_using: bool,
+    ) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
         let mut params = Vec::new();
         let mut metadata = Modifiers::default();
@@ -118,7 +110,7 @@ where
 
         loop {
             let checkpoint = self.cursor.checkpoint();
-            params.push(self.parse_term_param(metadata.clone()));
+            params.push(self.parse_term_param(owner, first_ordinary_clause, metadata.clone()));
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -151,8 +143,44 @@ where
         params
     }
 
-    fn parse_term_param(&mut self, metadata: Modifiers) -> TreeId<Untyped> {
+    fn parse_term_param(
+        &mut self,
+        owner: ParamOwner,
+        first_ordinary_clause: bool,
+        mut metadata: Modifiers,
+    ) -> TreeId<Untyped> {
         let mark = self.mark();
+        let explicit_accessor = match self.current().kind {
+            TokenKind::Keyword(dotty_core::HardKeyword::Val) => {
+                self.advance();
+                Some(false)
+            }
+            TokenKind::Keyword(dotty_core::HardKeyword::Var) => {
+                self.advance();
+                Some(true)
+            }
+            _ => None,
+        };
+        if let Some(is_var) = explicit_accessor {
+            if !is_class_parameter_owner(owner) {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "`val` and `var` parameter accessors are only valid on class constructors",
+                );
+            } else {
+                metadata.modifiers.push(Modifier::ParamAccessor);
+                if is_var {
+                    metadata.modifiers.push(Modifier::Var);
+                }
+            }
+        } else if is_class_parameter_owner(owner) {
+            if owner == ParamOwner::CaseClass && first_ordinary_clause {
+                metadata.modifiers.push(Modifier::ParamAccessor);
+            } else {
+                metadata.modifiers.push(Modifier::ParamAccessor);
+                metadata.modifiers.push(Modifier::PrivateLocal);
+            }
+        }
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
             self.advance();
@@ -209,14 +237,6 @@ where
             self.cursor.lookahead(2).kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
         ) && !is_parameter_colon_at(self, 3)
-    }
-
-    fn current_is_class_accessor_parameter_clause(&mut self) -> bool {
-        self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
-            && matches!(
-                self.cursor.lookahead(1).kind,
-                TokenKind::Keyword(dotty_core::HardKeyword::Val | dotty_core::HardKeyword::Var)
-            )
     }
 
     fn parse_param_name(&mut self) -> TermName {
@@ -277,6 +297,10 @@ fn is_parameter_colon_at<S: dotty_core::TokenSource>(
             | TokenKind::ColonOp
             | TokenKind::Punctuation(Punctuation::Colon)
     ) && parser.token_text(&token).ok() == Some(":")
+}
+
+fn is_class_parameter_owner(owner: ParamOwner) -> bool {
+    matches!(owner, ParamOwner::Class | ParamOwner::CaseClass)
 }
 
 fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
@@ -351,6 +375,138 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(first_name.as_name().text()), "x");
         assert_eq!(parser.names.resolve(second_name.as_name().text()), "y");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn marks_a_plain_class_parameter_as_accessor_and_private_local() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected a constructor parameter");
+        };
+        assert_eq!(
+            metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal]
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn marks_an_explicit_class_val_parameter_as_an_accessor() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 1, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let parameter = clauses[0][0];
+        let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(parameter).kind else {
+            panic!("expected a constructor parameter");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::ParamAccessor]);
+        assert_eq!(
+            parser
+                .ast()
+                .get(parameter)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .start(),
+            1
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn marks_an_explicit_class_var_parameter_as_a_mutable_accessor() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(var x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Var), 1, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected a constructor parameter");
+        };
+        assert_eq!(
+            metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::Var]
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn later_case_class_clauses_keep_accessor_and_private_local_roles() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A)(y: B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::ColonFollow, 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::CaseClass);
+        let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected first parameter");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::ParamAccessor]);
+        let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[1][0]).kind
+        else {
+            panic!("expected second parameter");
+        };
+        assert_eq!(
+            metadata.modifiers,
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 

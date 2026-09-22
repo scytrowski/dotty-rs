@@ -49,6 +49,12 @@ where
         if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
             return self.parse_object_definition(location);
         }
+        if self.current().kind == TokenKind::CaseClass {
+            return self.parse_case_class_definition(location);
+        }
+        if self.current().kind == TokenKind::CaseObject {
+            return self.parse_case_object_definition(location);
+        }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Package) {
             return self.parse_package_definition(location);
         }
@@ -91,6 +97,8 @@ where
             TokenKind::Keyword(HardKeyword::Object) => {
                 self.parse_object_definition_with_prefix(prefix)
             }
+            TokenKind::CaseClass => self.parse_case_class_definition_with_prefix(prefix),
+            TokenKind::CaseObject => self.parse_case_object_definition_with_prefix(prefix),
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
@@ -351,7 +359,8 @@ const fn is_top_level_statement_start(kind: TokenKind) -> bool {
                 | HardKeyword::Match
                 | HardKeyword::Enum
                 | HardKeyword::Given
-        )
+        ) | TokenKind::CaseClass
+            | TokenKind::CaseObject
     )
 }
 
