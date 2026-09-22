@@ -325,6 +325,7 @@ where
                 );
                 self.parse_capture_selection(mark, this)
             }
+            TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let Ok(name) = self.intern_current_term_name() else {
@@ -352,6 +353,18 @@ where
                     return self.parse_capture_selection(mark, qualifier);
                 }
 
+                if self.current().kind == TokenKind::Keyword(HardKeyword::Super) {
+                    let qualifier_position = self.span_from(mark);
+                    self.advance();
+                    let qualifier = self.alloc(
+                        TreeKind::This(dotty_core::ast::This {
+                            qual: Some(*name.as_name()),
+                        }),
+                        Some(qualifier_position),
+                    );
+                    return self.parse_super_tail(mark, qualifier);
+                }
+
                 self.parse_capture_selection_after_dot(mark, ident)
             }
             _ => {
@@ -370,10 +383,6 @@ where
         qualifier: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
         if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `.` in a capture reference",
-            );
             return qualifier;
         }
         self.parse_capture_selection_after_dot(mark, qualifier)
@@ -385,14 +394,6 @@ where
         mut qualifier: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
         loop {
-            let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-            let Ok(name) = self.intern_current_term_name() else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a name after `.` in a capture reference",
-                );
-                return qualifier;
-            };
             if !matches!(
                 self.current().kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
@@ -403,6 +404,10 @@ where
                 );
                 return qualifier;
             }
+            let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+            let Ok(name) = self.intern_current_term_name() else {
+                return qualifier;
+            };
             self.advance();
             qualifier = self.alloc_from(
                 mark,
@@ -1053,6 +1058,110 @@ mod tests {
                 .end(),
             26
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_terminal_this_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses this",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Keyword(HardKeyword::This), 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(matches!(
+            parser.ast().get(template.metadata.uses[0].reference).kind,
+            TreeKind::This(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_qualified_this_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses Outer.this",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::This), 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        let reference = template.metadata.uses[0].reference;
+        assert!(
+            matches!(parser.ast().get(reference).kind, TreeKind::This(this) if this.qual.is_some())
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_super_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses super.cap",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Keyword(HardKeyword::Super), 13, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        let reference = template.metadata.uses[0].reference;
+        assert!(matches!(
+            parser.ast().get(reference).kind,
+            TreeKind::Select(select) if matches!(parser.ast().get(select.qualifier).kind, TreeKind::Super(_))
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
