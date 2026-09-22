@@ -212,6 +212,22 @@ mod tests {
         };
         assert_eq!(extension.param_clauses.len(), 1);
         assert_eq!(extension.param_clauses[0].len(), 1);
+        let TreeKind::ValDef(ref receiver) = parser.ast.get(extension.param_clauses[0][0]).kind
+        else {
+            panic!("expected a receiver parameter");
+        };
+        assert!(
+            !receiver
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::ParamAccessor)
+        );
+        assert!(
+            !receiver
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PrivateLocal)
+        );
         assert_eq!(extension.methods.len(), 1);
         assert!(matches!(
             parser.ast.get(extension.methods[0]).kind,
@@ -277,5 +293,74 @@ mod tests {
                 if value.metadata.modifiers.contains(&dotty_core::ast::Modifier::Given))
         }));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_extension_with_multiple_receiver_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (a: A, b: B) def f = a",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::ColonFollow, 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::Keyword(HardKeyword::Def), 23, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Operator, 29, 30),
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        assert!(extension.param_clauses.is_empty());
+        assert_eq!(extension.methods.len(), 1);
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_an_extension_without_a_method_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X)",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        assert!(matches!(
+            parser.ast.get(extension).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 }
