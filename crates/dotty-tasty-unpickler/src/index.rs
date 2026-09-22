@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use dotty_core::ids::{ScopeId, SymbolId, TypeId};
 
+use crate::discovery::DiscoveryMode;
 use crate::error::UnpickleError;
 
 /// Maps TASTy definition addresses to the semantic entities entered for them.
@@ -59,11 +60,17 @@ pub struct TastySemanticIndex {
     /// different owner than the one that entered them: their parameters are
     /// owned once, so projecting them is refused (`SharedLambdaOwnerConflict`).
     lambda_conflicts: HashSet<u32>,
-    /// `(type tree, owner)` pairs the declared-type-tree scan has walked
-    /// (`LAMBDAtpt` type parameters, Milestone 5c; `REFINEDtpt` synthetic
-    /// classes, Milestone 5d2b), so a tree shared by many definitions is
-    /// walked once per owner, not once per path.
-    declared_tree_scans: HashSet<(u32, SymbolId)>,
+    /// `(tree, owner, mode)` triples the identity-discovery walker has
+    /// visited (Milestone 5d2c; `LAMBDAtpt` type parameters, Milestone 5c;
+    /// `REFINEDtpt` synthetic classes, Milestone 5d2b), so a tree shared by
+    /// many definitions, or reached under several structural interpretations,
+    /// is walked once per `(owner, mode)` pair, not once per path. The mode
+    /// is part of the key precisely so an earlier shallow visit (say,
+    /// `SemanticType`, which does not follow a direct/symbol reference's
+    /// target) cannot suppress a later, semantically richer one (`ClassRef`,
+    /// which does) of the very same address: see
+    /// [`DiscoveryMode`](crate::discovery::DiscoveryMode).
+    identity_scans: HashSet<(u32, SymbolId, DiscoveryMode)>,
     /// The owner each `REFINEDtpt` entered its synthetic refinement class
     /// for (Milestone 5d2b, pass 1): the first semantic owner to reach the
     /// tree. The class itself is entered through the ordinary `symbols` map,
@@ -226,9 +233,15 @@ impl TastySemanticIndex {
         self.refined_conflicts.insert(address);
     }
 
-    /// Whether `(tree, owner)` had not been scanned before; records it.
-    pub(crate) fn first_declared_tree_scan(&mut self, tree: u32, owner: SymbolId) -> bool {
-        self.declared_tree_scans.insert((tree, owner))
+    /// Whether `(tree, owner, mode)` had not been visited by the identity
+    /// walker before; records it.
+    pub(crate) fn first_identity_scan(
+        &mut self,
+        tree: u32,
+        owner: SymbolId,
+        mode: DiscoveryMode,
+    ) -> bool {
+        self.identity_scans.insert((tree, owner, mode))
     }
 
     /// Records the type projected for a term-tree address; a second one for

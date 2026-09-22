@@ -1131,8 +1131,9 @@ ClassInfo {
   parent along exactly the paths `type_of_parent` reads (a call's function only,
   a type application's function and, only when its constructor type is not
   already applied, its type arguments, the `NEW` type; never a
-  constructor argument) and the `SELFDEF` tree with the ordinary `enter_lambdas_in`.
-  Upstream reads parents in a compiler-internal `localDummy` context; that is not
+  constructor argument) and the `SELFDEF` tree with the ordinary
+  `discover_identities` (Milestone 5d2c, `discovery.rs`, formerly
+  `enter_lambdas_in`). Upstream reads parents in a compiler-internal `localDummy` context; that is not
   a declaration, so the parameters of such a lambda are owned by the *class*.
   They are not class members, so they never reach `ClassInfo.declarations`. The
   owner-conflict logic of 5c applies unchanged: a lambda reached through a
@@ -1310,16 +1311,15 @@ tree.withType(RecType.closeOver(rt => refined.substThis(refineCls, rt.recThis)))
   `TYPEREFDIRECT`/`TYPEREFSYMBOL` already use), instead of falling to the
   generic `UnsupportedType`. This was found only once real-fixture tests
   existed to reach it; no synthetic wire test predicted it.
-* **A known, measured gap.** A `REFINEDtpt` reached *only* through a
-  `SELECTtpt` qualifier's own type resolution (`SELECTTPT_TAG` is not among
-  the tags the declared-type-tree scanner walks into) or *only* through a
-  `SHAREDtype` link rather than a `SHAREDterm` one is not entered in pass 1,
-  so projection reaches it with no synthetic class and fails with the
-  explicit `MissingRefinementClass`/`InvalidRefinementClass` — a real, typed
-  failure, never silently wrong, but not yet a completion. Measured at 2
-  library `Trait` self-types (of 669 entered) across every corpus
-  permutation; `unexpected errors: 0` throughout. Left for a follow-up rather
-  than widening this PR's scope further.
+* **A gap this milestone left, closed by Milestone 5d2c.** A `REFINEDtpt`
+  reached *only* through a `SELECTtpt` qualifier's own type resolution or
+  *only* through a `SHAREDtype` link rather than a `SHAREDterm` one was not
+  entered in pass 1 (the declared-type-tree scanner only descended through a
+  fixed whitelist of `TypeTree` tags), so projection reached it with no
+  synthetic class: `MissingRefinementClass`/`InvalidRefinementClass`, a real,
+  typed failure, never silently wrong, but not a completion either. Measured
+  at 2 library `Trait` self-types (of 669 entered). See "Semantic identity
+  discovery parity" below for the fix.
 
 New errors: `SharedRefinementOwnerConflict`, `UnsupportedRefinementStat`,
 `MissingRefinementClass`, `InvalidRefinementClass`, `MissingRefinementScope`,
@@ -1354,6 +1354,120 @@ instead of failing with the pre-5d2b `UnsupportedTypeTree`. `unexpected
 errors: 0` holds across every one of the twelve run permutations
 `type_corpus.rs` exercises (both corpora; with and without compiler builtins;
 symbols-then-classes ordering; the classes-not-completed ablation).
+
+### Semantic identity discovery parity (Milestone 5d2c)
+
+Milestone 5d2b's projection of `REFINEDtpt` was correct; the problem was
+earlier. Pass 1's declared-type-tree scanner (`enter_lambdas_in`, since
+Milestone 5c) only descended through a fixed whitelist of `TypeTree` tags
+(`SHAREDterm`, `LAMBDAtpt`, `REFINEDtpt`, `APPLIEDtpt`, `BYNAMEtpt`,
+`EXPLICITtpt`, `TYPEBOUNDStpt`, `ANNOTATEDtpt`), but real semantic projection
+is not that shallow: `type_of_tpt` can hand off to `type_of_term` (a
+`SELECTtpt` qualifier, a `SINGLETONtpt` reference), which can hand off to
+`type_at`/`decode_type` (an embedded `IDENT` type, a selection's semantic
+prefix), which can reach `this_class` (a `THIS`/`QUALTHIS` class reference) —
+and any of those hops can land on a `SHAREDtype` link whose target is, or
+contains, a `LAMBDAtpt`/`REFINEDtpt` identity the old whitelist never visited.
+Exactly the 2 library `Trait` self-types 5d2b measured and documented as a
+known gap.
+
+**The fix (`discovery.rs`): a mode-aware walker, not a wider whitelist.** Four
+`DiscoveryMode`s name the structural layers projection actually has, and
+`discover_identities` dispatches on the mode, following *exactly* the child
+addresses the corresponding projection function would read next:
+
+| mode | mirrors | routing highlights |
+|------|---------|---------------------|
+| `TypeTree` | `type_of_tpt` | `SELECTtpt`/`SINGLETONtpt` → `TermType`; an unhandled tag (a bare semantic type node in tpt position) → `SemanticType`; `MATCHtpt`/`BLOCK`/`HOLE` stay unwalked |
+| `TermType` | `type_of_term` | `IDENT`'s embedded type → `SemanticType`; `SELECT`'s qualifier → `TermType`; `QUALTHIS`'s qualifier `IDENTtpt`'s embedded type → `ClassRef`; an unsupported term shape (`APPLY`, `BLOCK`, ...) has no arm and the walk simply stops there — pass 1 never becomes a general term-body walker |
+| `SemanticType` | `type_at`/`decode_type` | `SHAREDtype` → same mode, bounded; `TYPEREF`/`TERMREF` prefix → `SemanticType` (the member itself is never resolved, §15 below); `THIS` → `ClassRef`; `RECthis`/`PARAMtype` are left alone (binder identities, not pass-1 symbols) |
+| `ClassRef` | `this_class` | `TYPEREFdirect`/`TYPEREFsymbol`/`SHAREDtype` mirror `this_class`'s own grammar; a `REFINEDtpt` reached directly (the critical case, below) enters it |
+
+Discovery still allocates only the two identity-bearing forms
+(`enter_lambda_tpt`, `enter_refined_tpt`, both unchanged) and the ordinary
+symbols/scopes those already enter; it never calls `type_of_tpt`,
+`type_of_term`, `type_at`, `complete_in` or the `SymbolResolver`, never
+allocates a `TypeId`, and never resolves a member or a package by name — pass
+1 stays reference reachability only.
+
+* **The critical case: `THIS → SHAREDtype → REFINEDtpt`.** Milestone 5d2b's
+  own fixture investigation found that *any* reference to a member of a
+  refinement (an explicit `this.type` or a plain sibling alias) is encoded as
+  `THIS` of the refinement's own synthetic class, reached through a
+  `SHAREDtype` link back to the `REFINEDtpt` node's own address. `ClassRef`
+  mode's `REFINEDtpt` arm enters that identity directly, never routing it
+  through `SemanticType` decoding (which has no arm for a bare `REFINEDtpt`
+  tag, matching `decode_type`'s own lack of one).
+* **Direct/symbol reference targets are not recursively scanned as
+  definitions**, except for that one case: when a `TYPEREFdirect`/
+  `TYPEREFsymbol`/`TERMREFdirect`/`TERMREFsymbol`'s target address is itself a
+  `REFINEDtpt` node, that identity is entered for the *current* owner
+  (`enter_reference_target`). An ordinary reference's target is otherwise left
+  alone — discovery is a bounded reachability check, not a general definition
+  walker.
+* **A reference to an already-entered `REFINEDtpt` is idempotent, mirroring
+  Dotty's `symAtAddr.getOrElse(start, newRefinedClassSymbol(...))`
+  exactly: get the existing identity, never re-derive its owner.** The first
+  implementation of the critical case above re-ran the ordinary
+  owner-conflict bookkeeping on every hidden-route visit, which
+  misclassified a member naming its *own* enclosing refinement (`x: this.type`
+  inside the very refinement `x` is a member of) as a second, conflicting
+  owner — found and fixed by `tests/discovery.rs`'s
+  `a_member_naming_its_own_enclosing_refinement_through_this_keeps_the_refinements_true_owner`,
+  mutation-checked: removing the idempotency check makes the test, and two of
+  5d2b's own real-fixture tests, fail exactly as expected.
+  `enter_referenced_refined_tpt` checks `symbol_at` first; only a genuinely
+  unentered address is entered fresh, owned by the declared-type position
+  discovery began from. Genuine cross-definition sharing (5d2b's `SHAREDterm`
+  case) is untouched: it is still detected the same way, at the `TypeTree`
+  routing layer, before any reference-target special-casing runs.
+* **Memoization includes the mode.** `first_identity_scan` is keyed by
+  `(tree, owner, mode)`, not `(tree, owner)`: the same address can legitimately
+  be visited first under a shallow mode (`SemanticType`, which has no arm for
+  a bare `REFINEDtpt` tag) and later under a richer one (`ClassRef`, which
+  does) for the same owner, and the first, shallower visit must not suppress
+  the second. `tests/discovery.rs`'s
+  `an_identity_first_visited_under_a_shallow_mode_is_still_entered_under_a_richer_one`
+  is this exact scenario.
+* **Annotation argument trees are not walked** (`ANNOTATEDtpt`/`ANNOTATEDtype`'s
+  base is; the annotation constructor form, an `APPLY`/`NEW` term, is not):
+  every annotation class in both corpora is a plain class reference, never a
+  structural refinement or a type lambda, so mirroring the full
+  constructor-spine walk would add real complexity for a measured zero. The
+  corpus run below reports zero missing identities with this scope, not an
+  unverified assumption.
+
+New errors: none — every route above either enters an already-modelled
+identity (`enter_lambda_tpt`/`enter_refined_tpt`, with their existing errors)
+or is a structural no-op; a malformed/cyclic link is still the existing
+`MalformedType`/`InvalidReferenceTarget`.
+
+Measured (`tests/discovery.rs`, a hand-built fixture, address-settled like
+5d2b's own): a `REFINEDtpt` hidden behind a `SELECTtpt` qualifier is entered;
+one hidden behind `THIS`, with and without an extra `SHAREDtype` hop, is
+entered; two owners reaching one hidden `REFINEDtpt` through `SELECTtpt`
+still conflict (`SharedRefinementOwnerConflict`, no duplicate class); a
+poisoned `REFINEDtpt` nested only inside an unsupported `APPLY` term body is
+never discovered; the mode-sensitive-memo scenario above; the self-reference
+false-conflict fix above; and that projection now succeeds end-to-end for a
+`REFINEDtpt` only reachable through a hidden route. Every 5d2a/5d2b regression
+suite (`tests/refined_tpt_enter.rs`, `tests/refined_tpt_project.rs`,
+`tests/refined_tpt_real.rs`, `tests/lambda_tpt.rs`, and the rest of the
+workspace) is unchanged and still green — this milestone changes *when* pass 1
+discovers an identity, not what `REFINEDtpt`/`LAMBDAtpt` project to.
+
+Corpus impact: the 2 library `Trait` self-types 5d2b measured as
+`MissingRefinementClass`/`InvalidRefinementClass` no longer fail for a missing
+pass-1 identity (no occurrence of either error, or of the "refinement
+semantic-state error" completion bucket, anywhere in any of the twelve run
+permutations). `unexpected errors: 0` holds throughout, and no existing
+completion count regresses (`Trait`, `Class`, `Method`, `Constructor`,
+`Field`, `Parameter`, `TypeParameter`, `TypeAlias`, `ModuleClass` completion
+counts are byte-identical to the pre-5d2c corpus run in every permutation).
+
+Milestone 5d is closed by this issue; the roadmap continues at 5e (symbol
+annotations, companion links, opaque aliases), driven by the next measured
+corpus gap.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -1705,6 +1819,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      owner-class result) — complete;
    - 5d2b: `REFINEDtpt`'s synthetic refinement class, `close_over_this` and the
      `Refined`/`Recursive` projection — complete;
+   - 5d2c: semantic identity discovery parity — a mode-aware pass-1 walker
+     mirroring every supported projection route to `LAMBDAtpt`/`REFINEDtpt`
+     — complete; Milestone 5d is closed;
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.

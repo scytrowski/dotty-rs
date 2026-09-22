@@ -26,6 +26,7 @@ mod binders;
 mod class;
 mod completion;
 mod constructor;
+mod discovery;
 mod enter;
 mod error;
 mod index;

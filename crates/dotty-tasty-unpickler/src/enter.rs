@@ -49,16 +49,15 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
-    ANNOTATEDTPT_TAG, APPLIEDTPT_TAG, APPLY_TAG, BLOCK_TAG, BYNAMETPT_TAG, DEFDEF_TAG,
-    DefinitionBody, EMPTYCLAUSE_TAG, EXPLICITTPT_TAG, LAMBDATPT_TAG, NEW_TAG, PACKAGE_TAG,
-    PARAM_TAG, ParameterNode, REFINEDTPT_TAG, RawTree, SELECTIN_TAG, SHAREDTERM_TAG,
-    SHAREDTYPE_TAG, SPLITCLAUSE_TAG, StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG,
-    TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue,
-    VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, EMPTYCLAUSE_TAG, NEW_TAG, PACKAGE_TAG,
+    PARAM_TAG, ParameterNode, RawTree, SELECTIN_TAG, SHAREDTYPE_TAG, SPLITCLAUSE_TAG,
+    StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+    TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
 
 use crate::ast_view::{AstView, MAX_SHARED_DEPTH, address};
 use crate::class::{parent_constructor_is_applied, template_parts};
+use crate::discovery::DiscoveryMode;
 use crate::error::UnpickleError;
 use crate::mapping::{
     DeclaredModifiers, QualifiedAccess, QualifierRef, REFINEMENT_CLASS_NAME, def_def_kind,
@@ -68,8 +67,10 @@ use crate::names::{package_segments, wire_name};
 use crate::packages::enter_in_scope;
 use crate::unpickler::TastyUnpickler;
 
-/// How deep a type tree may nest before pass 1 refuses it.
-const MAX_TREE_DEPTH: usize = 256;
+/// How deep a type tree may nest before pass 1 refuses it. Shared with the
+/// identity-discovery walker ([`crate::discovery`]), which is the successor
+/// of the scan this bound originally guarded.
+pub(crate) const MAX_TREE_DEPTH: usize = 256;
 
 /// What [`TastyUnpickler::enter_definition_header`] learned, for
 /// [`TastyUnpickler::enter_definition_body`] to continue with.
@@ -277,10 +278,10 @@ impl TastyUnpickler<'_, '_, '_> {
     /// The scanning half of entering a definition: its own class scope and
     /// template, or parameters and result, or declared-type `LAMBDAtpt`/
     /// `REFINEDtpt` scan, following [`enter_definition_header`](Self::enter_definition_header).
-    /// `depth` bounds the walk the way [`enter_lambdas_in`](Self::enter_lambdas_in) does; a
-    /// definition reached directly from a package or a class template passes
-    /// `0`, and a refinement member passes the depth its `REFINEDtpt` was
-    /// found at.
+    /// `depth` bounds the walk the way [`discover_identities`](crate::discovery)
+    /// does; a definition reached directly from a package or a class template
+    /// passes `0`, and a refinement member passes the depth its `REFINEDtpt`
+    /// was found at.
     fn enter_definition_body(
         &mut self,
         ast: &AstView<'_>,
@@ -297,11 +298,11 @@ impl TastyUnpickler<'_, '_, '_> {
                     self.enter_class_scope(symbol)?;
                     self.enter_template(ast, at, symbol)?;
                 } else {
-                    self.enter_declared_lambdas(ast, at, symbol, depth)?;
+                    self.discover_declared_type_identities(ast, at, symbol, depth)?;
                 }
             }
             DefinitionHeader::Val { symbol } => {
-                self.enter_declared_lambdas(ast, at, symbol, depth)?;
+                self.discover_declared_type_identities(ast, at, symbol, depth)?;
             }
             DefinitionHeader::Method { symbol: method } => {
                 self.enter_parameters(ast, at, method, false, depth)?;
@@ -314,7 +315,13 @@ impl TastyUnpickler<'_, '_, '_> {
                     )
                 });
                 if let Some(result) = result {
-                    self.enter_lambdas_in(ast, address(result.offset), method, depth)?;
+                    self.discover_identities(
+                        ast,
+                        address(result.offset),
+                        method,
+                        DiscoveryMode::TypeTree,
+                        depth,
+                    )?;
                 }
             }
         }
@@ -354,7 +361,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if let Some(self_def) = parts.self_def
             && let Some(tree) = ast.children(self_def).first()
         {
-            self.enter_lambdas_in(ast, address(tree.offset), class, 0)?;
+            self.discover_identities(ast, address(tree.offset), class, DiscoveryMode::TypeTree, 0)?;
         }
         Ok(())
     }
@@ -408,7 +415,13 @@ impl TastyUnpickler<'_, '_, '_> {
                 // take ownership from, or conflict with, a parent that is read.
                 if !parent_constructor_is_applied(ast, *function) {
                     for argument in arguments {
-                        self.enter_lambdas_in(ast, *argument, class, depth + 1)?;
+                        self.discover_identities(
+                            ast,
+                            *argument,
+                            class,
+                            DiscoveryMode::TypeTree,
+                            depth + 1,
+                        )?;
                     }
                 }
                 Ok(())
@@ -416,13 +429,19 @@ impl TastyUnpickler<'_, '_, '_> {
             Some(SELECTIN_TAG) => match children.first() {
                 Some(new) if ast.tag_at(*new) == Some(NEW_TAG) => {
                     for tpt in ast.children(*new) {
-                        self.enter_lambdas_in(ast, address(tpt.offset), class, depth + 1)?;
+                        self.discover_identities(
+                            ast,
+                            address(tpt.offset),
+                            class,
+                            DiscoveryMode::TypeTree,
+                            depth + 1,
+                        )?;
                     }
                     Ok(())
                 }
                 _ => Ok(()),
             },
-            _ => self.enter_lambdas_in(ast, at, class, depth + 1),
+            _ => self.discover_identities(ast, at, class, DiscoveryMode::TypeTree, depth + 1),
         }
     }
 
@@ -478,114 +497,56 @@ impl TastyUnpickler<'_, '_, '_> {
                 member: is_member,
             },
         )?;
-        self.enter_declared_lambdas(ast, at, symbol, depth)?;
+        self.discover_declared_type_identities(ast, at, symbol, depth)?;
         Ok(())
     }
 
-    /// Scans the declared type tree of the definition at `at` (its first
-    /// child: a type, bounds or right-hand side) for `LAMBDAtpt`/`REFINEDtpt`
-    /// identities owned by `owner`.
-    fn enter_declared_lambdas(
-        &mut self,
-        ast: &AstView<'_>,
-        at: u32,
-        owner: SymbolId,
-        depth: usize,
-    ) -> Result<(), UnpickleError> {
-        if let Some(tree) = ast.children(at).first() {
-            self.enter_lambdas_in(ast, address(tree.offset), owner, depth)?;
-        }
-        Ok(())
-    }
-
-    /// Walks the type tree at `tree`, entering the type parameters of every
-    /// `LAMBDAtpt` in it for `owner`. `depth` bounds the nesting, links and
-    /// lambdas alike.
-    fn enter_lambdas_in(
+    /// Enters the type parameters of the `LAMBDAtpt` at `tree`, owned by
+    /// `owner`: Dotty's `newRefinedClassSymbol`-adjacent `TYPEPARAM` entering
+    /// (Milestone 5c). Called from every
+    /// [`DiscoveryMode::TypeTree`](crate::discovery::DiscoveryMode::TypeTree)
+    /// route that reaches a `LAMBDAtpt` — a direct child of a declared type
+    /// tree, or a `LAMBDAtpt` found "hidden" behind a `SELECTtpt` qualifier,
+    /// a `THIS` class reference, or any other broadened route (Milestone
+    /// 5d2c). A second owner reaching the same tree keeps the first
+    /// (`has_lambda_owner_conflict`); every parameter is entered before any
+    /// bounds or the body are walked, so they can refer to one another.
+    pub(crate) fn enter_lambda_tpt(
         &mut self,
         ast: &AstView<'_>,
         tree: u32,
+        children: &[u32],
         owner: SymbolId,
         depth: usize,
     ) -> Result<(), UnpickleError> {
-        if depth > MAX_TREE_DEPTH {
+        match self.index.lambda_owner(tree) {
+            Some(first) if first == owner => return Ok(()),
+            Some(_) => {
+                self.index.mark_lambda_conflict(tree);
+                return Ok(());
+            }
+            None => self.index.insert_lambda_owner(tree, owner),
+        }
+        ast.node(tree)?.decode_lambda_tpt()?;
+        let Some((body, params)) = children.split_last() else {
             return Err(UnpickleError::MalformedType {
                 address: tree,
-                reason: "a type tree nests too deeply",
+                reason: "a lambda type tree has type parameters and a body",
             });
-        }
-        let Some(tag) = ast.tag_at(tree) else {
-            return Ok(());
         };
-        if !matches!(
-            tag,
-            SHAREDTERM_TAG
-                | LAMBDATPT_TAG
-                | REFINEDTPT_TAG
-                | APPLIEDTPT_TAG
-                | BYNAMETPT_TAG
-                | EXPLICITTPT_TAG
-                | TYPEBOUNDSTPT_TAG
-                | ANNOTATEDTPT_TAG
-        ) || !self.index.first_declared_tree_scan(tree, owner)
-        {
-            return Ok(());
+        // Every parameter is entered before any bounds or the body are
+        // walked, so they can refer to one another.
+        for param in params {
+            if ast.tag_at(*param) != Some(TYPEPARAM_TAG) {
+                return Err(UnpickleError::MalformedType {
+                    address: tree,
+                    reason: "a lambda type tree parameter is not a type parameter",
+                });
+            }
+            let parameter = ast.node(*param)?.decode_parameter()?;
+            self.enter_parameter(ast, *param, &parameter, owner, false, depth + 1)?;
         }
-        let children: Vec<u32> = ast
-            .children(tree)
-            .iter()
-            .map(|child| address(child.offset))
-            .collect();
-        match tag {
-            SHAREDTERM_TAG => {
-                // A link to a tree written earlier: walked as if it were here.
-                // A chain of links is bounded like every shared chain.
-                let target = ast.resolve_shared_term(tree, tree)?;
-                self.enter_lambdas_in(ast, target, owner, depth + 1)
-            }
-            LAMBDATPT_TAG => {
-                match self.index.lambda_owner(tree) {
-                    Some(first) if first == owner => return Ok(()),
-                    Some(_) => {
-                        self.index.mark_lambda_conflict(tree);
-                        return Ok(());
-                    }
-                    None => self.index.insert_lambda_owner(tree, owner),
-                }
-                ast.node(tree)?.decode_lambda_tpt()?;
-                let Some((body, params)) = children.split_last() else {
-                    return Err(UnpickleError::MalformedType {
-                        address: tree,
-                        reason: "a lambda type tree has type parameters and a body",
-                    });
-                };
-                // Every parameter is entered before any bounds or the body
-                // are walked, so they can refer to one another.
-                for param in params {
-                    if ast.tag_at(*param) != Some(TYPEPARAM_TAG) {
-                        return Err(UnpickleError::MalformedType {
-                            address: tree,
-                            reason: "a lambda type tree parameter is not a type parameter",
-                        });
-                    }
-                    let parameter = ast.node(*param)?.decode_parameter()?;
-                    self.enter_parameter(ast, *param, &parameter, owner, false, depth + 1)?;
-                }
-                self.enter_lambdas_in(ast, *body, owner, depth + 1)
-            }
-            REFINEDTPT_TAG => self.enter_refined_tpt(ast, tree, &children, owner, depth),
-            // A type tree with the annotation to be ignored: only the base.
-            ANNOTATEDTPT_TAG => match children.first() {
-                Some(base) => self.enter_lambdas_in(ast, *base, owner, depth + 1),
-                None => Ok(()),
-            },
-            _ => {
-                for child in children {
-                    self.enter_lambdas_in(ast, child, owner, depth + 1)?;
-                }
-                Ok(())
-            }
-        }
+        self.discover_identities(ast, *body, owner, DiscoveryMode::TypeTree, depth + 1)
     }
 
     /// Enters the `REFINEDtpt` at `tree`, owned by `owner`: its synthetic
@@ -609,7 +570,7 @@ impl TastyUnpickler<'_, '_, '_> {
     /// (the final `Refined`/`Recursive` graph, Milestone 5d2b's projection)
     /// is therefore a second, independent thing this same address names; see
     /// the index module's documentation.
-    fn enter_refined_tpt(
+    pub(crate) fn enter_refined_tpt(
         &mut self,
         ast: &AstView<'_>,
         tree: u32,
@@ -688,7 +649,7 @@ impl TastyUnpickler<'_, '_, '_> {
             self.enter_definition_body(ast, stat, header, depth + 1)?;
         }
 
-        self.enter_lambdas_in(ast, *parent, owner, depth + 1)
+        self.discover_identities(ast, *parent, owner, DiscoveryMode::TypeTree, depth + 1)
     }
 
     /// Allocates the symbol for a definition, records its address, and
