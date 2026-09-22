@@ -59,6 +59,9 @@ where
             );
         }
 
+        // This state belongs to the enclosing template member loop. A
+        // completed body must not affect a later, unrelated template.
+        self.defer_template_outdent_feedback = false;
         members
     }
 
