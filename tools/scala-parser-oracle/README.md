@@ -71,10 +71,11 @@ definition nodes. The renderer exposes the source-level `Trait` distinction,
 modern `given` aliases and structural templates, and `ExtMethods` parameter
 clauses with method/export children. Anonymous given names remain empty rather
 than being replaced with synthetic names. Extension fixtures cover generic and
-`using` prefixes, receiver ordering, colon/braced/indented bodies, method
-modifiers and annotations, multiple methods, and exports. Constructor parent
-applications remain in the same `New`/`Select`/`Apply` shape as the Scala
-parser; semantic given synthesis and extension lowering are not compared.
+`using` prefixes, receiver ordering, braced/indented bodies, rejection of a
+colon directly after the header, method modifiers and annotations, multiple
+methods, and exports. Constructor parent applications remain in the same
+`New`/`Select`/`Apply` shape as the Scala parser; semantic given synthesis and
+extension lowering are not compared.
 
 Fixtures under `fixtures/compilation/` use `compilation` mode. Scala calls the
 real `Parser.compilationUnit()` entry and Rust calls `parse_compilation_unit`.

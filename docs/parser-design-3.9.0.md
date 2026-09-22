@@ -315,10 +315,11 @@ wrapper. Its parameter clauses remain in source order: leading type parameters,
 leading `using` clauses, exactly one ordinary receiver, and trailing `using`
 clauses. The wrapper's methods preserve `DefDef` and `Export` members in source
 order. Extension receiver parameters are ordinary `ValDef` parameters, not
-constructor accessors. Braced, colon-led, and scanner-provided indented bodies
-are supported; ordinary clauses after the receiver and non-method body members
-are diagnosed. This is source structure only: no given synthesis, extension
-lowering, symbol creation, or semantic resolution is performed.
+constructor accessors. Braced and scanner-provided indented bodies are
+supported; a colon directly after the extension header is rejected according to
+the Scala 3.9 grammar. Ordinary clauses after the receiver and non-method body
+members are diagnosed. This is source structure only: no given synthesis,
+extension lowering, symbol creation, or semantic resolution is performed.
 
 ### Definition prefixes and source metadata
 
