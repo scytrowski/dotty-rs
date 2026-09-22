@@ -446,7 +446,11 @@ mod tests {
         let params = parser.parse_type_param_clause(ParamOwner::Class);
 
         assert_eq!(params.len(), 1);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        let diagnostic = &parser.diagnostics()[0];
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType);
+        assert_eq!(diagnostic.message(), "expected a type parameter name");
+        assert_eq!(diagnostic.span(), TextRange::new(1, 2).unwrap());
     }
 
     #[test]
