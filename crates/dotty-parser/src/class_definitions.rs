@@ -1249,6 +1249,58 @@ mod tests {
     }
 
     #[test]
+    fn rejects_prefixed_enum_cases_but_preserves_a_following_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { private case class C\ndef f = x }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Private), 9, 16),
+                token(TokenKind::CaseClass, 17, 27),
+                token(TokenKind::Identifier, 28, 29),
+                token(TokenKind::Newline, 29, 30),
+                token(TokenKind::Keyword(HardKeyword::Def), 30, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Operator, 36, 37),
+                token(TokenKind::Identifier, 38, 39),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 40, 41),
+                token(TokenKind::Eof, 41, 41),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(
+            parser
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
+                .count(),
+            1
+        );
+        assert!(parser.diagnostics()[0].message().contains("enum cases"));
+    }
+
+    #[test]
     fn does_not_treat_case_classes_in_nested_templates_as_enum_cases() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

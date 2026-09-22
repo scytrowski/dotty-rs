@@ -51,6 +51,9 @@ where
         }
         if self.starts_definition_prefix() {
             let prefix = self.parse_definition_prefix();
+            if self.context.enum_body && is_enum_case_start(self.current().kind) {
+                return self.parse_unsupported_enum_case();
+            }
             return self.parse_prefixed_definition(location, prefix);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Given) {
