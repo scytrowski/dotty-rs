@@ -84,7 +84,12 @@ impl ContextualScanner {
         if next.kind == TokenKind::Eof {
             return false;
         }
-        if !has_source_line_break(&self.source, current.span.end(), next.span.start()) {
+        let current_end = if is_layout_token(current.kind) {
+            current.span.start()
+        } else {
+            current.span.end()
+        };
+        if !has_source_line_break(&self.source, current_end, next.span.start()) {
             return false;
         }
         let current_indent = line_indentation(&self.source, current.span.start());
@@ -131,7 +136,13 @@ impl ContextualScanner {
             };
             let region_indent =
                 line_indentation(&self.source, self.tokens[indent_index].span.start());
-            let current_indent = line_indentation(&self.source, self.tokens[index].span.start());
+            let current_offset = if is_layout_token(self.tokens[index].kind) {
+                next_real_token(&self.tokens, index)
+                    .map_or(self.tokens[index].span.start(), |token| token.span.start())
+            } else {
+                self.tokens[index].span.start()
+            };
+            let current_indent = line_indentation(&self.source, current_offset);
             if !matches!(
                 current_indent.ordering(&region_indent),
                 IndentOrdering::Less
@@ -1930,6 +1941,20 @@ mod tests {
     }
 
     #[test]
+    fn indented_feedback_after_a_newline_token_opens_a_layout_region() {
+        let mut scanner =
+            ContextualScanner::new("receiver\n  def method = body").expect("source scans");
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Newline);
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+    }
+
+    #[test]
     fn parser_feedback_closes_nested_indentation_regions_in_order() {
         let mut scanner =
             ContextualScanner::new("root:\n  child:\n    leaf\nback").expect("source scans");
@@ -2016,6 +2041,25 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn parser_feedback_closes_a_region_when_current_is_a_newline() {
+        let mut scanner = ContextualScanner::new("root:\n  child\nnext").expect("source scans");
+
+        scanner.advance();
+        scanner.observe(ScannerEvent::ColonEol { in_template: false });
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        scanner.advance();
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Newline);
+
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Newline);
     }
 
     #[test]

@@ -137,6 +137,11 @@ TopStat         -> package QualId body
                  | import ImportExpr {',' ImportExpr}
                  | export ImportExpr {',' ImportExpr}
                  | supported top-level definition
+
+Supported contextual definitions include modern `given` aliases and
+structural instances, plus contextual `extension` method groups. Ordinary
+expression uses of `extension` remain expressions unless the bounded lookahead
+sees `[` or `(`.
 ```
 
 Package bodies may be braced, scanner-provided indented regions, or the
@@ -282,6 +287,40 @@ template region. The parser preserves `derives` and ordered `uses` metadata in
 Sequence capture references, `.only[...]`/`.rd` forms, enum definitions,
 auxiliary constructors, and semantic template processing remain future work.
 
+### Contextual definitions
+
+The implemented `given` subset follows the Scala 3.9 source parser's node-kind
+matrix:
+
+```text
+given T = rhs                  -> ValDef
+given name: T = rhs            -> ValDef
+given [A] => T = rhs            -> DefDef
+given (using ctx: Ctx) => T = rhs -> DefDef
+given T: body                  -> ModuleDef(Template(...))
+given name: T: body            -> ModuleDef(Template(...))
+given [A] => T: body            -> TypeDef(Template(...))
+```
+
+Anonymous givens use the canonical empty interned term name; the parser does
+not synthesize a `$given_N` spelling. Unparameterized non-inline aliases carry
+Dotty's parser-added `Given`, `Final`, and `Lazy` metadata where applicable.
+Parameterized and `inline` aliases are represented as `DefDef` trees, and
+structural bodies reuse the ordinary `Template` machinery. Given conditions
+currently support type parameters and named `using` clauses; anonymous
+context-type parameters and the full `GivenType` grammar remain deferred.
+
+An extension is represented by the existing `UntypedNode::ExtensionMethods`
+wrapper. Its parameter clauses remain in source order: leading type parameters,
+leading `using` clauses, exactly one ordinary receiver, and trailing `using`
+clauses. The wrapper's methods preserve `DefDef` and `Export` members in source
+order. Extension receiver parameters are ordinary `ValDef` parameters, not
+constructor accessors. Braced and scanner-provided indented bodies are
+supported; a colon directly after the extension header is rejected according to
+the Scala 3.9 grammar. Ordinary clauses after the receiver and non-method body
+members are diagnosed. This is source structure only: no given synthesis,
+extension lowering, symbol creation, or semantic resolution is performed.
+
 ### Definition prefixes and source metadata
 
 Definitions share a parser-owned prefix step before dispatching to `val`,
@@ -300,7 +339,7 @@ set. It is attached to the existing definition nodes, including
 `ModuleDef.metadata`, so later phases can distinguish source syntax from
 semantic resolution. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-annotations, `given`/`enum` definitions, and feature-dependent
+parameter annotations, `enum` definitions, and feature-dependent
 `opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
@@ -317,7 +356,7 @@ named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
 `RefinedType`, remaining definition forms (including enums and full template
-semantics), remaining control flow (`do`/`while`),
+semantics), legacy given syntax, remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including

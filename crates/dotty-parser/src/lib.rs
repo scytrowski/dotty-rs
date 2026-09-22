@@ -16,6 +16,8 @@ mod cursor;
 mod definitions;
 mod diagnostics;
 mod expr;
+mod extensions;
+mod givens;
 mod imports;
 mod infix;
 mod literals;

@@ -473,7 +473,7 @@ where
         }
     }
 
-    fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
+    pub(crate) fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if matches!(
             self.current().kind,
@@ -880,6 +880,141 @@ where
                 metadata: Modifiers::default(),
             }),
             Some(position),
+        );
+        (constructor, constructor_start)
+    }
+    /// Builds the existing source-level template shape used by a structural
+    /// given. A given has no class name of its own, but its parent and body use
+    /// exactly the same template machinery as class-like definitions.
+    pub(crate) fn allocate_given_template(
+        &mut self,
+        start: u32,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        parent: TreeId<Untyped>,
+        body: Vec<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        let (constructor, constructor_start) = self.synthetic_given_constructor(
+            start,
+            type_params,
+            value_param_clauses,
+            parent,
+            &body,
+        );
+        let tail = TemplateTail {
+            parents: vec![parent],
+            self_val: None,
+            body,
+            metadata: UntypedTemplateMetadata::default(),
+        };
+        let position = self.template_position(constructor, constructor_start, &tail);
+        let template = self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Template(Template {
+                constructor,
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
+            }),
+        );
+        self.ast.get_mut(template).position = Some(position);
+        template
+    }
+
+    fn synthetic_given_constructor(
+        &mut self,
+        start: u32,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        parent: TreeId<Untyped>,
+        body: &[TreeId<Untyped>],
+    ) -> (TreeId<Untyped>, u32) {
+        for type_param in &type_params {
+            if let TreeKind::TypeDef(definition) = &mut self.ast.get_mut(*type_param).kind
+                && !definition
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::PrivateLocal)
+            {
+                definition.metadata.modifiers.push(Modifier::PrivateLocal);
+            }
+        }
+        for parameter in value_param_clauses.iter().flatten() {
+            if let TreeKind::ValDef(definition) = &mut self.ast.get_mut(*parameter).kind
+                && !definition
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::ParamAccessor)
+            {
+                definition.metadata.modifiers.push(Modifier::ParamAccessor);
+            }
+        }
+
+        let type_param_start = type_params.first().and_then(|child| {
+            self.ast
+                .get(*child)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let value_param_start = value_param_clauses
+            .iter()
+            .flat_map(|clause| clause.iter())
+            .next()
+            .and_then(|child| {
+                self.ast
+                    .get(*child)
+                    .position
+                    .map(|position| position.span().range().start())
+            });
+        let parent_start = self
+            .ast
+            .get(parent)
+            .position
+            .map(|position| position.span().range().start());
+        let body_start = body.first().and_then(|member| {
+            self.ast
+                .get(*member)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let constructor_start = type_param_start
+            .or(value_param_start)
+            .or(parent_start)
+            .or(body_start)
+            .unwrap_or(start);
+        let constructor_end = value_param_clauses
+            .last()
+            .and_then(|clause| clause.last())
+            .and_then(|parameter| self.ast.get(*parameter).position)
+            .map(|position| position.span().range().end())
+            .or_else(|| {
+                type_params
+                    .last()
+                    .and_then(|parameter| self.ast.get(*parameter).position)
+                    .map(|position| position.span().range().end())
+            })
+            .or(parent_start)
+            .or(body_start)
+            .unwrap_or(constructor_start);
+        let tpt = self.synthetic_type_tree_at(constructor_end);
+        let constructor_name = TermName::new(self.names.intern("<init>"));
+        let constructor = self.alloc(
+            TreeKind::DefDef(DefDef {
+                name: constructor_name,
+                type_params,
+                value_param_clauses,
+                tpt,
+                rhs: None,
+                metadata: Modifiers::default(),
+            }),
+            Some(dotty_core::SourceSpan::new(
+                self.source_id,
+                dotty_core::Span::without_point(
+                    dotty_core::TextRange::new(constructor_start, constructor_end)
+                        .expect("given constructor span is ordered"),
+                ),
+            )),
         );
         (constructor, constructor_start)
     }
