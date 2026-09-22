@@ -129,7 +129,7 @@ where
         lhs
     }
 
-    fn current_is_bare_assignment(&mut self) -> bool {
+    pub(crate) fn current_is_bare_assignment(&mut self) -> bool {
         self.current().kind == TokenKind::Operator && self.current_text().ok() == Some("=")
     }
 

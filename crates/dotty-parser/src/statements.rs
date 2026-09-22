@@ -22,11 +22,36 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Returns whether `extension` is being used as the contextual
+    /// extension-definition introducer.
+    ///
+    /// `extension` remains an ordinary identifier unless Scala's bounded
+    /// lookahead sees the first parameter/type-parameter clause. This mirrors
+    /// Dotty's `followingIsExtension` rule without teaching the lexer about
+    /// the contextual keyword.
+    pub(crate) fn starts_extension_definition(&mut self) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self
+                .intern_current_term_name()
+                .ok()
+                .is_some_and(|name| name == self.known_names.extension)
+            && matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Punctuation(Punctuation::LeftBracket | Punctuation::LeftParen)
+            )
+    }
+
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        if self.starts_extension_definition() {
+            return self.parse_extension_definition(location);
+        }
         if self.starts_definition_prefix() {
             let prefix = self.parse_definition_prefix();
             return self.parse_prefixed_definition(location, prefix);
+        }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Given) {
+            return self.parse_given_definition(location);
         }
         if matches!(
             self.current().kind,
@@ -99,6 +124,9 @@ where
             }
             TokenKind::CaseClass => self.parse_case_class_definition_with_prefix(prefix),
             TokenKind::CaseObject => self.parse_case_object_definition_with_prefix(prefix),
+            TokenKind::Keyword(HardKeyword::Given) => {
+                self.parse_given_definition_with_prefix(location, prefix)
+            }
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
@@ -333,11 +361,7 @@ const fn is_unsupported_start(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Keyword(
-            HardKeyword::Match
-                | HardKeyword::Val
-                | HardKeyword::Var
-                | HardKeyword::Enum
-                | HardKeyword::Given
+            HardKeyword::Match | HardKeyword::Val | HardKeyword::Var | HardKeyword::Enum
         )
     )
 }
@@ -368,7 +392,42 @@ const fn is_top_level_statement_start(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{NameInterner, TextRange, TokenKind, TreeKind};
+    use dotty_core::{NameInterner, Punctuation, TextRange, TokenKind, TreeKind};
+
+    #[test]
+    fn recognizes_extension_only_when_a_parameter_clause_follows() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x)",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        assert!(parser.starts_extension_definition());
+    }
+
+    #[test]
+    fn keeps_extension_as_an_expression_identifier_without_a_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension + 1",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::IntegerLiteral, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        assert!(!parser.starts_extension_definition());
+    }
 
     #[test]
     fn statement_sequence_keeps_the_final_expression_as_the_result() {
