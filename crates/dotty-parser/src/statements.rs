@@ -174,6 +174,8 @@ where
 
             if self.is_sequence_separator(boundary) {
                 self.consume_sequence_separators(boundary);
+            } else if self.last_advance_was_outdent {
+                self.last_advance_was_outdent = false;
             } else if !self.sequence_ended(boundary) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -230,6 +232,8 @@ where
 
             if self.is_sequence_separator(boundary) {
                 self.consume_sequence_separators(boundary);
+            } else if self.last_advance_was_outdent {
+                self.last_advance_was_outdent = false;
             } else if !self.sequence_ended(boundary) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
