@@ -207,6 +207,11 @@ where
         self.observe(ScannerEvent::ArrowIndented);
     }
 
+    /// Tells the scanner that a template self-type arrow was consumed.
+    pub fn observe_self_arrow(&mut self) {
+        self.observe(ScannerEvent::SelfArrow);
+    }
+
     /// Advances the parser and records the end of a real token.
     pub fn advance(&mut self) {
         let (kind, end) = {
@@ -931,6 +936,7 @@ mod tests {
         parser.observe_indented();
         parser.observe_outdented();
         parser.observe_arrow_indented();
+        parser.observe_self_arrow();
 
         assert_eq!(
             *observed.borrow(),
@@ -939,6 +945,7 @@ mod tests {
                 ScannerEvent::Indented,
                 ScannerEvent::Outdented,
                 ScannerEvent::ArrowIndented,
+                ScannerEvent::SelfArrow,
             ]
         );
     }

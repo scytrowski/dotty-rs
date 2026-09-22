@@ -12,13 +12,14 @@ object Main:
     val (mode, path) = args.toList match
       case path :: Nil => ("expr", path)
       case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
+      case "--mode" :: "block" :: path :: Nil => ("expr", path)
       case "--mode" :: "compilation" :: path :: Nil => ("compilation", path)
       case "--batch" :: manifest :: Nil =>
         runBatch(manifest)
         return
       case _ =>
         throw IllegalArgumentException(
-          "usage: scala-parser-oracle [--mode pattern|compilation] <source-file> | --batch manifest"
+          "usage: scala-parser-oracle [--mode pattern|block|compilation] <source-file> | --batch manifest"
         )
 
     println(parseAndRender(mode, path))

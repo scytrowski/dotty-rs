@@ -6,7 +6,8 @@
 //! interpreted.  The actual class-like definition parser is layered on top of
 //! this helper.
 
-use dotty_core::{Punctuation, TokenKind, TreeId, Untyped};
+use dotty_core::ast::{Modifier, Modifiers, ValDef};
+use dotty_core::{HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 
@@ -15,6 +16,11 @@ use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 pub(crate) enum TemplateBody {
     Braced,
     Indented,
+}
+
+pub(crate) struct TemplateBodyResult {
+    pub self_val: Option<TreeId<Untyped>>,
+    pub members: Vec<TreeId<Untyped>>,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -26,7 +32,7 @@ where
     /// The opening and closing delimiter belong to this helper.  In the
     /// indented form the scanner has already classified the layout and the
     /// parser only consumes the resulting `Indent`/`Outdent` tokens.
-    pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> Vec<TreeId<Untyped>> {
+    pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
                 TokenKind::Punctuation(Punctuation::LeftBrace),
@@ -36,12 +42,15 @@ where
         };
 
         if !self.expect(opening) {
-            return Vec::new();
+            return TemplateBodyResult {
+                self_val: None,
+                members: Vec::new(),
+            };
         }
 
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
 
-        let members = self.with_placeholder_scope(|parser| {
+        let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
                     parser.parse_template_members(closing, body_indent)
@@ -62,15 +71,17 @@ where
         // This state belongs to the enclosing template member loop. A
         // completed body must not affect a later, unrelated template.
         self.defer_template_outdent_feedback = false;
-        members
+        result
     }
 
     fn parse_template_members(
         &mut self,
         closing: TokenKind,
         body_indent: String,
-    ) -> Vec<TreeId<Untyped>> {
+    ) -> TemplateBodyResult {
         let mut members = Vec::new();
+        self.consume_template_separators(closing);
+        let self_val = self.parse_template_self();
         self.consume_template_separators(closing);
 
         loop {
@@ -131,7 +142,154 @@ where
             }
         }
 
-        members
+        TemplateBodyResult { self_val, members }
+    }
+
+    fn parse_template_self(&mut self) -> Option<TreeId<Untyped>> {
+        if !self.starts_template_self() {
+            return None;
+        }
+
+        let mark = self.mark();
+        let is_this = self.current().kind == TokenKind::Keyword(HardKeyword::This);
+        let name = if is_this {
+            self.advance();
+            TermName::new(self.names.intern("_"))
+        } else {
+            match self.intern_current_term_name() {
+                Ok(name) => {
+                    self.advance();
+                    name
+                }
+                Err(_) => return None,
+            }
+        };
+        let has_colon = self.accept_self_colon();
+        if is_this && !has_colon {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `:` after `this` in a template self type",
+            );
+        }
+        let tpt = if has_colon {
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+        } else {
+            self.synthetic_type_tree_at(mark.start())
+        };
+        if self.starts_unsupported_self_type_tail() {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                "compound template self types are not supported yet",
+            );
+            self.recover_self_type_tail();
+        }
+        if self.current_is_arrow() {
+            self.observe_self_arrow();
+            self.advance();
+        } else {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after a template self type",
+            );
+        }
+
+        Some(self.alloc_from(
+            mark,
+            TreeKind::ValDef(ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata: Modifiers {
+                    modifiers: vec![Modifier::PrivateLocal],
+                    ..Modifiers::default()
+                },
+            }),
+        ))
+    }
+
+    fn starts_unsupported_self_type_tail(&mut self) -> bool {
+        match self.current().kind {
+            TokenKind::Operator | TokenKind::ColonOp => !self.current_text_is("=>"),
+            TokenKind::Keyword(HardKeyword::With) => true,
+            TokenKind::Punctuation(Punctuation::LeftBracket) => true,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                matches!(
+                    self.cursor.lookahead(1).kind,
+                    TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn recover_self_type_tail(&mut self) {
+        while !self.current_is_arrow()
+            && !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Eof
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            )
+        {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn starts_template_self(&mut self) -> bool {
+        let is_name = matches!(
+            self.current().kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Keyword(HardKeyword::This)
+        );
+        if !is_name {
+            return false;
+        }
+        if self.cursor.lookahead(1).kind == TokenKind::Operator
+            && self.source.slice(self.cursor.lookahead(1).span).ok() == Some("=>")
+        {
+            return true;
+        }
+        if !is_self_colon(self.cursor.lookahead(1).kind) {
+            return false;
+        }
+        let mut offset = 2;
+        loop {
+            let token = self.cursor.lookahead(offset);
+            if matches!(
+                token.kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Eof
+                    | TokenKind::Punctuation(Punctuation::LeftBrace)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            ) {
+                return false;
+            }
+            if token.kind == TokenKind::Operator && self.source.slice(token.span).ok() == Some("=>")
+            {
+                return true;
+            }
+            offset = offset.saturating_add(1);
+        }
+    }
+
+    fn accept_self_colon(&mut self) -> bool {
+        if is_self_colon(self.current().kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     fn feedback_template_outdent(&mut self, body_indent: &str) {
@@ -187,6 +345,16 @@ where
     }
 }
 
+const fn is_self_colon(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Punctuation(Punctuation::Colon)
+            | TokenKind::ColonFollow
+            | TokenKind::ColonOp
+            | TokenKind::ColonEol
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +380,7 @@ mod tests {
             &mut names,
         );
 
-        let members = parser.parse_template_body(TemplateBody::Braced);
+        let members = parser.parse_template_body(TemplateBody::Braced).members;
 
         assert_eq!(members.len(), 2);
         assert!(matches!(
@@ -243,7 +411,7 @@ mod tests {
             &mut names,
         );
 
-        let members = parser.parse_template_body(TemplateBody::Indented);
+        let members = parser.parse_template_body(TemplateBody::Indented).members;
 
         assert_eq!(members.len(), 2);
         assert!(
@@ -286,10 +454,166 @@ mod tests {
             &mut names,
         );
 
-        let members = parser.parse_template_body(TemplateBody::Braced);
+        let members = parser.parse_template_body(TemplateBody::Braced).members;
 
         assert!(members.is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_template_self_arrow_without_creating_a_nested_layout_region() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ self => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(matches!(
+            parser.ast().get(result.self_val.expect("self value")).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert_eq!(result.members.len(), 1);
+        assert!(matches!(
+            parser.ast().get(result.members[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_compound_self_types_without_losing_the_body_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ self: A & B => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn recovers_an_unsupported_self_type_application_at_the_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ self: Parent[T] => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 14),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 14, 15),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn parses_a_typed_this_self_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ this: Parent => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::This), 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        let self_val = result.self_val.expect("self value");
+        let TreeKind::ValDef(self_def) = &parser.ast().get(self_val).kind else {
+            panic!("expected self ValDef");
+        };
+        assert!(matches!(
+            parser.ast().get(self_def.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert_eq!(result.members.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_untyped_this_self_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ this => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::This), 2, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
     }
 }

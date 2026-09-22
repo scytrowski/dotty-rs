@@ -1,6 +1,7 @@
-use dotty_core::ast::{Ident, PackageDef, Select};
+use dotty_core::ast::PackageDef;
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
+use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::{ParsedStatement, StatementSequenceBoundary};
 use crate::{Location, ParseDiagnosticKind, Parser};
 
@@ -30,56 +31,27 @@ where
     }
 
     fn parse_package_name(&mut self) -> TreeId<Untyped> {
-        let mark = self.mark();
-        if !self.is_package_name() {
-            let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected a package name",
-            );
-            if self.current().kind != TokenKind::Eof {
-                self.advance();
+        match self.parse_qualified_reference(ReferenceNamespace::Term) {
+            Ok(tree) => tree,
+            Err(QualifiedReferenceError::MissingInitial) => {
+                let position = self.current_span();
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a package name",
+                );
+                if self.current().kind != TokenKind::Eof {
+                    self.advance();
+                }
+                self.error_expr(position)
             }
-            return self.error_expr(position);
-        }
-
-        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-        let Ok(name) = self.intern_current_term_name() else {
-            return self.error_expr(self.current_span());
-        };
-        self.advance();
-        let mut tree = self.alloc_from(
-            mark,
-            TreeKind::Ident(Ident {
-                name: *name.as_name(),
-                backquoted,
-            }),
-        );
-
-        while self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-            if !self.is_package_name() {
+            Err(QualifiedReferenceError::MissingSegment) => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected a package name after `.`",
                 );
-                break;
+                self.error_expr(self.current_span())
             }
-            let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-            let Ok(name) = self.intern_current_term_name() else {
-                break;
-            };
-            self.advance();
-            tree = self.alloc_from(
-                mark,
-                TreeKind::Select(Select {
-                    qualifier: tree,
-                    name: *name.as_name(),
-                    backquoted,
-                }),
-            );
         }
-
-        tree
     }
 
     fn parse_package_body(&mut self) -> Vec<TreeId<Untyped>> {
@@ -147,13 +119,6 @@ where
         ) {
             self.advance();
         }
-    }
-
-    fn is_package_name(&self) -> bool {
-        matches!(
-            self.current().kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        )
     }
 }
 

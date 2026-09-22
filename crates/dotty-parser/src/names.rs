@@ -16,6 +16,10 @@ pub struct KnownNames {
     pub open: TermName,
     pub transparent: TermName,
     pub using: TermName,
+    /// Contextual name used by template `uses` clauses.
+    pub uses: TermName,
+    /// Contextual name used by the `initially` clause in capture-aware syntax.
+    pub initially: TermName,
     /// Feature-dependent contextual name; its syntax is controlled by
     /// [`crate::ParserFeatures::into`].
     pub into: TermName,
@@ -41,6 +45,8 @@ impl KnownNames {
             open: term_name(names, "open"),
             transparent: term_name(names, "transparent"),
             using: term_name(names, "using"),
+            uses: term_name(names, "uses"),
+            initially: term_name(names, "initially"),
             into: term_name(names, "into"),
             erased: term_name(names, "erased"),
             tracked: term_name(names, "tracked"),
@@ -71,6 +77,8 @@ mod tests {
             (known.open, "open"),
             (known.transparent, "transparent"),
             (known.using, "using"),
+            (known.uses, "uses"),
+            (known.initially, "initially"),
             (known.into, "into"),
             (known.erased, "erased"),
             (known.tracked, "tracked"),
@@ -89,6 +97,8 @@ mod tests {
 
         assert!(known.as_.as_name().is_term());
         assert!(known.using.as_name().is_term());
+        assert!(known.uses.as_name().is_term());
+        assert!(known.initially.as_name().is_term());
         assert!(!known.using.as_name().is_type());
     }
 
