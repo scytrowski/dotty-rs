@@ -183,7 +183,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{NameInterner, TextRange};
+    use dotty_core::{NameInterner, Punctuation, TextRange};
 
     #[test]
     fn parses_anonymous_given_alias_with_the_empty_name() {
@@ -219,5 +219,180 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(name_id), "");
+    }
+
+    #[test]
+    fn parses_a_named_given_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given config: Config = makeConfig",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Operator, 21, 22),
+                token(TokenKind::Identifier, 23, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a value definition");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(definition.rhs.is_some());
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "config");
+    }
+
+    #[test]
+    fn parses_a_parameterized_given_alias_as_a_method_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A] => Show = makeShow",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        assert_eq!(definition.type_params.len(), 1);
+        assert!(definition.value_param_clauses.is_empty());
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
+        assert!(definition.metadata.modifiers.contains(&Modifier::Final));
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_named_using_parameters_method_like_on_a_given_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given (using ctx: Ctx) => Service = makeService",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Punctuation(Punctuation::Colon), 16, 17),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::Operator, 23, 25),
+                token(TokenKind::Identifier, 26, 33),
+                token(TokenKind::Operator, 34, 35),
+                token(TokenKind::Identifier, 36, 46),
+                token(TokenKind::Eof, 46, 46),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        let [parameter] = definition.value_param_clauses[0].as_slice() else {
+            panic!("expected one using parameter");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+            panic!("expected a value parameter");
+        };
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(
+            !parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(
+            !parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::PrivateLocal)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_prefix_without_synthesizing_lazy() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "inline given Config = makeConfig",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Given), 7, 12),
+                token(TokenKind::Identifier, 13, 19),
+                token(TokenKind::Operator, 20, 21),
+                token(TokenKind::Identifier, 22, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a value definition");
+        };
+        assert!(definition.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_private_prefix_on_a_named_given() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "private given config: Config = makeConfig",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Given), 8, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::Colon), 20, 21),
+                token(TokenKind::Identifier, 22, 28),
+                token(TokenKind::Operator, 29, 30),
+                token(TokenKind::Identifier, 31, 41),
+                token(TokenKind::Eof, 41, 41),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a value definition");
+        };
+        assert!(matches!(
+            definition.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 }
