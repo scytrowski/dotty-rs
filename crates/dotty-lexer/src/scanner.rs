@@ -160,6 +160,27 @@ impl ContextualScanner {
         true
     }
 
+    fn remove_pending_indent_after_current(&mut self) -> bool {
+        let mut index = self.current_index().saturating_add(1);
+        while self
+            .tokens
+            .get(index)
+            .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        {
+            index += 1;
+        }
+        if self
+            .tokens
+            .get(index)
+            .is_some_and(|token| token.kind == TokenKind::Indent)
+        {
+            self.tokens.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     fn current_is_arrow(&self) -> bool {
         let current = self.current();
         current.kind == TokenKind::Operator
@@ -233,6 +254,14 @@ impl TokenSource for ContextualScanner {
                 if self.current_is_arrow() && self.insert_indent_after_current() {
                     self.feedback_regions += 1;
                 }
+            }
+            ScannerEvent::SelfArrow => {
+                // A template self arrow is already inside the template's
+                // layout region. Unlike a lambda arrow it must not open a
+                // second synthetic indentation region. The eager scanner may
+                // already have inserted that region based on the raw arrow,
+                // so remove only that pending synthetic token here.
+                self.remove_pending_indent_after_current();
             }
         }
     }
@@ -2243,6 +2272,24 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn self_arrow_feedback_does_not_open_a_nested_body_region() {
+        let mut scanner = ContextualScanner::new("self =>\n  body").expect("source scans");
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::Operator);
+        scanner.observe(ScannerEvent::SelfArrow);
+        scanner.advance();
+
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
+        assert!(
+            !scanner
+                .tokens()
+                .iter()
+                .any(|token| token.kind == TokenKind::Indent)
         );
     }
 

@@ -174,7 +174,7 @@ where
         self.parse_super_tail(mark, qualifier)
     }
 
-    fn parse_super_tail(
+    pub(crate) fn parse_super_tail(
         &mut self,
         mark: crate::Mark,
         qualifier: TreeId<Untyped>,

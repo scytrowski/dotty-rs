@@ -26,6 +26,7 @@ mod parameters;
 mod parser;
 mod patterns;
 mod recovery;
+mod references;
 mod spans;
 mod statements;
 mod templates;

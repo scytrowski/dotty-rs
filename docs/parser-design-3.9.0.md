@@ -86,8 +86,9 @@ source that remains stuck is detected and terminates recovery.
 Scoped helpers restore the previous context after nested parsing, including
 recovery paths. `KnownNames` pre-interns the Scala 3.9 soft keywords `as`,
 `derives`, `extension`, `infix`, `inline`, `opaque`, `open`, `transparent`,
-and `using`. It also interns the future feature-dependent names `into`,
-`erased`, `tracked`, and `update`. The lexer still emits all of these as identifiers;
+`using`, `uses`, and `initially`. It also interns the future
+feature-dependent names `into`, `erased`, `tracked`, and `update`. The lexer
+still emits all of these as identifiers;
 parser context gives them grammar meaning only in the appropriate production.
 `ParserFeatures` currently exposes independent switches for capture checking,
 erased definitions, `into`, legacy `postfix_ops`, and experimental single-case
@@ -95,9 +96,10 @@ erased definitions, `into`, legacy `postfix_ops`, and experimental single-case
 The switches are a boundary for future grammar work, not an implementation of
 those features.
 
-The parser forwards `ColonEol`, `Indented`, `Outdented`, and `ArrowIndented`
-events through readable helpers. This keeps layout and colon reclassification
-in the scanner while allowing grammar decisions to remain in the parser.
+The parser forwards `ColonEol`, `Indented`, `Outdented`, `ArrowIndented`, and
+the template-specific `SelfArrow` event through readable helpers. A self arrow
+suppresses a pending nested indentation region; layout classification remains
+owned by the scanner while grammar decisions remain in the parser.
 
 ## Diagnostics and recovery
 
@@ -204,6 +206,8 @@ supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
 class, trait, object, case class, and case object definitions with type
 parameters, primary constructor clauses, simple `extends` parent applications,
+comma/`with` parent lists, `derives` and capture-checking `uses` clauses, basic
+`cap`/qualified capture references, self values (`self =>`, typed self types),
 and braced or indented template bodies. The class/trait/case distinctions are
 preserved in definition metadata; case objects remain `ModuleDef` trees. The
 synthetic primary constructor and template body remain parser-level structure.
@@ -265,12 +269,17 @@ a synthetic `<init>` `DefDef` and preserves the source parameter structure
 there.
 
 Braced and scanner-provided indented template bodies retain every member in
-source order, including nested definitions and expressions. This is
-deliberately different from an expression block, whose last expression is its
-result. Layout classification remains owned by the scanner; the parser only
-feeds back the `ColonEol`, `Indented`, and `Outdented` events needed to close a
-template region, including nested case definitions. Enum definitions,
-case-specific syntax beyond the supported class/object forms, self types,
+source order, including nested definitions and expressions. A self value is
+stored in the existing `Template.self_val`; its source-level `ValDef` carries
+`PrivateLocal`, matching Dotty's parser tree. The current type subset accepts
+simple qualified self types; compound `InfixType` forms are diagnosed and
+recovered at the self arrow until the fuller type grammar lands. This is
+deliberately different from an expression block, whose last expression is its result. Layout
+classification remains owned by the scanner; the parser only feeds back the
+`ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
+template region. The parser preserves `derives` and ordered `uses` metadata in
+`UntypedTemplateMetadata`; it does not perform derivation or capture checking.
+Sequence capture references, `.only[...]`/`.rd` forms, enum definitions,
 auxiliary constructors, and semantic template processing remain future work.
 
 ### Definition prefixes and source metadata

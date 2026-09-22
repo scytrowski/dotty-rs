@@ -1,7 +1,7 @@
-use dotty_core::ast::{Ident, Select};
-use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{Punctuation, TokenKind, TreeId, Untyped};
 
-use crate::Parser;
+use crate::references::{QualifiedReferenceError, ReferenceNamespace};
+use crate::{ParseDiagnosticKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -9,64 +9,24 @@ where
 {
     /// Parses the small simple-type subset needed by simple expressions.
     pub(crate) fn simple_type(&mut self) -> TreeId<Untyped> {
-        let mark = self.mark();
-        let mut tree = match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-                let Ok(name) = self.intern_current_type_name() else {
-                    return self.error_type(self.current_span());
-                };
-                self.advance();
-                self.alloc_from(
-                    mark,
-                    TreeKind::Ident(Ident {
-                        name: *name.as_name(),
-                        backquoted,
-                    }),
-                )
-            }
-            _ => {
+        match self.parse_qualified_reference(ReferenceNamespace::Type) {
+            Ok(tree) => tree,
+            Err(QualifiedReferenceError::MissingInitial) => {
                 let position = self.current_span();
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedType,
-                    "expected a simple type",
-                );
+                self.report(ParseDiagnosticKind::ExpectedType, "expected a simple type");
                 if !is_type_recovery_boundary(self.current().kind) {
                     self.advance();
                 }
-                return self.error_type(position);
+                self.error_type(position)
             }
-        };
-
-        while self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-            let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-            let name = match self.current().kind {
-                TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                    match self.intern_current_type_name() {
-                        Ok(name) => name,
-                        Err(_) => return self.error_type(self.current_span()),
-                    }
-                }
-                _ => {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedType,
-                        "expected a type name after `.`",
-                    );
-                    return tree;
-                }
-            };
-            self.advance();
-            tree = self.alloc_from(
-                mark,
-                TreeKind::Select(Select {
-                    qualifier: tree,
-                    name: *name.as_name(),
-                    backquoted,
-                }),
-            );
+            Err(QualifiedReferenceError::MissingSegment) => {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type name after `.`",
+                );
+                self.error_type(self.current_span())
+            }
         }
-
-        tree
     }
 }
 
@@ -96,7 +56,7 @@ const fn is_type_recovery_boundary(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{NameInterner, Punctuation, TextRange};
+    use dotty_core::{NameInterner, Punctuation, TextRange, TreeKind};
 
     #[test]
     fn parses_a_simple_type_in_the_type_namespace() {

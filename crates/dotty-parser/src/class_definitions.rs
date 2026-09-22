@@ -7,6 +7,7 @@
 
 use dotty_core::ast::{
     Apply, ApplyKind, DefDef, Modifier, Modifiers, ModuleDef, New, Select, Template, TypeDef,
+    UntypedTemplateMetadata,
 };
 use dotty_core::{
     HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -14,7 +15,7 @@ use dotty_core::{
 
 use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
-use crate::templates::TemplateBody;
+use crate::templates::{TemplateBody, TemplateBodyResult};
 use crate::{Location, ParseDiagnosticKind, Parser};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +29,13 @@ struct ConstructorBoundary {
     parameter_start: Option<u32>,
     parent_start: Option<u32>,
     body_start: Option<u32>,
+}
+
+struct TemplateTail {
+    parents: Vec<TreeId<Untyped>>,
+    self_val: Option<TreeId<Untyped>>,
+    body: Vec<TreeId<Untyped>>,
+    metadata: UntypedTemplateMetadata,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -99,15 +107,9 @@ where
         };
         self.advance();
         let name = self.parse_object_name();
-        let parents = self.parse_parent_clause();
-        let body = self.parse_optional_template_body();
-        let parent_start = parents.first().and_then(|parent| {
-            self.ast
-                .get(*parent)
-                .position
-                .map(|position| position.span().range().start())
-        });
-        let body_start = body.first().and_then(|member| {
+        let tail = self.parse_template_tail();
+        let parent_start = self.template_tail_start(&tail);
+        let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
                 .position
@@ -124,16 +126,15 @@ where
                 body_start,
             },
         );
-        let template_position =
-            self.template_position(constructor, constructor_start, &parents, &body);
+        let template_position = self.template_position(constructor, constructor_start, &tail);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents,
-                self_val: None,
-                body,
-                metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
@@ -184,15 +185,9 @@ where
         .then_some(self.current().span.start());
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
-        let parents = self.parse_parent_clause();
-        let body = self.parse_optional_template_body();
-        let parent_start = parents.first().and_then(|parent| {
-            self.ast
-                .get(*parent)
-                .position
-                .map(|position| position.span().range().start())
-        });
-        let body_start = body.first().and_then(|member| {
+        let tail = self.parse_template_tail();
+        let parent_start = self.template_tail_start(&tail);
+        let body_start = tail.body.first().and_then(|member| {
             self.ast
                 .get(*member)
                 .position
@@ -209,16 +204,15 @@ where
                 body_start,
             },
         );
-        let template_position =
-            self.template_position(constructor, constructor_start, &parents, &body);
+        let template_position = self.template_position(constructor, constructor_start, &tail);
         let template = self.alloc_from(
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents,
-                self_val: None,
-                body,
-                metadata: dotty_core::ast::UntypedTemplateMetadata::default(),
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
@@ -241,7 +235,246 @@ where
         ))
     }
 
-    fn parse_optional_template_body(&mut self) -> Vec<TreeId<Untyped>> {
+    fn parse_template_tail(&mut self) -> TemplateTail {
+        let parents = self.parse_parent_clause();
+        let derives = self.parse_derives_clause();
+        let uses = self.parse_uses_clause();
+        let body = self.parse_optional_template_body();
+        TemplateTail {
+            parents,
+            self_val: body.self_val,
+            body: body.members,
+            metadata: UntypedTemplateMetadata { derives, uses },
+        }
+    }
+
+    fn template_tail_start(&self, tail: &TemplateTail) -> Option<u32> {
+        tail.parents
+            .iter()
+            .chain(tail.metadata.derives.iter())
+            .chain(tail.metadata.uses.iter().map(|use_ref| &use_ref.reference))
+            .copied()
+            .chain(tail.self_val)
+            .chain(tail.body.first().copied())
+            .filter_map(|tree| {
+                self.ast
+                    .get(tree)
+                    .position
+                    .map(|position| position.span().range().start())
+            })
+            .min()
+    }
+
+    fn parse_derives_clause(&mut self) -> Vec<TreeId<Untyped>> {
+        self.consume_newlines_before_template_name(self.known_names.derives);
+        if !self.current_is_template_name(self.known_names.derives) {
+            return Vec::new();
+        }
+        self.advance();
+
+        let mut derives = Vec::new();
+        loop {
+            let derive =
+                self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
+            if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+            {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "type applications are not supported in `derives` clauses",
+                );
+                self.recover_unsupported_derives_type_application();
+            }
+            derives.push(derive);
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                break;
+            }
+        }
+        derives
+    }
+
+    fn recover_unsupported_derives_type_application(&mut self) {
+        let mut depth = 0u32;
+        while self.current().kind != TokenKind::Eof {
+            match self.current().kind {
+                TokenKind::Punctuation(Punctuation::LeftBracket) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightBracket) => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+            let closes_application = depth == 0;
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) || closes_application {
+                break;
+            }
+        }
+    }
+
+    fn parse_uses_clause(&mut self) -> Vec<dotty_core::ast::UseRef> {
+        self.consume_newlines_before_template_name(self.known_names.uses);
+        if !self.current_is_template_name(self.known_names.uses) {
+            return Vec::new();
+        }
+        self.advance();
+
+        let mut uses = Vec::new();
+        loop {
+            let reference = self.parse_capture_reference();
+            let initially = self.current_is_template_name(self.known_names.initially);
+            if initially {
+                self.advance();
+            }
+            uses.push(dotty_core::ast::UseRef {
+                reference,
+                initially,
+            });
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                break;
+            }
+        }
+        uses
+    }
+
+    fn parse_capture_reference(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        match self.current().kind {
+            TokenKind::Keyword(HardKeyword::This) => {
+                let position = self.current_span();
+                self.advance();
+                let this = self.alloc(
+                    TreeKind::This(dotty_core::ast::This { qual: None }),
+                    Some(position),
+                );
+                self.parse_capture_selection(mark, this)
+            }
+            TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+                let Ok(name) = self.intern_current_term_name() else {
+                    return self.error_expr(self.current_span());
+                };
+                self.advance();
+                let ident = self.alloc_from(
+                    mark,
+                    TreeKind::Ident(dotty_core::ast::Ident {
+                        name: *name.as_name(),
+                        backquoted,
+                    }),
+                );
+                if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+                    return ident;
+                }
+
+                if self.accept(TokenKind::Keyword(HardKeyword::This)) {
+                    let qualifier = self.alloc_from(
+                        mark,
+                        TreeKind::This(dotty_core::ast::This {
+                            qual: Some(*name.as_name()),
+                        }),
+                    );
+                    return self.parse_capture_selection(mark, qualifier);
+                }
+
+                if self.current().kind == TokenKind::Keyword(HardKeyword::Super) {
+                    let qualifier_position = self.span_from(mark);
+                    self.advance();
+                    let qualifier = self.alloc(
+                        TreeKind::This(dotty_core::ast::This {
+                            qual: Some(*name.as_name()),
+                        }),
+                        Some(qualifier_position),
+                    );
+                    return self.parse_super_tail(mark, qualifier);
+                }
+
+                self.parse_capture_selection_after_dot(mark, ident)
+            }
+            _ => {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a capture reference after `uses`",
+                );
+                self.error_expr(self.current_span())
+            }
+        }
+    }
+
+    fn parse_capture_selection(
+        &mut self,
+        mark: crate::Mark,
+        qualifier: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+            return qualifier;
+        }
+        self.parse_capture_selection_after_dot(mark, qualifier)
+    }
+
+    fn parse_capture_selection_after_dot(
+        &mut self,
+        mark: crate::Mark,
+        mut qualifier: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        loop {
+            if !matches!(
+                self.current().kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            ) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a name after `.` in a capture reference",
+                );
+                return qualifier;
+            }
+            let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+            let Ok(name) = self.intern_current_term_name() else {
+                return qualifier;
+            };
+            self.advance();
+            qualifier = self.alloc_from(
+                mark,
+                TreeKind::Select(dotty_core::ast::Select {
+                    qualifier,
+                    name: *name.as_name(),
+                    backquoted,
+                }),
+            );
+            if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
+                break;
+            }
+        }
+        qualifier
+    }
+
+    fn current_is_template_name(&mut self, expected: TermName) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self.current_is_known_name(expected).unwrap_or(false)
+    }
+
+    fn consume_newlines_before_template_name(&mut self, expected: TermName) {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        let follows = self.cursor.lookahead(count);
+        let expected_text = self.names.resolve(expected.as_name().text());
+        if follows.kind == TokenKind::Identifier
+            && self.source.slice(follows.span).ok() == Some(expected_text)
+        {
+            for _ in 0..count {
+                self.advance();
+            }
+        }
+    }
+
+    fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
+        self.consume_newlines_before_template_body();
         if matches!(
             self.current().kind,
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
@@ -259,7 +492,10 @@ where
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an indented template body after `:`",
                 );
-                return Vec::new();
+                return TemplateBodyResult {
+                    self_val: None,
+                    members: Vec::new(),
+                };
             }
         }
 
@@ -268,7 +504,28 @@ where
                 self.parse_template_body(TemplateBody::Braced)
             }
             TokenKind::Indent => self.parse_template_body(TemplateBody::Indented),
-            _ => Vec::new(),
+            _ => TemplateBodyResult {
+                self_val: None,
+                members: Vec::new(),
+            },
+        }
+    }
+
+    fn consume_newlines_before_template_body(&mut self) {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        if matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+        ) {
+            for _ in 0..count {
+                self.advance();
+            }
         }
     }
 
@@ -276,8 +533,7 @@ where
         &self,
         constructor: TreeId<Untyped>,
         start: u32,
-        parents: &[TreeId<Untyped>],
-        body: &[TreeId<Untyped>],
+        tail: &TemplateTail,
     ) -> dotty_core::SourceSpan {
         let constructor_range = self.ast.get(constructor).position.map(|position| {
             (
@@ -285,36 +541,64 @@ where
                 position.span().range().end(),
             )
         });
-        let body_start = body.first().and_then(|tree| {
+        let body_start = tail.body.first().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().start())
         });
-        let body_end = body.last().and_then(|tree| {
+        let body_end = tail.body.last().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().end())
         });
-        let parent_end = parents.last().and_then(|tree| {
+        let parent_end = tail.parents.last().and_then(|tree| {
             self.ast
                 .get(*tree)
                 .position
                 .map(|position| position.span().range().end())
         });
-        let template_start = if parents.is_empty()
+        let template_start = if tail.parents.is_empty()
             && constructor_range.is_some_and(|(constructor_start, constructor_end)| {
                 constructor_start == constructor_end
-            }) {
+            })
+            && body_start.is_none_or(|body_start| body_start == start)
+        {
             body_start.unwrap_or(start)
         } else {
             start
         };
-        let template_end = body_end
-            .or(parent_end)
-            .or_else(|| constructor_range.map(|(_, end)| end))
-            .unwrap_or(template_start);
+        let metadata_end = tail
+            .metadata
+            .derives
+            .iter()
+            .chain(tail.metadata.uses.iter().map(|use_ref| &use_ref.reference))
+            .chain(tail.self_val.iter())
+            .filter_map(|tree| {
+                self.ast
+                    .get(*tree)
+                    .position
+                    .map(|position| position.span().range().end())
+            })
+            .max();
+        let uses_end = tail
+            .metadata
+            .uses
+            .iter()
+            .filter_map(|use_ref| self.use_ref_end(use_ref))
+            .max();
+        let template_end = [
+            body_end,
+            metadata_end,
+            uses_end,
+            parent_end,
+            constructor_range.map(|(_, end)| end),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(template_start);
         dotty_core::SourceSpan::new(
             self.source_id,
             dotty_core::Span::without_point(
@@ -322,6 +606,22 @@ where
                     .expect("template span is ordered"),
             ),
         )
+    }
+
+    fn use_ref_end(&self, use_ref: &dotty_core::ast::UseRef) -> Option<u32> {
+        let position = self.ast.get(use_ref.reference).position?;
+        let end = position.span().range().end() as usize;
+        if !use_ref.initially {
+            return Some(end as u32);
+        }
+        let remainder = self.source.as_str().get(end..)?;
+        let limit = remainder
+            .find([',', ':', '\n', '\r', '}'])
+            .unwrap_or(remainder.len());
+        remainder[..limit]
+            .find("initially")
+            .map(|offset| end.saturating_add(offset + "initially".len()) as u32)
+            .or(Some(end as u32))
     }
 
     fn parse_parent_clause(&mut self) -> Vec<TreeId<Untyped>> {
@@ -618,6 +918,316 @@ mod tests {
         };
         assert!(template.parents.is_empty());
         assert!(template.body.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_qualified_derives_in_template_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives A, pkg.B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Dot), 22, 23),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.metadata.derives.len(), 2);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .start(),
+            16
+        );
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[1]).kind,
+            TreeKind::Select(select) if select.name.is_type()
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_type_applications_in_derives_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives Foo[Bar]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 19, 20),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+    }
+
+    #[test]
+    fn preserves_uses_references_and_initially_markers() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses cap initially, outer.cap",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Identifier, 17, 26),
+                token(TokenKind::Punctuation(Punctuation::Comma), 26, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Punctuation(Punctuation::Dot), 33, 34),
+                token(TokenKind::Identifier, 34, 37),
+                token(TokenKind::Eof, 37, 37),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.metadata.uses.len(), 2);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .end(),
+            37
+        );
+        assert!(template.metadata.uses[0].initially);
+        assert!(!template.metadata.uses[1].initially);
+        assert!(matches!(
+            parser.ast().get(template.metadata.uses[0].reference).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(template.metadata.uses[1].reference).kind,
+            TreeKind::Select(_)
+        ));
+        let TreeKind::Select(select) = &parser.ast().get(template.metadata.uses[1].reference).kind
+        else {
+            panic!("expected qualified capture reference");
+        };
+        assert_eq!(
+            parser
+                .ast()
+                .get(select.qualifier)
+                .position
+                .expect("capture qualifier span")
+                .span()
+                .range(),
+            dotty_core::TextRange::new(28, 33).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn includes_initially_marker_in_template_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses cap initially",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Identifier, 17, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(template.metadata.uses[0].initially);
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .expect("template span")
+                .span()
+                .range()
+                .end(),
+            26
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_terminal_this_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses this",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Keyword(HardKeyword::This), 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert!(matches!(
+            parser.ast().get(template.metadata.uses[0].reference).kind,
+            TreeKind::This(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_qualified_this_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses Outer.this",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::This), 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        let reference = template.metadata.uses[0].reference;
+        assert!(
+            matches!(parser.ast().get(reference).kind, TreeKind::This(this) if this.qual.is_some())
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_super_capture_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C uses super.cap",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Keyword(HardKeyword::Super), 13, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        let reference = template.metadata.uses[0].reference;
+        assert!(matches!(
+            parser.ast().get(reference).kind,
+            TreeKind::Select(select) if matches!(parser.ast().get(select.qualifier).kind, TreeKind::Super(_))
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
