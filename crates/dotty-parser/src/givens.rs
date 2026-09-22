@@ -1,8 +1,7 @@
-//! Source-level Scala 3.9 `given` definitions.
+//! Source-level Scala 3.9 contextual `given` definitions.
 //!
-//! This module starts with the alias form. Structural instances and
-//! conditional signatures are layered on the same dispatch in later
-//! increments.
+//! Alias, conditional, and structural forms share the same parser dispatch;
+//! semantic given synthesis remains outside this source-parser layer.
 
 use dotty_core::ast::{DefDef, Modifier, ModuleDef, TypeDef, ValDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
