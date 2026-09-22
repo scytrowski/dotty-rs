@@ -394,10 +394,14 @@ fn render_tree(
         _ => {}
     }
 
-    let mut rendered_children = child_ids(&tree.kind, arena)
-        .into_iter()
-        .map(|child| render_tree(child, arena, names, source))
-        .collect::<Vec<_>>();
+    let mut rendered_children = if let TreeKind::Template(template) = &tree.kind {
+        render_template_children(template, arena, names, source)
+    } else {
+        child_ids(&tree.kind, arena)
+            .into_iter()
+            .map(|child| render_tree(child, arena, names, source))
+            .collect()
+    };
     if let TreeKind::Super(super_tree) = &tree.kind
         && matches!(arena.get(super_tree.qual).kind, TreeKind::This(this) if this.qual.is_none())
         && let Some(position) = tree.position
@@ -431,6 +435,70 @@ fn render_tree(
     }
     fields.push(format!("\"children\":[{}]", rendered_children.join(",")));
     format!("{{{}}}", fields.join(","))
+}
+
+fn render_template_children(
+    template: &dotty_core::ast::Template<Untyped>,
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+    source: &str,
+) -> Vec<String> {
+    let mut children = Vec::new();
+    children.push(render_tree(template.constructor, arena, names, source));
+    children.extend(
+        template
+            .parents
+            .iter()
+            .map(|parent| render_tree(*parent, arena, names, source)),
+    );
+    children.extend(
+        template
+            .metadata
+            .derives
+            .iter()
+            .map(|derive| render_tree(*derive, arena, names, source)),
+    );
+    children.extend(template.metadata.uses.iter().map(|use_ref| {
+        let reference = render_tree(use_ref.reference, arena, names, source);
+        let span = render_use_ref_span(use_ref.reference, use_ref.initially, arena, source);
+        format!(
+            "{{\"kind\":\"UseRef\",\"span\":{},\"children\":[{}]}}",
+            span, reference
+        )
+    }));
+    if let Some(self_val) = template.self_val {
+        children.push(render_tree(self_val, arena, names, source));
+    }
+    children.extend(
+        template
+            .body
+            .iter()
+            .map(|member| render_tree(*member, arena, names, source)),
+    );
+    children
+}
+
+fn render_use_ref_span(
+    reference: TreeId<Untyped>,
+    initially: bool,
+    arena: &AstArena<Untyped>,
+    source: &str,
+) -> String {
+    let Some(position) = arena.get(reference).position else {
+        return "null".to_owned();
+    };
+    let range = position.span().range();
+    let mut end = range.end() as usize;
+    if initially {
+        let remainder = &source[end.min(source.len())..];
+        let limit = remainder
+            .find([',', ':', '\n', '\r', '}'])
+            .unwrap_or(remainder.len());
+        if let Some(offset) = remainder[..limit].find("initially") {
+            end = end.saturating_add(offset).saturating_add("initially".len());
+        }
+    }
+    format!("{{\"start\":{},\"end\":{}}}", range.start(), end)
 }
 
 fn render_definition_metadata(
@@ -530,6 +598,11 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::DefDef(_) => "DefDef",
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::Template(template)
+            if !template.metadata.derives.is_empty() || !template.metadata.uses.is_empty() =>
+        {
+            "DerivingTemplate"
+        }
         TreeKind::Template(_) => "Template",
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",

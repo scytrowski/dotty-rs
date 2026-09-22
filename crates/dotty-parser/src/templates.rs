@@ -6,7 +6,7 @@
 //! interpreted.  The actual class-like definition parser is layered on top of
 //! this helper.
 
-use dotty_core::ast::{Modifiers, ValDef};
+use dotty_core::ast::{Modifier, Modifiers, ValDef};
 use dotty_core::{HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
@@ -184,7 +184,10 @@ where
                 name,
                 tpt,
                 rhs: None,
-                metadata: Modifiers::default(),
+                metadata: Modifiers {
+                    modifiers: vec![Modifier::PrivateLocal],
+                    ..Modifiers::default()
+                },
             }),
         ))
     }

@@ -12,6 +12,7 @@ object Main:
     val (mode, path) = args.toList match
       case path :: Nil => ("expr", path)
       case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
+      case "--mode" :: "block" :: path :: Nil => ("expr", path)
       case "--mode" :: "compilation" :: path :: Nil => ("compilation", path)
       case "--batch" :: manifest :: Nil =>
         runBatch(manifest)
