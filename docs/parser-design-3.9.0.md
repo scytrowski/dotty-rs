@@ -113,8 +113,7 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `enum`, `for`, `try`,
-and `match`
+Valid but not yet implemented constructs such as `for`, `try`, and `match`
 produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
 of a panic.
 
@@ -209,12 +208,13 @@ parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
-class, trait, object, case class, and case object definitions with type
+class, trait, object, case class, case object, and enum definitions with type
 parameters, primary constructor clauses, simple `extends` parent applications,
 comma/`with` parent lists, `derives` and capture-checking `uses` clauses, basic
 `cap`/qualified capture references, self values (`self =>`, typed self types),
-and braced or indented template bodies. The class/trait/case distinctions are
-preserved in definition metadata; case objects remain `ModuleDef` trees. The
+and braced or indented template bodies. The class/trait/case/enum distinctions
+are preserved in definition metadata; case objects remain `ModuleDef` trees.
+Enum cases are intentionally diagnosed and deferred to a later milestone. The
 synthetic primary constructor and template body remain parser-level structure.
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
@@ -284,8 +284,8 @@ classification remains owned by the scanner; the parser only feeds back the
 `ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
 template region. The parser preserves `derives` and ordered `uses` metadata in
 `UntypedTemplateMetadata`; it does not perform derivation or capture checking.
-Sequence capture references, `.only[...]`/`.rd` forms, enum definitions,
-auxiliary constructors, and semantic template processing remain future work.
+Sequence capture references, `.only[...]`/`.rd` forms, enum cases, auxiliary
+constructors, and semantic template processing remain future work.
 
 ### Contextual definitions
 
@@ -324,7 +324,8 @@ extension lowering, symbol creation, or semantic resolution is performed.
 ### Definition prefixes and source metadata
 
 Definitions share a parser-owned prefix step before dispatching to `val`,
-`var`, `def`, `type`, `class`, `trait`, `object`, `case class`, or `case object`.
+`var`, `def`, `type`, `class`, `trait`, `object`, `case class`, `case object`,
+or `enum`.
 The current subset
 preserves annotations, source order for hard modifiers (`abstract`, `final`,
 `sealed`, `implicit`, `lazy`, and `override`), supported soft modifiers
@@ -337,9 +338,11 @@ retaining a recoverable source tree.
 The resulting `Modifiers` value is parser metadata, not a resolved symbol-flag
 set. It is attached to the existing definition nodes, including
 `ModuleDef.metadata`, so later phases can distinguish source syntax from
-semantic resolution. Annotation trees use the source-level
+semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
+parser-level `Modifier::Enum`; this preserves enum identity without adding a
+new shared tree kind. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-parameter annotations, `enum` definitions, and feature-dependent
+parameter annotations, enum cases, and feature-dependent
 `opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
@@ -355,8 +358,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms (including enums and full template
-semantics), legacy given syntax, remaining control flow (`do`/`while`),
+`RefinedType`, remaining definition forms and full template semantics, legacy
+given syntax, remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including

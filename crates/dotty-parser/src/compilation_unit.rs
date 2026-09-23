@@ -407,9 +407,9 @@ pub(crate) mod tests {
     fn unsupported_valid_syntax_gets_an_unsupported_diagnostic() {
         let mut names = NameInterner::new();
         let parser = parser_for(
-            "enum A",
+            "match A",
             vec![
-                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Keyword(HardKeyword::Match), 0, 5),
                 token(TokenKind::Identifier, 5, 6),
                 token(TokenKind::Eof, 6, 6),
             ],

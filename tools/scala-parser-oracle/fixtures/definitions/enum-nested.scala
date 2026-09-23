@@ -1,0 +1,5 @@
+{
+  class Outer {
+    enum Inner {}
+  }
+}

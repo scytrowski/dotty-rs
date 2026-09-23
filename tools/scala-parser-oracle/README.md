@@ -61,13 +61,14 @@ in synthetic `match` expressions. The normalized tree compares `Bind`,
 arguments as they appear before semantic extractor lowering.
 
 Fixtures under `fixtures/definitions/` cover the initial class-like
-definition subset in block mode: class, trait, and object nodes; primary
+definition subset in block mode: class, trait, object, and enum nodes; primary
 constructor clauses; simple parent applications; and braced or indented
 template bodies. They also cover source annotations, hard and supported soft
 modifiers, and qualified visibility. The normalized definition metadata
 compares modifier order, visibility, visibility qualifiers, and annotation
 trees; `ModuleDef.metadata` is included just like metadata on the other
-definition nodes. The renderer exposes the source-level `Trait` distinction,
+definition nodes. The renderer exposes the source-level `Trait` and `Enum`
+distinctions,
 modern `given` aliases and structural templates, and `ExtMethods` parameter
 clauses with method/export children. Anonymous given names remain empty rather
 than being replaced with synthetic names. Extension fixtures cover generic and

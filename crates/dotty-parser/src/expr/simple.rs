@@ -120,9 +120,11 @@ where
         &mut self,
         end: TokenKind,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
-        self.with_placeholder_scope(|parser| {
-            parser.with_block_end(Some(end), |parser| {
-                parser.parse_statement_sequence(StatementSequenceBoundary::Block(end))
+        self.with_enum_body(false, |parser| {
+            parser.with_placeholder_scope(|parser| {
+                parser.with_block_end(Some(end), |parser| {
+                    parser.parse_statement_sequence(StatementSequenceBoundary::Block(end))
+                })
             })
         })
     }

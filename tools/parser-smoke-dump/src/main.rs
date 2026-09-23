@@ -234,6 +234,13 @@ fn render_tree(
             {
                 fields.push("\"trait\":true".to_owned());
             }
+            if definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Enum)
+            {
+                fields.push("\"enum\":true".to_owned());
+            }
             if is_type_definition_source(&source_text) {
                 fields.extend(render_definition_metadata(
                     &definition.metadata,
@@ -545,6 +552,7 @@ fn render_definition_metadata(
         .iter()
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
+            dotty_core::ast::Modifier::Enum => None,
             dotty_core::ast::Modifier::Param
             | dotty_core::ast::Modifier::ParamAccessor
             | dotty_core::ast::Modifier::PrivateLocal => None,
@@ -611,7 +619,7 @@ fn is_value_definition_source(source: &str) -> bool {
 fn is_type_definition_source(source: &str) -> bool {
     source
         .split(|character: char| !character.is_ascii_alphabetic())
-        .any(|word| matches!(word, "type" | "class" | "trait" | "object"))
+        .any(|word| matches!(word, "type" | "class" | "trait" | "object" | "enum"))
 }
 
 fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {

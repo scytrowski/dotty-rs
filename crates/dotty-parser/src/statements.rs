@@ -43,11 +43,17 @@ where
 
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
+        if self.context.enum_body && is_enum_case_start(self.current().kind) {
+            return self.parse_unsupported_enum_case();
+        }
         if self.starts_extension_definition() {
             return self.parse_extension_definition(location);
         }
         if self.starts_definition_prefix() {
             let prefix = self.parse_definition_prefix();
+            if self.context.enum_body && is_enum_case_start(self.current().kind) {
+                return self.parse_unsupported_enum_case();
+            }
             return self.parse_prefixed_definition(location, prefix);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Given) {
@@ -64,6 +70,9 @@ where
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
             return self.parse_type_definition(location);
+        }
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Enum) {
+            return self.parse_enum_definition(location);
         }
         if self.current().kind == TokenKind::Keyword(HardKeyword::Class) {
             return self.parse_class_definition(location);
@@ -113,6 +122,7 @@ where
             TokenKind::Keyword(HardKeyword::Type) => {
                 self.parse_type_definition_with_prefix(location, prefix)
             }
+            TokenKind::Keyword(HardKeyword::Enum) => self.parse_enum_definition_with_prefix(prefix),
             TokenKind::Keyword(HardKeyword::Class) => {
                 self.parse_class_definition_with_prefix(prefix)
             }
@@ -341,6 +351,17 @@ where
         self.recover_until(RecoverySet::Statement);
         self.error_expr(position)
     }
+
+    fn parse_unsupported_enum_case(&mut self) -> ParsedStatement {
+        let position = self.current_span();
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "enum cases are not supported by this parser milestone",
+        );
+        self.advance();
+        self.recover_until(RecoverySet::Statement);
+        ParsedStatement::Expression(self.error_expr(position))
+    }
 }
 
 const fn is_statement_separator(kind: TokenKind) -> bool {
@@ -367,9 +388,14 @@ pub(crate) const fn is_block_separator(kind: TokenKind) -> bool {
 const fn is_unsupported_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Keyword(
-            HardKeyword::Match | HardKeyword::Val | HardKeyword::Var | HardKeyword::Enum
-        )
+        TokenKind::Keyword(HardKeyword::Match | HardKeyword::Val | HardKeyword::Var)
+    )
+}
+
+const fn is_enum_case_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(HardKeyword::Case) | TokenKind::CaseClass | TokenKind::CaseObject
     )
 }
 
