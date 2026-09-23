@@ -242,7 +242,12 @@ fn render_tree(
             }) {
                 fields.push("\"enum\":true".to_owned());
             }
-            if is_type_definition_source(&source_text) {
+            if is_type_definition_source(&source_text)
+                || definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::EnumCase)
+            {
                 fields.extend(render_definition_metadata(
                     &definition.metadata,
                     arena,
