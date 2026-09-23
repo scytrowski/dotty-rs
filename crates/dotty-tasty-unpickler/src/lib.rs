@@ -39,6 +39,7 @@ mod reachability;
 mod recursive;
 mod refined;
 mod refinement;
+mod symbol_annotations;
 mod term_type;
 mod type_tree;
 mod types;

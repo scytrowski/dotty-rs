@@ -63,6 +63,20 @@
 //! does. Both children come from the AST index by absolute address
 //! (`children[0]` the parent, `children[1]` the annotation); the structural
 //! decoder validates the shape only.
+//!
+//! ## The shared payload decoder (Milestone 5e1)
+//!
+//! [`TastyUnpickler::decode_annotation_payload`] is the one lower-level
+//! decoder of an annotation payload (compact or full) into an `AnnotationId`,
+//! with no `Type::Annotated` wrapping — `decode_annotated_type` above wraps
+//! its result for `ANNOTATEDtype`, and, from Milestone 5e1, symbol-annotation
+//! completion calls it directly for a `DefinitionTail::Annotation`'s
+//! `full_annotation` tree, which is the very same kind of payload
+//! (`ANNOTATEDtype`/`ANNOTATEDtpt` annotate a *type*; a symbol annotation
+//! annotates a *declaration*, but both share this one representation and
+//! arena). `ANNOTATEDtpt` (`type_tree.rs`) keeps calling
+//! [`TastyUnpickler::decode_annotation_tree`] on its own, since it has never
+//! wrapped a compact form.
 
 use dotty_core::ids::{AnnotationId, TypeId};
 use dotty_core::names::TermName;
@@ -171,65 +185,78 @@ impl TastyUnpickler<'_, '_, '_> {
         };
 
         let underlying = self.type_at(ast, underlying_at, at, depth)?;
-        let Some(annotation_tag) = ast.tag_at(annotation_at) else {
-            return Err(UnpickleError::MalformedType {
-                address: at,
-                reason: "the annotation of an annotated type is not a node",
-            });
-        };
-        // The full form, shared with `ANNOTATEDtpt`: a constructor call, or
-        // the tree the chain of links ends at.
-        let (tree_at, tree_tag) =
-            match self.decode_annotation_tree(ast, at, annotation_at, depth)? {
-                FullAnnotation::Constructor(annotation) => {
-                    return Ok(Type::Annotated {
-                        underlying,
-                        annotation,
-                    });
-                }
-                FullAnnotation::Other { at, tag } => (at, tag),
-            };
-        if tree_at != annotation_at {
-            // A shared target that is no constructor call: the tree's own
-            // address and tag are the ones reported.
-            return Err(UnpickleError::UnsupportedAnnotationTree {
-                address: at,
-                annotation_address: tree_at,
-                tag: tree_tag,
-            });
-        }
-        if !is_compact_annot_type_tag(annotation_tag) {
-            return Err(UnpickleError::UnsupportedAnnotationTree {
-                address: at,
-                annotation_address: annotation_at,
-                tag: annotation_tag,
-            });
-        }
-
-        // The wire tag only says "a type": what it decodes to (a `SHAREDtype`
-        // may reach anything) must be what `CompactAnnotation` accepts, a
-        // `TypeRef` or an `AppliedType`. A binder still being decoded has no
-        // readable slot yet, so it cannot be one.
-        let annotation_type = self.type_at(ast, annotation_at, at, depth)?;
-        let accepted = !self.is_pending(annotation_type)
-            && matches!(
-                self.store.types.get(annotation_type),
-                Type::TypeRef { .. } | Type::Applied { .. }
-            );
-        if !accepted {
-            return Err(UnpickleError::InvalidCompactAnnotationType {
-                address: at,
-                annotation_type,
-            });
-        }
-        let annotation = self
-            .store
-            .annotations
-            .alloc(Annotation::compact(annotation_type));
+        let annotation = self.decode_annotation_payload(ast, at, annotation_at, depth)?;
         Ok(Type::Annotated {
             underlying,
             annotation,
         })
+    }
+
+    /// Decodes the annotation payload at `annotation_at`, belonging to the
+    /// annotated node (or, from Milestone 5e1, definition/parameter) at `at`,
+    /// into one semantic `AnnotationId`: the one lower-level decoder shared by
+    /// `ANNOTATEDtype`, and, from Milestone 5e1, serialized symbol
+    /// annotations. `ANNOTATEDtpt` keeps calling
+    /// [`decode_annotation_tree`](Self::decode_annotation_tree) directly,
+    /// since it never wraps a compact form (Milestone 5b never observed one
+    /// in the corpora); nothing here changes that.
+    ///
+    /// Compact when the payload's own tag, *before* any `SHAREDterm` is
+    /// followed, is [`is_compact_annot_type_tag`] (a `SHAREDtype` counts: it
+    /// is a type-level link, not the term-level `SHAREDterm` a full
+    /// annotation tree may be reached through); full — a constructor
+    /// application, directly written or reached through `SHAREDterm` links —
+    /// otherwise. A compact form is never itself reached through a
+    /// `SHAREDterm`: [`decode_annotation_tree`](Self::decode_annotation_tree)
+    /// follows that chain and, if it ends at a tag that only happens to look
+    /// compact, still reports `UnsupportedAnnotationTree` (`Other`, below),
+    /// exactly as it always has — Dotty never shares a compact annotation.
+    pub(crate) fn decode_annotation_payload(
+        &mut self,
+        ast: &AstView<'_>,
+        at: u32,
+        annotation_at: u32,
+        depth: usize,
+    ) -> Result<AnnotationId, UnpickleError> {
+        let Some(annotation_tag) = ast.tag_at(annotation_at) else {
+            return Err(UnpickleError::MalformedType {
+                address: at,
+                reason: "the annotation is not a node",
+            });
+        };
+        if is_compact_annot_type_tag(annotation_tag) {
+            // The wire tag only says "a type": what it decodes to (a
+            // `SHAREDtype` may reach anything) must be what
+            // `CompactAnnotation` accepts, a `TypeRef` or an `AppliedType`. A
+            // binder still being decoded has no readable slot yet, so it
+            // cannot be one.
+            let annotation_type = self.type_at(ast, annotation_at, at, depth)?;
+            let accepted = !self.is_pending(annotation_type)
+                && matches!(
+                    self.store.types.get(annotation_type),
+                    Type::TypeRef { .. } | Type::Applied { .. }
+                );
+            if !accepted {
+                return Err(UnpickleError::InvalidCompactAnnotationType {
+                    address: at,
+                    annotation_type,
+                });
+            }
+            return Ok(self
+                .store
+                .annotations
+                .alloc(Annotation::compact(annotation_type)));
+        }
+        match self.decode_annotation_tree(ast, at, annotation_at, depth)? {
+            FullAnnotation::Constructor(annotation) => Ok(annotation),
+            FullAnnotation::Other { at: tree_at, tag } => {
+                Err(UnpickleError::UnsupportedAnnotationTree {
+                    address: at,
+                    annotation_address: tree_at,
+                    tag,
+                })
+            }
+        }
     }
 }
 

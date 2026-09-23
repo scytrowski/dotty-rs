@@ -159,6 +159,12 @@ pub enum UnpickleError {
     /// The symbol at `address` is of a kind whose completion is a later
     /// milestone (methods, constructors, classes, traits, modules).
     UnsupportedSymbolCompletion { address: u32, kind: SymbolKind },
+    /// The symbol at `address` is of a kind pass 1 never indexes an
+    /// `ANNOTATION` tail for (a package, entered through `enter_package`
+    /// rather than `enter_symbol`): `complete_symbol_annotations` and
+    /// `complete_symbols_annotations` are for `TYPEDEF`/`VALDEF`/`DEFDEF`/
+    /// `TYPEPARAM`/`PARAM` addresses only.
+    UnsupportedAnnotationCompletion { address: u32, kind: SymbolKind },
     /// An opaque type alias, whose completion (`opaqueToBounds`) is not
     /// approximated as an ordinary alias.
     OpaqueAliasDeferred { address: u32 },
@@ -460,6 +466,10 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the {kind:?} at address {address} cannot be completed yet"
             ),
+            Self::UnsupportedAnnotationCompletion { address, kind } => write!(
+                formatter,
+                "the {kind:?} at address {address} has no annotation tail to complete"
+            ),
             Self::OpaqueAliasDeferred { address } => write!(
                 formatter,
                 "the opaque type alias at address {address} cannot be completed yet"
@@ -660,6 +670,7 @@ impl std::error::Error for UnpickleError {
             | Self::InvalidSingletonTypeTree { .. }
             | Self::MissingEnteredSymbol { .. }
             | Self::UnsupportedSymbolCompletion { .. }
+            | Self::UnsupportedAnnotationCompletion { .. }
             | Self::OpaqueAliasDeferred { .. }
             | Self::SymbolCompletionDeferred { .. }
             | Self::SymbolInfoError { .. }

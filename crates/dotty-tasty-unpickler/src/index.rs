@@ -88,6 +88,15 @@ pub struct TastySemanticIndex {
     /// The structural hop that led discovery to each `REFINEDtpt`'s *first*
     /// owner, mirroring `lambda_routes`.
     refined_routes: HashMap<u32, DiscoveryRoute>,
+    /// The `ANNOTATION` tail entries of the definition/parameter at an
+    /// address, in wire order, recorded when its symbol is entered
+    /// (Milestone 5e1, pass 1). An address with no `ANNOTATION` entries is
+    /// still present, mapped to an empty `Vec`, so a later completion pass
+    /// can tell "no annotations in the wire" apart from "no symbol was ever
+    /// entered here" — see [`annotation_tail_at`](Self::annotation_tail_at).
+    /// No decoding happens here: each value is only the ordered addresses of
+    /// the `ANNOTATION` nodes themselves.
+    annotation_tails: HashMap<u32, Vec<u32>>,
 }
 
 impl TastySemanticIndex {
@@ -333,6 +342,39 @@ impl TastySemanticIndex {
         }
     }
 
+    /// The `ANNOTATION` tail addresses recorded for the definition/parameter
+    /// at `address`, if a symbol was entered for it: `Some(&[])` when it was
+    /// entered with no `ANNOTATION` entries, `None` when no symbol was ever
+    /// entered at `address`.
+    pub fn annotation_tail_at(&self, address: u32) -> Option<&[u32]> {
+        self.annotation_tails.get(&address).map(Vec::as_slice)
+    }
+
+    /// The number of definition/parameter addresses that carry at least one
+    /// `ANNOTATION` tail entry.
+    pub fn annotated_definition_count(&self) -> usize {
+        self.annotation_tails
+            .values()
+            .filter(|entries| !entries.is_empty())
+            .count()
+    }
+
+    /// The total number of `ANNOTATION` tail entries recorded across every
+    /// definition/parameter address.
+    pub fn annotation_tail_count(&self) -> usize {
+        self.annotation_tails.values().map(Vec::len).sum()
+    }
+
+    /// Records the `ANNOTATION` tail addresses for the definition/parameter
+    /// at `address`, in wire order. Called once per address, right after its
+    /// symbol is entered; a second call for the same address would silently
+    /// overwrite the first; pass 1 never does that, since
+    /// [`insert_symbol`](Self::insert_symbol) already rejects a second entry
+    /// at the same address before this would ever run again.
+    pub(crate) fn insert_annotation_tail(&mut self, address: u32, annotations: Vec<u32>) {
+        self.annotation_tails.insert(address, annotations);
+    }
+
     /// Records the scope of a package that another unit entered, for the
     /// unit to find with `scope_of`. Recording it twice is not an error.
     pub(crate) fn share_scope(&mut self, symbol: SymbolId, scope: ScopeId) {
@@ -568,5 +610,53 @@ mod tests {
 
         assert_eq!(result, Err(UnpickleError::DuplicateScope { symbol: foo }));
         assert_eq!(index.scope_of(foo), Some(first));
+    }
+
+    // --- annotation tails ---
+
+    #[test]
+    fn an_address_with_no_recorded_annotation_tail_is_unknown() {
+        let index = TastySemanticIndex::new();
+
+        assert_eq!(index.annotation_tail_at(4), None);
+        assert_eq!(index.annotated_definition_count(), 0);
+        assert_eq!(index.annotation_tail_count(), 0);
+    }
+
+    #[test]
+    fn a_definition_entered_with_no_annotations_is_recorded_as_empty_not_unknown() {
+        let mut index = TastySemanticIndex::new();
+
+        index.insert_annotation_tail(4, Vec::new());
+
+        assert_eq!(index.annotation_tail_at(4), Some(&[][..]));
+        assert_eq!(index.annotated_definition_count(), 0);
+        assert_eq!(index.annotation_tail_count(), 0);
+    }
+
+    #[test]
+    fn a_definitions_annotation_addresses_are_kept_in_wire_order() {
+        let mut index = TastySemanticIndex::new();
+
+        index.insert_annotation_tail(4, vec![9, 30, 21]);
+
+        assert_eq!(index.annotation_tail_at(4), Some(&[9, 30, 21][..]));
+        assert_eq!(index.annotated_definition_count(), 1);
+        assert_eq!(index.annotation_tail_count(), 3);
+    }
+
+    #[test]
+    fn distinct_addresses_keep_distinct_annotation_tails() {
+        let mut index = TastySemanticIndex::new();
+
+        index.insert_annotation_tail(4, vec![9]);
+        index.insert_annotation_tail(46, Vec::new());
+        index.insert_annotation_tail(90, vec![91, 92]);
+
+        assert_eq!(index.annotation_tail_at(4), Some(&[9][..]));
+        assert_eq!(index.annotation_tail_at(46), Some(&[][..]));
+        assert_eq!(index.annotation_tail_at(90), Some(&[91, 92][..]));
+        assert_eq!(index.annotated_definition_count(), 2);
+        assert_eq!(index.annotation_tail_count(), 3);
     }
 }

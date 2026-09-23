@@ -1601,6 +1601,221 @@ original PR body to be closed before merge:
     `OutOfScope`), and a local `DEFDEF` nested in an enclosing `DEFDEF`'s
     `BLOCK` body (`OutOfScope`, the regression the corpus run itself caught).
 
+### Serialized symbol annotations (Milestone 5e1, tail indexing)
+
+```text
+ANNOTATION Length tycon_Type full_annotation_Type
+```
+
+Scala 3.9's `TreeUnpickler` reads a definition's annotations as part of its
+modifier tail and stores them directly on the symbol denotation
+(`Symbol.annotations: Vec<AnnotationId>` in `dotty-core`, still always empty
+before this milestone). This is a distinct wire node from `ANNOTATEDtype`/
+`ANNOTATEDtpt` (Milestones 4b1/5b): those pair an `underlying` type/tree with
+its annotation directly; `ANNOTATION` splits out a `tycon` field alongside the
+same kind of annotation tree (`full_annotation`), and only ever appears inside
+a `TYPEDEF`/`VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM`'s tail, never as a type's own
+child.
+
+This increment adds only the pass-1 half: an address-backed index of where
+each `ANNOTATION` entry is, in wire order, with no semantic decoding yet
+(`Symbol.annotations` is still not populated). Later increments build the
+completion that turns an indexed address into an `AnnotationId`.
+
+**A relative-offset trap.** `dotty-tasty`'s `DefinitionTail::Annotation`
+carries the tail entry's own `RawNode`, whose `offset` field is *not* an
+absolute AST address: `RawNode::reader()` always starts a fresh `Reader` at
+position 0 over the node's own payload slice (`Reader::new(self.payload)`),
+so every offset `read_definition_tail` records is relative to the enclosing
+definition's payload, not the file's AST section. Nothing in the unpickler had
+read that offset before, so nothing had needed to notice; the semantic
+identity invariant this crate depends on (§3) makes every other address
+absolute, and an index keyed by a payload-relative number would silently
+collide across definitions and never match an address a real reference (or a
+later completion call) names. This was caught and fixed *before* any address
+was published: the actual addresses pass 1 indexes come from the AST's own
+child edges instead (`AstView::children`, built top-down over absolute
+offsets by `dotty-tasty`'s own address indexer), by filtering a definition's
+or parameter's immediate children for the `ANNOTATION` tag — the same
+mechanism every other structural child (a class's `TEMPLATE`, a method's
+`TYPEPARAM`/`PARAM`) is already found through in `enter.rs`, not the
+tail-decoded `RawNode` at all. `DefinitionTail`/`DeclaredModifiers::from_tail`
+still skip `Annotation` entries entirely, exactly as before this milestone —
+they answer only namespace/flags/visibility.
+
+**The index.** `TastySemanticIndex::annotation_tail_at(address)` returns
+`Some(&[u32])`, the `ANNOTATION` child addresses of the definition/parameter
+entered at `address`, in wire order — `Some(&[])` when it was entered with no
+`ANNOTATION` children, `None` when no symbol was ever entered there at all.
+Distinguishing "entered, zero annotations" from "never entered" here (rather
+than only at the eventual completion-state layer, §5e-to-come) means a survey
+or a later completion call can tell a `TYPEPARAM`/`PARAM`/local definition
+pass 1 skipped from one it indexed and found empty, without re-parsing the
+tail itself. It is populated once, when `enter_symbol` allocates the symbol
+(`enter_definition_header`'s three branches, `enter_parameter`), needs no
+incremental-rollback bookkeeping of its own (pass 1's own failure path already
+rolls back the whole index as one unit, unlike pass 2's per-address maps), and
+is unaffected by unit order or retry.
+
+**Fixtures.** `tests/fixtures/semantic/SymbolAnnotations.scala` (real Scala
+3.9.0 compiler output, via `generate.sh`) covers a class annotation, an
+annotated `val`/`def`/type alias, an annotated constructor value parameter, an
+annotated method type parameter, a term parameter with two annotations
+(`@SymbolMarker @SymbolTagged(tag = "p")`, keeping wire order), an
+unannotated parameter and an unannotated class — the last one showing that
+Scala 3.9 always attaches a compiler-synthesized `@SourceFile` annotation to
+every top-level class, a genuine `ANNOTATION` wire entry rather than one of
+the compiler-internal, non-serialized annotations §5e-to-come's completion
+must not synthesize (`LazyBodyAnnotation` and friends). Eleven `enter.rs` unit
+tests pin the exact indexed addresses and counts over these fixtures, each
+mutation-tested.
+
+**Corpus (Milestone 5e1 tail-indexing survey; `unaccounted: 0` throughout).**
+`scala3-library`: 4091 `ANNOTATION` tail entries over 60407 entered
+definitions/parameters, 3431 of them annotated (`TYPEDEF` 2235 entries/1682
+annotated, `DEFDEF` 1318/1243, `VALDEF` 364/332, `PARAM` 120/120, `TYPEPARAM`
+54/54); `scala3-compiler`: 4652 entries over 94685 entered, 3349 annotated
+(`TYPEDEF` 3085/1876, `VALDEF` 1128/1035, `PARAM` 287/287, `DEFDEF` 152/151,
+`TYPEPARAM` 0/0). Both corpora skew heavily toward one annotation per
+definition (2944/2982 respectively) with a long tail up to 24 and 234 on a
+handful of outliers. The counts are identical across every
+builtins/completion/classes/reverse permutation the corpus test runs, as
+expected: this survey reads only pass 1's own index, never completion.
+
+### Serialized symbol annotations (Milestone 5e1, the shared decoder and completion)
+
+**The shared payload decoder.** `TastyUnpickler::decode_annotation_payload(ast,
+at, annotation_at, depth) -> Result<AnnotationId, UnpickleError>`, extracted
+from `decode_annotated_type`'s inline compact/full split (§4's "Annotated
+types" above), is the one lower-level annotation decoder now shared by
+`ANNOTATEDtype` and serialized symbol annotations: compact when the payload's
+own tag is `is_compact_annot_type_tag`, full otherwise (reusing
+`decode_annotation_tree` unchanged). `ANNOTATEDtpt` keeps calling
+`decode_annotation_tree` directly, since it has never wrapped a compact form
+and this refactor's job was to preserve, not extend, existing behavior
+(verified byte-identical corpus annotation counts before/after, plus a
+mutation of the compact branch caught by 15 of the 55 `tests/annotated.rs`
+tests).
+
+**`complete_symbol_annotations`.** The `ANNOTATION` wrapper a tail entry
+carries (`ANNOTATION Length tycon_Type full_annotation_Type`) is not
+`ANNOTATEDtype`/`ANNOTATEDtpt`'s `{underlying, annotation}` pair: it splits
+out a `tycon` field alongside the same kind of annotation tree
+(`full_annotation`). `TastyUnpickler::complete_symbol_annotations(address) ->
+Result<Vec<AnnotationId>, UnpickleError>` decodes every `ANNOTATION` tail
+entry pass 1 indexed for `address` (`RawNode::decode_annotation` validates
+the wrapper's shape), in wire order, by calling
+`decode_annotation_payload` on each entry's `full_annotation` child — `tycon`
+is read only far enough to validate that shape, never given independent
+semantic weight: the full annotation tree's own root already carries the
+constructor's type (a compact tag is a type outright; a full constructor's
+`NEW`/`APPLY` spine resolves its own class), so nothing is lost by not
+reading it a second time. If a real annotation is ever found where the two
+disagree, that is future evidence to revisit this choice, not something this
+milestone tries to detect. `complete_symbols_annotations(addresses)` is the
+all-or-nothing batch entry, mirroring `complete_symbols`.
+
+**Independence from `SymbolInfo`.** Annotation completion and `complete_symbol`
+are separate semantic dimensions: neither inspects, sets or requires the
+other, so a symbol's annotations can complete while its `SymbolInfo` is still
+`Missing`, and completing `SymbolInfo` never touches `Symbol.annotations`.
+Regression tests cover both directions, plus the specific case the issue asks
+for: a symbol whose own completion already succeeded is untouched by a later,
+unrelated annotation-completion failure on the very same symbol.
+
+**Completion state, identity, atomicity.** `Vec::is_empty()` on
+`Symbol.annotations` cannot tell "not completed" from "completed with zero
+annotations", so a new adapter-local `annotations_completed: HashSet<SymbolId>`
+on `TastyUnpickler` is the state a repeated call checks (idempotent: returns
+the same `AnnotationId`s again, allocates nothing). Because arena truncation
+cannot restore a *mutated field* of a symbol that already exists (the same
+problem `SymbolInfo` completion already solved), a new `annotations_journal:
+Vec<(SymbolId, Vec<AnnotationId>, bool)>` records each symbol's old
+`Symbol.annotations` and old completion-state membership before a call
+changes them, mirroring `info_journal` exactly (`Transaction.annotations`,
+rolled back or cleared in `finish_transaction` the same way). This makes both
+levels of atomicity issue #16–19 asks for fall out for free: a symbol's own
+multiple annotations are only ever *written* once, after every one of them has
+decoded successfully (so a mid-list failure never needs to "undo" a partial
+write — there was never a partial write to undo), and a batch spanning several
+symbols rolls back an *earlier* symbol's already-committed write through the
+journal when a *later* one in the same batch fails. Each `ANNOTATION`
+occurrence still owns its own `AnnotationId`, never merged with another equal
+payload's, mirroring the existing `ANNOTATEDtype` occurrence-identity policy.
+Both mutations (disabling the idempotence check; disabling the journal
+rollback) are caught by dedicated `tests/symbol_annotations.rs` tests.
+
+**A package address is a typed error, not a panic (review fix).** A package
+symbol is entered through `enter_package`, which inserts it into the index
+directly (`insert_symbol`) and never calls `insert_annotation_tail`: a
+`PACKAGE` node has no `ANNOTATION` tail in the wire format at all, unlike
+every `TYPEDEF`/`VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM`, which always gets one
+indexed (even empty) through `enter_symbol`. An initial version of
+`complete_symbol_annotations` `.expect()`ed a tail to exist whenever a symbol
+did, which is true for every address this milestone means to support but not
+for a package address — a real, well-formed input, not a bug, so panicking on
+it broke this crate's own "never panic on wire/caller input" invariant. Fixed
+with a new typed `UnsupportedAnnotationCompletion { address, kind }`, and two
+regressions (`complete_symbol_annotations` alone, and inside a batch) pin a
+package address failing cleanly instead.
+
+**Fixtures and tests.** 22 `tests/symbol_annotations.rs` tests exercise every
+fixture shape from the tail-indexing increment above through the real
+completion API (basic completion, identity, idempotence, `SymbolInfo`
+independence in both directions, partial-multi-annotation atomicity, and
+batch all-or-nothing), stubbing in `SymbolMarker`/`SymbolTagged` (the
+fixture's own annotation classes, defined in sibling units) and
+`scala.annotation.internal.SourceFile` (the compiler's own synthesized
+annotation on every top-level class, confirmed real rather than assumed: an
+early guess at its class name/package was verified directly against the real
+fixture's decoded output before being written into the tests). One finding
+worth noting for anyone reading wire order literally: `@SymbolMarker
+@SymbolTagged(tag = "p")` in source decodes with `SymbolTagged` *first* in
+`ANNOTATION` tail order — the wire order is not simply left-to-right source
+order, and no code here assumes it is beyond "whatever order pass 1 indexed
+them in, is the order completion preserves".
+
+**Completion-outcome corpus survey.** `tests/type_corpus.rs` completes every
+definition/parameter with at least one indexed `ANNOTATION` entry through the
+real `complete_symbol_annotations` and classifies the result, `unexpected: 0`
+throughout. Like every other unit-only, single-file completion measurement in
+this document (`TYPELAMBDAtype`/`PARAMtype` after 3a, `APPLIEDtype` after
+2c1, ...), most failures are `external` — an annotation class this
+one-unit-at-a-time session never entered, which a classpath resolver
+(Milestone 6) is expected to unlock — and the two corpora diverge sharply
+because of it: `scala3-library` decodes most of its 3431 attempts (2108,
+order-dependent: 943–2135 across the corpus test's permutations, 1084–2362
+external, plus 176 `UnsupportedAnnotationConstructor` and 36
+`UnsupportedAnnotationArgument`, both stable across permutations since they
+never depend on resolution order), while `scala3-compiler`'s 3349 attempts
+decode 0 — its own annotation classes are defined in units later in
+compilation order than this survey ever enters, so every one of them (plus a
+stable 8 `UnsupportedAnnotationConstructor`) is `external`. No
+`InvalidAnnotationType`, `UnsupportedAnnotationTree` or `MalformedType`
+occurs in either corpus.
+
+**Cross-adapter storage convergence with `dotty-classloader`.**
+`dotty-classloader/tests/cross_adapter_annotations.rs` confirms both adapters
+share the "attach `AnnotationId`s to `Symbol.annotations`, `tree` always
+`None`, annotation type always class-like" contract (issue #129 §33) —
+`ClassLoader::enter_annotations` (JVM classfile `RuntimeVisibleAnnotations`)
+on one side, `complete_symbol_annotations` on the other. Milestone 6
+(classloader/`SymbolResolver` integration) has not landed, so the two
+adapters cannot yet run against one shared `SemanticStore` — `ClassLoader::new`
+bootstraps its own `Definitions` internally, and `Definitions::bootstrap` is
+documented as exactly-once per store — so the test runs each adapter over its
+own store and compares the contract their results satisfy, not one shared
+arena. One divergence is documented and asserted rather than hidden:
+`dotty-classloader` does not (yet) map a classfile's decoded element values
+into `AnnotationArguments::Known` (they stay exclusively in its own
+JVM-facing `SemanticAnnotation` sidecar), so every classfile annotation is
+`Unavailable` regardless of its real element count, while an argument-free
+TASTy annotation is `Known([])` — a real, allowed divergence per §33 ("do not
+require equal payloads"), not a bug either side needs to fix for Milestone
+5e1.
+
+Milestone 5e1 is complete.
+
 ### Owner-space references (Milestone 4c1)
 
 ```text
@@ -1955,7 +2170,14 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      mirroring every supported projection route to `LAMBDAtpt`/`REFINEDtpt`
      — complete; Milestone 5d is closed;
    - 5e: symbol annotations, companion links, opaque aliases and the
-     remaining tails.
+     remaining tails, in steps:
+     - 5e1: serialized symbol annotations — pass-1 `ANNOTATION` tail
+       indexing, the corpus survey, the shared payload decoder,
+       `complete_symbol_annotations`/`complete_symbols_annotations`, the
+       completion-outcome corpus survey and the `dotty-classloader`
+       storage-convergence check all landed — complete;
+     - 5e2: companion links;
+     - 5e3: opaque aliases and the remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
 
