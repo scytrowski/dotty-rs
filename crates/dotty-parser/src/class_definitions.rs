@@ -648,6 +648,15 @@ where
                 self.recover_unsupported_derives_type_application();
             }
             derives.push(derive);
+            if self.current().kind == TokenKind::Operator
+                && (self.current_text_is("|") || self.current_text_is("&"))
+            {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "infix type expressions are not supported in `derives` clauses",
+                );
+                self.recover_unsupported_derives_type_expression();
+            }
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
@@ -669,6 +678,28 @@ where
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) || closes_application {
+                break;
+            }
+        }
+    }
+
+    fn recover_unsupported_derives_type_expression(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::ColonFollow
+                | TokenKind::ColonEol
+                | TokenKind::Punctuation(
+                    Punctuation::LeftBrace | Punctuation::RightBrace | Punctuation::Semicolon
+                )
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
                 break;
             }
         }
@@ -3476,6 +3507,43 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::UnsupportedSyntax
         );
+    }
+
+    #[test]
+    fn keeps_derives_as_a_qualified_identifier_list() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives Eq | Show",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.metadata.derives.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
