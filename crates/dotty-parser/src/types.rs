@@ -61,7 +61,7 @@ where
 
     fn parse_function_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        if self.starts_poly_function_type() {
+        if self.starts_bracketed_function_type() {
             return self.parse_bracketed_function_type(mark);
         }
         if self.starts_empty_function_type() {
@@ -135,7 +135,7 @@ where
         self.alloc_function_type(mark, params, body, arrow, erased_params)
     }
 
-    fn starts_poly_function_type(&self) -> bool {
+    fn starts_bracketed_function_type(&self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
     }
 
