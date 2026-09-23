@@ -271,19 +271,24 @@ where
         self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
             Punctuation::LeftParen,
         ));
-        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an enum case constructor parameter clause",
-            );
-            self.recover_until(crate::RecoverySet::Case);
-            return ParsedStatement::Expression(self.error_expr(case_position));
-        }
-
-        let parameter_start = self.current().span.start();
-        let value_param_clauses = self.parse_term_param_clauses(crate::ParamOwner::CaseClass);
+        let (value_param_clauses, parameter_start) =
+            if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+                let parameter_start = self.current().span.start();
+                (
+                    self.parse_term_param_clauses(crate::ParamOwner::CaseClass),
+                    Some(parameter_start),
+                )
+            } else if type_params.is_empty() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected an enum case constructor parameter clause",
+                );
+                self.recover_until(crate::RecoverySet::Case);
+                return ParsedStatement::Expression(self.error_expr(case_position));
+            } else {
+                (Vec::new(), None)
+            };
         let constructor_end = self.last_real_token_end;
-
         let parent_start = self.enum_case_parent_start();
         if parent_start.is_some() {
             self.report(
@@ -312,7 +317,7 @@ where
             value_param_clauses,
             constructor_end,
             ConstructorBoundary {
-                parameter_start: Some(parameter_start),
+                parameter_start,
                 parent_start: None,
                 body_start: None,
             },
@@ -1832,6 +1837,39 @@ mod tests {
             vec![Modifier::Param, Modifier::PrivateLocal]
         );
         assert_eq!(constructor.value_param_clauses.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_only_enum_case_without_value_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case Empty[T]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_enum_case() else {
+            panic!("expected a parameterized enum case definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected a constructor");
+        };
+        assert_eq!(constructor.type_params.len(), 1);
+        assert!(constructor.value_param_clauses.is_empty());
         assert!(parser.diagnostics().is_empty());
     }
 

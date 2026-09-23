@@ -220,7 +220,8 @@ one `PatDef` with the source identifiers in order. The synthetic primary
 constructor and template body remain parser-level structure. Parameterized enum
 cases are represented as `TypeDef(Template(...))` with `Modifier::EnumCase`;
 their type parameters and constructor clauses reuse the `ParamOwner::CaseClass`
-policy, including accessor/private-local metadata.
+policy, including accessor/private-local metadata. Type-only cases such as
+`case Empty[T]` have no value-parameter clauses.
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
 case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed
