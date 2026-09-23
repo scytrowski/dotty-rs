@@ -73,7 +73,22 @@ where
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             loop {
-                args.push(self.argument_expr());
+                if self.at_enum_body_parent_boundary()
+                    || matches!(
+                        self.current().kind,
+                        TokenKind::Punctuation(Punctuation::RightBrace)
+                            | TokenKind::Outdent
+                            | TokenKind::Eof
+                    )
+                {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedExpression,
+                        "expected an argument",
+                    );
+                    args.push(self.error_expr(self.current_span()));
+                } else {
+                    args.push(self.argument_expr());
+                }
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
