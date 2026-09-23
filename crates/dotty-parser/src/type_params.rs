@@ -125,12 +125,6 @@ where
         };
 
         let name = self.parse_type_param_name();
-        if variance.is_some() && self.context.param_owner == Some(ParamOwner::Type) {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "variance is not allowed for a polymorphic function type parameter",
-            );
-        }
 
         let nested_params = if self
             .cursor
