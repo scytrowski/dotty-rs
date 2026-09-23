@@ -67,6 +67,7 @@ where
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket)
                 || self.current().kind == TokenKind::Eof
                 || self.current_is_arrow()
+                || self.current_is_type_lambda_arrow()
             {
                 break;
             }
@@ -76,7 +77,7 @@ where
                 "expected `,` or `]` after a type parameter",
             );
             self.recover_type_param_clause();
-            if self.current_is_arrow() {
+            if self.current_is_arrow() || self.current_is_type_lambda_arrow() {
                 break;
             }
         }
@@ -206,6 +207,7 @@ where
                     | TokenKind::Punctuation(Punctuation::RightBrace)
             ))
             && !self.current_is_arrow()
+            && !self.current_is_type_lambda_arrow()
         {
             self.advance();
         }
@@ -240,6 +242,7 @@ where
                     | TokenKind::Punctuation(Punctuation::RightBrace)
             ))
             && !self.current_is_arrow()
+            && !self.current_is_type_lambda_arrow()
         {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
@@ -648,6 +651,31 @@ mod tests {
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn stops_a_type_parameter_clause_before_a_type_lambda_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>> F[A]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        assert_eq!(params.len(), 1);
+        assert_eq!(parser.current_text(), Ok("=>>"));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
