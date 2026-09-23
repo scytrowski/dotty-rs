@@ -262,12 +262,14 @@ where
         case_position: dotty_core::SourceSpan,
         name: TypeName,
     ) -> ParsedStatement {
+        let diagnostics_before_type_params = self.diagnostics.len();
         let type_params = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
         {
             self.parse_type_param_clause(crate::ParamOwner::CaseClass)
         } else {
             Vec::new()
         };
+        let type_params_are_valid = self.diagnostics.len() == diagnostics_before_type_params;
         self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
             Punctuation::LeftParen,
         ));
@@ -278,11 +280,13 @@ where
                     self.parse_term_param_clauses(crate::ParamOwner::CaseClass),
                     Some(parameter_start),
                 )
-            } else if type_params.is_empty() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an enum case constructor parameter clause",
-                );
+            } else if type_params.is_empty() || !type_params_are_valid {
+                if type_params_are_valid {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an enum case constructor parameter clause",
+                    );
+                }
                 self.recover_until(crate::RecoverySet::Case);
                 return ParsedStatement::Expression(self.error_expr(case_position));
             } else {
