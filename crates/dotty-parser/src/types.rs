@@ -1145,6 +1145,140 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_empty_context_function_parameter_list() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = () ?=> R",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_context_function_type_without_a_left_operand() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Operator, 9, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_repeated_context_function_arrow() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = A ?=> ?=>",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 14),
+                token(TokenKind::Operator, 15, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_context_function_result_at_eof() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (A, B) ?=>",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_context_function_result_inside_type_arguments() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = List[A ?=>]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 13),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 13, 14),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_trailing_tuple_comma_before_a_context_arrow() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (A,) ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn converts_a_direct_tuple_lhs_into_multiple_function_parameters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
