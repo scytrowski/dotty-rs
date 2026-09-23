@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Loads `.class`/`.tasty`-backed classes from a [`ClassPathEntry`] into a
-/// [`SemanticStore`], caching results in a [`ClassRepository`].
+/// [`SemanticStore`], caching results in a `ClassRepository`.
 ///
 /// Implements `dotty-core`'s "enter before complete" algorithm
 /// (`docs/classloader.md` §5): a class's `SymbolId` is allocated before its
