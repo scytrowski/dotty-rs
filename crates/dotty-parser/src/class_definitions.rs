@@ -2019,6 +2019,53 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_prefixed_enum_case_without_a_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { private case\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Private), 9, 16),
+                token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+                token(TokenKind::Newline, 21, 22),
+                token(TokenKind::Keyword(HardKeyword::Def), 22, 25),
+                token(TokenKind::Identifier, 26, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::IntegerLiteral, 34, 35),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 36, 37),
+                token(TokenKind::Eof, 37, 37),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedPattern
+        );
+    }
+
+    #[test]
     fn parses_a_parameterized_enum_case_as_a_type_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
