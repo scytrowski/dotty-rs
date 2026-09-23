@@ -261,10 +261,15 @@ with applied, tuple, union, and intersection types. Context-function types
 parameter nodes as ordinary function types. The parameters retain default
 metadata without `Given`; `Given` belongs to the surrounding
 `FunctionWithMods`, whose `erased_params` contains one `false` per parameter.
+With `ParserFeatures::erased_definitions` enabled, context-function types also
+accept named erased parameters such as `(erased x: A) ?=> B` and mixed clauses
+such as `(x: A, erased y: B) ?=> C`. They retain the plain `ValDef` parameter
+shape; `Given` remains on the surrounding `FunctionWithMods`, while
+`erased_params` records erasure positionally alongside ordinary parameters.
 Named parameters can use the full currently-supported `type_expr()` subset and
-compose recursively with ordinary or context arrows. Named tuple types,
-context-function erased parameters, pure arrows, polymorphic function types,
-and type lambdas remain deferred. Supported context-function types use
+compose recursively with ordinary or context arrows. Named tuple types, pure
+arrows, polymorphic function types, and type lambdas remain deferred. Supported
+context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
 `erased_params` per parameter; `?=>` is right-associative and composes
 recursively with ordinary `=>`.

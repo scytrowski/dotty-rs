@@ -80,10 +80,13 @@ colon directly after the header, method modifiers and annotations, multiple
 methods, and exports. Constructor parent applications remain in the same
 `New`/`Select`/`Apply` shape as the Scala parser; semantic given synthesis and
 extension lowering are not compared.
-The `type-function-erased-*.scala` fixtures use a separate `block-erased` mode:
-their source imports `scala.language.experimental.erasedDefinitions`, and the
-Rust side enables the matching `ParserFeatures` policy. The normalized
-`FunctionWithMods.erased_params` vector is compared positionally.
+The `type-function-erased-*.scala` and `type-context-function-erased-*.scala`
+fixtures use a separate `block-erased` mode: their source imports
+`scala.language.experimental.erasedDefinitions`, and the Rust side enables the
+matching `ParserFeatures` policy. The normalized
+`FunctionWithMods.erased_params` vector is compared positionally; context
+functions also expose their `Given` modifier through the normal normalized
+metadata.
 Singleton enum cases expose a separate `enum_case: true` metadata field; this
 is distinct from ordinary `case` metadata, and comma-separated singleton cases
 remain one normalized `PatDef`.
