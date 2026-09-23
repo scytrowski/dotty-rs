@@ -4936,6 +4936,32 @@ mod tests {
     }
 
     #[test]
+    fn recovers_a_leading_type_lambda_parameter_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[, A] =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Comma), 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Operator, 6, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
     fn recovers_a_missing_type_lambda_parameter_closer() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -4981,6 +5007,64 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_nested_type_lambda_parameter_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>> [B =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { body, .. }) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an outer type lambda");
+        };
+        assert!(matches!(
+            parser.ast().get(*body).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn recovers_a_missing_context_bound_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A:] =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                token(TokenKind::Operator, 5, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 
     #[test]

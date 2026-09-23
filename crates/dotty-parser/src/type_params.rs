@@ -62,6 +62,12 @@ where
             }
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a type parameter after `,`",
+                    );
+                }
                 continue;
             }
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket)
@@ -491,6 +497,26 @@ mod tests {
         assert!(low.is_none() && high.is_none() && alias.is_none());
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_trailing_type_lambda_parameter_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A,]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_type_param_clause(ParamOwner::Type);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 
     #[test]
