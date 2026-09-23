@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -206,7 +206,10 @@ object Main:
       "var" -> Mutable,
       "given" -> Given
     ).collect {
-      case (name, flag) if (includeMutable || name != "var") && mods.is(flag) => name
+      case (name, flag)
+          if (includeMutable || name != "var")
+              && mods.is(flag)
+              && (name != "case" || !mods.flags.isAllOf(EnumCase)) => name
     }.toSet
     val sourceText = slice(tree, source)
     val sourceWords = sourceText.split("[^A-Za-z]+").toSet
@@ -248,12 +251,13 @@ object Main:
     val annotationTrees = mods.annotations.map(annotation =>
       render(annotation, source, placeholderBase(annotation, source))
     ).mkString("[", ",", "]")
-    List(
+    val metadata = List(
       field("modifiers", modifiers),
       field("visibility", if visibility.isEmpty then "null" else quote(visibility)),
       field("visibility_qualifier", qualifier),
       field("annotations", annotationTrees)
     )
+    if mods.flags.isAllOf(EnumCase) then metadata :+ field("enum_case", "true") else metadata
 
   private def indexOfWord(source: String, word: String): Option[Int] =
     val index = source.indexOf(word)

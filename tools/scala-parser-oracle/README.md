@@ -77,6 +77,9 @@ colon directly after the header, method modifiers and annotations, multiple
 methods, and exports. Constructor parent applications remain in the same
 `New`/`Select`/`Apply` shape as the Scala parser; semantic given synthesis and
 extension lowering are not compared.
+Singleton enum cases expose a separate `enum_case: true` metadata field; this
+is distinct from ordinary `case` metadata, and comma-separated singleton cases
+remain one normalized `PatDef`.
 
 Fixtures under `fixtures/compilation/` use `compilation` mode. Scala calls the
 real `Parser.compilationUnit()` entry and Rust calls `parse_compilation_unit`.

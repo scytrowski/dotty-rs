@@ -59,6 +59,15 @@ where
         false
     }
 
+    /// Returns whether the current token is a modifier spelling, independent
+    /// of whether it starts a definition prefix.
+    pub(crate) fn current_is_modifier(&mut self) -> bool {
+        is_annotation_start(self)
+            || is_hard_modifier(self.current().kind)
+            || self.soft_modifier().is_some()
+            || self.is_deferred_soft_modifier()
+    }
+
     /// Parses annotations and modifiers until the definition keyword.
     pub(crate) fn parse_definition_prefix(&mut self) -> DefinitionPrefix {
         let start = self.mark().start();

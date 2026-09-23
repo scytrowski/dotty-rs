@@ -34,6 +34,13 @@ pub enum Modifier {
     /// so the marker preserves their identity without introducing a separate
     /// enum AST node.
     Enum,
+    /// Parser-level distinction for a singleton enum case.
+    ///
+    /// This is generated from the `case` position inside an enum body rather
+    /// than represented as a source modifier keyword. It keeps enum-case
+    /// identity separate from the `Case` modifier used by case classes and
+    /// case objects.
+    EnumCase,
     /// Parser-level role for a constructor parameter that contributes an
     /// accessor on its owning class.
     ///
@@ -149,5 +156,11 @@ mod tests {
     fn enum_is_a_distinct_source_definition_modifier() {
         assert_ne!(Modifier::Enum, Modifier::Trait);
         assert_ne!(Modifier::Enum, Modifier::Case);
+    }
+
+    #[test]
+    fn enum_case_is_distinct_from_case_definition_metadata() {
+        assert_ne!(Modifier::EnumCase, Modifier::Case);
+        assert_ne!(Modifier::EnumCase, Modifier::Enum);
     }
 }

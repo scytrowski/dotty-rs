@@ -553,6 +553,7 @@ fn render_definition_metadata(
         .filter_map(|modifier| match modifier {
             dotty_core::ast::Modifier::Trait => None,
             dotty_core::ast::Modifier::Enum => None,
+            dotty_core::ast::Modifier::EnumCase => None,
             dotty_core::ast::Modifier::Param
             | dotty_core::ast::Modifier::ParamAccessor
             | dotty_core::ast::Modifier::PrivateLocal => None,
@@ -601,13 +602,20 @@ fn render_definition_metadata(
         .map(|annotation| render_tree(*annotation, arena, names, source))
         .collect::<Vec<_>>()
         .join(",");
+    let enum_case = metadata
+        .modifiers
+        .contains(&dotty_core::ast::Modifier::EnumCase);
 
-    vec![
+    let mut fields = vec![
         format!("\"modifiers\":[{}]", modifiers.join(",")),
         format!("\"visibility\":{visibility}"),
         format!("\"visibility_qualifier\":{qualifier}"),
         format!("\"annotations\":[{annotations}]"),
-    ]
+    ];
+    if enum_case {
+        fields.push("\"enum_case\":true".to_owned());
+    }
+    fields
 }
 
 fn is_value_definition_source(source: &str) -> bool {
