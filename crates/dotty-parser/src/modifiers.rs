@@ -239,7 +239,7 @@ where
             || name == known.update
     }
 
-    fn parse_annotation(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_annotation(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         self.advance(); // `@` is scanner-facing Operator punctuation.
 

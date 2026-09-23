@@ -89,6 +89,9 @@ where
     fn type_param(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let mut metadata = Modifiers::default();
+        while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            metadata.annotations.push(self.parse_annotation());
+        }
         let is_synthetic_wildcard_name = self.current().kind == TokenKind::BackquotedIdentifier
             && self
                 .current_text()
@@ -825,6 +828,64 @@ mod tests {
                 .span()
                 .range(),
             TextRange::new(6, 14).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_an_annotation_on_a_type_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[@ann A]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected a type parameter");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.metadata.annotations[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_an_annotation_on_a_wildcard_type_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[@ann _]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected a wildcard type parameter");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "$type_wildcard_0"
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
