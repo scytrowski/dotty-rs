@@ -2525,6 +2525,109 @@ mod tests {
     }
 
     #[test]
+    fn treats_erased_as_an_ordinary_parameter_name_when_the_feature_is_disabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased: A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Punctuation(Punctuation::Colon), 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a named function parameter");
+        };
+        assert_eq!(
+            parser.names.resolve(parameter.name.as_name().text()),
+            "erased"
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_backquoted_erased_as_a_regular_parameter_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(`erased`: A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::BackquotedIdentifier, 1, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a named function parameter");
+        };
+        assert_eq!(
+            parser.names.resolve(parameter.name.as_name().text()),
+            "erased"
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn does_not_enable_erased_parameters_for_context_function_types() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased x: A) ?=> B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_multiple_context_function_parameters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
