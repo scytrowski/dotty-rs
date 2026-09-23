@@ -178,6 +178,7 @@ where
         let case_position = self.current_span();
         self.advance();
 
+        let name_mark = self.mark();
         let (name, backquoted) = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
@@ -201,7 +202,7 @@ where
 
         if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
             let first = self.alloc_from(
-                mark,
+                name_mark,
                 TreeKind::Ident(Ident {
                     name: *name.as_name(),
                     backquoted,
@@ -1368,6 +1369,91 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ref module))
                 if module.metadata.modifiers == vec![Modifier::EnumCase]
         ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_comma_separated_enum_case_as_one_pattern_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case Red, Green\ndef after = x }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 24),
+                token(TokenKind::Newline, 24, 25),
+                token(TokenKind::Keyword(HardKeyword::Def), 25, 28),
+                token(TokenKind::Identifier, 29, 34),
+                token(TokenKind::Operator, 35, 36),
+                token(TokenKind::Identifier, 37, 38),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 39, 40),
+                token(TokenKind::Eof, 40, 40),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(pattern_definition)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected a PatDef");
+        };
+        assert_eq!(
+            pattern_definition.modifiers.modifiers,
+            vec![Modifier::EnumCase]
+        );
+        assert_eq!(pattern_definition.patterns.len(), 2);
+        assert!(matches!(
+            parser.ast().get(pattern_definition.patterns[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(pattern_definition.patterns[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(pattern_definition.patterns[0])
+                .position
+                .expect("first pattern span")
+                .span()
+                .range()
+                .start(),
+            14
+        );
+        assert_eq!(
+            parser
+                .ast()
+                .get(pattern_definition.patterns[1])
+                .position
+                .expect("second pattern span")
+                .span()
+                .range()
+                .start(),
+            19
+        );
+        assert!(matches!(
+            parser.ast().get(pattern_definition.tpt).kind,
+            TreeKind::TypeTree(_)
+        ));
+        assert!(pattern_definition.rhs.is_none());
         assert!(matches!(
             parser.ast().get(template.body[1]).kind,
             TreeKind::DefDef(_)
