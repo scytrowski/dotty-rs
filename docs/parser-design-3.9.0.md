@@ -264,6 +264,16 @@ remain deferred. Supported context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
 `erased_params` per parameter; `?=>` is right-associative and composes
 recursively with ordinary `=>`.
+Ordinary parenthesized function types also support unnamed by-name parameters
+in the leading-arrow `FunArgType` form, such as `(=> A) => B` and
+`(A, => B) => C`. Each explicit `=> Type` parameter is represented by the
+shared `ByNameTypeTree`, and strict/by-name parameters retain source order.
+The wrapped result uses the full current `type_expr()` parser, so applied,
+union/intersection, tuple, and nested ordinary/context function types are
+preserved. By-name parameters are limited to parenthesized ordinary function
+types in this milestone; named by-name parameters, context-function by-name
+parameters, erased parameters, pure arrows, polymorphic function types, and
+type lambdas remain deferred.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters

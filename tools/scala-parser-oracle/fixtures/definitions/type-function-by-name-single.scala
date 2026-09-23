@@ -1,0 +1,3 @@
+{
+  type Supplier = (=> Value) => Result
+}

@@ -65,6 +65,7 @@ object Main:
         tree.getClass.getSimpleName.stripSuffix("$") match
           case "WhileDo" => "While"
           case "AppliedTypeTree" => "TypeApply"
+          case "ByNameTypeTree" => "ByNameTypeTree"
           case "WildcardFunction" => "Function"
           case name => name
     fields += field("kind", quote(normalizedKind))
