@@ -208,8 +208,18 @@ where
     }
 
     pub(crate) fn parse_enum_case(&mut self) -> ParsedStatement {
-        let mark = self.mark();
+        self.parse_enum_case_with_prefix(DefinitionPrefix::empty(self.mark().start()))
+    }
+
+    pub(crate) fn parse_enum_case_with_prefix(
+        &mut self,
+        prefix: DefinitionPrefix,
+    ) -> ParsedStatement {
+        let mark = crate::Mark {
+            start: prefix.start,
+        };
         let case_position = self.current_span();
+        let metadata = self.enum_case_metadata(prefix.metadata);
         self.advance();
 
         let name_mark = self.mark();
@@ -232,7 +242,7 @@ where
             self.current().kind,
             TokenKind::Punctuation(Punctuation::LeftBracket | Punctuation::LeftParen)
         ) {
-            return self.parse_parameterized_enum_case(mark, case_position, type_name);
+            return self.parse_parameterized_enum_case(mark, case_position, type_name, metadata);
         }
 
         if self.enum_case_requires_unsupported_recovery() {
@@ -247,11 +257,9 @@ where
                     backquoted,
                 }),
             );
-            return self.parse_enum_case_group(mark, first);
+            return self.parse_enum_case_group(mark, first, metadata);
         }
 
-        let mut metadata = Modifiers::default();
-        metadata.modifiers.push(Modifier::EnumCase);
         self.parse_enum_case_module_after_name(mark, term_name, metadata)
     }
 
@@ -260,6 +268,7 @@ where
         mark: crate::Mark,
         case_position: dotty_core::SourceSpan,
         name: TypeName,
+        metadata: Modifiers,
     ) -> ParsedStatement {
         let diagnostics_before_type_params = self.diagnostics.len();
         let type_params = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
@@ -336,8 +345,6 @@ where
         );
         self.ast.get_mut(template).position = Some(template_position);
 
-        let mut metadata = Modifiers::default();
-        metadata.modifiers.push(Modifier::EnumCase);
         ParsedStatement::Definition(self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
@@ -353,6 +360,7 @@ where
         &mut self,
         mark: crate::Mark,
         first: TreeId<Untyped>,
+        metadata: Modifiers,
     ) -> ParsedStatement {
         let mut patterns = vec![first];
         while self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
@@ -386,8 +394,6 @@ where
         }
 
         let tpt = self.synthetic_type_tree_at(self.last_real_token_end);
-        let mut metadata = Modifiers::default();
-        metadata.modifiers.push(Modifier::EnumCase);
         ParsedStatement::Definition(self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(
@@ -435,6 +441,18 @@ where
                 self.source.slice(follows.span).ok(),
                 Some("derives" | "uses")
             ))
+    }
+
+    fn enum_case_metadata(&mut self, mut metadata: Modifiers) -> Modifiers {
+        metadata.modifiers.retain(|modifier| {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                format!("modifier `{modifier:?}` is not allowed on an enum case"),
+            );
+            false
+        });
+        metadata.modifiers.push(Modifier::EnumCase);
+        metadata
     }
 
     fn malformed_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
@@ -1513,6 +1531,106 @@ mod tests {
     }
 
     #[test]
+    fn preserves_prefix_metadata_on_all_enum_case_definition_shapes() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { @A case Red, Green\nprivate[pkg] case Some(value: A)\nprotected case Child(value: A) extends Parent\n}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Case), 12, 16),
+                token(TokenKind::Identifier, 17, 20),
+                token(TokenKind::Punctuation(Punctuation::Comma), 20, 21),
+                token(TokenKind::Identifier, 22, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Private), 28, 35),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 35, 36),
+                token(TokenKind::Identifier, 36, 39),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 39, 40),
+                token(TokenKind::Keyword(HardKeyword::Case), 41, 45),
+                token(TokenKind::Identifier, 46, 50),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 50, 51),
+                token(TokenKind::Identifier, 51, 56),
+                token(TokenKind::ColonFollow, 56, 57),
+                token(TokenKind::Identifier, 58, 59),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 59, 60),
+                token(TokenKind::Newline, 60, 61),
+                token(TokenKind::Keyword(HardKeyword::Protected), 61, 70),
+                token(TokenKind::Keyword(HardKeyword::Case), 71, 75),
+                token(TokenKind::Identifier, 76, 81),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 81, 82),
+                token(TokenKind::Identifier, 82, 87),
+                token(TokenKind::ColonFollow, 87, 88),
+                token(TokenKind::Identifier, 89, 90),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 90, 91),
+                token(TokenKind::Keyword(HardKeyword::Extends), 92, 99),
+                token(TokenKind::Identifier, 100, 106),
+                token(TokenKind::Newline, 106, 107),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 107, 108),
+                token(TokenKind::Eof, 108, 108),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 3);
+
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(group)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected a comma-separated enum case group");
+        };
+        assert_eq!(group.modifiers.modifiers, vec![Modifier::EnumCase]);
+        assert_eq!(group.modifiers.annotations.len(), 1);
+        assert!(group.modifiers.visibility.is_none());
+        assert_eq!(
+            parser
+                .ast()
+                .get(template.body[0])
+                .position
+                .expect("enum case group span")
+                .span()
+                .range()
+                .start(),
+            9
+        );
+
+        let TreeKind::TypeDef(parameterized) = &parser.ast().get(template.body[1]).kind else {
+            panic!("expected a parameterized enum case");
+        };
+        assert_eq!(parameterized.metadata.modifiers, vec![Modifier::EnumCase]);
+        let Some(dotty_core::ast::VisibilitySyntax::Private {
+            qualifier: Some(qualifier),
+        }) = parameterized.metadata.visibility
+        else {
+            panic!("expected qualified private visibility");
+        };
+        assert_eq!(parser.names.resolve(qualifier.text()), "pkg");
+        assert!(parameterized.metadata.annotations.is_empty());
+
+        let TreeKind::TypeDef(parented) = &parser.ast().get(template.body[2]).kind else {
+            panic!("expected a parented enum case");
+        };
+        assert_eq!(parented.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert_eq!(
+            parented.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Protected { qualifier: None })
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_comma_separated_enum_case_as_one_pattern_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -1650,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_prefixed_singleton_enum_case() {
+    fn parses_a_prefixed_singleton_enum_case() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "enum E { private case Red\ndef after = 1 }",
@@ -1681,6 +1799,257 @@ mod tests {
         let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
             panic!("expected a Template");
         };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected a singleton enum case module");
+        };
+        assert_eq!(
+            module.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
+        assert_eq!(module.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_a_hard_modifier_before_an_enum_case_without_losing_the_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { final case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Final), 9, 14),
+                token(TokenKind::Keyword(HardKeyword::Case), 15, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Newline, 23, 24),
+                token(TokenKind::Keyword(HardKeyword::Def), 24, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Operator, 34, 35),
+                token(TokenKind::IntegerLiteral, 36, 37),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 38, 39),
+                token(TokenKind::Eof, 39, 39),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the invalidly prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(case.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_soft_modifier_before_an_enum_case_without_treating_it_as_valid() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Keyword(HardKeyword::Case), 16, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Newline, 24, 25),
+                token(TokenKind::Keyword(HardKeyword::Def), 25, 28),
+                token(TokenKind::Identifier, 29, 34),
+                token(TokenKind::Operator, 35, 36),
+                token(TokenKind::IntegerLiteral, 37, 38),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 39, 40),
+                token(TokenKind::Eof, 40, 40),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the invalidly prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(case.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_missing_annotation_type_before_an_enum_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { @ case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Keyword(HardKeyword::Case), 11, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Newline, 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Def), 20, 23),
+                token(TokenKind::Identifier, 24, 29),
+                token(TokenKind::Operator, 30, 31),
+                token(TokenKind::IntegerLiteral, 32, 33),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_missing_qualified_visibility_closer_before_an_enum_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { private[pkg case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Private), 9, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 16, 17),
+                token(TokenKind::Identifier, 17, 20),
+                token(TokenKind::Keyword(HardKeyword::Case), 21, 25),
+                token(TokenKind::Identifier, 26, 29),
+                token(TokenKind::Newline, 29, 30),
+                token(TokenKind::Keyword(HardKeyword::Def), 30, 33),
+                token(TokenKind::Identifier, 34, 39),
+                token(TokenKind::Operator, 40, 41),
+                token(TokenKind::IntegerLiteral, 42, 43),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 44, 45),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_prefixed_enum_case_without_a_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { private case\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Private), 9, 16),
+                token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+                token(TokenKind::Newline, 21, 22),
+                token(TokenKind::Keyword(HardKeyword::Def), 22, 25),
+                token(TokenKind::Identifier, 26, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::IntegerLiteral, 34, 35),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 36, 37),
+                token(TokenKind::Eof, 37, 37),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
         assert!(matches!(
             parser.ast().get(template.body[0]).kind,
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
@@ -1689,15 +2058,181 @@ mod tests {
             parser.ast().get(template.body[1]).kind,
             TreeKind::DefDef(_)
         ));
+        assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
-                .count(),
-            1
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedPattern
         );
-        assert!(parser.diagnostics()[0].message().contains("enum cases"));
+    }
+
+    #[test]
+    fn diagnoses_a_soft_modifier_before_qualified_enum_visibility() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline private[pkg] case Broken\ncase Good }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Keyword(HardKeyword::Private), 16, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 23, 24),
+                token(TokenKind::Identifier, 24, 27),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Case), 29, 33),
+                token(TokenKind::Identifier, 34, 40),
+                token(TokenKind::Newline, 40, 41),
+                token(TokenKind::Keyword(HardKeyword::Case), 41, 45),
+                token(TokenKind::Identifier, 46, 50),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 51, 52),
+                token(TokenKind::Eof, 52, 52),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(first)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(first.metadata.modifiers, vec![Modifier::EnumCase]);
+        let Some(dotty_core::ast::VisibilitySyntax::Private {
+            qualifier: Some(qualifier),
+        }) = first.metadata.visibility
+        else {
+            panic!("expected qualified private visibility");
+        };
+        assert_eq!(parser.names.resolve(qualifier.text()), "pkg");
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_soft_modifier_before_this_qualified_enum_visibility() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline private[this] case Broken\ncase Good }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Keyword(HardKeyword::Private), 16, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 23, 24),
+                token(TokenKind::Keyword(HardKeyword::This), 24, 28),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 28, 29),
+                token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
+                token(TokenKind::Identifier, 35, 41),
+                token(TokenKind::Newline, 41, 42),
+                token(TokenKind::Keyword(HardKeyword::Case), 42, 46),
+                token(TokenKind::Identifier, 47, 51),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 52, 53),
+                token(TokenKind::Eof, 53, 53),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(first)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(first.metadata.modifiers, vec![Modifier::EnumCase]);
+        let Some(dotty_core::ast::VisibilitySyntax::Private {
+            qualifier: Some(qualifier),
+        }) = first.metadata.visibility
+        else {
+            panic!("expected private[this] visibility");
+        };
+        assert_eq!(parser.names.resolve(qualifier.text()), "this");
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_soft_modifier_across_a_prefix_newline() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline\ncase Broken\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Newline, 15, 16),
+                token(TokenKind::Keyword(HardKeyword::Case), 16, 20),
+                token(TokenKind::Identifier, 21, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Def), 28, 31),
+                token(TokenKind::Identifier, 32, 37),
+                token(TokenKind::Operator, 38, 39),
+                token(TokenKind::IntegerLiteral, 40, 41),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 42, 43),
+                token(TokenKind::Eof, 43, 43),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
     }
 
     #[test]

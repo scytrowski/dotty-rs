@@ -48,7 +48,9 @@ where
         // ordinary term identifiers in expression and value-name positions.
         for offset in 1..=8 {
             let kind = self.cursor.lookahead(offset).kind;
-            if is_definition_keyword(kind) {
+            if is_definition_keyword(kind)
+                || (self.context.enum_body && kind == TokenKind::Keyword(HardKeyword::Case))
+            {
                 return true;
             }
             if is_prefix_continuation(kind) {
@@ -333,7 +335,10 @@ fn is_prefix_continuation(kind: TokenKind) -> bool {
             kind,
             TokenKind::Identifier
                 | TokenKind::BackquotedIdentifier
-                | TokenKind::Punctuation(Punctuation::LeftBracket)
+                | TokenKind::Keyword(HardKeyword::This)
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Punctuation(Punctuation::LeftBracket | Punctuation::RightBracket)
         )
 }
 

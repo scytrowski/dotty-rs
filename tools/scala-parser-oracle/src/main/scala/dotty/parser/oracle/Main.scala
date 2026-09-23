@@ -109,7 +109,7 @@ object Main:
           fields += field("trait", "true")
         if tdef.mods.is(Enum) then
           fields += field("enum", "true")
-        if isTypeDefinitionSource(slice(tdef, source)) then
+        if isTypeDefinitionSource(slice(tdef, source)) || tdef.mods.flags.isAllOf(EnumCase) then
           fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase, includeMutable = false)
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
         fields += field("name", quote(module.name.toString))
@@ -222,7 +222,7 @@ object Main:
           .minOption
           .getOrElse(sourceText.length)
       else
-        List("def", "type", "class", "trait", "object")
+        List("def", "type", "class", "trait", "object", "enum")
           .flatMap(indexOfWord(sourceText, _))
           .minOption
           .getOrElse(sourceText.length)
