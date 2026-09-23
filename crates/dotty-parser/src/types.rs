@@ -113,11 +113,22 @@ where
         }
 
         let mut elements = vec![inner];
-        while !self
-            .cursor
-            .at(TokenKind::Punctuation(Punctuation::RightParen))
-            && self.current().kind != TokenKind::Eof
-        {
+        loop {
+            if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::RightParen))
+            {
+                let position = self.zero_width_span(self.current().span.start());
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type after `,`",
+                );
+                elements.push(self.error_type(position));
+                break;
+            }
+            if self.current().kind == TokenKind::Eof {
+                break;
+            }
             elements.push(self.type_expr());
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
@@ -517,6 +528,40 @@ mod tests {
             panic!("expected a recovered tuple type");
         };
         assert_eq!(tuple.elements.len(), 3);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType))
+        );
+    }
+
+    #[test]
+    fn reports_a_trailing_tuple_comma_with_a_missing_element() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A,)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(ref tuple)) = parser.ast().get(id).kind
+        else {
+            panic!("expected a recovered tuple type");
+        };
+        assert_eq!(tuple.elements.len(), 2);
+        assert!(matches!(
+            parser.ast().get(tuple.elements[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(
             parser
