@@ -175,9 +175,6 @@ where
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
                 self.is_function_type(parens.inner)
             }
-            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(poly_function)) => {
-                self.is_function_type(poly_function.body)
-            }
             _ => false,
         }
     }
@@ -4826,6 +4823,37 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(parser.current_text(), Ok("?=>"));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_directly_nested_polymorphic_function_type_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] => [B] => B => A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 16, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
 }
