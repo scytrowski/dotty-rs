@@ -25,7 +25,7 @@ where
         }
 
         loop {
-            args.push(self.simple_type());
+            args.push(self.type_expr());
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
                 break;
@@ -268,6 +268,70 @@ mod tests {
         assert_eq!(parser.names.resolve(outer.op.text()), "&");
         assert!(matches!(
             parser.ast().get(outer.left).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_union_inside_type_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[A | B]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(applied) = &parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert_eq!(applied.args.len(), 1);
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_nested_applied_types_with_an_intersection_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Option[List[A | B]]",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 11, 12),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let outer_id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(outer) = &parser.ast().get(outer_id).kind else {
+            panic!("expected the outer applied type");
+        };
+        let inner_id = outer.args[0];
+        let TreeKind::AppliedTypeTree(inner) = &parser.ast().get(inner_id).kind else {
+            panic!("expected the nested applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(inner.args[0]).kind,
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
         ));
         assert!(parser.diagnostics().is_empty());
