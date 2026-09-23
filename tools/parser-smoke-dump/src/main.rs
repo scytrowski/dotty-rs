@@ -234,11 +234,12 @@ fn render_tree(
             {
                 fields.push("\"trait\":true".to_owned());
             }
-            if definition
-                .metadata
-                .modifiers
-                .contains(&dotty_core::ast::Modifier::Enum)
-            {
+            if definition.metadata.modifiers.iter().any(|modifier| {
+                matches!(
+                    modifier,
+                    dotty_core::ast::Modifier::Enum | dotty_core::ast::Modifier::EnumCase
+                )
+            }) {
                 fields.push("\"enum\":true".to_owned());
             }
             if is_type_definition_source(&source_text) {
