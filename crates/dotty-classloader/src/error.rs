@@ -29,7 +29,8 @@ pub enum ClassLoadError {
     /// decoder can safely give a semantic reading — either newer than
     /// this project's JDK-25 compatibility ceiling, older than the JVMS
     /// has ever defined, or a preview-features class this decoder never
-    /// has preview features enabled for (see
+    /// has preview features enabled for. Real compatibility corpora cover
+    /// JDK 23, 24, and 25 (see
     /// [`ClassFileVersion::is_compatible`] and
     /// `docs/classfile-format-jdk25.md` §2.1).
     UnsupportedClassVersion(BinaryName, ClassFileVersion),

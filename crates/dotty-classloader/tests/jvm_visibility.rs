@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassFormat, ClassLoader, ClassOrigin, ClassPathEntry, ClassPathError,
@@ -19,8 +19,15 @@ use dotty_core::ids::SymbolId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::Visibility;
 
-fn corpus_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dotty-classfile/tests/fixtures/jdk_corpus")
+fn corpus_root(version: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-classfile/tests/fixtures/jdk_corpus")
+        .join(version)
+}
+
+fn corpus_classes_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-classfile/tests/fixtures/jdk_corpus/classes.txt")
 }
 
 /// The real corpus classes, with a minimal synthetic stand-in for any class
@@ -81,7 +88,7 @@ fn stub_class(this_name: &str, super_name: Option<&str>) -> Vec<u8> {
 
 /// Binary names listed in the corpus's `classes.txt`.
 fn corpus_classes() -> Vec<BinaryName> {
-    fs::read_to_string(corpus_root().join("classes.txt"))
+    fs::read_to_string(corpus_classes_path())
         .expect("classes.txt should exist")
         .lines()
         .map(str::trim)
@@ -98,12 +105,12 @@ fn is_java_visibility(visibility: Visibility) -> bool {
 }
 
 /// Every class and member symbol produced by loading the corpus.
-fn loaded_symbols() -> (SemanticStore, Vec<SymbolId>) {
+fn loaded_symbols(corpus_root: &Path) -> (SemanticStore, Vec<SymbolId>) {
     let mut store = SemanticStore::new();
     let mut symbols = Vec::new();
     {
         let mut loader = ClassLoader::new(
-            CorpusWithStubs(DirectoryClassPath::new(corpus_root())),
+            CorpusWithStubs(DirectoryClassPath::new(corpus_root.to_path_buf())),
             &mut store,
         );
         for name in corpus_classes() {
@@ -123,16 +130,19 @@ fn loaded_symbols() -> (SemanticStore, Vec<SymbolId>) {
 
 #[test]
 fn loaded_classes_and_members_never_get_a_qualified_visibility() {
-    let (store, symbols) = loaded_symbols();
+    for version in ["jdk23", "jdk24", "jdk25"] {
+        let root = corpus_root(version);
+        let (store, symbols) = loaded_symbols(&root);
 
-    assert!(!symbols.is_empty(), "the corpus produced no symbols");
-    for symbol in symbols {
-        let visibility = store.symbols.get(symbol).visibility;
-        assert!(
-            is_java_visibility(visibility),
-            "symbol {} has non-JVM visibility {visibility:?}",
-            symbol.index()
-        );
+        assert!(!symbols.is_empty(), "{version} produced no symbols");
+        for symbol in symbols {
+            let visibility = store.symbols.get(symbol).visibility;
+            assert!(
+                is_java_visibility(visibility),
+                "{version}: symbol {} has non-JVM visibility {visibility:?}",
+                symbol.index()
+            );
+        }
     }
 }
 
@@ -140,24 +150,27 @@ fn loaded_classes_and_members_never_get_a_qualified_visibility() {
 fn the_corpus_exercises_every_java_visibility() {
     // Guards the test above against passing vacuously on a corpus that only
     // contains, say, public members.
-    let (store, symbols) = loaded_symbols();
+    for version in ["jdk23", "jdk24", "jdk25"] {
+        let root = corpus_root(version);
+        let (store, symbols) = loaded_symbols(&root);
 
-    let seen: HashSet<&str> = symbols
-        .iter()
-        .map(|symbol| match store.symbols.get(*symbol).visibility {
-            Visibility::Public => "public",
-            Visibility::Private => "private",
-            Visibility::Protected => "protected",
-            Visibility::Package(_) => "package",
-            Visibility::PrivateWithin(_) | Visibility::ProtectedWithin(_) => "qualified",
-        })
-        .collect();
+        let seen: HashSet<&str> = symbols
+            .iter()
+            .map(|symbol| match store.symbols.get(*symbol).visibility {
+                Visibility::Public => "public",
+                Visibility::Private => "private",
+                Visibility::Protected => "protected",
+                Visibility::Package(_) => "package",
+                Visibility::PrivateWithin(_) | Visibility::ProtectedWithin(_) => "qualified",
+            })
+            .collect();
 
-    for expected in ["public", "private", "protected", "package"] {
-        assert!(
-            seen.contains(expected),
-            "no {expected} symbol in the corpus"
-        );
+        for expected in ["public", "private", "protected", "package"] {
+            assert!(
+                seen.contains(expected),
+                "{version}: no {expected} symbol in the corpus"
+            );
+        }
+        assert!(!seen.contains("qualified"));
     }
-    assert!(!seen.contains("qualified"));
 }

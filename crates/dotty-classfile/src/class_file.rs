@@ -46,9 +46,10 @@ impl From<ReadError> for ClassFileHeaderError {
 pub const MIN_MAJOR_VERSION: u16 = 45;
 
 /// This project's compatibility ceiling: JDK 25, the version
-/// `docs/classfile-format-jdk25.md` is written against. A `major_version`
-/// above this is a JDK newer than this decoder has been validated
-/// against, not necessarily an invalid file.
+/// `docs/classfile-format-jdk25.md` is written against and the highest
+/// release covered by a real compatibility corpus. A `major_version` above
+/// this is a JDK newer than this decoder has been validated against, not
+/// necessarily an invalid file.
 pub const MAX_MAJOR_VERSION: u16 = 69;
 
 /// The `minor_version` that marks a class as compiled against **preview
@@ -540,6 +541,28 @@ mod tests {
         assert!(
             ClassFileVersion {
                 major: 69,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_jdk_24_version_is_compatible() {
+        assert!(
+            ClassFileVersion {
+                major: 68,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
+    fn a_jdk_23_version_is_compatible() {
+        assert!(
+            ClassFileVersion {
+                major: 67,
                 minor: 0
             }
             .is_compatible()
