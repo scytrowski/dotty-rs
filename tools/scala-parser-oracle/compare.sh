@@ -29,7 +29,7 @@ for fixture in "${fixtures[@]}"; do
     mode=pattern
   elif [[ "$(basename "$(dirname "${fixture}")")" == "definitions" ]]; then
     mode=block
-    if [[ "$(basename "${fixture}")" == type-function-erased-*.scala ]]; then
+    if [[ "$(basename "${fixture}")" == *function-erased-*.scala ]]; then
       mode=block-erased
     fi
   elif [[ "$(basename "$(dirname "${fixture}")")" == "compilation" ]]; then
