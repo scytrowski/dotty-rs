@@ -358,8 +358,8 @@ simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms (including enums and full template
-semantics), legacy given syntax, remaining control flow (`do`/`while`),
+`RefinedType`, remaining definition forms and full template semantics, legacy
+given syntax, remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
