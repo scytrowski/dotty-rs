@@ -2126,6 +2126,66 @@ mod tests {
     }
 
     #[test]
+    fn diagnoses_a_soft_modifier_before_this_qualified_enum_visibility() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline private[this] case Broken\ncase Good }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Keyword(HardKeyword::Private), 16, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 23, 24),
+                token(TokenKind::Keyword(HardKeyword::This), 24, 28),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 28, 29),
+                token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
+                token(TokenKind::Identifier, 35, 41),
+                token(TokenKind::Newline, 41, 42),
+                token(TokenKind::Keyword(HardKeyword::Case), 42, 46),
+                token(TokenKind::Identifier, 47, 51),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 52, 53),
+                token(TokenKind::Eof, 53, 53),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(first)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(first.metadata.modifiers, vec![Modifier::EnumCase]);
+        let Some(dotty_core::ast::VisibilitySyntax::Private {
+            qualifier: Some(qualifier),
+        }) = first.metadata.visibility
+        else {
+            panic!("expected private[this] visibility");
+        };
+        assert_eq!(parser.names.resolve(qualifier.text()), "this");
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
     fn diagnoses_a_soft_modifier_across_a_prefix_newline() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

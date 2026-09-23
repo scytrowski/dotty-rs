@@ -335,6 +335,7 @@ fn is_prefix_continuation(kind: TokenKind) -> bool {
             kind,
             TokenKind::Identifier
                 | TokenKind::BackquotedIdentifier
+                | TokenKind::Keyword(HardKeyword::This)
                 | TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Punctuation(Punctuation::LeftBracket | Punctuation::RightBracket)
