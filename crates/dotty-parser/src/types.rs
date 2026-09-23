@@ -106,7 +106,7 @@ where
         }
     }
 
-    fn parse_union_type(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_union_type(&mut self) -> TreeId<Untyped> {
         let mut tree = self.parse_intersection_type();
         while let Some(operator) = self.accept_type_infix_operator("|") {
             self.consume_type_infix_newlines();
