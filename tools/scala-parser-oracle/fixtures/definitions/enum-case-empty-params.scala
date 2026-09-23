@@ -1,0 +1,4 @@
+{
+  enum EmptyCase:
+    case Empty()
+}
