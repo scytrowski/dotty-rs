@@ -49,8 +49,8 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::{ClassInfo, Type};
 use dotty_tasty::tasty::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, EMPTYCLAUSE_TAG, NEW_TAG, PACKAGE_TAG,
-    PARAM_TAG, ParameterNode, RawTree, SELECTIN_TAG, SHAREDTYPE_TAG, SPLITCLAUSE_TAG,
+    ANNOTATION_TAG, APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, DefinitionBody, EMPTYCLAUSE_TAG, NEW_TAG,
+    PACKAGE_TAG, PARAM_TAG, ParameterNode, RawTree, SELECTIN_TAG, SHAREDTYPE_TAG, SPLITCLAUSE_TAG,
     StructuredNode, TEMPLATE_TAG, TERMREFPKG_TAG, TYPEAPPLY_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
     TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
@@ -71,6 +71,24 @@ use crate::unpickler::TastyUnpickler;
 /// identity-discovery walker ([`crate::discovery`]), which is the successor
 /// of the scan this bound originally guarded.
 pub(crate) const MAX_TREE_DEPTH: usize = 256;
+
+/// The addresses of `at`'s immediate `ANNOTATION` children, in wire order
+/// (Milestone 5e1).
+///
+/// A `DefinitionTail::Annotation` node's own `RawNode.offset` is relative to
+/// the definition's payload (`RawNode::reader` always starts a fresh reader
+/// at 0), not an absolute AST address, so it cannot key the address-based
+/// index the rest of the unpickler relies on. The AST's own child edges,
+/// built top-down over absolute offsets, give the real address instead —
+/// exactly how every other structural child of a definition or parameter is
+/// found (a class's `TEMPLATE`, a method's `TYPEPARAM`/`PARAM` children).
+fn annotation_children(ast: &AstView<'_>, at: u32) -> Vec<u32> {
+    ast.children(at)
+        .iter()
+        .filter(|child| child.tag == ANNOTATION_TAG)
+        .map(|child| address(child.offset))
+        .collect()
+}
 
 /// What [`TastyUnpickler::enter_definition_header`] learned, for
 /// [`TastyUnpickler::enter_definition_body`] to continue with.
@@ -97,6 +115,10 @@ struct Declaration<'a> {
     owner: SymbolId,
     /// Whether the symbol is a member of its owner's declaration scope.
     member: bool,
+    /// The addresses of `at`'s `ANNOTATION` tail entries, in wire order
+    /// (Milestone 5e1). Indexed alongside the symbol, decoded by nothing
+    /// here.
+    annotations: &'a [u32],
 }
 
 /// The name reference of a `PACKAGE` node's path, which is a direct
@@ -215,6 +237,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 tail,
             }) => {
                 let modifiers = DeclaredModifiers::from_tail(&tail)?;
+                let annotations = annotation_children(ast, at);
                 let has_template = matches!(
                     &type_or_template,
                     RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG
@@ -230,6 +253,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         modifiers: &modifiers,
                         owner,
                         member: true,
+                        annotations: &annotations,
                     },
                 )?;
                 DefinitionHeader::Ty {
@@ -239,6 +263,7 @@ impl TastyUnpickler<'_, '_, '_> {
             }
             StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) => {
                 let modifiers = DeclaredModifiers::from_tail(&tail)?;
+                let annotations = annotation_children(ast, at);
                 let kind = val_def_kind(&modifiers, owner_kind);
                 let symbol = self.enter_symbol(
                     ast,
@@ -250,12 +275,14 @@ impl TastyUnpickler<'_, '_, '_> {
                         modifiers: &modifiers,
                         owner,
                         member: true,
+                        annotations: &annotations,
                     },
                 )?;
                 DefinitionHeader::Val { symbol }
             }
             StructuredNode::DefDef(body) => {
                 let modifiers = DeclaredModifiers::from_tail(&body.tail)?;
+                let annotations = annotation_children(ast, at);
                 let kind = def_def_kind(&wire_name(self.file.names(), body.name)?);
                 let method = self.enter_symbol(
                     ast,
@@ -267,6 +294,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         modifiers: &modifiers,
                         owner,
                         member: true,
+                        annotations: &annotations,
                     },
                 )?;
                 DefinitionHeader::Method { symbol: method }
@@ -496,6 +524,7 @@ impl TastyUnpickler<'_, '_, '_> {
     ) -> Result<(), UnpickleError> {
         let tag = parameter.tag();
         let modifiers = DeclaredModifiers::from_tail(&parameter.decode_body()?.tail)?;
+        let annotations = annotation_children(ast, at);
         let kind = if tag == TYPEPARAM_TAG {
             type_param_kind()
         } else {
@@ -512,6 +541,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 modifiers: &modifiers,
                 owner,
                 member: is_member,
+                annotations: &annotations,
             },
         )?;
         self.discover_declared_type_identities(ast, at, symbol, depth)?;
@@ -707,6 +737,7 @@ impl TastyUnpickler<'_, '_, '_> {
             modifiers,
             owner,
             member,
+            annotations,
         } = declaration;
         let namespace =
             namespace_of(tag).ok_or(UnpickleError::MissingDefinition { address: at })?;
@@ -726,6 +757,7 @@ impl TastyUnpickler<'_, '_, '_> {
             links: SymbolLinks::default(),
         });
         self.index.insert_symbol(at, symbol)?;
+        self.index.insert_annotation_tail(at, annotations.to_vec());
 
         if member && let Some(scope) = self.index.scope_of(owner) {
             enter_in_scope(self.store, &mut self.scope_journal, scope, name, symbol);
@@ -1140,5 +1172,195 @@ mod tests {
                 definition: FOO_CLASS
             })
         );
+    }
+
+    // --- symbol annotation tail indexing (Milestone 5e1) ---
+
+    const SYMBOL_ANNOTATED: &[u8] =
+        include_bytes!("../tests/fixtures/semantic/SymbolAnnotated.tasty");
+    const SYMBOL_ANNOTATED_PARAMS: &[u8] =
+        include_bytes!("../tests/fixtures/semantic/SymbolAnnotatedParams.tasty");
+    const SYMBOL_UNANNOTATED: &[u8] =
+        include_bytes!("../tests/fixtures/semantic/SymbolUnannotated.tasty");
+
+    // Absolute addresses (pinned by `tests/fixtures/semantic/generate.sh`'s
+    // output): each definition's `ANNOTATION` children are the wire's own
+    // explicit `@SymbolMarker`/`@SymbolTagged` entries plus the compiler's own
+    // `@SourceFile` on every top-level class, in wire order.
+    const SYMBOL_ANNOTATED_CLASS: u32 = 5; // `@SymbolMarker class SymbolAnnotated`
+    const SYMBOL_ANNOTATED_INIT: u32 = 23; // its primary constructor
+    const SYMBOL_ANNOTATED_X: u32 = 31; // `@SymbolMarker val x`
+    const SYMBOL_ANNOTATED_F: u32 = 60; // `@SymbolMarker def f(x: Int)`
+    const SYMBOL_ANNOTATED_F_PARAM: u32 = 63; // `f`'s unannotated parameter `x`
+    const SYMBOL_ANNOTATED_T: u32 = 92; // `@SymbolMarker type T`
+
+    const SYMBOL_ANNOTATED_PARAMS_CTOR_PARAM: u32 = 34; // `@SymbolMarker val ctorParam`
+    const SYMBOL_ANNOTATED_PARAMS_TYPE_PARAM: u32 = 67; // `[@SymbolMarker A]`
+    const SYMBOL_ANNOTATED_PARAMS_TERM_PARAM: u32 = 96; // `@SymbolMarker @SymbolTagged(...) param`
+
+    const SYMBOL_UNANNOTATED_CLASS: u32 = 4; // `class SymbolUnannotated` (no explicit annotation)
+    const SYMBOL_UNANNOTATED_PLAIN: u32 = 29; // `val plain`
+
+    #[test]
+    fn a_class_with_an_explicit_annotation_carries_it_alongside_the_compilers_source_file_one() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_CLASS)
+                .map(<[u32]>::to_vec)
+        });
+
+        let tail = tail.expect("the class was entered");
+        assert_eq!(
+            tail.len(),
+            2,
+            "@SymbolMarker plus the compiler's @SourceFile: {tail:?}"
+        );
+    }
+
+    #[test]
+    fn a_synthesized_primary_constructor_carries_no_annotations() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_INIT)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(
+            tail,
+            Some(Vec::new()),
+            "the primary constructor is not annotated"
+        );
+    }
+
+    #[test]
+    fn an_annotated_val_is_indexed_with_exactly_its_one_annotation() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_X)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail.map(|tail| tail.len()), Some(1));
+    }
+
+    #[test]
+    fn an_annotated_def_is_indexed_with_exactly_its_one_annotation() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_F)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail.map(|tail| tail.len()), Some(1));
+    }
+
+    #[test]
+    fn an_unannotated_parameter_is_indexed_as_empty_not_missing() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_F_PARAM)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail, Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_annotated_type_alias_is_indexed_with_exactly_its_one_annotation() {
+        let tail = with_entered(SYMBOL_ANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_T)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail.map(|tail| tail.len()), Some(1));
+    }
+
+    #[test]
+    fn an_annotated_constructor_value_parameter_is_indexed() {
+        let tail = with_entered(SYMBOL_ANNOTATED_PARAMS, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_PARAMS_CTOR_PARAM)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail.map(|tail| tail.len()), Some(1));
+    }
+
+    #[test]
+    fn an_annotated_type_parameter_is_indexed() {
+        let tail = with_entered(SYMBOL_ANNOTATED_PARAMS, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_PARAMS_TYPE_PARAM)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail.map(|tail| tail.len()), Some(1));
+    }
+
+    #[test]
+    fn a_term_parameter_with_two_annotations_keeps_both_in_wire_order() {
+        let tail = with_entered(SYMBOL_ANNOTATED_PARAMS, |unpickler, ast| {
+            let addresses = unpickler
+                .index
+                .annotation_tail_at(SYMBOL_ANNOTATED_PARAMS_TERM_PARAM)
+                .map(<[u32]>::to_vec);
+            (
+                addresses,
+                ast.children(SYMBOL_ANNOTATED_PARAMS_TERM_PARAM).to_vec(),
+            )
+        });
+        let (addresses, children) = tail;
+        let addresses = addresses.expect("the parameter was entered");
+
+        assert_eq!(
+            addresses.len(),
+            2,
+            "@SymbolMarker and @SymbolTagged(...): {addresses:?}"
+        );
+        // The indexed addresses are exactly the `ANNOTATION`-tagged children,
+        // in the order the AST's own child edges report them (wire order).
+        let expected: Vec<u32> = children
+            .iter()
+            .filter(|child| child.tag == ANNOTATION_TAG)
+            .map(|child| address(child.offset))
+            .collect();
+        assert_eq!(addresses, expected);
+    }
+
+    #[test]
+    fn an_unannotated_classs_symbol_still_carries_the_compilers_source_file_annotation() {
+        let tail = with_entered(SYMBOL_UNANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_UNANNOTATED_CLASS)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(
+            tail.map(|tail| tail.len()),
+            Some(1),
+            "no explicit annotation, but the compiler still attaches @SourceFile"
+        );
+    }
+
+    #[test]
+    fn a_definition_with_no_annotations_at_all_is_indexed_as_empty() {
+        let tail = with_entered(SYMBOL_UNANNOTATED, |unpickler, _ast| {
+            unpickler
+                .index
+                .annotation_tail_at(SYMBOL_UNANNOTATED_PLAIN)
+                .map(<[u32]>::to_vec)
+        });
+
+        assert_eq!(tail, Some(Vec::new()));
     }
 }

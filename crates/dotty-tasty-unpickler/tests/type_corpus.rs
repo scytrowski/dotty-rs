@@ -674,8 +674,195 @@ struct Tally {
     missing_outside_bodies: usize,
     /// The identity-reachability oracle (Milestone 5d2c's follow-up review).
     identity: IdentitySurvey,
+    /// Serialized symbol annotations (Milestone 5e1's own corpus survey).
+    symbol_annotations: SymbolAnnotationSurvey,
+    /// Symbol-annotation *completion* outcomes (Milestone 5e1's own corpus
+    /// outcome survey, issue #129 §30/31).
+    symbol_annotation_completion: SymbolAnnotationCompletionSurvey,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: Vec<String>,
+}
+
+/// Serialized symbol annotations (Milestone 5e1): every
+/// `DefinitionTail::Annotation` pass 1 indexes, over every `TYPEDEF`,
+/// `VALDEF`, `DEFDEF`, `TYPEPARAM` and `PARAM` address pass 1 actually
+/// entered a symbol for. Decodes nothing: this counts wire occurrences only,
+/// exactly what pass 1's index records.
+#[derive(Default)]
+struct SymbolAnnotationSurvey {
+    /// Every `ANNOTATION` tail entry recorded, over every entered address.
+    total: usize,
+    /// Entered addresses with at least one `ANNOTATION` tail entry.
+    annotated_definitions: usize,
+    /// Every entered address, annotated or not (the denominator for
+    /// `annotated_definitions`).
+    definitions: usize,
+    /// Annotation tail entries, summed per definition/parameter tag.
+    by_definition_tag: BTreeMap<&'static str, usize>,
+    /// Entered addresses with at least one annotation, per definition/
+    /// parameter tag.
+    annotated_by_definition_tag: BTreeMap<&'static str, usize>,
+    /// "Annotations on one definition" -> how many annotated definitions
+    /// have exactly that many.
+    per_definition_distribution: BTreeMap<usize, usize>,
+}
+
+/// The name of a definition/parameter tag, for the symbol-annotation survey.
+fn definition_tag_name(tag: u8) -> &'static str {
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+    match tag {
+        TYPEDEF_TAG => "TYPEDEF",
+        VALDEF_TAG => "VALDEF",
+        DEFDEF_TAG => "DEFDEF",
+        TYPEPARAM_TAG => "TYPEPARAM",
+        PARAM_TAG => "PARAM",
+        _ => "other",
+    }
+}
+
+/// Surveys the `ANNOTATION` tail entries pass 1 indexed for `file`
+/// (Milestone 5e1). Reads only [`TastySemanticIndex::annotation_tail_at`]:
+/// an address pass 1 never entered a symbol for (a local definition inside a
+/// method body, in particular) has no recorded tail and is skipped, exactly
+/// as it is skipped by every other survey in this module.
+fn survey_symbol_annotations(
+    file: &TastyFile<'_>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut SymbolAnnotationSurvey,
+) {
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+    let index = file.ast_address_index().unwrap();
+    for tag in [
+        TYPEDEF_TAG,
+        VALDEF_TAG,
+        DEFDEF_TAG,
+        TYPEPARAM_TAG,
+        PARAM_TAG,
+    ] {
+        for node in index.iter_nodes_with_tag(tag) {
+            let at = u32::try_from(node.offset).unwrap();
+            let Some(annotations) = unpickler.index().annotation_tail_at(at) else {
+                continue;
+            };
+            let name = definition_tag_name(tag);
+            survey.definitions += 1;
+            survey.total += annotations.len();
+            *survey.by_definition_tag.entry(name).or_default() += annotations.len();
+            if !annotations.is_empty() {
+                survey.annotated_definitions += 1;
+                *survey.annotated_by_definition_tag.entry(name).or_default() += 1;
+                *survey
+                    .per_definition_distribution
+                    .entry(annotations.len())
+                    .or_default() += 1;
+            }
+        }
+    }
+}
+
+/// Symbol-annotation completion outcomes (Milestone 5e1's own corpus outcome
+/// survey, issue #129 §30/31): every definition/parameter with at least one
+/// indexed `ANNOTATION` entry is completed through the real
+/// `TastyUnpickler::complete_symbol_annotations`, and classified.
+/// `unexpected` must stay empty: every other bucket is an expected outcome
+/// on real compiler output (most of all `external`, since this survey never
+/// enters the annotation classes of another unit the way a real multi-unit
+/// session would), but an error this survey does not recognize is not.
+#[derive(Default)]
+struct SymbolAnnotationCompletionSurvey {
+    /// Definitions/parameters with at least one indexed `ANNOTATION` entry.
+    attempted: usize,
+    /// Fully decoded: every `ANNOTATION` entry became an `AnnotationId`.
+    decoded: usize,
+    /// `UnresolvedPackage` / `UnresolvedMember`: the annotation class (or one
+    /// of its type arguments) is not entered in this unit-only session.
+    external: usize,
+    /// `UnsupportedAnnotationConstructor`: a full annotation's constructor
+    /// spine is not `APPLY`/`TYPEAPPLY`/`SELECTin`/`NEW`, or its class tree
+    /// is not `SELECTtpt`/`IDENTtpt`/a bare type.
+    unsupported_constructor: usize,
+    /// `UnsupportedAnnotationArgument`: a full annotation's argument is not a
+    /// literal or class literal.
+    unsupported_argument: usize,
+    /// `InvalidAnnotationType` / `InvalidCompactAnnotationType`: the
+    /// annotation's resolved type is not `TypeRef`/`Applied` (or is still
+    /// pending).
+    invalid_type: usize,
+    /// `UnsupportedAnnotationTree`: the payload is neither a compact type nor
+    /// a constructor application (directly, or through `SHAREDterm` links).
+    unsupported_tree: usize,
+    /// `MalformedType`: the wrapper's own shape (`ANNOTATION`'s two
+    /// children) does not match what `RawNode::decode_annotation` expects.
+    malformed: usize,
+    /// Any other typed error this survey recognizes but does not bucket
+    /// separately (for example `InvalidReferenceTarget`, a bad `SHAREDterm`
+    /// chain).
+    other_known: usize,
+    /// Errors this survey does not recognize: `label @address: error`.
+    unexpected: Vec<String>,
+}
+
+fn survey_symbol_annotation_completion(
+    file: &TastyFile<'_>,
+    unpickler: &mut TastyUnpickler<'_, '_, '_>,
+    label: &str,
+    survey: &mut SymbolAnnotationCompletionSurvey,
+) {
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+    let addresses: Vec<u32> = {
+        let index = file.ast_address_index().unwrap();
+        [
+            TYPEDEF_TAG,
+            VALDEF_TAG,
+            DEFDEF_TAG,
+            TYPEPARAM_TAG,
+            PARAM_TAG,
+        ]
+        .into_iter()
+        .flat_map(|tag| {
+            index
+                .iter_nodes_with_tag(tag)
+                .map(|node| u32::try_from(node.offset).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+    };
+    for at in addresses {
+        let has_annotations = unpickler
+            .index()
+            .annotation_tail_at(at)
+            .is_some_and(|tail| !tail.is_empty());
+        if !has_annotations {
+            continue;
+        }
+        survey.attempted += 1;
+        match unpickler.complete_symbol_annotations(at) {
+            Ok(_) => survey.decoded += 1,
+            Err(
+                UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
+            ) => {
+                survey.external += 1;
+            }
+            Err(UnpickleError::UnsupportedAnnotationConstructor { .. }) => {
+                survey.unsupported_constructor += 1;
+            }
+            Err(UnpickleError::UnsupportedAnnotationArgument { .. }) => {
+                survey.unsupported_argument += 1;
+            }
+            Err(
+                UnpickleError::InvalidAnnotationType { .. }
+                | UnpickleError::InvalidCompactAnnotationType { .. },
+            ) => {
+                survey.invalid_type += 1;
+            }
+            Err(UnpickleError::UnsupportedAnnotationTree { .. }) => {
+                survey.unsupported_tree += 1;
+            }
+            Err(UnpickleError::MalformedType { .. }) => survey.malformed += 1,
+            Err(UnpickleError::InvalidReferenceTarget { .. }) => survey.other_known += 1,
+            Err(other) => survey.unexpected.push(format!("{label} @{at}: {other:?}")),
+        }
+    }
 }
 
 /// The name of a tag observed at the root of a full annotation tree.
@@ -2319,6 +2506,13 @@ fn run(
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
     survey_identity_reachability(&file, &unpickler, label, &mut tally.identity);
+    survey_symbol_annotations(&file, &unpickler, &mut tally.symbol_annotations);
+    survey_symbol_annotation_completion(
+        &file,
+        &mut unpickler,
+        label,
+        &mut tally.symbol_annotation_completion,
+    );
     if completion != Completion::Off {
         complete_unit(
             &mut unpickler,
@@ -3292,6 +3486,53 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             if !id.unaccounted_examples.is_empty() {
                 println!("  unaccounted examples: {:?}", id.unaccounted_examples);
             }
+        }
+        {
+            let sa = &tally.symbol_annotations;
+            println!(
+                "symbol annotations (Milestone 5e1 survey): {} ANNOTATION tail entries over {} entered definitions/parameters, {} of them annotated",
+                sa.total, sa.definitions, sa.annotated_definitions
+            );
+            println!("  entries by definition tag: {:?}", sa.by_definition_tag);
+            println!(
+                "  annotated definitions by tag: {:?}",
+                sa.annotated_by_definition_tag
+            );
+            println!(
+                "  annotations-per-definition distribution: {:?}",
+                sa.per_definition_distribution
+            );
+        }
+        {
+            let sac = &tally.symbol_annotation_completion;
+            println!(
+                "symbol annotation completion (Milestone 5e1 outcome survey): {} attempted, {} decoded, {} external, {} unsupported constructor, {} unsupported argument, {} invalid type, {} unsupported tree, {} malformed, {} other known, {} unexpected",
+                sac.attempted,
+                sac.decoded,
+                sac.external,
+                sac.unsupported_constructor,
+                sac.unsupported_argument,
+                sac.invalid_type,
+                sac.unsupported_tree,
+                sac.malformed,
+                sac.other_known,
+                sac.unexpected.len()
+            );
+            for error in sac.unexpected.iter().take(10) {
+                println!("  {error}");
+            }
+            assert!(sac.unexpected.is_empty(), "{:?}", sac.unexpected);
+            assert_eq!(
+                sac.attempted,
+                sac.decoded
+                    + sac.external
+                    + sac.unsupported_constructor
+                    + sac.unsupported_argument
+                    + sac.invalid_type
+                    + sac.unsupported_tree
+                    + sac.malformed
+                    + sac.other_known
+            );
         }
         println!("unexpected errors: {}", tally.unexpected.len());
         for error in tally.unexpected.iter().take(10) {

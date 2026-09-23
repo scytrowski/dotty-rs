@@ -11,7 +11,13 @@
 //! `TRACKED`, `INTO` (no matching core flag), `COVARIANT`/`CONTRAVARIANT`
 //! (variance belongs to type-parameter completion), and the accessor roles
 //! `FIELDACCESSOR`, `CASEACCESSOR`, `PARAMSETTER`, `PARAMALIAS`,
-//! `HASDEFAULT`, `STABLE`. Annotations are not read here.
+//! `HASDEFAULT`, `STABLE`. Annotations are not read here: `from_tail` skips
+//! `DefinitionTail::Annotation` entirely, including for the wire position it
+//! carries, because that position is relative to the definition's own
+//! payload, not an absolute AST address (`RawNode::reader` always starts a
+//! fresh reader at offset 0) — the addresses pass 1 indexes for Milestone 5e1
+//! come from the AST's own child edges instead (`enter::annotation_children`),
+//! exactly like every other structural child a definition's tail is not.
 
 use dotty_core::names::Namespace;
 use dotty_core::symbols::{SymbolFlags, SymbolKind, Visibility};
