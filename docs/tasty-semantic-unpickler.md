@@ -1745,7 +1745,21 @@ payload's, mirroring the existing `ANNOTATEDtype` occurrence-identity policy.
 Both mutations (disabling the idempotence check; disabling the journal
 rollback) are caught by dedicated `tests/symbol_annotations.rs` tests.
 
-**Fixtures and tests.** 20 `tests/symbol_annotations.rs` tests exercise every
+**A package address is a typed error, not a panic (review fix).** A package
+symbol is entered through `enter_package`, which inserts it into the index
+directly (`insert_symbol`) and never calls `insert_annotation_tail`: a
+`PACKAGE` node has no `ANNOTATION` tail in the wire format at all, unlike
+every `TYPEDEF`/`VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM`, which always gets one
+indexed (even empty) through `enter_symbol`. An initial version of
+`complete_symbol_annotations` `.expect()`ed a tail to exist whenever a symbol
+did, which is true for every address this milestone means to support but not
+for a package address — a real, well-formed input, not a bug, so panicking on
+it broke this crate's own "never panic on wire/caller input" invariant. Fixed
+with a new typed `UnsupportedAnnotationCompletion { address, kind }`, and two
+regressions (`complete_symbol_annotations` alone, and inside a batch) pin a
+package address failing cleanly instead.
+
+**Fixtures and tests.** 22 `tests/symbol_annotations.rs` tests exercise every
 fixture shape from the tail-indexing increment above through the real
 completion API (basic completion, identity, idempotence, `SymbolInfo`
 independence in both directions, partial-multi-annotation atomicity, and

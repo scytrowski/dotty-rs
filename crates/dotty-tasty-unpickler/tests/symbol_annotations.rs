@@ -36,6 +36,11 @@ const SYMBOL_ANNOTATED_PARAMS_TERM_PARAM: u32 = 96; // `@SymbolMarker @SymbolTag
 const SYMBOL_UNANNOTATED_CLASS: u32 = 4; // `class SymbolUnannotated` (compiler's @SourceFile only)
 const SYMBOL_UNANNOTATED_PLAIN: u32 = 29; // `val plain`
 
+/// The fixture's single top-level `PACKAGE` node: entered through
+/// `enter_package`, not `enter_symbol`, so pass 1 never indexes an
+/// annotation tail for it.
+const PACKAGE_ADDRESS: u32 = 0;
+
 struct Session {
     store: SemanticStore,
     definitions: Definitions,
@@ -470,4 +475,41 @@ fn a_batch_with_one_failing_address_leaves_none_of_it_completed() {
     let x = unpickler.index().symbol_at(SYMBOL_ANNOTATED_X).unwrap();
 
     assert_eq!(session.store.symbols.get(x).annotations, Vec::new());
+}
+
+// --- a package address is a typed error, not a panic ---
+
+#[test]
+fn a_package_address_is_a_typed_error_not_a_panic() {
+    // A package is entered through `enter_package`, which never indexes an
+    // annotation tail for it (a `PACKAGE` node has none in the wire format).
+    // `complete_symbol_annotations` must not `.expect()` its way into a
+    // panic on this input: it is a real, well-formed address with a real
+    // entered symbol, just not one this completion supports.
+    real_unit!(SYMBOL_ANNOTATED, file, session, unpickler);
+
+    let result = unpickler.complete_symbol_annotations(PACKAGE_ADDRESS);
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::UnsupportedAnnotationCompletion {
+            address: PACKAGE_ADDRESS,
+            kind: SymbolKind::Package,
+        })
+    );
+}
+
+#[test]
+fn a_package_address_in_a_batch_fails_the_whole_batch_without_panicking() {
+    real_unit!(SYMBOL_ANNOTATED, file, session, unpickler);
+
+    let result = unpickler.complete_symbols_annotations(&[SYMBOL_ANNOTATED_X, PACKAGE_ADDRESS]);
+
+    assert_eq!(
+        result,
+        Err(UnpickleError::UnsupportedAnnotationCompletion {
+            address: PACKAGE_ADDRESS,
+            kind: SymbolKind::Package,
+        })
+    );
 }

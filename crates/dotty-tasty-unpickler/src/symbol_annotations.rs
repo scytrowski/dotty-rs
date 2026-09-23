@@ -72,7 +72,10 @@ impl TastyUnpickler<'_, '_, '_> {
     ///
     /// `address` must name a definition/parameter pass 1 entered a symbol
     /// for (`UnpickleError::MissingEnteredSymbol` otherwise, matching
-    /// [`complete_symbol`](crate::unpickler::TastyUnpickler::complete_symbol)).
+    /// [`complete_symbol`](crate::unpickler::TastyUnpickler::complete_symbol)),
+    /// and one that carries an indexed `ANNOTATION` tail: every `TYPEDEF`/
+    /// `VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM` does, even with zero entries, but
+    /// a package symbol never does (`UnpickleError::UnsupportedAnnotationCompletion`).
     /// Already-completed annotations (including a symbol completed with
     /// none) are returned again with no further work. The call is atomic:
     /// see the module docs.
@@ -120,13 +123,18 @@ impl TastyUnpickler<'_, '_, '_> {
         if self.annotations_completed.contains(&symbol) {
             return Ok(self.store.symbols.get(symbol).annotations.clone());
         }
-        // Pass 1 always indexes an annotation tail alongside a symbol
-        // (`enter_symbol`), so a `symbol_at` hit always has one too.
-        let tails = self
-            .index
-            .annotation_tail_at(at)
-            .expect("a symbol was entered with no annotation tail indexed alongside it")
-            .to_vec();
+        // Every `TYPEDEF`/`VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM` symbol is
+        // entered through `enter_symbol`, which always indexes an annotation
+        // tail alongside it (even an empty one). A package symbol is the one
+        // exception: `enter_package` inserts it directly and never indexes a
+        // tail, because a `PACKAGE` node has no `ANNOTATION` tail in the wire
+        // format at all. `annotation_tail_at` returning `None` here means
+        // `at` names one of those, not a bug to panic on.
+        let Some(tails) = self.index.annotation_tail_at(at) else {
+            let kind = self.store.symbols.get(symbol).kind;
+            return Err(UnpickleError::UnsupportedAnnotationCompletion { address: at, kind });
+        };
+        let tails = tails.to_vec();
 
         let mut annotations = Vec::with_capacity(tails.len());
         for annotation_node_at in tails {
