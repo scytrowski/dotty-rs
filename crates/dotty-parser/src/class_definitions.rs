@@ -1344,6 +1344,60 @@ mod tests {
     }
 
     #[test]
+    fn allows_local_case_definitions_inside_an_enum_method_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { def f = { case class Local\ncase object Other } }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Def), 9, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 17, 18),
+                token(TokenKind::CaseClass, 19, 29),
+                token(TokenKind::Identifier, 30, 35),
+                token(TokenKind::Newline, 35, 36),
+                token(TokenKind::CaseObject, 36, 47),
+                token(TokenKind::Identifier, 48, 53),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 54, 55),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 56, 57),
+                token(TokenKind::Eof, 57, 57),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(enum_definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(enum_template) = &parser.ast().get(enum_definition.rhs).kind else {
+            panic!("expected the enum template");
+        };
+        let TreeKind::DefDef(method) = &parser.ast().get(enum_template.body[0]).kind else {
+            panic!("expected the method definition");
+        };
+        let TreeKind::Block(body) = &parser.ast().get(method.rhs.expect("method body")).kind else {
+            panic!("expected the method body block");
+        };
+        assert_eq!(body.stats.len(), 2);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::TypeDef(ref definition)
+                if definition.metadata.modifiers.contains(&Modifier::Case)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.stats[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ref definition))
+                if definition.metadata.modifiers.contains(&Modifier::Case)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_qualified_derives_in_template_metadata() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
