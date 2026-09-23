@@ -1,4 +1,4 @@
-use dotty_core::ast::{Parens, UntypedNode};
+use dotty_core::ast::{Function, Parens, UntypedNode};
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
@@ -47,12 +47,32 @@ where
         args
     }
 
-    /// Parses the currently supported infix type subset.
+    /// Parses the currently supported function and infix type subset.
     ///
     /// `simple_type` deliberately remains an atomic/applied type parser. The
-    /// higher-level entry owns the Scala union/intersection precedence.
+    /// higher-level entries own function-arrow and union/intersection
+    /// precedence.
     pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
-        self.parse_union_type()
+        self.parse_function_type()
+    }
+
+    fn parse_function_type(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let diagnostics_before = self.diagnostics.len();
+        let parameter = self.parse_union_type();
+        if self.diagnostics.len() != diagnostics_before || !self.current_is_arrow() {
+            return parameter;
+        }
+
+        self.advance();
+        let body = self.type_expr();
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Function(Function {
+                params: vec![parameter],
+                body,
+            })),
+        )
     }
 
     fn parse_union_type(&mut self) -> TreeId<Untyped> {
@@ -572,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_function_type_arrows_for_the_later_type_milestone() {
+    fn parses_a_function_type_after_a_tuple_type() {
         let mut names = NameInterner::new();
         let parser = parser_for(
             "type F = (A, B) => C",
@@ -593,7 +613,7 @@ mod tests {
         );
 
         let result = parser.compilation_unit();
-        assert!(!result.diagnostics.is_empty());
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -645,6 +665,106 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(infix.op.text()), "|");
         assert!(infix.op.is_type());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_ordinary_function_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A => B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 6).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn function_type_results_are_right_associative() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A => B => C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref outer)) = parser.ast().get(id).kind
+        else {
+            panic!("expected the outer function type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn function_arrow_binds_below_union_and_intersection_types() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A | B => C & D",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
