@@ -93,11 +93,6 @@ where
             && self.lookahead_is_arrow(2)
     }
 
-    fn lookahead_is_arrow(&mut self, offset: usize) -> bool {
-        let token = self.cursor.lookahead(offset).clone();
-        token.kind == TokenKind::Operator && self.token_text(&token).ok() == Some("=>")
-    }
-
     fn function_type_params(&self, parameter: TreeId<Untyped>) -> Vec<TreeId<Untyped>> {
         match &self.ast.get(parameter).kind {
             TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })) => vec![*inner],
