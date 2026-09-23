@@ -58,6 +58,20 @@ where
 
     fn parse_function_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        if self.starts_empty_function_type() {
+            self.advance();
+            self.advance();
+            self.advance();
+            let body = self.type_expr();
+            return self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::Function(Function {
+                    params: Vec::new(),
+                    body,
+                })),
+            );
+        }
+
         let diagnostics_before = self.diagnostics.len();
         let parameter = self.parse_union_type();
         if self.diagnostics.len() != diagnostics_before || !self.current_is_arrow() {
@@ -71,6 +85,17 @@ where
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
         )
+    }
+
+    fn starts_empty_function_type(&mut self) -> bool {
+        self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
+            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
+            && self.lookahead_is_arrow(2)
+    }
+
+    fn lookahead_is_arrow(&mut self, offset: usize) -> bool {
+        let token = self.cursor.lookahead(offset).clone();
+        token.kind == TokenKind::Operator && self.token_text(&token).ok() == Some("=>")
     }
 
     fn function_type_params(&self, parameter: TreeId<Untyped>) -> Vec<TreeId<Untyped>> {
@@ -739,6 +764,36 @@ mod tests {
             TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_zero_argument_function_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "() => R",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 1, 2),
+                token(TokenKind::Operator, 3, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        assert!(function.params.is_empty());
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
