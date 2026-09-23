@@ -130,7 +130,7 @@ fn loaded_symbols(corpus_root: &Path) -> (SemanticStore, Vec<SymbolId>) {
 
 #[test]
 fn loaded_classes_and_members_never_get_a_qualified_visibility() {
-    for version in ["jdk23", "jdk24", "jdk25"] {
+    for version in ["jdk23", "jdk24", "jdk25", "jdk26"] {
         let root = corpus_root(version);
         let (store, symbols) = loaded_symbols(&root);
 
@@ -150,7 +150,7 @@ fn loaded_classes_and_members_never_get_a_qualified_visibility() {
 fn the_corpus_exercises_every_java_visibility() {
     // Guards the test above against passing vacuously on a corpus that only
     // contains, say, public members.
-    for version in ["jdk23", "jdk24", "jdk25"] {
+    for version in ["jdk23", "jdk24", "jdk25", "jdk26"] {
         let root = corpus_root(version);
         let (store, symbols) = loaded_symbols(&root);
 

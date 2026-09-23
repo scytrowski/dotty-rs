@@ -27,10 +27,10 @@ pub enum ClassLoadError {
     /// The class file decoded structurally, but its own declared
     /// `major_version`/`minor_version` falls outside the range this
     /// decoder can safely give a semantic reading — either newer than
-    /// this project's JDK-25 compatibility ceiling, older than the JVMS
+    /// this project's JDK-26 compatibility ceiling, older than the JVMS
     /// has ever defined, or a preview-features class this decoder never
     /// has preview features enabled for. Real compatibility corpora cover
-    /// JDK 23, 24, and 25 (see
+    /// JDK 23, 24, 25, and 26 (see
     /// [`ClassFileVersion::is_compatible`] and
     /// `docs/classfile-format-jdk25.md` §2.1).
     UnsupportedClassVersion(BinaryName, ClassFileVersion),
@@ -174,13 +174,13 @@ mod tests {
         let error = ClassLoadError::UnsupportedClassVersion(
             BinaryName::from_internal("Future"),
             ClassFileVersion {
-                major: 70,
+                major: 71,
                 minor: 0,
             },
         );
         assert_eq!(
             error.to_string(),
-            "unsupported class file version 70.0 for Future"
+            "unsupported class file version 71.0 for Future"
         );
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let error = ClassLoadError::UnsupportedClassVersion(
             BinaryName::from_internal("Future"),
             ClassFileVersion {
-                major: 70,
+                major: 71,
                 minor: 0,
             },
         );
