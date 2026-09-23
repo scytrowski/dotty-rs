@@ -21,6 +21,7 @@ where
             return self.error_expr(self.current_span());
         }
 
+        self.report_poly_function_variance(&type_params);
         if self.arrow_starts_indented_body() {
             self.observe_arrow_indented();
         }
@@ -172,6 +173,50 @@ mod tests {
         };
         assert_eq!(type_params.len(), 2);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_variance_in_a_polymorphic_function_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[+A] => (x: A) => x",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(1, 2).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(5, 7).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonOp, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(15, 17).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

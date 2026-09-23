@@ -19,6 +19,23 @@ where
         self.with_param_owner(Some(owner), |parser| parser.type_param_clause())
     }
 
+    pub(crate) fn report_poly_function_variance(&mut self, type_params: &[TreeId<Untyped>]) {
+        for type_param in type_params {
+            if matches!(
+                &self.ast.get(*type_param).kind,
+                TreeKind::TypeDef(TypeDef {
+                    variance: Some(_),
+                    ..
+                })
+            ) {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "variance is not allowed for a polymorphic function type parameter",
+                );
+            }
+        }
+    }
+
     fn type_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
         let mut params = Vec::new();

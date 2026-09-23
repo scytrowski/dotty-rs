@@ -1,6 +1,6 @@
 use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
-    PolyFunction, Tuple, TypeDef, UntypedNode, ValDef,
+    PolyFunction, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -182,23 +182,6 @@ where
                 body,
             })),
         )
-    }
-
-    fn report_poly_function_variance(&mut self, type_params: &[TreeId<Untyped>]) {
-        for type_param in type_params {
-            if matches!(
-                &self.ast.get(*type_param).kind,
-                TreeKind::TypeDef(TypeDef {
-                    variance: Some(_),
-                    ..
-                })
-            ) {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "variance is not allowed for a polymorphic function type parameter",
-                );
-            }
-        }
     }
 
     fn is_function_type(&self, tree: TreeId<Untyped>) -> bool {
