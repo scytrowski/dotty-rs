@@ -1,5 +1,6 @@
 use dotty_core::ast::{
-    Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode, ValDef,
+    ByNameTypeTree, Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode,
+    ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -93,6 +94,14 @@ where
             return self.alloc_function_type(mark, params, body, arrow);
         }
 
+        if self.starts_unnamed_by_name_function_type() {
+            let params = self.parse_unnamed_function_params();
+            self.consume_function_arrow();
+            let body = self.type_expr();
+            self.recover_missing_function_results();
+            return self.alloc_function_type(mark, params, body, FunctionTypeArrow::Ordinary);
+        }
+
         let diagnostics_before = self.diagnostics.len();
         let parameter = self.parse_union_type();
         if self.diagnostics.len() != diagnostics_before {
@@ -170,6 +179,142 @@ where
                 _ => {}
             }
             offset = offset.saturating_add(1);
+        }
+    }
+
+    /// Recognizes a parenthesized function parameter list containing a
+    /// leading-arrow by-name parameter and followed by an ordinary arrow.
+    ///
+    /// A leading arrow is only a `FunArgType` marker in this position. In
+    /// particular, `(A => B) => C` is an ordinary function type whose single
+    /// parameter is itself a function type, not a by-name parameter list.
+    fn starts_unnamed_by_name_function_type(&mut self) -> bool {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return false;
+        }
+
+        let mut paren_depth = 1usize;
+        let mut bracket_depth = 0usize;
+        let mut parameter_start = true;
+        let mut has_by_name = false;
+        let mut offset = 1usize;
+
+        loop {
+            let token = self.cursor.lookahead(offset).clone();
+            match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftParen) => {
+                    paren_depth += 1;
+                    parameter_start = false;
+                }
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    if paren_depth == 0 {
+                        return has_by_name && self.lookahead_is_arrow(offset + 1);
+                    }
+                    parameter_start = false;
+                }
+                TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                    bracket_depth += 1;
+                    parameter_start = false;
+                }
+                TokenKind::Punctuation(Punctuation::RightBracket) => {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    parameter_start = false;
+                }
+                TokenKind::Punctuation(Punctuation::Comma)
+                    if paren_depth == 1 && bracket_depth == 0 =>
+                {
+                    parameter_start = true;
+                }
+                TokenKind::Operator
+                    if paren_depth == 1
+                        && bracket_depth == 0
+                        && parameter_start
+                        && self.lookahead_is_arrow(offset) =>
+                {
+                    has_by_name = true;
+                    parameter_start = false;
+                }
+                TokenKind::Eof => return false,
+                _ => parameter_start = false,
+            }
+            offset = offset.saturating_add(1);
+        }
+    }
+
+    fn parse_unnamed_function_params(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
+        let mut params = Vec::new();
+
+        if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+            return params;
+        }
+
+        loop {
+            let mark = self.mark();
+            let parameter = if self.current_is_arrow() {
+                self.advance();
+                let result = self.type_expr();
+                self.alloc_from(mark, TreeKind::ByNameTypeTree(ByNameTypeTree { result }))
+            } else {
+                self.type_expr()
+            };
+            params.push(parameter);
+
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::RightParen))
+                {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a function type parameter after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
+            if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                break;
+            }
+
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `,` or `)` after function type parameter",
+            );
+            self.recover_unnamed_function_params();
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                continue;
+            }
+            self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+            break;
+        }
+
+        params
+    }
+
+    fn recover_unnamed_function_params(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen) | TokenKind::Eof
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn consume_function_arrow(&mut self) {
+        if self.current_is_arrow() {
+            self.advance();
+        } else {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after function type parameters",
+            );
         }
     }
 
@@ -1005,6 +1150,127 @@ mod tests {
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 6).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_single_by_name_function_type_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(=> A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        let parameter = function.params[0];
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(parameter).kind else {
+            panic!("expected a by-name type tree");
+        };
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(parameter).position.unwrap().span().range(),
+            TextRange::new(1, 5).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_strict_and_by_name_function_type_parameter_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A, => B, C) => D",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        assert_eq!(function.params.len(), 3);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.params[1]).kind,
+            TreeKind::ByNameTypeTree(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.params[2]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_full_type_expressions_inside_by_name_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(=> A | B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a by-name type tree");
+        };
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
