@@ -62,7 +62,8 @@ arguments as they appear before semantic extractor lowering.
 
 Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, object, and enum nodes; primary
-constructor clauses; simple parent applications; and braced or indented
+constructor clauses; simple parent applications, including parameterized enum
+case parents and ordered parent lists; and braced or indented
 template bodies. They also cover source annotations, hard and supported soft
 modifiers, and qualified visibility. The normalized definition metadata
 compares modifier order, visibility, visibility qualifiers, and annotation

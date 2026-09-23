@@ -209,8 +209,9 @@ clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
 class, trait, object, case class, case object, and enum definitions with type
-parameters, primary constructor clauses, simple `extends` parent applications,
-comma/`with` parent lists, `derives` and capture-checking `uses` clauses, basic
+parameters, primary constructor clauses, simple `extends` parent applications
+including parameterized enum-case parents, comma/`with` parent lists, `derives`
+and capture-checking `uses` clauses, basic
 `cap`/qualified capture references, self values (`self =>`, typed self types),
 and braced or indented template bodies. The class/trait/case/enum distinctions
 are preserved in definition metadata; case objects remain `ModuleDef` trees.
@@ -222,6 +223,10 @@ cases are represented as `TypeDef(Template(...))` with `Modifier::EnumCase`;
 their type parameters and constructor clauses reuse the `ParamOwner::CaseClass`
 policy, including accessor/private-local metadata. Type-only cases such as
 `case Empty[T]` have no value-parameter clauses.
+Parameterized case templates populate `Template.parents` through the same
+parent/constr-app parser used by classes; parent order and constructor
+applications are preserved. Prefixed enum cases, enum-case bodies, and
+enum-case `derives`/`uses` remain deferred.
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
 case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed
@@ -349,7 +354,7 @@ semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-parameter annotations, extended/prefixed enum cases, and feature-dependent
+parameter annotations, prefixed enum cases, and feature-dependent
 `opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
