@@ -68,19 +68,18 @@ where
                 .metadata
                 .modifiers
                 .contains(&dotty_core::ast::Modifier::Erased);
-        let value_param_clauses =
-            if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
-                method_like = true;
-                let clauses = self
-                    .parse_term_param_clauses(ParamOwner::Given)
-                    .into_iter()
-                    .filter(|clause| !clause.is_empty())
-                    .collect();
-                self.expect_arrow();
-                clauses
-            } else {
-                Vec::new()
-            };
+        let value_param_clauses = if self.starts_given_parameter_clause() {
+            method_like = true;
+            let clauses = self
+                .parse_term_param_clauses(ParamOwner::Given)
+                .into_iter()
+                .filter(|clause| !clause.is_empty())
+                .collect();
+            self.expect_arrow();
+            clauses
+        } else {
+            Vec::new()
+        };
 
         let tpt = self.with_location(location, |parser| {
             parser.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
@@ -226,6 +225,29 @@ where
         }
     }
 
+    fn starts_given_parameter_clause(&mut self) -> bool {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return false;
+        }
+
+        let mut depth = 0usize;
+        let mut offset = 0usize;
+        loop {
+            match self.cursor.lookahead(offset).kind {
+                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self.lookahead_is_arrow(offset + 1);
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
     fn starts_named_given(&mut self) -> bool {
         if !matches!(
             self.current().kind,
@@ -245,7 +267,9 @@ where
         has_colon
             && matches!(
                 candidate.kind,
-                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                TokenKind::Identifier
+                    | TokenKind::BackquotedIdentifier
+                    | TokenKind::Punctuation(Punctuation::LeftParen)
             )
             && !self.has_line_break_between(next.span.end(), candidate.span.start())
     }
@@ -354,6 +378,41 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(name_id), "config");
+    }
+
+    #[test]
+    fn parses_a_named_given_alias_with_a_parenthesized_function_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given f: (A => B) = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Colon), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Operator, 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a value definition");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(_))
+        ));
+        assert!(definition.rhs.is_some());
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
