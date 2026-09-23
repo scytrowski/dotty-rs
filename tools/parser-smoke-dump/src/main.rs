@@ -681,6 +681,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
         TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
         TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
@@ -913,6 +914,11 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
             let mut children = function.params.clone();
             children.push(function.body);
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
+            let mut children = function.params.clone();
+            children.push(function.result);
             children
         }
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(function)) => {
