@@ -165,7 +165,8 @@ responsibility: `compilation_unit.rs` owns orchestration and statement
 separators, `expr/` owns the incremental `Expr`/`Expr1` through operator- and
 simple-expression pipeline, `patterns.rs` owns the source-level pattern
 pipeline, `type_definitions.rs` owns source-level type definitions, `types.rs`
-owns the initial type-name subset used by type applications and bounds, and
+owns the initial simple/applied type subset used by annotations, bounds, type
+applications, and definitions, and
 `literals.rs` owns numeric and string decoding. These names describe the
 current milestone; they do not claim complete Scala grammar coverage.
 
@@ -249,8 +250,11 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles only
-the simple type names needed by these ascriptions, type applications, and
-type-definition bounds.
+the simple and recursively applied type names needed by these ascriptions,
+type applications, and type-definition bounds. Type positions use
+`AppliedTypeTree`; the term-level `foo[A]` form remains `TypeApply`. The
+`derives` clause intentionally keeps its narrower qualified-identifier
+grammar, so `derives Eq[A]` remains rejected until that grammar is expanded.
 
 Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
@@ -268,7 +272,8 @@ covers simple aliases (`type A = B`), abstract declarations, lower and upper
 bounds, backquoted type names, and one flat higher-kinded parameter clause
 (`type F[A] = A`). Parameterized declarations preserve their parameters in a
 shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
-the existing zero-width `TypeBoundsTree` representation. Applied, refined,
+the existing zero-width `TypeBoundsTree` representation. The supported
+recursive applied-type subset is represented by `AppliedTypeTree`; refined,
 opaque, match, and other full type forms remain deferred.
 
 ### Class-like definitions and templates
@@ -426,10 +431,10 @@ foo(_, 1)
 _.name
 ```
 
-Type-parameter bounds currently accept only simple or qualified type names.
-Applied, infix, refined, and other full type forms (for example `List[Int]`
-or `Foo & Bar`) remain deferred and produce a parser diagnostic in this
-milestone.
+Type-parameter bounds currently accept simple, qualified, and recursively
+applied type names. Infix, refined, opaque, match, and other full type forms
+(for example `Foo & Bar`) remain deferred and produce a parser diagnostic in
+this milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the
