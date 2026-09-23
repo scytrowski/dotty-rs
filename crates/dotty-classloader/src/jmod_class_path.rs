@@ -12,7 +12,7 @@ const JMOD_MAGIC: [u8; 4] = [0x4A, 0x4D, 0x01, 0x00];
 /// A [`ClassPathEntry`] backed by a single JMOD file, mapping
 /// `BinaryName` to the entry named `classes/<internal name>.class`.
 ///
-/// A JMOD is otherwise an ordinary ZIP archive (see [`ZipArchive`]) once
+/// A JMOD is otherwise an ordinary ZIP archive (see `ZipArchive`) once
 /// its 4-byte magic is stripped, so this type only adds the magic check
 /// and the `classes/` prefix on top of [`JarClassPath`](crate::jar_class_path::JarClassPath)'s
 /// approach.
