@@ -57,6 +57,7 @@ where
     fn parse_union_type(&mut self) -> TreeId<Untyped> {
         let mut tree = self.parse_intersection_type();
         while let Some(operator) = self.accept_type_infix_operator("|") {
+            self.consume_type_infix_newlines();
             let right = self.parse_intersection_type();
             tree = self.alloc_infix(tree, operator, right);
         }
@@ -64,12 +65,58 @@ where
     }
 
     fn parse_intersection_type(&mut self) -> TreeId<Untyped> {
-        let mut tree = self.simple_type();
+        let mut tree = self.parse_type_operand();
         while let Some(operator) = self.accept_type_infix_operator("&") {
-            let right = self.simple_type();
+            self.consume_type_infix_newlines();
+            let right = self.parse_type_operand();
             tree = self.alloc_infix(tree, operator, right);
         }
         tree
+    }
+
+    fn parse_type_operand(&mut self) -> TreeId<Untyped> {
+        if matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return self.simple_type();
+        }
+
+        let position = self.current_span();
+        self.report(ParseDiagnosticKind::ExpectedType, "expected a type operand");
+        self.error_type(position)
+    }
+
+    fn consume_type_infix_newlines(&mut self) {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            return;
+        }
+
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        if !matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return;
+        }
+
+        while offset > 0 {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            offset -= 1;
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn accept_type_infix_operator(&mut self, expected: &str) -> Option<Name> {
@@ -334,6 +381,97 @@ mod tests {
             parser.ast().get(inner.args[0]).kind,
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn consumes_a_newline_after_a_type_operator_when_an_operand_follows() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A |\nB",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_type_operand_without_consuming_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A |",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        ));
+    }
+
+    #[test]
+    fn recovers_a_missing_type_operand_before_a_closing_bracket() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[A |]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        ));
+    }
+
+    #[test]
+    fn leaves_unimplemented_type_operators_unconsumed() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A || B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Operator);
+        assert_eq!(parser.current_text().unwrap(), "||");
         assert!(parser.diagnostics().is_empty());
     }
 
