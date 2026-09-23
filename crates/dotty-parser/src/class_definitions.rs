@@ -694,7 +694,10 @@ where
                 | TokenKind::ColonFollow
                 | TokenKind::ColonEol
                 | TokenKind::Punctuation(
-                    Punctuation::LeftBrace | Punctuation::RightBrace | Punctuation::Semicolon
+                    Punctuation::Comma
+                        | Punctuation::LeftBrace
+                        | Punctuation::RightBrace
+                        | Punctuation::Semicolon
                 )
         ) {
             let checkpoint = self.cursor.checkpoint();
@@ -3541,6 +3544,49 @@ mod tests {
         assert!(matches!(
             parser.ast().get(template.metadata.derives[0]).kind,
             TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_following_derives_after_unsupported_infix_type_recovery() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C derives A | B, C",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Identifier, 8, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Punctuation(Punctuation::Comma), 21, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.metadata.derives.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[0]).kind,
+            TreeKind::Ident(ident) if parser.names.resolve(ident.name.text()) == "A"
+        ));
+        assert!(matches!(
+            parser.ast().get(template.metadata.derives[1]).kind,
+            TreeKind::Ident(ident) if parser.names.resolve(ident.name.text()) == "C"
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
