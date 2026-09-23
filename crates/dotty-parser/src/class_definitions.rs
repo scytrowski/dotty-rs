@@ -293,15 +293,13 @@ where
                 (Vec::new(), None)
             };
         let constructor_end = self.last_real_token_end;
-        let parent_start = self.enum_case_parent_start();
-        if parent_start.is_some() {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "enum case parent clauses are not supported by this parser milestone",
-            );
-            self.recover_until(crate::RecoverySet::Case);
-            return ParsedStatement::Expression(self.error_expr(case_position));
-        }
+        let parents = self.parse_parent_clause();
+        let parent_start = parents.first().and_then(|parent| {
+            self.ast
+                .get(*parent)
+                .position
+                .map(|position| position.span().range().start())
+        });
         if self.enum_case_requires_unsupported_recovery() {
             return self.unsupported_enum_case(case_position);
         }
@@ -322,7 +320,7 @@ where
             constructor_end,
             ConstructorBoundary {
                 parameter_start,
-                parent_start: None,
+                parent_start,
                 body_start: None,
             },
         );
@@ -331,7 +329,7 @@ where
             mark,
             TreeKind::Template(Template {
                 constructor,
-                parents: Vec::new(),
+                parents,
                 self_val: None,
                 body: Vec::new(),
                 metadata: tail.metadata,
@@ -350,16 +348,6 @@ where
                 variance: None,
             }),
         ))
-    }
-
-    fn enum_case_parent_start(&mut self) -> Option<u32> {
-        let newline_count =
-            self.newlines_before(|kind| kind == TokenKind::Keyword(HardKeyword::Extends));
-        for _ in 0..newline_count {
-            self.advance();
-        }
-        (self.current().kind == TokenKind::Keyword(HardKeyword::Extends))
-            .then_some(self.current().span.start())
     }
 
     fn parse_enum_case_group(
@@ -1956,7 +1944,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_enum_case_parent_clauses_and_preserves_following_members() {
+    fn parses_enum_case_parent_clauses_and_preserves_following_members() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "enum E { case Some(value: A) extends Parent\ndef after = 1 }",
@@ -1994,18 +1982,23 @@ mod tests {
             panic!("expected a Template");
         };
         assert_eq!(template.body.len(), 2);
+        let TreeKind::TypeDef(case_definition) = &parser.ast().get(template.body[0]).kind else {
+            panic!("expected a parameterized enum case TypeDef");
+        };
+        assert_eq!(case_definition.metadata.modifiers, vec![Modifier::EnumCase]);
+        let TreeKind::Template(case_template) = &parser.ast().get(case_definition.rhs).kind else {
+            panic!("expected an enum case Template");
+        };
+        assert_eq!(case_template.parents.len(), 1);
         assert!(matches!(
-            parser.ast().get(template.body[0]).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+            parser.ast().get(case_template.parents[0]).kind,
+            TreeKind::Ident(identifier) if identifier.name.is_type()
         ));
         assert!(matches!(
             parser.ast().get(template.body[1]).kind,
             TreeKind::DefDef(_)
         ));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax
-                && diagnostic.message().contains("enum case parent clauses")
-        }));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
