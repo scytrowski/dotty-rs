@@ -320,7 +320,11 @@ where
 
     fn recover_missing_function_results(&mut self) {
         while self.current_is_arrow() || self.current_is_context_arrow() {
+            let checkpoint = self.cursor.checkpoint();
             self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                return;
+            }
             let _ = self.type_expr();
         }
     }
