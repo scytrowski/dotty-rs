@@ -1,0 +1,14 @@
+# Real .class files extracted from an Eclipse Temurin 21 runtime image via
+# `jimage extract` (see ../generate.sh). The shared classes.txt file is the
+# source of truth for corpus membership.
+id = "jdk21-corpus"
+source_kind = "jdk-runtime-image"
+jdk_vendor = "Eclipse Adoptium"
+jdk_version = "21.0.8"
+jdk_build = "21.0.8+9-LTS"
+jdk_major = 21
+class_file_major = 65
+classes_file = "../classes.txt"
+fixture_root = "."
+fixture_count = 6
+fixture_bytes = 98842

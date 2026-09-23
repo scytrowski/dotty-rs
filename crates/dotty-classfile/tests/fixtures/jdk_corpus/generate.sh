@@ -2,6 +2,8 @@
 # Regenerates one real JDK class-file corpus via `jimage extract`.
 #
 # Usage:
+#   JAVA_HOME=/path/to/jdk21 tests/fixtures/jdk_corpus/generate.sh jdk21
+#   JAVA_HOME=/path/to/jdk22 tests/fixtures/jdk_corpus/generate.sh jdk22
 #   JAVA_HOME=/path/to/jdk23 tests/fixtures/jdk_corpus/generate.sh jdk23
 #   JAVA_HOME=/path/to/jdk24 tests/fixtures/jdk_corpus/generate.sh jdk24
 #   JAVA_HOME=/path/to/jdk25 tests/fixtures/jdk_corpus/generate.sh jdk25
@@ -12,7 +14,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: JAVA_HOME=/path/to/jdk tests/fixtures/jdk_corpus/generate.sh <jdk23|jdk24|jdk25|jdk26>" >&2
+  echo "usage: JAVA_HOME=/path/to/jdk tests/fixtures/jdk_corpus/generate.sh <jdk21|jdk22|jdk23|jdk24|jdk25|jdk26>" >&2
   exit 2
 fi
 
