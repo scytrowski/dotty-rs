@@ -2403,6 +2403,53 @@ mod tests {
     }
 
     #[test]
+    fn keeps_singleton_enum_case_parent_clauses_deferred() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case Red extends Parent\ncase Blue }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Keyword(HardKeyword::Extends), 18, 25),
+                token(TokenKind::Identifier, 26, 32),
+                token(TokenKind::Newline, 32, 33),
+                token(TokenKind::Keyword(HardKeyword::Case), 33, 37),
+                token(TokenKind::Identifier, 38, 42),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 43, 44),
+                token(TokenKind::Eof, 44, 44),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.message().contains("unsupported enum case") })
+        );
+    }
+
+    #[test]
     fn rejects_suffix_modifiers_on_singleton_enum_cases() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
