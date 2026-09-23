@@ -257,6 +257,112 @@ mod tests {
         };
         assert_eq!(inner.args.len(), 1);
         assert_eq!(outer.args.len(), 1);
+        assert_eq!(
+            parser.ast().get(outer_id).position.unwrap().span().range(),
+            TextRange::new(0, 7).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(inner_id).position.unwrap().span().range(),
+            TextRange::new(0, 4).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_an_empty_applied_type_argument_list() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_type();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        ));
+    }
+
+    #[test]
+    fn recovers_a_missing_applied_type_argument_before_a_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[, Int]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_type();
+        let TreeKind::AppliedTypeTree(applied) = &parser.ast().get(id).kind else {
+            panic!("expected an applied type tree");
+        };
+        assert_eq!(applied.args.len(), 2);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn recovers_a_missing_applied_type_closer_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[Int",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        parser.simple_type();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        ));
+    }
+
+    #[test]
+    fn recovers_repeated_commas_in_an_applied_type_argument_list() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[Int,, String]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        parser.simple_type();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 }
