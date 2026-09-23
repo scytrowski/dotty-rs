@@ -1417,7 +1417,7 @@ mod tests {
         let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
             panic!("expected a Template");
         };
-        assert!(template.body.len() >= 2);
+        assert_eq!(template.body.len(), 2);
         assert!(matches!(
             parser.ast().get(template.body[0]).kind,
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ref module))
