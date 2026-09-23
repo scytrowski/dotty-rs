@@ -672,6 +672,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Super(_) => "Super",
         TreeKind::New(_) => "New",
         TreeKind::TypeApply(_) => "TypeApply",
+        TreeKind::AppliedTypeTree(_) => "TypeApply",
         TreeKind::Block(_) => "Block",
         TreeKind::Literal(_) => "Literal",
         TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
@@ -766,6 +767,12 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             let mut children = Vec::with_capacity(type_apply.args.len() + 1);
             children.push(type_apply.function);
             children.extend(type_apply.args.iter().copied());
+            children
+        }
+        TreeKind::AppliedTypeTree(applied) => {
+            let mut children = Vec::with_capacity(applied.args.len() + 1);
+            children.push(applied.tpt);
+            children.extend(applied.args.iter().copied());
             children
         }
         TreeKind::Apply(application) => {
