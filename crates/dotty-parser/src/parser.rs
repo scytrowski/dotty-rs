@@ -357,6 +357,11 @@ where
         token.kind == TokenKind::Operator && self.token_text(token).ok() == Some("=>")
     }
 
+    /// Returns whether a token is the context-function arrow `?=>`.
+    pub(crate) fn is_context_arrow_token(&self, token: &Token) -> bool {
+        token.kind == TokenKind::Operator && self.token_text(token).ok() == Some("?=>")
+    }
+
     /// Returns whether the current token is the ordinary case arrow `=>`.
     pub(crate) fn current_is_arrow(&self) -> bool {
         self.is_arrow_token(self.current())
@@ -368,9 +373,15 @@ where
         self.is_arrow_token(&token)
     }
 
+    /// Returns whether the token at `offset` is the context-function arrow `?=>`.
+    pub(crate) fn lookahead_is_context_arrow(&mut self, offset: usize) -> bool {
+        let token = self.cursor.lookahead(offset).clone();
+        self.is_context_arrow_token(&token)
+    }
+
     /// Returns whether the current token is the context-function arrow `?=>`.
     pub(crate) fn current_is_context_arrow(&self) -> bool {
-        self.current().kind == TokenKind::Operator && self.current_text_is("?=>")
+        self.is_context_arrow_token(self.current())
     }
 
     /// Returns whether the current operator is reserved for a later grammar layer.

@@ -1,4 +1,6 @@
-use dotty_core::ast::{Function, Parens, Tuple, UntypedNode};
+use dotty_core::ast::{
+    Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode,
+};
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
@@ -71,26 +73,66 @@ where
                 })),
             );
         }
+        if self.starts_empty_context_function_type() {
+            self.advance();
+            self.advance();
+            self.advance();
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "a context function type requires at least one parameter",
+            );
+            let _ = self.type_expr();
+            return self.error_type(self.span_from(mark));
+        }
 
         let diagnostics_before = self.diagnostics.len();
         let parameter = self.parse_union_type();
-        if self.diagnostics.len() != diagnostics_before || !self.current_is_arrow() {
+        if self.diagnostics.len() != diagnostics_before {
             return parameter;
         }
 
-        self.advance();
+        let is_context = if self.current_is_arrow() {
+            self.advance();
+            false
+        } else if self.current_is_context_arrow() {
+            self.advance();
+            true
+        } else {
+            return parameter;
+        };
         let body = self.type_expr();
         let params = self.function_type_params(parameter);
-        self.alloc_from(
-            mark,
-            TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
-        )
+        if is_context {
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
+                    erased_params: vec![false; params.len()],
+                    modifiers: Modifiers {
+                        modifiers: vec![Modifier::Given],
+                        ..Modifiers::default()
+                    },
+                    params,
+                    result: body,
+                })),
+            )
+        } else {
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
+            )
+        }
     }
 
     fn starts_empty_function_type(&mut self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
             && self.lookahead_is_arrow(2)
+    }
+
+    fn starts_empty_context_function_type(&mut self) -> bool {
+        self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
+            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
+            && self.lookahead_is_context_arrow(2)
     }
 
     fn function_type_params(&self, parameter: TreeId<Untyped>) -> Vec<TreeId<Untyped>> {
@@ -877,24 +919,38 @@ mod tests {
     }
 
     #[test]
-    fn does_not_consume_context_function_arrows_as_ordinary_function_types() {
+    fn parses_a_context_function_type_with_given_metadata() {
         let mut names = NameInterner::new();
-        let parser = parser_for(
-            "type F = A ?=> B",
+        let mut parser = parser_for(
+            "A ?=> B",
             vec![
-                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
-                token(TokenKind::Identifier, 5, 6),
-                token(TokenKind::Operator, 7, 8),
-                token(TokenKind::Identifier, 9, 10),
-                token(TokenKind::Operator, 11, 14),
-                token(TokenKind::Identifier, 15, 16),
-                token(TokenKind::Eof, 16, 16),
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
             ],
             &mut names,
         );
 
-        let result = parser.compilation_unit();
-        assert!(!result.diagnostics.is_empty());
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.result).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![false]);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
