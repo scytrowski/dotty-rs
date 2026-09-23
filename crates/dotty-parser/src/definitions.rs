@@ -84,7 +84,7 @@ where
         let has_explicit_return_type = !has_interleaved_type_params && is_definition_colon(self);
         let tpt = if has_explicit_return_type {
             self.advance();
-            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr())
         } else {
             synthetic_type_tree(self, return_type_start)
         };
@@ -184,7 +184,7 @@ where
         let tpt = if has_explicit_type {
             self.advance();
             self.with_location(location, |parser| {
-                parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+                parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr())
             })
         } else {
             synthetic_type_tree(self, type_start)
@@ -277,7 +277,7 @@ where
         let type_start = self.last_real_token_end;
         let tpt = if has_explicit_type {
             self.advance();
-            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr())
         } else {
             synthetic_type_tree(self, type_start)
         };

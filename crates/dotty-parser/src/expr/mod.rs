@@ -147,7 +147,7 @@ where
             .position
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start());
-        let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type());
+        let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr());
         self.update_active_placeholder_type(expr, tpt);
         self.alloc_from(
             crate::Mark { start },

@@ -30,7 +30,8 @@ with Rust source spans must convert them to UTF-8 byte offsets first.
 The default fixtures cover the expression forms currently represented by the Rust
 parser: identifiers, numeric and string literals, `this`, parentheses, the
 empty tuple, tuples, simple selections and applications, `super`, `new`,
-simple type applications, repeated suffix chains, and brace blocks.
+simple type applications, applied union/intersection types, repeated suffix
+chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the

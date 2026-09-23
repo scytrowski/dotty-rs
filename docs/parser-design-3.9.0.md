@@ -165,8 +165,8 @@ responsibility: `compilation_unit.rs` owns orchestration and statement
 separators, `expr/` owns the incremental `Expr`/`Expr1` through operator- and
 simple-expression pipeline, `patterns.rs` owns the source-level pattern
 pipeline, `type_definitions.rs` owns source-level type definitions, `types.rs`
-owns the initial simple/applied type subset used by annotations, bounds, type
-applications, and definitions, and
+owns the initial simple/applied/infix type subset used by annotations, bounds,
+type applications, and definitions, and
 `literals.rs` owns numeric and string decoding. These names describe the
 current milestone; they do not claim complete Scala grammar coverage.
 
@@ -185,7 +185,7 @@ new with simple or qualified type names and constructor applications
 simple type applications such as foo[A] and foo[A, B]
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
-expression type ascriptions with the current narrow simple-type parser
+expression type ascriptions with the supported simple/infix type parser
 parenthesized `using` argument lists, including nested application clauses
 indented colon arguments, including block, lambda, and case bodies
 prefix operators `-`, `+`, `~`, and `!` on the same physical line
@@ -204,7 +204,8 @@ simple `val`/`var` definitions with inferred or explicit types, declarations
 without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
 method definitions with a leading type-parameter clause, ordered term
-parameter clauses, simple return types, declarations, and expression RHSs
+parameter clauses, supported type-expression return types, declarations, and
+expression RHSs
 parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, default parameter expressions, and indented method bodies are
 supported. Interleaved type/term parameter clauses are explicitly deferred
@@ -251,10 +252,13 @@ subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles only
 the simple and recursively applied type names needed by these ascriptions,
-type applications, and type-definition bounds. Type positions use
-`AppliedTypeTree`; the term-level `foo[A]` form remains `TypeApply`. The
-`derives` clause intentionally keeps its narrower qualified-identifier
-grammar, so `derives Eq[A]` remains rejected until that grammar is expanded.
+type applications, and type-definition bounds, plus the narrow Scala 3.9
+union/intersection subset. `type_expr()` parses `&` above `simple_type()` and
+`|` above that intersection layer; both produce source-level `InfixOp` trees
+with type-namespace operator names. Type positions use `AppliedTypeTree`; the
+term-level `foo[A]` form remains `TypeApply`. The `derives` clause intentionally
+keeps its narrower qualified-identifier grammar, so `derives Eq[A]` and
+`derives Eq | Show` remain rejected until that grammar is expanded.
 
 Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
@@ -273,8 +277,10 @@ bounds, backquoted type names, and one flat higher-kinded parameter clause
 (`type F[A] = A`). Parameterized declarations preserve their parameters in a
 shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. The supported
-recursive applied-type subset is represented by `AppliedTypeTree`; refined,
-opaque, match, and other full type forms remain deferred.
+recursive applied-type subset is represented by `AppliedTypeTree`; unions and
+intersections use `InfixOp` with `&` binding tighter than `|`. Generic infix
+types beyond those two operators, refined, opaque, match, and other full type
+forms remain deferred.
 
 ### Class-like definitions and templates
 
@@ -431,10 +437,10 @@ foo(_, 1)
 _.name
 ```
 
-Type-parameter bounds currently accept simple, qualified, and recursively
-applied type names. Infix, refined, opaque, match, and other full type forms
-(for example `Foo & Bar`) remain deferred and produce a parser diagnostic in
-this milestone.
+Type-parameter bounds currently accept simple, qualified, recursively applied,
+union, and intersection type names. Generic infix types beyond `|` and `&`,
+refined, opaque, match, and other full type forms (for example `Foo + Bar`)
+remain deferred and produce a parser diagnostic in this milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the

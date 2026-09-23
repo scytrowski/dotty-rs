@@ -172,7 +172,7 @@ where
         };
 
         let type_tree = if self.accept_lambda_colon() {
-            self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
         } else {
             self.synthetic_type_tree_at(mark.start())
         };

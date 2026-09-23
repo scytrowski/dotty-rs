@@ -279,7 +279,7 @@ where
         self.advance();
         let empty = self.names.intern("");
         let bound = if self.can_start_import_type() {
-            Some(self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type()))
+            Some(self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr()))
         } else {
             None
         };
@@ -588,6 +588,39 @@ mod tests {
         };
         assert!(import.selectors[0].bound.is_some());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_given_selector_with_a_union_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.given A | B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Given), 11, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        let bound = import.selectors[0]
+            .bound
+            .expect("expected a given selector bound");
+        assert!(matches!(
+            parser.ast().get(bound).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
