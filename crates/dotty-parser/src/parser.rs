@@ -384,6 +384,11 @@ where
         self.is_context_arrow_token(self.current())
     }
 
+    /// Returns whether the current token is the deferred type-lambda arrow.
+    pub(crate) fn current_is_type_lambda_arrow(&self) -> bool {
+        self.current().kind == TokenKind::Operator && self.current_text_is("=>>")
+    }
+
     /// Returns whether the current operator is reserved for a later grammar layer.
     pub(crate) fn current_is_structural_operator(&self) -> bool {
         self.current().kind == TokenKind::Operator
@@ -622,6 +627,7 @@ mod tests {
         assert!(parser.current_text_is("=>"));
         assert!(parser.current_is_arrow());
         assert!(!parser.current_is_context_arrow());
+        assert!(!parser.current_is_type_lambda_arrow());
         assert!(parser.current_is_structural_operator());
         drop(parser);
 
@@ -635,7 +641,22 @@ mod tests {
         );
         assert!(!parser.current_is_arrow());
         assert!(parser.current_is_context_arrow());
+        assert!(!parser.current_is_type_lambda_arrow());
         assert!(parser.current_is_structural_operator());
+        drop(parser);
+
+        let parser = parser_with_tokens(
+            "=>>",
+            vec![
+                token(TokenKind::Operator, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        assert!(!parser.current_is_arrow());
+        assert!(!parser.current_is_context_arrow());
+        assert!(parser.current_is_type_lambda_arrow());
+        assert!(!parser.current_is_structural_operator());
         drop(parser);
 
         let parser = parser_with_tokens(
