@@ -1770,6 +1770,54 @@ mod tests {
     }
 
     #[test]
+    fn rejects_derives_and_uses_after_singleton_enum_cases() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case A derives Base\ncase B uses Ref }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Identifier, 16, 23),
+                token(TokenKind::Identifier, 24, 28),
+                token(TokenKind::Newline, 28, 29),
+                token(TokenKind::Keyword(HardKeyword::Case), 29, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Identifier, 36, 40),
+                token(TokenKind::Identifier, 41, 44),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 45, 46),
+                token(TokenKind::Eof, 46, 46),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(template.body.iter().all(|tree| matches!(
+            parser.ast().get(*tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        )));
+        assert_eq!(
+            parser
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.message().contains("unsupported enum case"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn recovers_from_missing_enum_case_names_and_trailing_commas() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
