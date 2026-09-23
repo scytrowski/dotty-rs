@@ -87,8 +87,7 @@ where
         }
 
         if let Some(arrow) = self.named_function_type_arrow() {
-            let allow_erased =
-                matches!(arrow, FunctionTypeArrow::Ordinary) && self.features().erased_definitions;
+            let allow_erased = self.features().erased_definitions;
             let params = self.parse_named_function_params(allow_erased);
             self.consume_function_type_arrow(arrow);
             let body = self.type_expr();
@@ -2654,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_enable_erased_parameters_for_context_function_types() {
+    fn parses_an_erased_named_context_function_parameter_when_enabled() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(erased x: A) ?=> B",
@@ -2677,11 +2676,73 @@ mod tests {
         });
 
         let id = parser.type_expr();
-        assert!(matches!(
-            parser.ast().get(id).kind,
-            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
-        ));
-        assert!(!parser.diagnostics().is_empty());
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![true]);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a named function parameter");
+        };
+        assert!(parameter.metadata.modifiers.is_empty());
+        assert_eq!(
+            parser
+                .ast()
+                .get(function.params[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(8, 12).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_mixed_erased_context_parameter_flags_and_given_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A, erased y: B) ?=> C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::Colon), 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Operator, 20, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![false, true]);
+        assert!(function.params.iter().all(|parameter| {
+            matches!(
+                &parser.ast().get(*parameter).kind,
+                TreeKind::ValDef(value) if value.metadata.modifiers.is_empty()
+            )
+        }));
+        assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
