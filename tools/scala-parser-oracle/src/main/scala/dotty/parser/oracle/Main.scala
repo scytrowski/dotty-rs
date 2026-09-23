@@ -13,13 +13,14 @@ object Main:
       case path :: Nil => ("expr", path)
       case "--mode" :: "pattern" :: path :: Nil => ("pattern", path)
       case "--mode" :: "block" :: path :: Nil => ("expr", path)
+      case "--mode" :: "block-erased" :: path :: Nil => ("expr", path)
       case "--mode" :: "compilation" :: path :: Nil => ("compilation", path)
       case "--batch" :: manifest :: Nil =>
         runBatch(manifest)
         return
       case _ =>
         throw IllegalArgumentException(
-          "usage: scala-parser-oracle [--mode pattern|block|compilation] <source-file> | --batch manifest"
+          "usage: scala-parser-oracle [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
         )
 
     println(parseAndRender(mode, path))
@@ -69,7 +70,7 @@ object Main:
           case "WildcardFunction" => "Function"
           case name => name
     fields += field("kind", quote(normalizedKind))
-    fields += field("span", span(tree))
+    fields += field("span", span(tree, source))
 
     tree match
       case ident: dotty.tools.dotc.ast.Trees.Ident[?] =>
@@ -85,6 +86,11 @@ object Main:
           fields += field("backquoted", "true")
       case named: dotty.tools.dotc.ast.Trees.NamedArg[?] =>
         fields += field("name", quote(named.name.toString))
+      case function: dotty.tools.dotc.ast.untpd.FunctionWithMods =>
+        fields += field(
+          "erased_params",
+          function.erasedParams.map(_.toString).mkString("[", ",", "]")
+        )
       case imported: dotty.tools.dotc.ast.Trees.Import[?] =>
         fields += field("selectors", renderSelectors(imported.selectors, source))
       case exported: dotty.tools.dotc.ast.Trees.Export[?] =>
@@ -306,9 +312,18 @@ object Main:
       s"{${fields.mkString(",")}}"
     .mkString("[", ",", "]")
 
-  private def span(tree: dotty.tools.dotc.ast.Trees.Tree[?]): String =
+  private def span(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
     if tree.span.exists then
-      s"{\"start\":${tree.span.start},\"end\":${tree.span.end}}"
+      val start =
+        if tree.isInstanceOf[dotty.tools.dotc.ast.Trees.ValDef[?]] then
+          val text = slice(tree, source)
+          val leading = text.dropWhile(_.isWhitespace)
+          if leading.startsWith("erased ") then
+            tree.span.start + text.indexOf(leading) + leading.indexOf(' ') + 1 +
+              leading.drop(7).indexWhere(!_.isWhitespace)
+          else tree.span.start
+        else tree.span.start
+      s"{\"start\":$start,\"end\":${tree.span.end}}"
     else
       "null"
 

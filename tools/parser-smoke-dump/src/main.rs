@@ -3,7 +3,10 @@ use std::{env, fs, process};
 use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{parse_compilation_unit, parse_expression_fragment, parse_pattern_fragment};
+use dotty_parser::{
+    Parser, ParserFeatures, parse_compilation_unit, parse_expression_fragment,
+    parse_pattern_fragment,
+};
 
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -18,13 +21,16 @@ fn main() {
         [path] => ("expr", path.as_str()),
         [flag, mode, path]
             if flag == "--mode"
-                && (mode == "pattern" || mode == "compilation" || mode == "block") =>
+                && (mode == "pattern"
+                    || mode == "compilation"
+                    || mode == "block"
+                    || mode == "block-erased") =>
         {
             (mode.as_str(), path.as_str())
         }
         _ => {
             eprintln!(
-                "usage: dotty-parser-smoke-dump [--mode pattern|block|compilation] <source-file> | --batch manifest"
+                "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
             );
             process::exit(2);
         }
@@ -32,7 +38,7 @@ fn main() {
 
     if path.is_empty() {
         eprintln!(
-            "usage: dotty-parser-smoke-dump [--mode pattern|block|compilation] <source-file> | --batch manifest"
+            "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
         );
         process::exit(2);
     }
@@ -93,6 +99,13 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
     } else if mode == "compilation" {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
+    } else if mode == "block-erased" {
+        Parser::new(source_text, SourceId::from_index(0), scanner, &mut names)
+            .with_features(ParserFeatures {
+                erased_definitions: true,
+                ..ParserFeatures::default()
+            })
+            .parse_expression_fragment()
     } else {
         parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
     };
@@ -103,7 +116,12 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         ));
     }
 
-    let tree = if mode == "pattern" || mode == "expr" || mode == "block" || mode == "compilation" {
+    let tree = if mode == "pattern"
+        || mode == "expr"
+        || mode == "block"
+        || mode == "block-erased"
+        || mode == "compilation"
+    {
         result.root
     } else {
         match &result.ast.get(result.root).kind {
@@ -422,6 +440,17 @@ fn render_tree(
             fields.push(format!(
                 "\"operator\":{}",
                 quote(names.resolve(postfix.op.text()))
+            ));
+        }
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
+            fields.push(format!(
+                "\"erased_params\":[{}]",
+                function
+                    .erased_params
+                    .iter()
+                    .map(bool::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
         TreeKind::PhaseSpecific(UntypedNode::GenFrom(generator)) => {
