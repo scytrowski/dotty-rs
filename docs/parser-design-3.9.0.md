@@ -225,8 +225,12 @@ policy, including accessor/private-local metadata. Type-only cases such as
 `case Empty[T]` have no value-parameter clauses.
 Parameterized case templates populate `Template.parents` through the same
 parent/constr-app parser used by classes; parent order and constructor
-applications are preserved. Prefixed enum cases, enum-case bodies, and
-enum-case `derives`/`uses` remain deferred.
+applications are preserved. Enum-case bodies and enum-case `derives`/`uses`
+remain deferred. Direct enum cases accept source annotations and
+`private`/`protected` visibility, including qualified visibility; the metadata
+is attached to the existing `ModuleDef`, `PatDef`, or `TypeDef` shape without
+introducing a new enum-case node. Annotations or modifiers after the case name,
+and semantic visibility checks, remain deferred.
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
 case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed
@@ -295,9 +299,11 @@ classification remains owned by the scanner; the parser only feeds back the
 `ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
 template region. The parser preserves `derives` and ordered `uses` metadata in
 `UntypedTemplateMetadata`; it does not perform derivation or capture checking.
-Sequence capture references, `.only[...]`/`.rd` forms, enum-case parent clauses,
-enum-case prefixes/modifiers, auxiliary constructors, and semantic template
-processing remain future work.
+Sequence capture references, `.only[...]`/`.rd` forms, auxiliary constructors,
+and semantic template processing remain future work. Direct enum-case
+annotations, access modifiers, and qualified visibility are preserved as
+definition metadata; constructor-level annotations/modifiers after the case
+name, enum-case bodies, and enum-case `derives`/`uses` remain deferred.
 
 ### Contextual definitions
 
@@ -337,7 +343,13 @@ extension lowering, symbol creation, or semantic resolution is performed.
 
 Definitions share a parser-owned prefix step before dispatching to `val`,
 `var`, `def`, `type`, `class`, `trait`, `object`, `case class`, `case object`,
-or `enum`.
+or `enum`. Direct enum cases have an additional prefix boundary: annotations
+and `private`/`protected` visibility are parsed before `case`, including
+qualified visibility such as `private[pkg]`. Invalid enum-case modifiers are
+diagnosed and do not change the existing node-kind matrix: singleton cases
+remain `ModuleDef`, comma-separated singleton cases remain one `PatDef`, and
+parameterized or parented cases remain `TypeDef(Template(...))` with
+`Modifier::EnumCase`.
 The current subset
 preserves annotations, source order for hard modifiers (`abstract`, `final`,
 `sealed`, `implicit`, `lazy`, and `override`), supported soft modifiers
@@ -354,7 +366,8 @@ semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-parameter annotations, prefixed enum cases, and feature-dependent
+annotations, constructor-level enum-case annotations/modifiers, enum-case
+bodies, and feature-dependent
 `opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
 
 The current source-level pattern grammar is layered as:
