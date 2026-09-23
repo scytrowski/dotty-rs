@@ -88,7 +88,7 @@ where
 
         if let Some(arrow) = self.named_function_type_arrow() {
             let params = self.parse_named_function_params();
-            self.consume_named_function_arrow(arrow);
+            self.consume_function_type_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
             return self.alloc_function_type(mark, params, body, arrow);
@@ -96,7 +96,7 @@ where
 
         if let Some(arrow) = self.unnamed_by_name_function_type_arrow() {
             let params = self.parse_unnamed_function_params();
-            self.consume_named_function_arrow(arrow);
+            self.consume_function_type_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
             return self.alloc_function_type(mark, params, body, arrow);
@@ -183,7 +183,7 @@ where
     }
 
     /// Recognizes a parenthesized function parameter list containing a
-    /// leading-arrow by-name parameter and followed by an ordinary arrow.
+    /// leading-arrow by-name parameter and followed by a function arrow.
     ///
     /// A leading arrow is only a `FunArgType` marker in this position. In
     /// particular, `(A => B) => C` is an ordinary function type whose single
@@ -439,7 +439,7 @@ where
         }
     }
 
-    fn consume_named_function_arrow(&mut self, arrow: FunctionTypeArrow) {
+    fn consume_function_type_arrow(&mut self, arrow: FunctionTypeArrow) {
         let matches_arrow = match arrow {
             FunctionTypeArrow::Ordinary => self.current_is_arrow(),
             FunctionTypeArrow::Context => self.current_is_context_arrow(),
