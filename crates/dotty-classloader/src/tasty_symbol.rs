@@ -22,7 +22,7 @@ use std::fmt;
 ///
 /// `fields`/`methods` cover ordinary `ValDef`/`DefDef` template members;
 /// each member's own declared type resolves to a name the same
-/// best-effort way a supertype does (see [`resolve_parent_name`]) — a
+/// best-effort way a supertype does (see `resolve_parent_name`) — a
 /// type shape this decoder does not recognize (anything past a plain or
 /// generic class reference: tuples, function types, refinements,
 /// dependent/path types, ...) is simply `None`, not a decode failure, so
@@ -128,7 +128,7 @@ pub(crate) struct DecodedTastyParameter {
     pub declared_type: Option<BinaryName>,
 }
 
-/// Why decoding a `.tasty` file into a [`DecodedTastyClass`] failed.
+/// Why decoding a `.tasty` file into a `DecodedTastyClass` failed.
 ///
 /// `pub`, not `pub(crate)`, even though the owning `tasty_symbol` module
 /// is private: this type appears as a field of the public
@@ -154,7 +154,7 @@ pub enum TastyDecodeError {
     NoTemplateBody,
     /// A supertype after the first `Template` parent (i.e. a mixin
     /// interface, not the implicit superclass slot) has no name this
-    /// decoder can resolve — see [`resolve_parent_name`]'s doc comment
+    /// decoder can resolve — see `resolve_parent_name`'s doc comment
     /// for exactly which shapes are and are not resolved.
     UnresolvedSupertype,
 }

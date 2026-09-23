@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// every [`ClassLoader`](crate::loader::ClassLoader) loading against one
 /// [`SemanticStore`](dotty_core::SemanticStore) session — which class names
 /// have already been *successfully* resolved to which `SymbolId`
-/// (`resolved`), the [`PackageRegistry`] (which package paths have already
+/// (`resolved`), the `PackageRegistry` (which package paths have already
 /// been resolved to which package `SymbolId`), and each resolved symbol's
 /// own [`ClassfileMetadata`]/[`ClassOrigin`] sidecar data.
 ///
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 /// regardless of which loader recorded it.
 ///
 /// Deliberately holds only *positive* results, not a full
-/// [`ClassRepository`](crate::repository::ClassRepository) (that stays a
+/// `ClassRepository` (that stays a
 /// loader-local field on `ClassLoader`, covering `Loading`/`Failed` too):
 /// a name one loader's own classpath doesn't have is not evidence that a
 /// *different* loader's classpath doesn't have it either (the

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 /// Why loading a class failed.
 ///
-/// `Clone` so a [`crate::ClassEntry::Failed`] cache entry can be returned
+/// `Clone` so a `ClassEntry::Failed` cache entry can be returned
 /// repeatedly without re-running the failed load. Non-`Clone` payloads
 /// (`ClassPathError`, and this type itself for [`Self::DependencyFailure`])
 /// are wrapped in `Rc` to keep the whole enum cheaply cloneable.
