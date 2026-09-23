@@ -240,6 +240,9 @@ by later phases. This metadata describes constructor roles, not source-level
 visibility.
 simple type aliases and abstract type declarations with lower and/or upper
 bounds
+parenthesized type grouping and tuple types, represented by the shared
+`Parens` and `Tuple` source nodes; tuple elements use the supported full type
+expression subset and compose with applied types
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
@@ -250,15 +253,20 @@ metadata
 The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
-forms, remains future work. Likewise, the type parser currently handles only
-the simple and recursively applied type names needed by these ascriptions,
-type applications, and type-definition bounds, plus the narrow Scala 3.9
-union/intersection subset. `type_expr()` parses `&` above `simple_type()` and
-`|` above that intersection layer; both produce source-level `InfixOp` trees
-with type-namespace operator names. Type positions use `AppliedTypeTree`; the
-term-level `foo[A]` form remains `TypeApply`. The `derives` clause intentionally
-keeps its narrower qualified-identifier grammar, so `derives Eq[A]` and
-`derives Eq | Show` remain rejected until that grammar is expanded.
+forms, remains future work. Likewise, the type parser currently handles
+simple, recursively applied, parenthesized, and tuple type names needed by
+these ascriptions, type applications, and type-definition bounds, plus the
+narrow Scala 3.9 union/intersection subset. `type_expr()` parses `&` above
+`simple_type()` and `|` above that intersection layer; both produce
+source-level `InfixOp` trees with type-namespace operator names. Parenthesized
+grouping and tuples preserve the shared source-level `Parens` and `Tuple`
+nodes, including when nested or used as applied type arguments. Type
+positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
+`TypeApply`. An empty `()` is not a standalone tuple type: zero-argument
+function types such as `() => R`, ordinary function types, and named tuple
+types remain deferred. The `derives` clause intentionally keeps its narrower
+qualified-identifier grammar, so `derives Eq[A]`, `derives Eq | Show`, and
+parenthesized derives types remain rejected until that grammar is expanded.
 
 Method definitions are statement-level `DefDef` trees. Their RHS is parsed as
 a complete expression, so local `val`/`var` and `def` statements can be kept
