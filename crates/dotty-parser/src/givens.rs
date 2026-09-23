@@ -83,7 +83,7 @@ where
             };
 
         let tpt = self.with_location(location, |parser| {
-            parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+            parser.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
         });
 
         if self.current_is_given_colon() {

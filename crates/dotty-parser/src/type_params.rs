@@ -213,7 +213,7 @@ where
     }
 
     fn parse_bound_type(&mut self) -> TreeId<Untyped> {
-        self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+        self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
     }
 
     fn accept_operator(&mut self, expected: &str) -> bool {
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_unsupported_applied_type_in_a_bound_without_hanging() {
+    fn parses_an_intersection_type_in_a_bound_without_hanging() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[A <: Foo & Bar]",
@@ -612,11 +612,21 @@ mod tests {
 
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .message()
-                .contains("expected `,` or `]` after a type parameter")
-        }));
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(params[0]).kind else {
+            panic!("expected a type definition");
+        };
+        let TreeKind::TypeBoundsTree(TypeBoundsTree { high, .. }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected type bounds");
+        };
+        assert!(matches!(
+            parser
+                .ast()
+                .get(high.expect("expected an upper bound"))
+                .kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]

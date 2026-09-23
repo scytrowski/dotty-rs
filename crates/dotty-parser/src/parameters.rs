@@ -220,7 +220,7 @@ where
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
             self.advance();
-            self.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedType,

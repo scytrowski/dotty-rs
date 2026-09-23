@@ -155,7 +155,7 @@ where
                 return error;
             }
             let rhs = self.with_location(location, |parser| {
-                parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+                parser.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
             });
             if owns_layout && self.current().kind == TokenKind::Outdent {
                 self.advance();
@@ -195,7 +195,7 @@ where
 
     fn parse_type_definition_bound_type(&mut self, location: Location) -> TreeId<Untyped> {
         self.with_location(location, |parser| {
-            parser.with_parse_kind(ParseKind::Type, |parser| parser.simple_type())
+            parser.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
         })
     }
 

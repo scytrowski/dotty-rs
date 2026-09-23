@@ -172,7 +172,7 @@ where
             );
         }
         let tpt = if has_colon {
-            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr())
         } else {
             self.synthetic_type_tree_at(mark.start())
         };
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_compound_self_types_without_losing_the_body_boundary() {
+    fn parses_compound_self_types_without_losing_the_body_boundary() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "{ self: A & B => value }",
@@ -521,11 +521,7 @@ mod tests {
         assert!(result.self_val.is_some());
         assert_eq!(result.members.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert_eq!(parser.diagnostics().len(), 1);
-        assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
-        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
