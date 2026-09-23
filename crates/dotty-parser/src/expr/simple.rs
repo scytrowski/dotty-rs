@@ -296,33 +296,7 @@ where
         mark: crate::Mark,
         function: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
-        self.advance();
-        let mut args = Vec::new();
-        if self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedType,
-                "expected a type argument between `[` and `]`",
-            );
-        } else {
-            loop {
-                args.push(self.simple_type());
-                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
-                    self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
-                    break;
-                }
-                if self
-                    .cursor
-                    .at(TokenKind::Punctuation(Punctuation::RightBracket))
-                {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedType,
-                        "expected a type argument after `,`",
-                    );
-                    self.advance();
-                    break;
-                }
-            }
-        }
+        let args = self.parse_type_argument_list();
         self.alloc_from(
             mark,
             TreeKind::TypeApply(dotty_core::ast::TypeApply { function, args }),

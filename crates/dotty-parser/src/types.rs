@@ -7,6 +7,45 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses a bracketed, comma-separated list of simple type arguments.
+    ///
+    /// The caller owns the tree that precedes the list; this helper is shared
+    /// by term-level type applications and applied type trees so that their
+    /// delimiter and recovery behavior stays identical.
+    pub(crate) fn parse_type_argument_list(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
+
+        let mut args = Vec::new();
+        if self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a type argument between `[` and `]`",
+            );
+            return args;
+        }
+
+        loop {
+            args.push(self.simple_type());
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
+                break;
+            }
+
+            if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::RightBracket))
+            {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type argument after `,`",
+                );
+                self.advance();
+                break;
+            }
+        }
+        args
+    }
+
     /// Parses the small simple-type subset needed by simple expressions.
     pub(crate) fn simple_type(&mut self) -> TreeId<Untyped> {
         match self.parse_qualified_reference(ReferenceNamespace::Type) {
@@ -109,6 +148,31 @@ mod tests {
             parser.ast().get(selection.qualifier).kind,
             TreeKind::Ident(ident) if ident.name.is_type()
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_shared_type_argument_list_in_the_type_namespace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A, B]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let args = parser.parse_type_argument_list();
+        assert_eq!(args.len(), 2);
+        assert!(args.iter().all(|id| matches!(
+            parser.ast().get(*id).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        )));
         assert!(parser.diagnostics().is_empty());
     }
 }
