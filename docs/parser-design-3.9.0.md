@@ -260,7 +260,8 @@ with applied, tuple, union, and intersection types. Context-function types
 `(ctx: Context, req: Request) ?=> Response`; they use the same direct `ValDef`
 parameter nodes as ordinary function types. The parameters retain default
 metadata without `Given`; `Given` belongs to the surrounding
-`FunctionWithMods`, whose `erased_params` contains one `false` per parameter.
+`FunctionWithMods`, whose `erased_params` contains one positional boolean per
+parameter (`false` for ordinary parameters and `true` for erased ones).
 With `ParserFeatures::erased_definitions` enabled, context-function types also
 accept named erased parameters such as `(erased x: A) ?=> B` and mixed clauses
 such as `(x: A, erased y: B) ?=> C`. They retain the plain `ValDef` parameter
@@ -270,8 +271,9 @@ Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types, pure
 arrows, polymorphic function types, and type lambdas remain deferred. Supported
 context-function types use
-`FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
-`erased_params` per parameter; `?=>` is right-associative and composes
+`FunctionWithMods` with exactly one `Given` modifier and one positional boolean
+in `erased_params` per parameter (`false` for ordinary parameters and `true`
+for erased ones); `?=>` is right-associative and composes
 recursively with ordinary `=>`.
 Ordinary parenthesized function types also support unnamed by-name parameters
 in the leading-arrow `FunArgType` form, such as `(=> A) => B` and
