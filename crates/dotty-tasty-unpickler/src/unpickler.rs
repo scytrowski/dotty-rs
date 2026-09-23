@@ -1,9 +1,9 @@
 //! The semantic unpickler driver.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use dotty_core::ids::{SymbolId, TypeId};
+use dotty_core::ids::{AnnotationId, SymbolId, TypeId};
 use dotty_core::resolution::{NoResolver, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::store::StoreCheckpoint;
@@ -25,6 +25,7 @@ pub(crate) struct Transaction {
     term_trees: usize,
     rec_this: usize,
     infos: usize,
+    annotations: usize,
 }
 
 /// Interprets one TASTy file into a `SemanticStore`.
@@ -70,6 +71,19 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     /// completed it, oldest first. Arena truncation cannot restore a field of
     /// a symbol that already existed, so a failed transaction puts these back.
     pub(crate) info_journal: Vec<(SymbolId, SymbolInfo)>,
+    /// Symbols whose `Symbol.annotations` completed (Milestone 5e1), with any
+    /// annotations, including zero. `Vec::is_empty()` on
+    /// `Symbol.annotations` cannot tell "not completed" from "completed with
+    /// none", so this adapter-local set is the state
+    /// [`complete_symbol_annotations`](Self::complete_symbol_annotations)
+    /// checks, never a new field on `dotty-core::Symbol`.
+    pub(crate) annotations_completed: HashSet<SymbolId>,
+    /// The `(old Symbol.annotations, was it completed before)` each symbol's
+    /// annotation state held before a call changed it, oldest first — mirrors
+    /// `info_journal`: arena truncation frees a newly allocated `Annotation`
+    /// but cannot restore a mutated field, or this set's own membership, for
+    /// a symbol that already existed.
+    pub(crate) annotations_journal: Vec<(SymbolId, Vec<AnnotationId>, bool)>,
     /// Whether `scala.&` / `scala.|` were declared in the package registry.
     special_aliases_declared: bool,
     /// The file's AST view, built on first use and shared by both passes.
@@ -115,6 +129,8 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             rec_this: HashMap::new(),
             rec_this_journal: Vec::new(),
             info_journal: Vec::new(),
+            annotations_completed: HashSet::new(),
+            annotations_journal: Vec::new(),
             special_aliases_declared: false,
             ast: None,
         }
@@ -273,6 +289,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             term_trees: self.index.mark_term_trees(),
             rec_this: self.rec_this_journal.len(),
             infos: self.info_journal.len(),
+            annotations: self.annotations_journal.len(),
         }
     }
 
@@ -284,11 +301,21 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         result: Result<T, UnpickleError>,
     ) -> Result<T, UnpickleError> {
         if result.is_err() {
-            // Infos first: they name symbols that exist before the call, and
-            // truncating the arenas does not touch them.
+            // Infos and annotations first: they name symbols that exist
+            // before the call, and truncating the arenas does not touch them.
             while self.info_journal.len() > transaction.infos {
                 if let Some((symbol, info)) = self.info_journal.pop() {
                     self.store.symbols.set_info(symbol, info);
+                }
+            }
+            while self.annotations_journal.len() > transaction.annotations {
+                if let Some((symbol, annotations, was_completed)) = self.annotations_journal.pop() {
+                    self.store.symbols.get_mut(symbol).annotations = annotations;
+                    if was_completed {
+                        self.annotations_completed.insert(symbol);
+                    } else {
+                        self.annotations_completed.remove(&symbol);
+                    }
                 }
             }
             self.store.rollback_to(transaction.checkpoint);
@@ -296,9 +323,14 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             self.index.roll_back_type_trees(transaction.type_trees);
             self.index.roll_back_term_trees(transaction.term_trees);
             self.roll_back_rec_this(transaction.rec_this);
-        } else if transaction.infos == 0 {
+        } else {
             // Committed and outermost: nothing left to undo.
-            self.info_journal.clear();
+            if transaction.infos == 0 {
+                self.info_journal.clear();
+            }
+            if transaction.annotations == 0 {
+                self.annotations_journal.clear();
+            }
         }
         // Nothing is pending outside a call, and every binder unregisters
         // itself; this only guarantees the invariant for the next call.
@@ -312,6 +344,21 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let old = self.store.symbols.get(symbol).info;
         self.info_journal.push((symbol, old));
         self.store.symbols.set_info(symbol, info);
+    }
+
+    /// Sets a symbol's annotations and marks its annotation completion
+    /// state complete (Milestone 5e1), remembering the old annotations and
+    /// completion state for rollback.
+    pub(crate) fn set_symbol_annotations(
+        &mut self,
+        symbol: SymbolId,
+        annotations: Vec<AnnotationId>,
+    ) {
+        let old = self.store.symbols.get(symbol).annotations.clone();
+        let was_completed = self.annotations_completed.contains(&symbol);
+        self.annotations_journal.push((symbol, old, was_completed));
+        self.store.symbols.get_mut(symbol).annotations = annotations;
+        self.annotations_completed.insert(symbol);
     }
 
     fn enter_all(&mut self) -> Result<(), UnpickleError> {
