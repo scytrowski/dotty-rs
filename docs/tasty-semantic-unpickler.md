@@ -1775,10 +1775,46 @@ worth noting for anyone reading wire order literally: `@SymbolMarker
 order, and no code here assumes it is beyond "whatever order pass 1 indexed
 them in, is the order completion preserves".
 
-Remaining for this milestone: a completion-outcome corpus survey (successful
-decodes vs. external/unsupported failures, by definition kind and annotation
-root shape) and a cross-adapter storage-convergence check against
-`dotty-classloader`.
+**Completion-outcome corpus survey.** `tests/type_corpus.rs` completes every
+definition/parameter with at least one indexed `ANNOTATION` entry through the
+real `complete_symbol_annotations` and classifies the result, `unexpected: 0`
+throughout. Like every other unit-only, single-file completion measurement in
+this document (`TYPELAMBDAtype`/`PARAMtype` after 3a, `APPLIEDtype` after
+2c1, ...), most failures are `external` — an annotation class this
+one-unit-at-a-time session never entered, which a classpath resolver
+(Milestone 6) is expected to unlock — and the two corpora diverge sharply
+because of it: `scala3-library` decodes most of its 3431 attempts (2108,
+order-dependent: 943–2135 across the corpus test's permutations, 1084–2362
+external, plus 176 `UnsupportedAnnotationConstructor` and 36
+`UnsupportedAnnotationArgument`, both stable across permutations since they
+never depend on resolution order), while `scala3-compiler`'s 3349 attempts
+decode 0 — its own annotation classes are defined in units later in
+compilation order than this survey ever enters, so every one of them (plus a
+stable 8 `UnsupportedAnnotationConstructor`) is `external`. No
+`InvalidAnnotationType`, `UnsupportedAnnotationTree` or `MalformedType`
+occurs in either corpus.
+
+**Cross-adapter storage convergence with `dotty-classloader`.**
+`dotty-classloader/tests/cross_adapter_annotations.rs` confirms both adapters
+share the "attach `AnnotationId`s to `Symbol.annotations`, `tree` always
+`None`, annotation type always class-like" contract (issue #129 §33) —
+`ClassLoader::enter_annotations` (JVM classfile `RuntimeVisibleAnnotations`)
+on one side, `complete_symbol_annotations` on the other. Milestone 6
+(classloader/`SymbolResolver` integration) has not landed, so the two
+adapters cannot yet run against one shared `SemanticStore` — `ClassLoader::new`
+bootstraps its own `Definitions` internally, and `Definitions::bootstrap` is
+documented as exactly-once per store — so the test runs each adapter over its
+own store and compares the contract their results satisfy, not one shared
+arena. One divergence is documented and asserted rather than hidden:
+`dotty-classloader` does not (yet) map a classfile's decoded element values
+into `AnnotationArguments::Known` (they stay exclusively in its own
+JVM-facing `SemanticAnnotation` sidecar), so every classfile annotation is
+`Unavailable` regardless of its real element count, while an argument-free
+TASTy annotation is `Known([])` — a real, allowed divergence per §33 ("do not
+require equal payloads"), not a bug either side needs to fix for Milestone
+5e1.
+
+Milestone 5e1 is complete.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -2136,10 +2172,10 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
    - 5e: symbol annotations, companion links, opaque aliases and the
      remaining tails, in steps:
      - 5e1: serialized symbol annotations — pass-1 `ANNOTATION` tail
-       indexing, the corpus survey, the shared payload decoder and
-       `complete_symbol_annotations`/`complete_symbols_annotations` all
-       landed; a completion-outcome corpus survey and cross-adapter
-       convergence with `dotty-classloader` remain;
+       indexing, the corpus survey, the shared payload decoder,
+       `complete_symbol_annotations`/`complete_symbols_annotations`, the
+       completion-outcome corpus survey and the `dotty-classloader`
+       storage-convergence check all landed — complete;
      - 5e2: companion links;
      - 5e3: opaque aliases and the remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
