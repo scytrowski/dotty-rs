@@ -251,10 +251,16 @@ name, a full currently-supported `type_expr()` type, no RHS, and default
 metadata. Backquoted parameter names and nested ordinary/context function
 types are preserved. Function arrows associate to the right and bind below
 the supported union/intersection type operators, so function types compose
-with applied, tuple, union, and intersection types. Named context-function
-parameters (`(x: A) ?=> B`), erased parameters, pure arrows, polymorphic
-function types, and type lambdas remain deferred. Supported context-function
-types use
+with applied, tuple, union, and intersection types. Context-function types
+(`?=>`) also support named typed parameters such as
+`(ctx: Context, req: Request) ?=> Response`; they use the same direct `ValDef`
+parameter nodes as ordinary function types. The parameters retain default
+metadata without `Given`; `Given` belongs to the surrounding
+`FunctionWithMods`, whose `erased_params` contains one `false` per parameter.
+Named parameters can use the full currently-supported `type_expr()` subset and
+compose recursively with ordinary or context arrows. Named tuple types,
+erased parameters, pure arrows, polymorphic function types, and type lambdas
+remain deferred. Supported context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
 `erased_params` per parameter; `?=>` is right-associative and composes
 recursively with ordinary `=>`.
@@ -282,8 +288,9 @@ nodes, including when nested or used as applied type arguments. Type
 positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
 `TypeApply`. An empty `()` is not a standalone tuple type: it is accepted only
 as the parameter list of a zero-argument function type. Named tuple types
-remain deferred unless the parenthesized list is followed by the ordinary
-function arrow and matches the named-parameter form above. An empty
+remain deferred unless the parenthesized list is followed by a supported
+ordinary or context function arrow and matches the named-parameter form above.
+An empty
 context-function parameter list (`() ?=> R`) is invalid and produces a
 focused parser diagnostic. The `derives` clause
 intentionally keeps its narrower
