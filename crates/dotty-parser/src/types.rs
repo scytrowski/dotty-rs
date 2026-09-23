@@ -1,4 +1,5 @@
-use dotty_core::{Name, Punctuation, TokenKind, TreeId, Untyped};
+use dotty_core::ast::{Parens, UntypedNode};
+use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::{ParseDiagnosticKind, Parser};
@@ -75,16 +76,39 @@ where
     }
 
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
-        if matches!(
-            self.current().kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) {
-            return self.simple_type();
+        let mark = self.mark();
+        match self.current().kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                return self.simple_type();
+            }
+            TokenKind::Punctuation(Punctuation::LeftParen) => {
+                return self.parse_parenthesized_type(mark);
+            }
+            _ => {}
         }
 
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedType, "expected a type operand");
         self.error_type(position)
+    }
+
+    fn parse_parenthesized_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "an empty parenthesized type requires a function type",
+            );
+            return self.error_type(position);
+        }
+
+        let inner = self.type_expr();
+        self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })),
+        )
     }
 
     fn consume_type_infix_newlines(&mut self) {
@@ -205,6 +229,65 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{NameInterner, Punctuation, TextRange, TreeKind};
+
+    #[test]
+    fn parses_a_parenthesized_type_as_parens() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a parenthesized type");
+        };
+        assert!(matches!(parser.ast().get(inner).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 3).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parenthesized_type_parses_a_full_inner_type_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A | B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a parenthesized type");
+        };
+        assert!(matches!(
+            parser.ast().get(inner).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
 
     #[test]
     fn parses_a_simple_type_in_the_type_namespace() {
