@@ -1,4 +1,4 @@
-use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
 use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -129,6 +129,57 @@ where
             );
         }
 
+        let higher_kind = if self
+            .cursor
+            .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+        {
+            let nested_params = self.parse_type_param_clause(ParamOwner::Hk);
+            let lambda_start = nested_params
+                .first()
+                .and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .unwrap_or(mark.start);
+            let empty_bounds_start = nested_params
+                .last()
+                .and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().end())
+                })
+                .unwrap_or(lambda_start);
+            let body = self.synthetic_type_bounds(empty_bounds_start);
+            let lambda = self.alloc_from(
+                crate::Mark {
+                    start: lambda_start,
+                },
+                TreeKind::LambdaTypeTree(LambdaTypeTree {
+                    type_params: nested_params,
+                    body,
+                }),
+            );
+            if matches!(
+                self.ast.get(body).kind,
+                TreeKind::TypeBoundsTree(TypeBoundsTree {
+                    low: None,
+                    high: None,
+                    alias: None,
+                })
+            ) {
+                let range = TextRange::new(lambda_start, empty_bounds_start)
+                    .expect("higher-kinded lambda span is ordered");
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+            Some(lambda)
+        } else {
+            None
+        };
+
         let explicit_bounds_start = self.current().span.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
@@ -154,12 +205,13 @@ where
         } else {
             self.synthetic_type_bounds(mark.start())
         };
+        let rhs = higher_kind.unwrap_or(bounds);
 
         self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
                 name,
-                rhs: bounds,
+                rhs,
                 metadata,
                 variance,
             }),
@@ -675,6 +727,50 @@ mod tests {
         let params = parser.parse_type_param_clause(ParamOwner::Type);
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current_text(), Ok("=>>"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_higher_kinded_type_parameter_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[G[_]]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 2, 3),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected an outer type parameter");
+        };
+        let TreeKind::LambdaTypeTree(lambda) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a higher-kinded lambda type");
+        };
+        assert_eq!(lambda.type_params.len(), 1);
+        let TreeKind::TypeDef(nested) = &parser.ast().get(lambda.type_params[0]).kind else {
+            panic!("expected a nested type parameter");
+        };
+        assert_eq!(
+            parser.names.resolve(nested.name.as_name().text()),
+            "$type_wildcard_0"
+        );
+        assert!(matches!(
+            parser.ast().get(nested.rhs).kind,
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low: None,
+                high: None,
+                alias: None,
+            })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 

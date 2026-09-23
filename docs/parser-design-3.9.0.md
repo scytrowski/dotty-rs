@@ -296,7 +296,10 @@ The ordinary `=>` is required for this path and the type-lambda arrow `=>>` is
 kept distinct from it. A leading type-parameter clause followed by `=>>`, such
 as `[A] =>> List[A]`, is represented by the shared `LambdaTypeTree` with
 `TypeDef` parameters and a body parsed through the full `type_expr()` entry
-point. Ordinary and context-function bodies compose recursively. Empty or
+point. Nested higher-kinded clauses such as `[G[_]] =>> G[Int]` use a nested
+`LambdaTypeTree` in the `G` parameter's `rhs`; the wildcard remains the shared
+synthetic type-parameter `TypeDef`. Ordinary and context-function bodies
+compose recursively. Empty or
 malformed type-lambda clauses report diagnostics without consuming the
 following type-definition boundary.
 parameterized type aliases and abstract declarations using the shared
