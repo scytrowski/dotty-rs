@@ -248,8 +248,11 @@ and `() => R`), represented by the shared `Function` node. Function arrows
 associate to the right and bind below the supported union/intersection type
 operators, so function types compose with applied, tuple, union, and
 intersection types. Context-function arrows (`?=>`), named or erased
-function-type parameters, pure/contextual arrows, polymorphic function types,
-and type lambdas remain deferred.
+function-type parameters, pure arrows, polymorphic function types, and type
+lambdas remain deferred. Supported context-function types use
+`FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
+`erased_params` per parameter; `?=>` is right-associative and composes
+recursively with ordinary `=>`.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
@@ -263,16 +266,20 @@ forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles
 simple, recursively applied, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus the
-narrow Scala 3.9 union/intersection subset. `type_expr()` parses ordinary
-function arrows above the `|` union layer, while `&` binds tighter than `|`.
-The union and intersection operators produce source-level `InfixOp` trees with
-type-namespace operator names; arrows produce `Function` trees. Parenthesized
+narrow Scala 3.9 union/intersection subset and ordinary/context function
+arrows. `type_expr()` parses both arrows above the `|` union layer, while `&`
+binds tighter than `|`. The union and intersection operators produce
+source-level `InfixOp` trees with type-namespace operator names; ordinary
+arrows produce `Function` trees and context arrows produce `FunctionWithMods`.
+Parenthesized
 grouping and tuples preserve the shared source-level `Parens` and `Tuple`
 nodes, including when nested or used as applied type arguments. Type
 positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
 `TypeApply`. An empty `()` is not a standalone tuple type: it is accepted only
 as the parameter list of a zero-argument function type. Named tuple types
-remain deferred. The `derives` clause intentionally keeps its narrower
+remain deferred. An empty context-function parameter list (`() ?=> R`) is
+invalid and produces a focused parser diagnostic. The `derives` clause
+intentionally keeps its narrower
 qualified-identifier grammar, so `derives Eq[A]`, `derives Eq | Show`, and
 parenthesized derives types remain rejected until that grammar is expanded.
 

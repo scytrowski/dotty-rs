@@ -1,4 +1,6 @@
-use dotty_core::ast::{Function, Parens, Tuple, UntypedNode};
+use dotty_core::ast::{
+    Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode,
+};
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
@@ -71,26 +73,66 @@ where
                 })),
             );
         }
+        if self.starts_empty_context_function_type() {
+            self.advance();
+            self.advance();
+            self.advance();
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "a context function type requires at least one parameter",
+            );
+            let _ = self.type_expr();
+            return self.error_type(self.span_from(mark));
+        }
 
         let diagnostics_before = self.diagnostics.len();
         let parameter = self.parse_union_type();
-        if self.diagnostics.len() != diagnostics_before || !self.current_is_arrow() {
+        if self.diagnostics.len() != diagnostics_before {
             return parameter;
         }
 
-        self.advance();
+        let is_context = if self.current_is_arrow() {
+            self.advance();
+            false
+        } else if self.current_is_context_arrow() {
+            self.advance();
+            true
+        } else {
+            return parameter;
+        };
         let body = self.type_expr();
         let params = self.function_type_params(parameter);
-        self.alloc_from(
-            mark,
-            TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
-        )
+        if is_context {
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
+                    erased_params: vec![false; params.len()],
+                    modifiers: Modifiers {
+                        modifiers: vec![Modifier::Given],
+                        ..Modifiers::default()
+                    },
+                    params,
+                    result: body,
+                })),
+            )
+        } else {
+            self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
+            )
+        }
     }
 
     fn starts_empty_function_type(&mut self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
             && self.lookahead_is_arrow(2)
+    }
+
+    fn starts_empty_context_function_type(&mut self) -> bool {
+        self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
+            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
+            && self.lookahead_is_context_arrow(2)
     }
 
     fn function_type_params(&self, parameter: TreeId<Untyped>) -> Vec<TreeId<Untyped>> {
@@ -877,18 +919,382 @@ mod tests {
     }
 
     #[test]
-    fn does_not_consume_context_function_arrows_as_ordinary_function_types() {
+    fn parses_a_context_function_type_with_given_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A ?=> B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.result).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![false]);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_multiple_context_function_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A, B) ?=> C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 2);
+        assert_eq!(function.erased_params, vec![false, false]);
+        assert!(
+            function
+                .params
+                .iter()
+                .all(|param| matches!(parser.ast().get(*param).kind, TreeKind::Ident(_)))
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn strips_a_direct_parentheses_wrapper_from_a_context_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A) ?=> B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_nested_tuple_context_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "((A, B), C) ?=> D",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Comma), 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 2);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(function.params[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn context_function_arrows_are_right_associative() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A ?=> B ?=> C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(outer)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected the outer context function type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.result).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn ordinary_and_context_function_arrows_mix_recursively() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A => B ?=> C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(outer)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected the outer ordinary function type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn context_and_ordinary_function_arrows_mix_in_the_other_direction() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A ?=> B => C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(outer)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected the outer context function type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.result).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_empty_context_function_parameter_list() {
         let mut names = NameInterner::new();
         let parser = parser_for(
-            "type F = A ?=> B",
+            "type F = () ?=> R",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_context_function_type_without_a_left_operand() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Operator, 9, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_repeated_context_function_arrow() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = A ?=> ?=>",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
                 token(TokenKind::Identifier, 5, 6),
                 token(TokenKind::Operator, 7, 8),
                 token(TokenKind::Identifier, 9, 10),
                 token(TokenKind::Operator, 11, 14),
-                token(TokenKind::Identifier, 15, 16),
-                token(TokenKind::Eof, 16, 16),
+                token(TokenKind::Operator, 15, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_context_function_result_at_eof() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (A, B) ?=>",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_context_function_result_inside_type_arguments() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = List[A ?=>]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 13),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 13, 14),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reports_a_trailing_tuple_comma_before_a_context_arrow() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (A,) ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn keeps_named_context_function_parameters_deferred() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (x: A) ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Colon), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
             ],
             &mut names,
         );
