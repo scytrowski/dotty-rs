@@ -135,6 +135,34 @@ where
             None
         };
 
+        let context_bound_start = if self.context.param_owner == Some(ParamOwner::Type)
+            && self.accept_context_bound_colon()
+        {
+            // Dotty parses a context bound in this position and strips it
+            // from the source-level type-lambda parameter tree.  Keep the
+            // bound's type syntactically consumed so the enclosing clause
+            // remains synchronized, but do not attach it to TypeDef: the
+            // shared AST has no context-bound field on type parameters.
+            let bound_start = self.current().span.start();
+            if matches!(
+                self.current().kind,
+                TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
+                    | TokenKind::Eof
+            ) || self.current_is_arrow()
+                || self.current_is_type_lambda_arrow()
+            {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a context-bound type after `:`",
+                );
+            } else {
+                let _ = self.parse_bound_type();
+            }
+            Some(bound_start)
+        } else {
+            None
+        };
+
         let explicit_bounds_start = self.current().span.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
@@ -170,7 +198,7 @@ where
                 }),
             )
         } else {
-            self.synthetic_type_bounds(empty_bounds_start)
+            self.synthetic_type_bounds(context_bound_start.unwrap_or(empty_bounds_start))
         };
         let rhs = if let Some(nested_params) = nested_params {
             let lambda_start = nested_params
@@ -202,7 +230,12 @@ where
             bounds
         };
 
-        self.alloc_from(
+        if context_bound_start.is_some() {
+            metadata
+                .modifiers
+                .retain(|modifier| !matches!(modifier, dotty_core::ast::Modifier::Param));
+        }
+        let type_param = self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
                 name,
@@ -210,7 +243,13 @@ where
                 metadata,
                 variance,
             }),
-        )
+        );
+        if let Some(start) = context_bound_start {
+            let range = TextRange::new(start, start).expect("zero-width context bound span");
+            self.ast.get_mut(type_param).position =
+                Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+        }
+        type_param
     }
 
     fn parse_type_param_name(&mut self) -> TypeName {
@@ -272,6 +311,19 @@ where
         } else {
             false
         }
+    }
+
+    fn accept_context_bound_colon(&mut self) -> bool {
+        let is_context_bound_colon = matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Colon)
+                | TokenKind::ColonFollow
+                | TokenKind::ColonOp
+        ) && self.current_text_is(":");
+        if is_context_bound_colon {
+            self.advance();
+        }
+        is_context_bound_colon
     }
 
     fn recover_type_param_clause(&mut self) {
@@ -409,6 +461,36 @@ mod tests {
             ]
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn strips_a_context_bound_from_a_type_lambda_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(params[0]).kind else {
+            panic!("expected a type parameter definition");
+        };
+        let TreeKind::TypeBoundsTree(TypeBoundsTree { low, high, alias }) =
+            parser.ast().get(rhs).kind
+        else {
+            panic!("expected synthetic type bounds");
+        };
+        assert!(low.is_none() && high.is_none() && alias.is_none());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

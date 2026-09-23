@@ -4767,6 +4767,43 @@ mod tests {
     }
 
     #[test]
+    fn strips_a_context_bound_in_a_type_lambda_like_dotty() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show] =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Operator, 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { type_params, .. }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        let parameter = parser.ast().get(type_params[0]);
+        assert_eq!(
+            parameter.position.unwrap().span().range(),
+            TextRange::new(4, 4).unwrap()
+        );
+        let TreeKind::TypeDef(definition) = &parameter.kind else {
+            panic!("expected a type parameter definition");
+        };
+        assert!(definition.metadata.modifiers.is_empty());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn preserves_type_parameter_order_in_a_type_lambda() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
