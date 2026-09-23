@@ -1,0 +1,3 @@
+{
+  type ContextSupplier = (=> Context) ?=> Result
+}
