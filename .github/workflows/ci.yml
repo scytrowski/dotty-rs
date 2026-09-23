@@ -34,10 +34,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-debug-
 
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
