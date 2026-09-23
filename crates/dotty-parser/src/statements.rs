@@ -43,7 +43,15 @@ where
 
     /// Parses one statement at the requested source location.
     pub(crate) fn parse_statement(&mut self, location: Location) -> ParsedStatement {
-        if self.context.enum_body && is_enum_case_start(self.current().kind) {
+        if self.context.enum_body && self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+            return self.parse_enum_case();
+        }
+        if self.context.enum_body
+            && matches!(
+                self.current().kind,
+                TokenKind::CaseClass | TokenKind::CaseObject
+            )
+        {
             return self.parse_unsupported_enum_case();
         }
         if self.starts_extension_definition() {

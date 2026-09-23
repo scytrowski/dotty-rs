@@ -6,8 +6,8 @@
 //! and template processing remains outside the parser.
 
 use dotty_core::ast::{
-    Apply, ApplyKind, DefDef, Modifier, Modifiers, ModuleDef, New, Select, Template, TypeDef,
-    UntypedTemplateMetadata,
+    Apply, ApplyKind, DefDef, Ident, Modifier, Modifiers, ModuleDef, New, Select, Template,
+    TypeDef, UntypedTemplateMetadata,
 };
 use dotty_core::{
     HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -118,6 +118,19 @@ where
         };
         self.advance();
         let name = self.parse_object_name();
+        let mut metadata = prefix.metadata;
+        if is_case {
+            metadata.modifiers.push(Modifier::Case);
+        }
+        self.parse_module_definition_after_name(mark, name, metadata)
+    }
+
+    fn parse_module_definition_after_name(
+        &mut self,
+        mark: crate::Mark,
+        name: TermName,
+        metadata: Modifiers,
+    ) -> ParsedStatement {
         let tail = self.with_enum_body(false, |parser| parser.parse_template_tail(false));
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
@@ -150,11 +163,6 @@ where
         );
         self.ast.get_mut(template).position = Some(template_position);
 
-        let mut metadata = prefix.metadata;
-        if is_case {
-            metadata.modifiers.push(Modifier::Case);
-        }
-
         ParsedStatement::Definition(self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
@@ -163,6 +171,132 @@ where
                 metadata,
             })),
         ))
+    }
+
+    pub(crate) fn parse_enum_case(&mut self) -> ParsedStatement {
+        let mark = self.mark();
+        let case_position = self.current_span();
+        self.advance();
+
+        let (name, backquoted) = match self.current().kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+                match self.intern_current_term_name() {
+                    Ok(name) => {
+                        self.advance();
+                        (name, backquoted)
+                    }
+                    Err(_) => return self.malformed_enum_case(case_position),
+                }
+            }
+            _ => return self.malformed_enum_case(case_position),
+        };
+
+        if self.enum_case_requires_unsupported_recovery() {
+            return self.unsupported_enum_case(
+                case_position,
+                "parameterized enum cases are not supported by this parser milestone",
+            );
+        }
+
+        if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
+            let first = self.alloc_from(
+                mark,
+                TreeKind::Ident(Ident {
+                    name: *name.as_name(),
+                    backquoted,
+                }),
+            );
+            return self.parse_enum_case_group(mark, first);
+        }
+
+        let mut metadata = Modifiers::default();
+        metadata.modifiers.push(Modifier::EnumCase);
+        self.parse_module_definition_after_name(mark, name, metadata)
+    }
+
+    fn parse_enum_case_group(
+        &mut self,
+        mark: crate::Mark,
+        first: TreeId<Untyped>,
+    ) -> ParsedStatement {
+        let mut patterns = vec![first];
+        while self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+            match self.current().kind {
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                    let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+                    let Ok(name) = self.intern_current_term_name() else {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedPattern,
+                            "expected an identifier after `,` in an enum case",
+                        );
+                        self.recover_until(crate::RecoverySet::Case);
+                        break;
+                    };
+                    let name = *name.as_name();
+                    let pattern_mark = self.mark();
+                    self.advance();
+                    patterns.push(
+                        self.alloc_from(pattern_mark, TreeKind::Ident(Ident { name, backquoted })),
+                    );
+                }
+                _ => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedPattern,
+                        "expected an identifier after `,` in an enum case",
+                    );
+                    self.recover_until(crate::RecoverySet::Case);
+                    break;
+                }
+            }
+        }
+
+        let tpt = self.synthetic_type_tree_at(self.last_real_token_end);
+        let mut metadata = Modifiers::default();
+        metadata.modifiers.push(Modifier::EnumCase);
+        ParsedStatement::Definition(self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(
+                dotty_core::ast::PatDef {
+                    modifiers: metadata,
+                    patterns,
+                    tpt,
+                    rhs: None,
+                },
+            )),
+        ))
+    }
+
+    fn enum_case_requires_unsupported_recovery(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Extends)
+                | TokenKind::Punctuation(
+                    Punctuation::LeftBracket | Punctuation::LeftBrace | Punctuation::LeftParen,
+                )
+                | TokenKind::ColonFollow
+                | TokenKind::ColonEol
+                | TokenKind::ColonOp
+        ) || (self.current().kind == TokenKind::Operator && self.current_text_is("@"))
+    }
+
+    fn malformed_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
+        self.report(
+            ParseDiagnosticKind::ExpectedPattern,
+            "expected an identifier after `case`",
+        );
+        self.recover_until(crate::RecoverySet::Case);
+        ParsedStatement::Expression(self.error_expr(position))
+    }
+
+    fn unsupported_enum_case(
+        &mut self,
+        position: dotty_core::SourceSpan,
+        message: &str,
+    ) -> ParsedStatement {
+        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+        self.recover_until(crate::RecoverySet::Case);
+        ParsedStatement::Expression(self.error_expr(position))
     }
 
     fn validate_enum_modifiers(&mut self, mut metadata: Modifiers) -> Modifiers {
@@ -1198,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_enum_cases_but_preserves_a_following_member() {
+    fn parses_a_singleton_enum_case_but_preserves_a_following_member() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "enum E { case A\ndef f = x }",
@@ -1231,21 +1365,14 @@ mod tests {
         assert_eq!(template.body.len(), 2);
         assert!(matches!(
             parser.ast().get(template.body[0]).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ref module))
+                if module.metadata.modifiers == vec![Modifier::EnumCase]
         ));
         assert!(matches!(
             parser.ast().get(template.body[1]).kind,
             TreeKind::DefDef(_)
         ));
-        assert_eq!(
-            parser
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax)
-                .count(),
-            1
-        );
-        assert!(parser.diagnostics()[0].message().contains("enum cases"));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
