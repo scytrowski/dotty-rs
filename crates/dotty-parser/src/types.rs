@@ -1279,6 +1279,31 @@ mod tests {
     }
 
     #[test]
+    fn keeps_named_context_function_parameters_deferred() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "type F = (x: A) ?=> B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Colon), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Operator, 16, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn converts_a_direct_tuple_lhs_into_multiple_function_parameters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
