@@ -989,7 +989,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
 
         // Checked before any symbol allocation: a version this decoder
-        // cannot safely interpret (newer than the JDK-25 ceiling, older
+        // cannot safely interpret (newer than the JDK-26 ceiling, older
         // than the JVMS has ever defined, or preview-features-only) must
         // not be given a semantic reading at all, not even a partial one.
         if !class_file.version.is_compatible() {
@@ -2315,7 +2315,7 @@ mod tests {
     }
 
     /// A hand-built, minimal, synthetic, otherwise-valid class file
-    /// declaring `major_version` 70 (one past this project's class-file
+    /// declaring `major_version` 71 (one past this project's class-file
     /// compatibility ceiling) — exercises `UnsupportedClassVersion`
     /// without needing a real class file from a JDK newer than this
     /// project targets.
@@ -2323,7 +2323,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // magic
         bytes.extend_from_slice(&[0x00, 0x00]); // minor
-        bytes.extend_from_slice(&[0x00, 70]); // major = 70 (unsupported)
+        bytes.extend_from_slice(&[0x00, 71]); // major = 71 (unsupported)
         bytes.extend_from_slice(&[0x00, 0x03]); // constant_pool_count = 3
         bytes.push(1); // #1 CONSTANT_Utf8
         bytes.extend_from_slice(&(this_name.len() as u16).to_be_bytes());
@@ -4187,7 +4187,7 @@ mod tests {
         assert!(matches!(
             error,
             ClassLoadError::UnsupportedClassVersion(name, version)
-                if name.as_internal() == "FromTheFuture" && version.major == 70
+                if name.as_internal() == "FromTheFuture" && version.major == 71
         ));
     }
 

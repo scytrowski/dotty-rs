@@ -1,15 +1,17 @@
-# JVM Class File Format Specification (JDK 25)
+# JVM Class File Format Compatibility (JDK 26 ceiling)
 
 Status: working document for the Rust implementation.
 
-The wire-format reference is JDK 25, but the decoder's checked-in real-JDK
-compatibility corpus covers JDK 23, 24, and 25. The corpus verifies the
+The wire-format reference is Java SE 26. The decoder's checked-in real-JDK
+compatibility corpus covers JDK 23, 24, 25, and 26. The corpus verifies the
 complete decode, trailing-byte check, constant-pool/reference validation, and
 representative attributes, descriptors, and generic signatures for each
 release.
 
-Normative source: [Chapter 4, "The `class` File Format", Java Virtual Machine
-Specification, SE 25](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html).
+Normative sources: [Chapter 4, "The `class` File Format", Java Virtual Machine
+Specification, SE 26](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-4.html),
+with [Java Virtual Machine Specification, SE 25](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html)
+as the compatibility-audit baseline.
 
 This document describes the wire format of `.class` files, scoped to what a
 **class loader for semantic analysis** needs: enough structure to resolve
@@ -30,6 +32,27 @@ source-level names). It intentionally does not cover:
 Where this document is silent on a validation rule, the JVMS is authoritative;
 this file is a working reference for the Rust decoder, not a replacement for
 the spec.
+
+## 0. Java SE 25 → 26 compatibility audit
+
+The relevant Java Virtual Machine Specification sections were compared before
+raising the supported ceiling. For the surface consumed by this decoder, the
+`ClassFile` sequence, constant-pool tags and constraints, class/field/method
+access flags, descriptors, generic signatures, annotation structures,
+`Record`, `PermittedSubclasses`, `BootstrapMethods`, and dynamic-constant
+structures retain the same grammar and validation rules.
+
+The compatibility delta is deliberately narrow:
+
+- Java SE 26 adds class-file major version `70` to the supported range;
+- `70.65535` is the Java SE 26 preview version and remains unsupported here,
+  just like preview versions for every other major;
+- major version `71` and newer remain outside the explicit compatibility
+  ceiling.
+
+No JDK-26-specific `ClassFile` model, constant-pool tag, attribute parser, or
+decoder fork is needed. The real JDK 26 corpus is the validation evidence for
+the unchanged grammar and for the semantic classloader path.
 
 ## 1. Format model
 
@@ -84,7 +107,7 @@ ClassFile {
 
 `major_version` follows the scheme `44 + JDK release number` for releases
 that introduced one major version per JDK (JDK 1.2 = 46, ..., JDK 8 = 52,
-..., **JDK 25 = 69**). A JVM that implements version `M.m` supports class
+..., **JDK 25 = 69**, **JDK 26 = 70**). A JVM that implements version `M.m` supports class
 file formats in the inclusive range `45.0` up to `M.0` or `M.65535`.
 
 Minor version rules:
@@ -96,13 +119,13 @@ Minor version rules:
 - for `45 <= major_version <= 55`: `minor_version` may be any value
   (historically used by JDK 1.0.x/1.1.x).
 
-For Scala 3.9.0 output, the reference target is JDK 25:
-`major_version = 69`, with `minor_version` in `{0, 65535}`. The decoder's
-compatible-range check accepts non-preview class files from the historically
-valid range `45.0` through `69.0`; the real compatibility corpus specifically
-verifies JDK 23 (`67.0`), JDK 24 (`68.0`), and JDK 25 (`69.0`). Preview files
-(`minor_version = 65535`) remain unsupported because this decoder has no
-matching preview-feature mode.
+For Scala 3.9.0 output, the compiler reference target remains JDK 25
+(`major_version = 69`), while this decoder's compatibility ceiling is JDK 26
+(`major_version = 70`). The compatible-range check accepts non-preview class
+files from the historically valid range `45.0` through `70.0`; the real
+compatibility corpus verifies JDK 23 (`67.0`), JDK 24 (`68.0`), JDK 25
+(`69.0`), and JDK 26 (`70.0`). Preview files (`minor_version = 65535`)
+remain unsupported because this decoder has no matching preview-feature mode.
 
 ## 3. Constant pool
 
@@ -748,7 +771,7 @@ scheme; out of scope while the module system is unsupported.
 - Resolving `invokedynamic`/`CONSTANT_Dynamic` call sites (structural parsing
   of `BootstrapMethods` and the constant pool entries is enough to traverse
   the file).
-- Class file versions below what JDK 25 / Scala 3.9.0 actually emits;
+- Class file versions below what Scala 3.9.0's reference output actually emits;
   historical version-gated flag semantics (e.g. `ACC_STRICT`, `ACC_SUPER`)
   are documented above only to the extent needed to parse a wider
   compatibility range without misinterpreting a flag bit.

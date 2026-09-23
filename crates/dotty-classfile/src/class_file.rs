@@ -45,12 +45,11 @@ impl From<ReadError> for ClassFileHeaderError {
 /// `docs/classfile-format-jdk25.md` §2.1).
 pub const MIN_MAJOR_VERSION: u16 = 45;
 
-/// This project's compatibility ceiling: JDK 25, the version
-/// `docs/classfile-format-jdk25.md` is written against and the highest
-/// release covered by a real compatibility corpus. A `major_version` above
-/// this is a JDK newer than this decoder has been validated against, not
-/// necessarily an invalid file.
-pub const MAX_MAJOR_VERSION: u16 = 69;
+/// This project's compatibility ceiling: JDK 26, the highest release covered
+/// by a real compatibility corpus. A `major_version` above this is a JDK
+/// newer than this decoder has been validated against, not necessarily an
+/// invalid file.
+pub const MAX_MAJOR_VERSION: u16 = 70;
 
 /// The `minor_version` that marks a class as compiled against **preview
 /// features** of its major version (JVMS §4.1, `major_version >= 56`).
@@ -89,7 +88,7 @@ impl ClassFileVersion {
     /// compatible-range rules:
     ///
     /// - `major_version` must fall within the historically valid,
-    ///   JDK-25-or-below range (`MIN_MAJOR_VERSION..=MAX_MAJOR_VERSION`);
+    ///   JDK-26-or-below range (`MIN_MAJOR_VERSION..=MAX_MAJOR_VERSION`);
     /// - `minor_version` must not be [`PREVIEW_MINOR_VERSION`] (this
     ///   decoder never has preview features enabled for any major
     ///   version, so a preview class is always incompatible);
@@ -548,6 +547,17 @@ mod tests {
     }
 
     #[test]
+    fn a_jdk_26_version_is_compatible() {
+        assert!(
+            ClassFileVersion {
+                major: 70,
+                minor: 0
+            }
+            .is_compatible()
+        );
+    }
+
+    #[test]
     fn a_jdk_24_version_is_compatible() {
         assert!(
             ClassFileVersion {
@@ -592,10 +602,10 @@ mod tests {
     }
 
     #[test]
-    fn a_major_version_above_the_jdk_25_ceiling_is_incompatible() {
+    fn a_major_version_above_the_jdk_26_ceiling_is_incompatible() {
         assert!(
             !ClassFileVersion {
-                major: 70,
+                major: 71,
                 minor: 0
             }
             .is_compatible()
@@ -606,7 +616,7 @@ mod tests {
     fn a_preview_minor_version_is_incompatible() {
         assert!(
             !ClassFileVersion {
-                major: 69,
+                major: 70,
                 minor: PREVIEW_MINOR_VERSION,
             }
             .is_compatible()
@@ -638,10 +648,10 @@ mod tests {
     #[test]
     fn version_displays_as_major_dot_minor() {
         let version = ClassFileVersion {
-            major: 69,
+            major: 70,
             minor: 0,
         };
 
-        assert_eq!(version.to_string(), "69.0");
+        assert_eq!(version.to_string(), "70.0");
     }
 }
