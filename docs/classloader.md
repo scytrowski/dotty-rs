@@ -8,9 +8,9 @@ covers and its current status; §3 and §4.4 list the real, currently-open
 gaps (mostly on the `.tasty` side) rather than unimplemented milestones.
 
 Normative sources:
-- JVM Specification SE 25, Chapter 4 — [The `class` File Format](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html) (already the basis of `docs/classfile-format-jdk25.md`)
-- JVM Specification SE 25, Chapter 5 — [Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-5.html)
-- JLS SE 25, Chapter 12, §12.2 — [Loading of Classes and Interfaces](https://docs.oracle.com/javase/specs/jls/se25/html/jls-12.html)
+- JVM Specification SE 26, Chapter 4 — [The `class` File Format](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-4.html) (already the basis of `docs/classfile-format-jdk25.md`)
+- JVM Specification SE 26, Chapter 5 — [Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-5.html)
+- JLS SE 26, Chapter 12, §12.2 — [Loading of Classes and Interfaces](https://docs.oracle.com/javase/specs/jls/se26/html/jls-12.html)
 
 Where this document is silent, the JVMS is authoritative, per the same
 policy as `docs/classfile-format-jdk25.md`.
@@ -378,9 +378,9 @@ and typed errors do.
 
 ## 7. Reference material
 
-- [JVMS SE 25, Chapter 4 — The `class` File Format](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html) — already the basis of `docs/classfile-format-jdk25.md`.
-- [JVMS SE 25, Chapter 5 — Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-5.html) — §5.1, §5.3, §5.3.5, §5.4, §5.4.3, §5.4.4 are the relevant sections for this module.
-- [JLS SE 25, Chapter 12 §12.2 — Loading of Classes and Interfaces](https://docs.oracle.com/javase/specs/jls/se25/html/jls-12.html) — source-language framing; defers precise semantics to JVMS Chapter 5.
+- [JVMS SE 26, Chapter 4 — The `class` File Format](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-4.html) — already the basis of `docs/classfile-format-jdk25.md`.
+- [JVMS SE 26, Chapter 5 — Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-5.html) — §5.1, §5.3, §5.3.5, §5.4, §5.4.3, §5.4.4 are the relevant sections for this module.
+- [JLS SE 26, Chapter 12 §12.2 — Loading of Classes and Interfaces](https://docs.oracle.com/javase/specs/jls/se26/html/jls-12.html) — source-language framing; defers precise semantics to JVMS Chapter 5.
 - Scala 3 compiler, as an architectural reference to study (not to port
   line-by-line):
   [`SymbolLoaders.scala`](https://github.com/scala/scala3/blob/main/compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala) (the enter/complete split — most directly relevant),
@@ -405,9 +405,9 @@ exact error variants asserted rather than `is_err()`.
   new ones for cases already covered there.
 - The shared JDK runtime-image corpus under
   `crates/dotty-classfile/tests/fixtures/jdk_corpus/` is materialized for
-  JDK 23, 24, and 25. Classfile tests run the same structural and
+  JDK 23, 24, 25, and 26. Classfile tests run the same structural and
   representative-shape checks against every version; loader visibility tests
-  use the JDK 25 directory as their canonical classpath.
+  load each version directory as a separate canonical classpath.
 - Hand-built minimal class files/synthetic classpaths are sometimes
   unavoidable and acceptable — e.g. a cyclic-inheritance scenario cannot
   be produced by `javac` (rejected at the source level), and a classpath

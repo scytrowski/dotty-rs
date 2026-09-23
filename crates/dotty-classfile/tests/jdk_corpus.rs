@@ -1,7 +1,7 @@
 //! Decodes and validates real `.class` files from the checked-in JDK 23, 24,
-//! and 25 corpora. The shared `classes.txt` file defines corpus membership;
-//! each version directory records its provenance, expected class-file major,
-//! and inventory in `manifest.toml`.
+//! 25, and 26 corpora. The shared `classes.txt` file defines corpus
+//! membership; each version directory records its provenance, expected
+//! class-file major, and inventory in `manifest.toml`.
 
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;

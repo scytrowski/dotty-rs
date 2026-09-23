@@ -5,13 +5,14 @@
 #   JAVA_HOME=/path/to/jdk23 tests/fixtures/jdk_corpus/generate.sh jdk23
 #   JAVA_HOME=/path/to/jdk24 tests/fixtures/jdk_corpus/generate.sh jdk24
 #   JAVA_HOME=/path/to/jdk25 tests/fixtures/jdk_corpus/generate.sh jdk25
+#   JAVA_HOME=/path/to/jdk26 tests/fixtures/jdk_corpus/generate.sh jdk26
 #
 # The selected JDK must match the version recorded by the target corpus
 # manifest. Ordinary tests use the checked-in binaries and do not need Java.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: JAVA_HOME=/path/to/jdk tests/fixtures/jdk_corpus/generate.sh <jdk23|jdk24|jdk25>" >&2
+  echo "usage: JAVA_HOME=/path/to/jdk tests/fixtures/jdk_corpus/generate.sh <jdk23|jdk24|jdk25|jdk26>" >&2
   exit 2
 fi
 
