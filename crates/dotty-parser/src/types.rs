@@ -165,10 +165,11 @@ where
         let colon_offset = if erased_prefix { 3 } else { 2 };
         let first_name = self.cursor.lookahead(name_offset).clone();
         let first_colon = self.cursor.lookahead(colon_offset).clone();
-        if !matches!(
-            first_name.kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) || !is_function_param_colon(first_colon.kind)
+        if !erased_prefix
+            && (!matches!(
+                first_name.kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            ) || !is_function_param_colon(first_colon.kind))
         {
             return None;
         }
@@ -2623,6 +2624,91 @@ mod tests {
             parser.ast().get(id).kind,
             TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
         ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_erased_parameter_name_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_erased_parameter_type_without_swallowing_the_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased x:) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_erased_parameter_name_after_a_valid_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A, erased) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
         assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
