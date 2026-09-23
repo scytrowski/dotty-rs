@@ -104,10 +104,29 @@ where
         }
 
         let inner = self.type_expr();
+        if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+            self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+            return self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })),
+            );
+        }
+
+        let mut elements = vec![inner];
+        while !self
+            .cursor
+            .at(TokenKind::Punctuation(Punctuation::RightParen))
+            && self.current().kind != TokenKind::Eof
+        {
+            elements.push(self.type_expr());
+            if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                break;
+            }
+        }
         self.expect(TokenKind::Punctuation(Punctuation::RightParen));
         self.alloc_from(
             mark,
-            TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(dotty_core::ast::Tuple { elements })),
         )
     }
 
@@ -287,6 +306,138 @@ mod tests {
         ));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_two_element_tuple_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A, B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(ref tuple)) = parser.ast().get(id).kind
+        else {
+            panic!("expected a tuple type");
+        };
+        assert_eq!(tuple.elements.len(), 2);
+        assert!(
+            tuple
+                .elements
+                .iter()
+                .all(|element| matches!(parser.ast().get(*element).kind, TreeKind::Ident(_)))
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 6).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn tuple_type_elements_use_full_type_expressions() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A | B, C & D)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(ref tuple)) = parser.ast().get(id).kind
+        else {
+            panic!("expected a tuple type");
+        };
+        assert_eq!(tuple.elements.len(), 2);
+        assert!(tuple.elements.iter().all(|element| matches!(
+            parser.ast().get(*element).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        )));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_nested_tuple_types_without_flattening_them() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "((A, B), C)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Comma), 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(ref outer)) = parser.ast().get(id).kind
+        else {
+            panic!("expected an outer tuple type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.elements[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert_eq!(outer.elements.len(), 2);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_tuple_types_inside_applied_type_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[(A, B)]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
