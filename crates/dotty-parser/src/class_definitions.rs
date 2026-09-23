@@ -1200,6 +1200,7 @@ where
                     .and_then(|parameter| self.ast.get(*parameter).position)
                     .map(|position| position.span().range().end())
             })
+            .or(boundary.parameter_start)
             .unwrap_or(constructor_end);
         let tpt = self.synthetic_type_tree_at(tpt_start);
         let position = if has_constructor_parameters
