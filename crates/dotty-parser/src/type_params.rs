@@ -32,6 +32,15 @@ where
 
         while self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Punctuation(Punctuation::RightBracket)
+            && !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            )
         {
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.report(
@@ -208,7 +217,15 @@ where
     fn recover_type_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
-            TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
+            TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                | TokenKind::Punctuation(
+                    Punctuation::Comma | Punctuation::RightBracket | Punctuation::RightBrace
+                )
         ) && !self.current_is_arrow()
         {
             let checkpoint = self.cursor.checkpoint();

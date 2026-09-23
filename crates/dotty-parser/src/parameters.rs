@@ -127,6 +127,22 @@ where
         }
 
         loop {
+            if matches!(
+                self.current().kind,
+                TokenKind::Eof
+                    | TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            ) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a parameter before the end of the clause",
+                );
+                break;
+            }
             let checkpoint = self.cursor.checkpoint();
             params.push(self.parse_term_param(owner, first_ordinary_clause, metadata.clone()));
 
@@ -287,7 +303,13 @@ where
     fn recover_term_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
-            TokenKind::Eof | TokenKind::Punctuation(Punctuation::RightParen)
+            TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
         ) {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
