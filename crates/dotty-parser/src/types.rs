@@ -94,12 +94,18 @@ where
             return self.alloc_function_type(mark, params, body, arrow);
         }
 
-        if self.starts_unnamed_by_name_function_type() {
+        if let Some(arrow) = self.unnamed_by_name_function_type_arrow() {
             let params = self.parse_unnamed_function_params();
-            self.consume_function_arrow();
+            if matches!(arrow, FunctionTypeArrow::Context) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "by-name parameters in context function types are not supported yet",
+                );
+            }
+            self.consume_named_function_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
-            return self.alloc_function_type(mark, params, body, FunctionTypeArrow::Ordinary);
+            return self.alloc_function_type(mark, params, body, arrow);
         }
 
         let diagnostics_before = self.diagnostics.len();
@@ -188,9 +194,9 @@ where
     /// A leading arrow is only a `FunArgType` marker in this position. In
     /// particular, `(A => B) => C` is an ordinary function type whose single
     /// parameter is itself a function type, not a by-name parameter list.
-    fn starts_unnamed_by_name_function_type(&mut self) -> bool {
+    fn unnamed_by_name_function_type_arrow(&mut self) -> Option<FunctionTypeArrow> {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
-            return false;
+            return None;
         }
 
         let mut paren_depth = 1usize;
@@ -209,7 +215,16 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     paren_depth = paren_depth.saturating_sub(1);
                     if paren_depth == 0 {
-                        return has_by_name && self.lookahead_is_arrow(offset + 1);
+                        if !has_by_name {
+                            return None;
+                        }
+                        if self.lookahead_is_arrow(offset + 1) {
+                            return Some(FunctionTypeArrow::Ordinary);
+                        }
+                        if self.lookahead_is_context_arrow(offset + 1) {
+                            return Some(FunctionTypeArrow::Context);
+                        }
+                        return None;
                     }
                     parameter_start = false;
                 }
@@ -235,7 +250,7 @@ where
                     has_by_name = true;
                     parameter_start = false;
                 }
-                TokenKind::Eof => return false,
+                TokenKind::Eof => return None,
                 _ => parameter_start = false,
             }
             offset = offset.saturating_add(1);
@@ -304,17 +319,6 @@ where
             if !self.cursor.progressed_since(checkpoint) {
                 break;
             }
-        }
-    }
-
-    fn consume_function_arrow(&mut self) {
-        if self.current_is_arrow() {
-            self.advance();
-        } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after function type parameters",
-            );
         }
     }
 
@@ -1273,6 +1277,105 @@ mod tests {
         ));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_by_name_parameter_type_before_the_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A, =>) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_unexpected_tokens_inside_by_name_parameter_lists() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(=> A B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_context_outer_by_name_function_types_deferred() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(=> A) ?=> B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_named_by_name_parameters_unsupported() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: => A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
