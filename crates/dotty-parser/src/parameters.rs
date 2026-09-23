@@ -305,14 +305,8 @@ where
     fn recover_term_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
-            TokenKind::Eof
-                | TokenKind::Newline
-                | TokenKind::Newlines
-                | TokenKind::Indent
-                | TokenKind::Outdent
-                | TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
-        ) || (self.context.enum_body
+            TokenKind::Eof | TokenKind::Punctuation(Punctuation::RightParen)
+        ) && !(self.context.enum_body
             && matches!(
                 self.current().kind,
                 TokenKind::Newline

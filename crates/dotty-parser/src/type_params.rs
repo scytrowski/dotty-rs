@@ -228,16 +228,18 @@ where
     fn recover_type_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
-            TokenKind::Eof
-                | TokenKind::Newline
-                | TokenKind::Newlines
-                | TokenKind::Indent
-                | TokenKind::Outdent
-                | TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                | TokenKind::Punctuation(
-                    Punctuation::Comma | Punctuation::RightBracket | Punctuation::RightBrace
-                )
-        ) && !self.current_is_arrow()
+            TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
+        ) && !(self.context.enum_body
+            && matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            ))
+            && !self.current_is_arrow()
         {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
@@ -636,6 +638,33 @@ mod tests {
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn type_parameter_recovery_outside_enum_body_consumes_newlines() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A B\n]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+
+        assert_eq!(params.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected `,` or `]` after a type parameter")
+        }));
     }
 
     #[test]
