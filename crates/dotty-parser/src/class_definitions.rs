@@ -1817,6 +1817,110 @@ mod tests {
     }
 
     #[test]
+    fn diagnoses_a_hard_modifier_before_an_enum_case_without_losing_the_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { final case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Final), 9, 14),
+                token(TokenKind::Keyword(HardKeyword::Case), 15, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Newline, 23, 24),
+                token(TokenKind::Keyword(HardKeyword::Def), 24, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Operator, 34, 35),
+                token(TokenKind::IntegerLiteral, 36, 37),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 38, 39),
+                token(TokenKind::Eof, 39, 39),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the invalidly prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(case.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_soft_modifier_before_an_enum_case_without_treating_it_as_valid() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { inline case Red\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Keyword(HardKeyword::Case), 16, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Newline, 24, 25),
+                token(TokenKind::Keyword(HardKeyword::Def), 25, 28),
+                token(TokenKind::Identifier, 29, 34),
+                token(TokenKind::Operator, 35, 36),
+                token(TokenKind::IntegerLiteral, 37, 38),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 39, 40),
+                token(TokenKind::Eof, 40, 40),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected the invalidly prefixed case to remain a ModuleDef");
+        };
+        assert_eq!(case.metadata.modifiers, vec![Modifier::EnumCase]);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(
+            parser.diagnostics()[0]
+                .message()
+                .contains("not allowed on an enum case")
+        );
+    }
+
+    #[test]
     fn parses_a_parameterized_enum_case_as_a_type_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
