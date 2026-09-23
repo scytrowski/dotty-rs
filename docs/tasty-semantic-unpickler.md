@@ -1601,6 +1601,87 @@ original PR body to be closed before merge:
     `OutOfScope`), and a local `DEFDEF` nested in an enclosing `DEFDEF`'s
     `BLOCK` body (`OutOfScope`, the regression the corpus run itself caught).
 
+### Serialized symbol annotations (Milestone 5e1, tail indexing)
+
+```text
+ANNOTATION Length tycon_Type full_annotation_Type
+```
+
+Scala 3.9's `TreeUnpickler` reads a definition's annotations as part of its
+modifier tail and stores them directly on the symbol denotation
+(`Symbol.annotations: Vec<AnnotationId>` in `dotty-core`, still always empty
+before this milestone). This is a distinct wire node from `ANNOTATEDtype`/
+`ANNOTATEDtpt` (Milestones 4b1/5b): those pair an `underlying` type/tree with
+its annotation directly; `ANNOTATION` splits out a `tycon` field alongside the
+same kind of annotation tree (`full_annotation`), and only ever appears inside
+a `TYPEDEF`/`VALDEF`/`DEFDEF`/`TYPEPARAM`/`PARAM`'s tail, never as a type's own
+child.
+
+This increment adds only the pass-1 half: an address-backed index of where
+each `ANNOTATION` entry is, in wire order, with no semantic decoding yet
+(`Symbol.annotations` is still not populated). Later increments build the
+completion that turns an indexed address into an `AnnotationId`.
+
+**A relative-offset trap.** `dotty-tasty`'s `DefinitionTail::Annotation`
+carries the tail entry's own `RawNode`, whose `offset` field is *not* an
+absolute AST address: `RawNode::reader()` always starts a fresh `Reader` at
+position 0 over the node's own payload slice (`Reader::new(self.payload)`),
+so every offset `read_definition_tail` records is relative to the enclosing
+definition's payload, not the file's AST section. Nothing in the unpickler had
+read that offset before, so nothing had needed to notice; the semantic
+identity invariant this crate depends on (§3) makes every other address
+absolute, and an index keyed by a payload-relative number would silently
+collide across definitions and never match an address a real reference (or a
+later completion call) names. This was caught and fixed *before* any address
+was published: the actual addresses pass 1 indexes come from the AST's own
+child edges instead (`AstView::children`, built top-down over absolute
+offsets by `dotty-tasty`'s own address indexer), by filtering a definition's
+or parameter's immediate children for the `ANNOTATION` tag — the same
+mechanism every other structural child (a class's `TEMPLATE`, a method's
+`TYPEPARAM`/`PARAM`) is already found through in `enter.rs`, not the
+tail-decoded `RawNode` at all. `DefinitionTail`/`DeclaredModifiers::from_tail`
+still skip `Annotation` entries entirely, exactly as before this milestone —
+they answer only namespace/flags/visibility.
+
+**The index.** `TastySemanticIndex::annotation_tail_at(address)` returns
+`Some(&[u32])`, the `ANNOTATION` child addresses of the definition/parameter
+entered at `address`, in wire order — `Some(&[])` when it was entered with no
+`ANNOTATION` children, `None` when no symbol was ever entered there at all.
+Distinguishing "entered, zero annotations" from "never entered" here (rather
+than only at the eventual completion-state layer, §5e-to-come) means a survey
+or a later completion call can tell a `TYPEPARAM`/`PARAM`/local definition
+pass 1 skipped from one it indexed and found empty, without re-parsing the
+tail itself. It is populated once, when `enter_symbol` allocates the symbol
+(`enter_definition_header`'s three branches, `enter_parameter`), needs no
+incremental-rollback bookkeeping of its own (pass 1's own failure path already
+rolls back the whole index as one unit, unlike pass 2's per-address maps), and
+is unaffected by unit order or retry.
+
+**Fixtures.** `tests/fixtures/semantic/SymbolAnnotations.scala` (real Scala
+3.9.0 compiler output, via `generate.sh`) covers a class annotation, an
+annotated `val`/`def`/type alias, an annotated constructor value parameter, an
+annotated method type parameter, a term parameter with two annotations
+(`@SymbolMarker @SymbolTagged(tag = "p")`, keeping wire order), an
+unannotated parameter and an unannotated class — the last one showing that
+Scala 3.9 always attaches a compiler-synthesized `@SourceFile` annotation to
+every top-level class, a genuine `ANNOTATION` wire entry rather than one of
+the compiler-internal, non-serialized annotations §5e-to-come's completion
+must not synthesize (`LazyBodyAnnotation` and friends). Eleven `enter.rs` unit
+tests pin the exact indexed addresses and counts over these fixtures, each
+mutation-tested.
+
+**Corpus (Milestone 5e1 tail-indexing survey; `unaccounted: 0` throughout).**
+`scala3-library`: 4091 `ANNOTATION` tail entries over 60407 entered
+definitions/parameters, 3431 of them annotated (`TYPEDEF` 2235 entries/1682
+annotated, `DEFDEF` 1318/1243, `VALDEF` 364/332, `PARAM` 120/120, `TYPEPARAM`
+54/54); `scala3-compiler`: 4652 entries over 94685 entered, 3349 annotated
+(`TYPEDEF` 3085/1876, `VALDEF` 1128/1035, `PARAM` 287/287, `DEFDEF` 152/151,
+`TYPEPARAM` 0/0). Both corpora skew heavily toward one annotation per
+definition (2944/2982 respectively) with a long tail up to 24 and 234 on a
+handful of outliers. The counts are identical across every
+builtins/completion/classes/reverse permutation the corpus test runs, as
+expected: this survey reads only pass 1's own index, never completion.
+
 ### Owner-space references (Milestone 4c1)
 
 ```text
@@ -1955,7 +2036,12 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
      mirroring every supported projection route to `LAMBDAtpt`/`REFINEDtpt`
      — complete; Milestone 5d is closed;
    - 5e: symbol annotations, companion links, opaque aliases and the
-     remaining tails.
+     remaining tails, in steps:
+     - 5e1: serialized symbol annotations — pass-1 `ANNOTATION` tail
+       indexing and the corpus survey landed; semantic completion
+       (`Symbol.annotations`) is the next increment;
+     - 5e2: companion links;
+     - 5e3: opaque aliases and the remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
 

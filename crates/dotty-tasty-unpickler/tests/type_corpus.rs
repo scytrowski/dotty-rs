@@ -674,8 +674,87 @@ struct Tally {
     missing_outside_bodies: usize,
     /// The identity-reachability oracle (Milestone 5d2c's follow-up review).
     identity: IdentitySurvey,
+    /// Serialized symbol annotations (Milestone 5e1's own corpus survey).
+    symbol_annotations: SymbolAnnotationSurvey,
     /// Errors that mean a bug or malformed input, never an expected gap.
     unexpected: Vec<String>,
+}
+
+/// Serialized symbol annotations (Milestone 5e1): every
+/// `DefinitionTail::Annotation` pass 1 indexes, over every `TYPEDEF`,
+/// `VALDEF`, `DEFDEF`, `TYPEPARAM` and `PARAM` address pass 1 actually
+/// entered a symbol for. Decodes nothing: this counts wire occurrences only,
+/// exactly what pass 1's index records.
+#[derive(Default)]
+struct SymbolAnnotationSurvey {
+    /// Every `ANNOTATION` tail entry recorded, over every entered address.
+    total: usize,
+    /// Entered addresses with at least one `ANNOTATION` tail entry.
+    annotated_definitions: usize,
+    /// Every entered address, annotated or not (the denominator for
+    /// `annotated_definitions`).
+    definitions: usize,
+    /// Annotation tail entries, summed per definition/parameter tag.
+    by_definition_tag: BTreeMap<&'static str, usize>,
+    /// Entered addresses with at least one annotation, per definition/
+    /// parameter tag.
+    annotated_by_definition_tag: BTreeMap<&'static str, usize>,
+    /// "Annotations on one definition" -> how many annotated definitions
+    /// have exactly that many.
+    per_definition_distribution: BTreeMap<usize, usize>,
+}
+
+/// The name of a definition/parameter tag, for the symbol-annotation survey.
+fn definition_tag_name(tag: u8) -> &'static str {
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+    match tag {
+        TYPEDEF_TAG => "TYPEDEF",
+        VALDEF_TAG => "VALDEF",
+        DEFDEF_TAG => "DEFDEF",
+        TYPEPARAM_TAG => "TYPEPARAM",
+        PARAM_TAG => "PARAM",
+        _ => "other",
+    }
+}
+
+/// Surveys the `ANNOTATION` tail entries pass 1 indexed for `file`
+/// (Milestone 5e1). Reads only [`TastySemanticIndex::annotation_tail_at`]:
+/// an address pass 1 never entered a symbol for (a local definition inside a
+/// method body, in particular) has no recorded tail and is skipped, exactly
+/// as it is skipped by every other survey in this module.
+fn survey_symbol_annotations(
+    file: &TastyFile<'_>,
+    unpickler: &TastyUnpickler<'_, '_, '_>,
+    survey: &mut SymbolAnnotationSurvey,
+) {
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
+    let index = file.ast_address_index().unwrap();
+    for tag in [
+        TYPEDEF_TAG,
+        VALDEF_TAG,
+        DEFDEF_TAG,
+        TYPEPARAM_TAG,
+        PARAM_TAG,
+    ] {
+        for node in index.iter_nodes_with_tag(tag) {
+            let at = u32::try_from(node.offset).unwrap();
+            let Some(annotations) = unpickler.index().annotation_tail_at(at) else {
+                continue;
+            };
+            let name = definition_tag_name(tag);
+            survey.definitions += 1;
+            survey.total += annotations.len();
+            *survey.by_definition_tag.entry(name).or_default() += annotations.len();
+            if !annotations.is_empty() {
+                survey.annotated_definitions += 1;
+                *survey.annotated_by_definition_tag.entry(name).or_default() += 1;
+                *survey
+                    .per_definition_distribution
+                    .entry(annotations.len())
+                    .or_default() += 1;
+            }
+        }
+    }
 }
 
 /// The name of a tag observed at the root of a full annotation tree.
@@ -2319,6 +2398,7 @@ fn run(
     let mut unpickler = TastyUnpickler::with_packages(&file, &mut *store, definitions, packages);
     unpickler.enter_symbols().unwrap();
     survey_identity_reachability(&file, &unpickler, label, &mut tally.identity);
+    survey_symbol_annotations(&file, &unpickler, &mut tally.symbol_annotations);
     if completion != Completion::Off {
         complete_unit(
             &mut unpickler,
@@ -3292,6 +3372,22 @@ fn measure_the_type_pass_over_the_scala3_corpora() {
             if !id.unaccounted_examples.is_empty() {
                 println!("  unaccounted examples: {:?}", id.unaccounted_examples);
             }
+        }
+        {
+            let sa = &tally.symbol_annotations;
+            println!(
+                "symbol annotations (Milestone 5e1 survey): {} ANNOTATION tail entries over {} entered definitions/parameters, {} of them annotated",
+                sa.total, sa.definitions, sa.annotated_definitions
+            );
+            println!("  entries by definition tag: {:?}", sa.by_definition_tag);
+            println!(
+                "  annotated definitions by tag: {:?}",
+                sa.annotated_by_definition_tag
+            );
+            println!(
+                "  annotations-per-definition distribution: {:?}",
+                sa.per_definition_distribution
+            );
         }
         println!("unexpected errors: {}", tally.unexpected.len());
         for error in tally.unexpected.iter().take(10) {
