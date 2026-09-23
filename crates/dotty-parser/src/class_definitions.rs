@@ -132,6 +132,41 @@ where
         metadata: Modifiers,
     ) -> ParsedStatement {
         let tail = self.with_enum_body(false, |parser| parser.parse_template_tail(false));
+        self.build_module_definition(mark, name, metadata, tail)
+    }
+
+    fn parse_enum_case_module_after_name(
+        &mut self,
+        mark: crate::Mark,
+        name: TermName,
+        metadata: Modifiers,
+    ) -> ParsedStatement {
+        // A singleton enum case uses Dotty's `caseTemplate`, not the general
+        // template tail. In particular, it must not consume a body, `derives`,
+        // or `uses` after the case name.
+        self.build_module_definition(
+            mark,
+            name,
+            metadata,
+            TemplateTail {
+                parents: Vec::new(),
+                self_val: None,
+                body: Vec::new(),
+                metadata: UntypedTemplateMetadata {
+                    derives: Vec::new(),
+                    uses: Vec::new(),
+                },
+            },
+        )
+    }
+
+    fn build_module_definition(
+        &mut self,
+        mark: crate::Mark,
+        name: TermName,
+        metadata: Modifiers,
+        tail: TemplateTail,
+    ) -> ParsedStatement {
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast
@@ -194,10 +229,7 @@ where
         };
 
         if self.enum_case_requires_unsupported_recovery() {
-            return self.unsupported_enum_case(
-                case_position,
-                "parameterized enum cases are not supported by this parser milestone",
-            );
+            return self.unsupported_enum_case(case_position);
         }
 
         if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
@@ -213,7 +245,7 @@ where
 
         let mut metadata = Modifiers::default();
         metadata.modifiers.push(Modifier::EnumCase);
-        self.parse_module_definition_after_name(mark, name, metadata)
+        self.parse_enum_case_module_after_name(mark, name, metadata)
     }
 
     fn parse_enum_case_group(
@@ -268,8 +300,8 @@ where
         ))
     }
 
-    fn enum_case_requires_unsupported_recovery(&self) -> bool {
-        matches!(
+    fn enum_case_requires_unsupported_recovery(&mut self) -> bool {
+        let immediate = matches!(
             self.current().kind,
             TokenKind::Keyword(HardKeyword::Extends)
                 | TokenKind::Punctuation(
@@ -278,7 +310,30 @@ where
                 | TokenKind::ColonFollow
                 | TokenKind::ColonEol
                 | TokenKind::ColonOp
-        ) || (self.current().kind == TokenKind::Operator && self.current_text_is("@"))
+        ) || (self.current().kind == TokenKind::Operator
+            && self.current_text_is("@"));
+        if immediate || self.starts_definition_prefix() {
+            return true;
+        }
+
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        let follows = self.cursor.lookahead(offset);
+        matches!(
+            follows.kind,
+            TokenKind::Indent
+                | TokenKind::Punctuation(Punctuation::LeftBrace)
+                | TokenKind::Keyword(HardKeyword::Extends)
+        ) || (follows.kind == TokenKind::Identifier
+            && matches!(
+                self.source.slice(follows.span).ok(),
+                Some("derives" | "uses")
+            ))
     }
 
     fn malformed_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
@@ -290,12 +345,11 @@ where
         ParsedStatement::Expression(self.error_expr(position))
     }
 
-    fn unsupported_enum_case(
-        &mut self,
-        position: dotty_core::SourceSpan,
-        message: &str,
-    ) -> ParsedStatement {
-        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+    fn unsupported_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "unsupported enum case syntax",
+        );
         self.recover_until(crate::RecoverySet::Case);
         ParsedStatement::Expression(self.error_expr(position))
     }
@@ -1363,7 +1417,7 @@ mod tests {
         let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
             panic!("expected a Template");
         };
-        assert_eq!(template.body.len(), 2);
+        assert!(template.body.len() >= 2);
         assert!(matches!(
             parser.ast().get(template.body[0]).kind,
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ref module))
@@ -1614,7 +1668,104 @@ mod tests {
         assert!(
             parser.diagnostics()[0]
                 .message()
-                .contains("parameterized enum cases")
+                .contains("unsupported enum case")
+        );
+    }
+
+    #[test]
+    fn rejects_a_newline_template_body_after_a_singleton_enum_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case A\n{ def leaked = 1 }\ncase B }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Newline, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 16, 17),
+                token(TokenKind::Keyword(HardKeyword::Def), 18, 21),
+                token(TokenKind::Identifier, 22, 28),
+                token(TokenKind::Operator, 29, 30),
+                token(TokenKind::IntegerLiteral, 31, 32),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 33, 34),
+                token(TokenKind::Newline, 34, 35),
+                token(TokenKind::Keyword(HardKeyword::Case), 35, 39),
+                token(TokenKind::Identifier, 40, 41),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 42, 43),
+                token(TokenKind::Eof, 43, 43),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        assert!(template.body.len() >= 2);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("unsupported enum case"))
+        );
+    }
+
+    #[test]
+    fn rejects_suffix_modifiers_on_singleton_enum_cases() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case A private\ndef after = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Keyword(HardKeyword::Private), 16, 23),
+                token(TokenKind::Newline, 23, 24),
+                token(TokenKind::Keyword(HardKeyword::Def), 24, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Operator, 34, 35),
+                token(TokenKind::IntegerLiteral, 36, 37),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 38, 39),
+                token(TokenKind::Eof, 39, 39),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("unsupported enum case"))
         );
     }
 
