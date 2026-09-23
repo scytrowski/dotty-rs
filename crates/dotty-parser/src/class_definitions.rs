@@ -1836,6 +1836,43 @@ mod tests {
     }
 
     #[test]
+    fn preserves_empty_enum_case_constructor_clause_and_type_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case Empty()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_enum_case() else {
+            panic!("expected a parameterized enum case definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected a constructor");
+        };
+        assert_eq!(constructor.value_param_clauses, vec![Vec::new()]);
+        let type_tree = parser.ast().get(constructor.tpt);
+        assert!(matches!(type_tree.kind, TreeKind::TypeTree(_)));
+        assert_eq!(
+            type_tree.position.map(|position| position.span().range()),
+            Some(dotty_core::TextRange::new(10, 10).unwrap())
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_multiple_enum_case_constructor_clauses() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
