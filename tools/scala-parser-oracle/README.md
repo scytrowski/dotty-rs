@@ -11,6 +11,7 @@ it with the selected SDKMAN defaults:
 ./run path/to/input.scala
 ./run --mode pattern path/to/pattern.scala
 ./run --mode compilation path/to/source-unit.scala
+./run --mode block-erased path/to/erased-function-type.scala
 ./run --batch path/to/manifest.tsv
 ```
 
@@ -79,6 +80,10 @@ colon directly after the header, method modifiers and annotations, multiple
 methods, and exports. Constructor parent applications remain in the same
 `New`/`Select`/`Apply` shape as the Scala parser; semantic given synthesis and
 extension lowering are not compared.
+The `type-function-erased-*.scala` fixtures use a separate `block-erased` mode:
+their source imports `scala.language.experimental.erasedDefinitions`, and the
+Rust side enables the matching `ParserFeatures` policy. The normalized
+`FunctionWithMods.erased_params` vector is compared positionally.
 Singleton enum cases expose a separate `enum_case: true` metadata field; this
 is distinct from ordinary `case` metadata, and comma-separated singleton cases
 remain one normalized `PatDef`.

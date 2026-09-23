@@ -249,7 +249,11 @@ parenthesized function types also support named typed parameters such as
 `(x: A, y: B) => C`; each parameter is a direct `ValDef` child with a term
 name, a full currently-supported `type_expr()` type, no RHS, and default
 metadata. Backquoted parameter names and nested ordinary/context function
-types are preserved. Function arrows associate to the right and bind below
+types are preserved. With `ParserFeatures::erased_definitions` enabled,
+ordinary named function types also accept the Scala 3.9
+`(erased x: A) => B` form. The parameter remains a plain `ValDef`; erasure is
+recorded positionally in `FunctionWithMods.erased_params`, while the outer
+function has no `Erased` modifier. Function arrows associate to the right and bind below
 the supported union/intersection type operators, so function types compose
 with applied, tuple, union, and intersection types. Context-function types
 (`?=>`) also support named typed parameters such as
@@ -259,8 +263,8 @@ metadata without `Given`; `Given` belongs to the surrounding
 `FunctionWithMods`, whose `erased_params` contains one `false` per parameter.
 Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types,
-erased parameters, pure arrows, polymorphic function types, and type lambdas
-remain deferred. Supported context-function types use
+context-function erased parameters, pure arrows, polymorphic function types,
+and type lambdas remain deferred. Supported context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
 `erased_params` per parameter; `?=>` is right-associative and composes
 recursively with ordinary `=>`.
@@ -274,8 +278,8 @@ preserved. By-name parameters are supported in parenthesized ordinary and
 context-function types. The latter use `FunctionWithMods` with `Given` on the
 outer function and retain an all-`false` `erased_params` vector; the
 `ByNameTypeTree` itself carries no context metadata. Named by-name parameters,
-erased parameters, pure arrows, polymorphic function types, and type lambdas
-remain deferred.
+unnamed erased parameters, erased/by-name combinations, pure arrows,
+polymorphic function types, and type lambdas remain deferred.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
