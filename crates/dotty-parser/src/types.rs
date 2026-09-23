@@ -1,5 +1,5 @@
 use dotty_core::ast::{
-    Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode,
+    Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -85,6 +85,16 @@ where
             return self.error_type(self.span_from(mark));
         }
 
+        if self.starts_named_function_type() {
+            let params = self.parse_named_function_params();
+            self.expect_named_function_arrow();
+            let body = self.type_expr();
+            return self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })),
+            );
+        }
+
         let diagnostics_before = self.diagnostics.len();
         let parameter = self.parse_union_type();
         if self.diagnostics.len() != diagnostics_before {
@@ -133,6 +143,169 @@ where
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
             && self.lookahead_is_context_arrow(2)
+    }
+
+    /// Recognizes the disambiguating prefix of `(name: Type) => Result`.
+    ///
+    /// Parenthesized type parsing must not treat the colon after `name` as a
+    /// tuple element. We only commit when the matching right parenthesis is
+    /// followed by the ordinary arrow; context-function parameters and named
+    /// tuple types remain on the existing recovery path for now.
+    fn starts_named_function_type(&mut self) -> bool {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
+            return false;
+        }
+
+        let first_name = self.cursor.lookahead(1).clone();
+        let first_colon = self.cursor.lookahead(2).clone();
+        if !matches!(
+            first_name.kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) || !is_function_param_colon(first_colon.kind)
+        {
+            return false;
+        }
+
+        let mut depth = 1usize;
+        let mut offset = 1usize;
+        loop {
+            let token = self.cursor.lookahead(offset).clone();
+            match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self.lookahead_is_arrow(offset + 1);
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset = offset.saturating_add(1);
+        }
+    }
+
+    fn parse_named_function_params(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
+        let mut params = Vec::new();
+
+        loop {
+            if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
+                self.advance();
+                break;
+            }
+            if self.current().kind == TokenKind::Eof || self.current_is_arrow() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `)` after named function type parameters",
+                );
+                break;
+            }
+
+            let mark = self.mark();
+            let name = match self.intern_current_term_name() {
+                Ok(name)
+                    if matches!(
+                        self.current().kind,
+                        TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                    ) =>
+                {
+                    self.advance();
+                    name
+                }
+                _ => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a named function type parameter",
+                    );
+                    self.recover_named_function_params();
+                    if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                        continue;
+                    }
+                    self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+                    break;
+                }
+            };
+
+            if !self.accept_function_param_colon() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `:` after named function type parameter",
+                );
+                self.recover_named_function_params();
+                if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    continue;
+                }
+                self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+                break;
+            }
+
+            let type_tree = self.type_expr();
+            params.push(self.alloc_from(
+                mark,
+                TreeKind::ValDef(ValDef {
+                    name,
+                    tpt: type_tree,
+                    rhs: None,
+                    metadata: Modifiers::default(),
+                }),
+            ));
+
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                continue;
+            }
+            if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                break;
+            }
+
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `,` or `)` after named function type parameter",
+            );
+            self.recover_named_function_params();
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                continue;
+            }
+            self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+            break;
+        }
+
+        params
+    }
+
+    fn accept_function_param_colon(&mut self) -> bool {
+        if is_function_param_colon(self.current().kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn recover_named_function_params(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen) | TokenKind::Eof
+        ) && !self.current_is_arrow()
+            && !self.current_is_context_arrow()
+        {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn expect_named_function_arrow(&mut self) {
+        if !self.current_is_arrow() {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after named function type parameters",
+            );
+        } else {
+            self.advance();
+        }
     }
 
     fn function_type_params(&self, parameter: TreeId<Untyped>) -> Vec<TreeId<Untyped>> {
@@ -339,6 +512,16 @@ const fn is_type_recovery_boundary(kind: TokenKind) -> bool {
                     | Punctuation::RightBracket
                     | Punctuation::RightParen
             )
+    )
+}
+
+const fn is_function_param_colon(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Punctuation(Punctuation::Colon)
+            | TokenKind::ColonOp
+            | TokenKind::ColonFollow
+            | TokenKind::ColonEol
     )
 }
 
@@ -769,6 +952,105 @@ mod tests {
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 6).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_named_function_type_parameter_as_a_val_def() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        let parameter = function.params[0];
+        let TreeKind::ValDef(parameter) = &parser.ast().get(parameter).kind else {
+            panic!("expected a named parameter ValDef");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x");
+        assert!(parameter.rhs.is_none());
+        assert!(parameter.metadata == Default::default());
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(function.params[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(1, 5).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_multiple_named_function_type_parameters_in_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A, y: B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Colon), 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(ref function)) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        let parameter_names: Vec<_> = function
+            .params
+            .iter()
+            .map(|parameter| {
+                let TreeKind::ValDef(definition) = &parser.ast().get(*parameter).kind else {
+                    panic!("expected a named parameter ValDef");
+                };
+                assert!(definition.rhs.is_none());
+                assert!(definition.metadata == Default::default());
+                parser.names.resolve(definition.name.as_name().text())
+            })
+            .collect();
+        assert_eq!(parameter_names, ["x", "y"]);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
