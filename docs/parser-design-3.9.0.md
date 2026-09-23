@@ -269,7 +269,7 @@ shape; `Given` remains on the surrounding `FunctionWithMods`, while
 `erased_params` records erasure positionally alongside ordinary parameters.
 Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types, pure
-arrows, polymorphic function types, and type lambdas remain deferred. Supported
+arrows, and type lambdas remain deferred. Supported
 context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one positional boolean
 in `erased_params` per parameter (`false` for ordinary parameters and `true`
@@ -285,8 +285,15 @@ preserved. By-name parameters are supported in parenthesized ordinary and
 context-function types. The latter use `FunctionWithMods` with `Given` on the
 outer function and retain an all-`false` `erased_params` vector; the
 `ByNameTypeTree` itself carries no context metadata. Named by-name parameters,
-unnamed erased parameters, erased/by-name combinations, pure arrows,
-polymorphic function types, and type lambdas remain deferred.
+unnamed erased parameters, erased/by-name combinations, pure arrows, and type
+lambdas remain deferred.
+Polymorphic function types such as `[A] => A => A` reuse the shared
+`parse_type_param_clause(ParamOwner::Type)` grammar and are represented by
+`PolyFunction` with `TypeDef` children followed by a function-type body.
+Bounds and the currently-supported ordinary, context, by-name, and feature-gated
+erased function bodies compose through the existing `type_expr()` entry point.
+The ordinary `=>` is required; the type-lambda arrow `=>>` remains deferred and
+is not consumed as a polymorphic function type.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
@@ -484,8 +491,8 @@ existing block-body convention. Polyfunctions use the shared `TypeDef` and
 `TypeBoundsTree` representation for their type-parameter clause. Expression
 placeholders create synthetic `ValDef` parameters and lower to ordinary
 `Function` nodes when the enclosing expression is complete; Dotty's internal
-`WildcardFunction` node is not exposed by the Rust AST. Erased parameters and
-migration-only forms remain future work.
+`WildcardFunction` node is not exposed by the Rust AST. Erased parameters in
+function literals and migration-only forms remain future work.
 
 The initial polymorphic and placeholder-function subset covers:
 
