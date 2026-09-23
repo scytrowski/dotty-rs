@@ -96,12 +96,6 @@ where
 
         if let Some(arrow) = self.unnamed_by_name_function_type_arrow() {
             let params = self.parse_unnamed_function_params();
-            if matches!(arrow, FunctionTypeArrow::Context) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "by-name parameters in context function types are not supported yet",
-                );
-            }
             self.consume_named_function_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
@@ -1425,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_context_outer_by_name_function_types_deferred() {
+    fn parses_a_by_name_context_function_type_with_given_metadata() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(=> A) ?=> B",
@@ -1441,8 +1435,20 @@ mod tests {
             &mut names,
         );
 
-        parser.type_expr();
-        assert!(!parser.diagnostics().is_empty());
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a context function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::ByNameTypeTree(_)
+        ));
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![false]);
+        assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
