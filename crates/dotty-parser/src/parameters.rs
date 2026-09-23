@@ -127,16 +127,18 @@ where
         }
 
         loop {
-            if matches!(
-                self.current().kind,
-                TokenKind::Eof
-                    | TokenKind::Newline
-                    | TokenKind::Newlines
-                    | TokenKind::Indent
-                    | TokenKind::Outdent
-                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                    | TokenKind::Punctuation(Punctuation::RightBrace)
-            ) {
+            if self.context.enum_body
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Eof
+                        | TokenKind::Newline
+                        | TokenKind::Newlines
+                        | TokenKind::Indent
+                        | TokenKind::Outdent
+                        | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                        | TokenKind::Punctuation(Punctuation::RightBrace)
+                )
+            {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected a parameter before the end of the clause",
@@ -310,7 +312,17 @@ where
                 | TokenKind::Outdent
                 | TokenKind::Keyword(dotty_core::HardKeyword::Case)
                 | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
-        ) {
+        ) || (self.context.enum_body
+            && matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            ))
+        {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {

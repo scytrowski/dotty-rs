@@ -32,15 +32,16 @@ where
 
         while self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Punctuation(Punctuation::RightBracket)
-            && !matches!(
-                self.current().kind,
-                TokenKind::Newline
-                    | TokenKind::Newlines
-                    | TokenKind::Indent
-                    | TokenKind::Outdent
-                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
-                    | TokenKind::Punctuation(Punctuation::RightBrace)
-            )
+            && !(self.context.enum_body
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Newline
+                        | TokenKind::Newlines
+                        | TokenKind::Indent
+                        | TokenKind::Outdent
+                        | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                        | TokenKind::Punctuation(Punctuation::RightBrace)
+                ))
         {
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.report(
@@ -194,7 +195,17 @@ where
         if !matches!(
             self.current().kind,
             TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
-        ) && !self.current_is_arrow()
+        ) && !(self.context.enum_body
+            && matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+                    | TokenKind::Keyword(dotty_core::HardKeyword::Case)
+                    | TokenKind::Punctuation(Punctuation::RightBrace)
+            ))
+            && !self.current_is_arrow()
         {
             self.advance();
         }
