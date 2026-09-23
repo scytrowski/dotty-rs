@@ -1,4 +1,4 @@
-use dotty_core::{Punctuation, TokenKind, TreeId, Untyped};
+use dotty_core::{Name, Punctuation, TokenKind, TreeId, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::{ParseDiagnosticKind, Parser};
@@ -44,6 +44,46 @@ where
             }
         }
         args
+    }
+
+    /// Parses the currently supported infix type subset.
+    ///
+    /// `simple_type` deliberately remains an atomic/applied type parser. The
+    /// higher-level entry owns the Scala union/intersection precedence.
+    pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
+        self.parse_union_type()
+    }
+
+    fn parse_union_type(&mut self) -> TreeId<Untyped> {
+        let mut tree = self.parse_intersection_type();
+        while let Some(operator) = self.accept_type_infix_operator("|") {
+            let right = self.parse_intersection_type();
+            tree = self.alloc_infix(tree, operator, right);
+        }
+        tree
+    }
+
+    fn parse_intersection_type(&mut self) -> TreeId<Untyped> {
+        let mut tree = self.simple_type();
+        while let Some(operator) = self.accept_type_infix_operator("&") {
+            let right = self.simple_type();
+            tree = self.alloc_infix(tree, operator, right);
+        }
+        tree
+    }
+
+    fn accept_type_infix_operator(&mut self, expected: &str) -> Option<Name> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::ColonOp
+        ) || !self.current_text_is(expected)
+        {
+            return None;
+        }
+
+        let operator = *self.intern_current_type_name().ok()?.as_name();
+        self.advance();
+        Some(operator)
     }
 
     /// Parses the small simple-type subset needed by simple expressions.
@@ -144,6 +184,93 @@ mod tests {
         let name = ident.name;
         drop(parser);
         assert_eq!(names.resolve(name.text()), "Value");
+    }
+
+    #[test]
+    fn parses_a_union_type_with_a_type_namespace_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A | B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a type infix tree");
+        };
+        assert_eq!(parser.names.resolve(infix.op.text()), "|");
+        assert!(infix.op.is_type());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn intersection_binds_tighter_than_union() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A | B & C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(outer)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected the outer union");
+        };
+        assert_eq!(parser.names.resolve(outer.op.text()), "|");
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(inner)) =
+            &parser.ast().get(outer.right).kind
+        else {
+            panic!("expected the nested intersection");
+        };
+        assert_eq!(parser.names.resolve(inner.op.text()), "&");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn same_precedence_type_operators_are_left_associative() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A & B & C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(outer)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected the outer intersection");
+        };
+        assert_eq!(parser.names.resolve(outer.op.text()), "&");
+        assert!(matches!(
+            parser.ast().get(outer.left).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
