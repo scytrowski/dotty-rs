@@ -1047,60 +1047,67 @@ where
         if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
             parent = self.parse_type_application(mark, parent);
         }
-        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
-            return parent;
-        }
-
-        self.advance();
-        let mut args = Vec::new();
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-            loop {
-                if self.at_enum_body_parent_boundary()
-                    || matches!(
-                        self.current().kind,
-                        TokenKind::Punctuation(Punctuation::RightBrace)
-                            | TokenKind::Outdent
-                            | TokenKind::Eof
-                    )
-                {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedExpression,
-                        "expected a parent constructor argument",
-                    );
-                    args.push(self.error_expr(self.current_span()));
-                } else {
-                    args.push(self.with_location(crate::Location::InArgs, |parser| parser.expr()));
-                }
-                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
-                    self.expect(TokenKind::Punctuation(Punctuation::RightParen));
-                    break;
-                }
-                if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-                    break;
+        let mut first_clause = true;
+        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            self.advance();
+            let mut args = Vec::new();
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                loop {
+                    if self.at_enum_body_parent_boundary()
+                        || matches!(
+                            self.current().kind,
+                            TokenKind::Punctuation(Punctuation::RightBrace)
+                                | TokenKind::Outdent
+                                | TokenKind::Eof
+                        )
+                    {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedExpression,
+                            "expected a parent constructor argument",
+                        );
+                        args.push(self.error_expr(self.current_span()));
+                    } else {
+                        args.push(
+                            self.with_location(crate::Location::InArgs, |parser| parser.expr()),
+                        );
+                    }
+                    if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                        self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+                        break;
+                    }
+                    if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                        break;
+                    }
                 }
             }
+            let function = if first_clause {
+                let new_tree = self.alloc(
+                    TreeKind::New(New { tpt: parent }),
+                    self.ast.get(parent).position,
+                );
+                let constructor_name = TermName::new(self.names.intern("<init>"));
+                self.alloc(
+                    TreeKind::Select(Select {
+                        qualifier: new_tree,
+                        name: *constructor_name.as_name(),
+                        backquoted: false,
+                    }),
+                    self.ast.get(new_tree).position,
+                )
+            } else {
+                parent
+            };
+            parent = self.alloc_from(
+                mark,
+                TreeKind::Apply(Apply {
+                    function,
+                    args,
+                    kind: ApplyKind::Regular,
+                }),
+            );
+            first_clause = false;
         }
-        let new_tree = self.alloc(
-            TreeKind::New(New { tpt: parent }),
-            self.ast.get(parent).position,
-        );
-        let constructor_name = TermName::new(self.names.intern("<init>"));
-        let constructor = self.alloc(
-            TreeKind::Select(Select {
-                qualifier: new_tree,
-                name: *constructor_name.as_name(),
-                backquoted: false,
-            }),
-            self.ast.get(new_tree).position,
-        );
-        self.alloc_from(
-            mark,
-            TreeKind::Apply(Apply {
-                function: constructor,
-                args,
-                kind: ApplyKind::Regular,
-            }),
-        )
+        parent
     }
 
     fn at_enum_body_parent_boundary(&self) -> bool {
@@ -2083,6 +2090,62 @@ mod tests {
                 .span()
                 .range(),
             dotty_core::TextRange::new(10, 42).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_repeated_enum_case_parent_argument_clauses_as_nested_applications() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case Child(value: A) extends Parent(first)(second)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 16),
+                token(TokenKind::ColonFollow, 16, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Extends), 21, 28),
+                token(TokenKind::Identifier, 29, 35),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 35, 36),
+                token(TokenKind::Identifier, 36, 41),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 41, 42),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 42, 43),
+                token(TokenKind::Identifier, 43, 49),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 49, 50),
+                token(TokenKind::Eof, 50, 50),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_enum_case() else {
+            panic!("expected a parameterized enum case definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a Template");
+        };
+        let TreeKind::Apply(outer) = &parser.ast().get(template.parents[0]).kind else {
+            panic!("expected the outer parent application");
+        };
+        let TreeKind::Apply(inner) = &parser.ast().get(outer.function).kind else {
+            panic!("expected the inner parent application");
+        };
+        assert_eq!(inner.args.len(), 1);
+        assert_eq!(outer.args.len(), 1);
+        assert_eq!(
+            parser
+                .ast()
+                .get(template.parents[0])
+                .position
+                .expect("curried parent span")
+                .span()
+                .range(),
+            dotty_core::TextRange::new(29, 50).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
