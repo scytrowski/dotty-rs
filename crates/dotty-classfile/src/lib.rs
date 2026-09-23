@@ -2,8 +2,8 @@
 //!
 //! Reference format: the class file format produced and consumed by JDK 26
 //! (class file major version 70), the current compatibility ceiling for
-//! Scala 3.9.0. The decoder is verified against real JDK 23, 24, 25, and 26
-//! corpora. See `docs/classfile-format-jdk25.md` for the wire-format
+//! Scala 3.9.0. The decoder is verified against real JDK 21, 22, 23, 24, 25,
+//! and 26 corpora. See `docs/classfile-format-jdk25.md` for the wire-format
 //! reference and compatibility audit this type model follows.
 //!
 //! This is currently a type skeleton only: no decoder, encoder, or bounded

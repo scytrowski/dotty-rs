@@ -30,6 +30,8 @@ fn corpus_classes_path() -> PathBuf {
         .join("../dotty-classfile/tests/fixtures/jdk_corpus/classes.txt")
 }
 
+const JDK_CORPORA: &[&str] = &["jdk21", "jdk22", "jdk23", "jdk24", "jdk25", "jdk26"];
+
 /// The real corpus classes, with a minimal synthetic stand-in for any class
 /// they depend on that is not in the corpus (`java/lang/Object`, the
 /// interfaces they implement, the types in their signatures). The real
@@ -130,7 +132,7 @@ fn loaded_symbols(corpus_root: &Path) -> (SemanticStore, Vec<SymbolId>) {
 
 #[test]
 fn loaded_classes_and_members_never_get_a_qualified_visibility() {
-    for version in ["jdk23", "jdk24", "jdk25", "jdk26"] {
+    for version in JDK_CORPORA {
         let root = corpus_root(version);
         let (store, symbols) = loaded_symbols(&root);
 
@@ -150,7 +152,7 @@ fn loaded_classes_and_members_never_get_a_qualified_visibility() {
 fn the_corpus_exercises_every_java_visibility() {
     // Guards the test above against passing vacuously on a corpus that only
     // contains, say, public members.
-    for version in ["jdk23", "jdk24", "jdk25", "jdk26"] {
+    for version in JDK_CORPORA {
         let root = corpus_root(version);
         let (store, symbols) = loaded_symbols(&root);
 

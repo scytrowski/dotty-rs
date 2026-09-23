@@ -1,5 +1,5 @@
-//! Decodes and validates real `.class` files from the checked-in JDK 23, 24,
-//! 25, and 26 corpora. The shared `classes.txt` file defines corpus
+//! Decodes and validates real `.class` files from the checked-in JDK 21, 22,
+//! 23, 24, 25, and 26 corpora. The shared `classes.txt` file defines corpus
 //! membership; each version directory records its provenance, expected
 //! class-file major, and inventory in `manifest.toml`.
 

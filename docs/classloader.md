@@ -405,7 +405,7 @@ exact error variants asserted rather than `is_err()`.
   new ones for cases already covered there.
 - The shared JDK runtime-image corpus under
   `crates/dotty-classfile/tests/fixtures/jdk_corpus/` is materialized for
-  JDK 23, 24, 25, and 26. Classfile tests run the same structural and
+  JDK 21, 22, 23, 24, 25, and 26. Classfile tests run the same structural and
   representative-shape checks against every version; loader visibility tests
   load each version directory as a separate canonical classpath.
 - Hand-built minimal class files/synthetic classpaths are sometimes
