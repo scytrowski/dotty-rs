@@ -206,7 +206,10 @@ object Main:
       "var" -> Mutable,
       "given" -> Given
     ).collect {
-      case (name, flag) if (includeMutable || name != "var") && mods.is(flag) => name
+      case (name, flag)
+          if (includeMutable || name != "var")
+              && mods.is(flag)
+              && (name != "case" || !mods.flags.isAllOf(EnumCase)) => name
     }.toSet
     val sourceText = slice(tree, source)
     val sourceWords = sourceText.split("[^A-Za-z]+").toSet
