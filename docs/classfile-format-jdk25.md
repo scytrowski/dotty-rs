@@ -2,6 +2,12 @@
 
 Status: working document for the Rust implementation.
 
+The wire-format reference is JDK 25, but the decoder's checked-in real-JDK
+compatibility corpus covers JDK 23, 24, and 25. The corpus verifies the
+complete decode, trailing-byte check, constant-pool/reference validation, and
+representative attributes, descriptors, and generic signatures for each
+release.
+
 Normative source: [Chapter 4, "The `class` File Format", Java Virtual Machine
 Specification, SE 25](https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-4.html).
 
@@ -90,12 +96,13 @@ Minor version rules:
 - for `45 <= major_version <= 55`: `minor_version` may be any value
   (historically used by JDK 1.0.x/1.1.x).
 
-For this project's compatibility target (JDK 25 / Scala 3.9.0 output), the
-expected pair is `major_version = 69`, `minor_version` in `{0, 65535}`. As
-with the TASTy header, a loader should expose both a strict check (accept
-only the target version) and a compatible-range check (accept the
-historically valid range and preserve the observed version), since
-dependency class files may legitimately be compiled for older JDKs.
+For Scala 3.9.0 output, the reference target is JDK 25:
+`major_version = 69`, with `minor_version` in `{0, 65535}`. The decoder's
+compatible-range check accepts non-preview class files from the historically
+valid range `45.0` through `69.0`; the real compatibility corpus specifically
+verifies JDK 23 (`67.0`), JDK 24 (`68.0`), and JDK 25 (`69.0`). Preview files
+(`minor_version = 65535`) remain unsupported because this decoder has no
+matching preview-feature mode.
 
 ## 3. Constant pool
 

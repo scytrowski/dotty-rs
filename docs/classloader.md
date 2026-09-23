@@ -403,6 +403,11 @@ exact error variants asserted rather than `is_err()`.
   compiled `.tasty` fixtures under `crates/dotty-tasty/tests/fixtures/`
   wherever they exercise loader-relevant shapes, instead of generating
   new ones for cases already covered there.
+- The shared JDK runtime-image corpus under
+  `crates/dotty-classfile/tests/fixtures/jdk_corpus/` is materialized for
+  JDK 23, 24, and 25. Classfile tests run the same structural and
+  representative-shape checks against every version; loader visibility tests
+  use the JDK 25 directory as their canonical classpath.
 - Hand-built minimal class files/synthetic classpaths are sometimes
   unavoidable and acceptable — e.g. a cyclic-inheritance scenario cannot
   be produced by `javac` (rejected at the source level), and a classpath

@@ -1,8 +1,9 @@
 //! JVM class file decoder and encoder.
 //!
-//! Target format: the class file format produced and consumed by JDK 25
+//! Reference format: the class file format produced and consumed by JDK 25
 //! (class file major version 69), the current LTS release supported by
-//! Scala 3.9.0. See `docs/classfile-format-jdk25.md` for the wire format
+//! Scala 3.9.0. The decoder is verified against real JDK 23, 24, and 25
+//! corpora. See `docs/classfile-format-jdk25.md` for the wire-format
 //! reference this type model follows.
 //!
 //! This is currently a type skeleton only: no decoder, encoder, or bounded

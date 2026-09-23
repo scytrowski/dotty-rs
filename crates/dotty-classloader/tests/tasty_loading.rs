@@ -62,7 +62,7 @@ fn write_synthetic_object_class(root: &Path) {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
     bytes.extend_from_slice(&[0x00, 0x00]); // minor
-    bytes.extend_from_slice(&[0x00, 0x45]); // major = 69 (JDK 25)
+    bytes.extend_from_slice(&[0x00, 0x45]); // class-file major = 69
     bytes.extend_from_slice(&[0x00, 0x03]); // constant_pool_count
     bytes.extend_from_slice(&pool);
     bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
