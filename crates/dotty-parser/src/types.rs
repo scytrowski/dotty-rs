@@ -445,6 +445,9 @@ where
         if self.current().kind != TokenKind::Identifier {
             return false;
         }
+        if is_function_param_colon(self.cursor.lookahead(1).kind) {
+            return false;
+        }
         let erased = self.known_names().erased;
         self.current_is_known_name(erased).unwrap_or(false)
     }
@@ -2526,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn treats_erased_as_an_ordinary_parameter_name_when_the_feature_is_disabled() {
+    fn treats_erased_as_an_ordinary_parameter_name_before_a_colon() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(erased: A) => B",
@@ -2541,7 +2544,11 @@ mod tests {
                 token(TokenKind::Eof, 16, 16),
             ],
             &mut names,
-        );
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
 
         let id = parser.type_expr();
         let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
@@ -2555,6 +2562,56 @@ mod tests {
             parser.names.resolve(parameter.name.as_name().text()),
             "erased"
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn treats_erased_as_an_ordinary_later_parameter_name_before_a_colon() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A, erased: B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::Colon), 13, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type");
+        };
+        assert_eq!(function.params.len(), 2);
+        let names = function
+            .params
+            .iter()
+            .map(|parameter| {
+                let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+                    panic!("expected a named function parameter");
+                };
+                parser
+                    .names
+                    .resolve(parameter.name.as_name().text())
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["x", "erased"]);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
