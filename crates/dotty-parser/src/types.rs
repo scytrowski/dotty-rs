@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    ByNameTypeTree, Function, FunctionWithMods, Modifier, Modifiers, Parens, Tuple, UntypedNode,
-    ValDef,
+    ByNameTypeTree, Function, FunctionWithMods, Modifier, Modifiers, Parens, PolyFunction, Tuple,
+    UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -61,6 +61,9 @@ where
 
     fn parse_function_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        if self.starts_poly_function_type() {
+            return self.parse_poly_function_type(mark);
+        }
         if self.starts_empty_function_type() {
             self.advance();
             self.advance();
@@ -130,6 +133,53 @@ where
         let params = self.function_type_params(parameter);
         let erased_params = vec![false; params.len()];
         self.alloc_function_type(mark, params, body, arrow, erased_params)
+    }
+
+    fn starts_poly_function_type(&self) -> bool {
+        self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
+    }
+
+    fn parse_poly_function_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let type_params = self.parse_type_param_clause(crate::ParamOwner::Type);
+        if !self.current_is_arrow() {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after polymorphic function type parameters",
+            );
+            return self.error_type(self.span_from(mark));
+        }
+
+        self.advance();
+        let body = self.type_expr();
+        if type_params.is_empty() || !self.is_function_type(body) {
+            self.report(
+                ParseDiagnosticKind::UnexpectedToken,
+                "polymorphic function types require a function type body and at least one type parameter",
+            );
+            return self.error_type(self.span_from(mark));
+        }
+
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(PolyFunction {
+                type_params,
+                body,
+            })),
+        )
+    }
+
+    fn is_function_type(&self, tree: TreeId<Untyped>) -> bool {
+        match &self.ast.get(tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+            | TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => true,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.is_function_type(parens.inner)
+            }
+            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(poly_function)) => {
+                self.is_function_type(poly_function.body)
+            }
+            _ => false,
+        }
     }
 
     fn starts_empty_function_type(&mut self) -> bool {
@@ -4468,5 +4518,98 @@ mod tests {
         parser.simple_type();
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn parses_a_polymorphic_function_type_with_a_function_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] => A => A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::PolyFunction(poly)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a polymorphic function type");
+        };
+        assert_eq!(poly.type_params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(poly.type_params[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(poly.body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 13).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_polymorphic_function_type_without_a_function_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] => A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_type_lambda_arrows_out_of_polymorphic_function_types() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>> F[A]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current_text(), Ok("=>>"));
+        assert!(!parser.diagnostics().is_empty());
     }
 }
