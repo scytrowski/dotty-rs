@@ -634,8 +634,9 @@ where
 
         let mut derives = Vec::new();
         loop {
-            let derive =
-                self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
+            let derive = self.with_parse_kind(crate::ParseKind::Type, |parser| {
+                parser.simple_type_reference()
+            });
             if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBracket))

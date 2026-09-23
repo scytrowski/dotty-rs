@@ -2802,7 +2802,10 @@ fn parses_type_application_on_new_before_constructor_application() {
     let TreeKind::New(New { tpt }) = parser.ast().get(selection.qualifier).kind else {
         panic!("expected new tree");
     };
-    assert!(matches!(parser.ast().get(tpt).kind, TreeKind::TypeApply(_)));
+    assert!(matches!(
+        parser.ast().get(tpt).kind,
+        TreeKind::AppliedTypeTree(_)
+    ));
     assert!(parser.diagnostics().is_empty());
 }
 

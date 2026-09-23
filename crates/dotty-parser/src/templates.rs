@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_an_unsupported_self_type_application_at_the_arrow() {
+    fn parses_a_self_type_application_at_the_arrow() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "{ self: Parent[T] => value }",
@@ -554,11 +554,7 @@ mod tests {
         assert!(result.self_val.is_some());
         assert_eq!(result.members.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert_eq!(parser.diagnostics().len(), 1);
-        assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
-        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
