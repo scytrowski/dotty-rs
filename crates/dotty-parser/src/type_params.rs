@@ -129,53 +129,11 @@ where
             );
         }
 
-        let higher_kind = if self
+        let nested_params = if self
             .cursor
             .at(TokenKind::Punctuation(Punctuation::LeftBracket))
         {
-            let nested_params = self.parse_type_param_clause(ParamOwner::Hk);
-            let lambda_start = nested_params
-                .first()
-                .and_then(|param| {
-                    self.ast
-                        .get(*param)
-                        .position
-                        .map(|position| position.span().range().start())
-                })
-                .unwrap_or(mark.start);
-            let empty_bounds_start = nested_params
-                .last()
-                .and_then(|param| {
-                    self.ast
-                        .get(*param)
-                        .position
-                        .map(|position| position.span().range().end())
-                })
-                .unwrap_or(lambda_start);
-            let body = self.synthetic_type_bounds(empty_bounds_start);
-            let lambda = self.alloc_from(
-                crate::Mark {
-                    start: lambda_start,
-                },
-                TreeKind::LambdaTypeTree(LambdaTypeTree {
-                    type_params: nested_params,
-                    body,
-                }),
-            );
-            if matches!(
-                self.ast.get(body).kind,
-                TreeKind::TypeBoundsTree(TypeBoundsTree {
-                    low: None,
-                    high: None,
-                    alias: None,
-                })
-            ) {
-                let range = TextRange::new(lambda_start, empty_bounds_start)
-                    .expect("higher-kinded lambda span is ordered");
-                self.ast.get_mut(lambda).position =
-                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
-            }
-            Some(lambda)
+            Some(self.parse_type_param_clause(ParamOwner::Hk))
         } else {
             None
         };
@@ -191,7 +149,19 @@ where
         } else {
             None
         };
-        let bounds = if low.is_some() || high.is_some() {
+        let has_explicit_bounds = low.is_some() || high.is_some();
+        let empty_bounds_start = nested_params
+            .as_ref()
+            .and_then(|params| {
+                params.last().and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().end())
+                })
+            })
+            .unwrap_or(mark.start);
+        let bounds = if has_explicit_bounds {
             self.alloc_from(
                 crate::Mark {
                     start: explicit_bounds_start,
@@ -203,9 +173,37 @@ where
                 }),
             )
         } else {
-            self.synthetic_type_bounds(mark.start())
+            self.synthetic_type_bounds(empty_bounds_start)
         };
-        let rhs = higher_kind.unwrap_or(bounds);
+        let rhs = if let Some(nested_params) = nested_params {
+            let lambda_start = nested_params
+                .first()
+                .and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .unwrap_or(mark.start);
+            let lambda = self.alloc_from(
+                crate::Mark {
+                    start: lambda_start,
+                },
+                TreeKind::LambdaTypeTree(LambdaTypeTree {
+                    type_params: nested_params,
+                    body: bounds,
+                }),
+            );
+            if !has_explicit_bounds {
+                let range = TextRange::new(lambda_start, empty_bounds_start)
+                    .expect("higher-kinded lambda span is ordered");
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+            lambda
+        } else {
+            bounds
+        };
 
         self.alloc_from(
             mark,
@@ -770,6 +768,64 @@ mod tests {
                 alias: None,
             })
         ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_bounds_in_a_higher_kinded_type_parameter_lambda() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[G[_] <: Bound]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 2, 3),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected an outer type parameter");
+        };
+        let TreeKind::LambdaTypeTree(lambda) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a higher-kinded lambda type");
+        };
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(3, 14).unwrap()
+        );
+        let TreeKind::TypeBoundsTree(bounds) = &parser.ast().get(lambda.body).kind else {
+            panic!("expected higher-kinded bounds");
+        };
+        assert!(bounds.low.is_none());
+        assert!(matches!(
+            bounds.high.map(|high| &parser.ast().get(high).kind),
+            Some(TreeKind::Ident(_))
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(lambda.body)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(6, 14).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
