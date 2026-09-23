@@ -1,4 +1,4 @@
-use dotty_core::ast::{Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
 use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -89,6 +89,9 @@ where
     fn type_param(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let mut metadata = Modifiers::default();
+        while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            metadata.annotations.push(self.parse_annotation());
+        }
         let is_synthetic_wildcard_name = self.current().kind == TokenKind::BackquotedIdentifier
             && self
                 .current_text()
@@ -129,6 +132,15 @@ where
             );
         }
 
+        let nested_params = if self
+            .cursor
+            .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+        {
+            Some(self.parse_type_param_clause(ParamOwner::Hk))
+        } else {
+            None
+        };
+
         let explicit_bounds_start = self.current().span.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
@@ -140,7 +152,19 @@ where
         } else {
             None
         };
-        let bounds = if low.is_some() || high.is_some() {
+        let has_explicit_bounds = low.is_some() || high.is_some();
+        let empty_bounds_start = nested_params
+            .as_ref()
+            .and_then(|params| {
+                params.last().and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().end())
+                })
+            })
+            .unwrap_or(mark.start);
+        let bounds = if has_explicit_bounds {
             self.alloc_from(
                 crate::Mark {
                     start: explicit_bounds_start,
@@ -152,14 +176,43 @@ where
                 }),
             )
         } else {
-            self.synthetic_type_bounds(mark.start())
+            self.synthetic_type_bounds(empty_bounds_start)
+        };
+        let rhs = if let Some(nested_params) = nested_params {
+            let lambda_start = nested_params
+                .first()
+                .and_then(|param| {
+                    self.ast
+                        .get(*param)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .unwrap_or(mark.start);
+            let lambda = self.alloc_from(
+                crate::Mark {
+                    start: lambda_start,
+                },
+                TreeKind::LambdaTypeTree(LambdaTypeTree {
+                    type_params: nested_params,
+                    body: bounds,
+                }),
+            );
+            if !has_explicit_bounds {
+                let range = TextRange::new(lambda_start, empty_bounds_start)
+                    .expect("higher-kinded lambda span is ordered");
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+            lambda
+        } else {
+            bounds
         };
 
         self.alloc_from(
             mark,
             TreeKind::TypeDef(TypeDef {
                 name,
-                rhs: bounds,
+                rhs,
                 metadata,
                 variance,
             }),
@@ -675,6 +728,166 @@ mod tests {
         let params = parser.parse_type_param_clause(ParamOwner::Type);
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current_text(), Ok("=>>"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_higher_kinded_type_parameter_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[G[_]]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 2, 3),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected an outer type parameter");
+        };
+        let TreeKind::LambdaTypeTree(lambda) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a higher-kinded lambda type");
+        };
+        assert_eq!(lambda.type_params.len(), 1);
+        let TreeKind::TypeDef(nested) = &parser.ast().get(lambda.type_params[0]).kind else {
+            panic!("expected a nested type parameter");
+        };
+        assert_eq!(
+            parser.names.resolve(nested.name.as_name().text()),
+            "$type_wildcard_0"
+        );
+        assert!(matches!(
+            parser.ast().get(nested.rhs).kind,
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low: None,
+                high: None,
+                alias: None,
+            })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_bounds_in_a_higher_kinded_type_parameter_lambda() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[G[_] <: Bound]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 2, 3),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected an outer type parameter");
+        };
+        let TreeKind::LambdaTypeTree(lambda) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected a higher-kinded lambda type");
+        };
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.rhs)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(3, 14).unwrap()
+        );
+        let TreeKind::TypeBoundsTree(bounds) = &parser.ast().get(lambda.body).kind else {
+            panic!("expected higher-kinded bounds");
+        };
+        assert!(bounds.low.is_none());
+        assert!(matches!(
+            bounds.high.map(|high| &parser.ast().get(high).kind),
+            Some(TreeKind::Ident(_))
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(lambda.body)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(6, 14).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_an_annotation_on_a_type_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[@ann A]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected a type parameter");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.metadata.annotations[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_an_annotation_on_a_wildcard_type_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[@ann _]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(definition) = &parser.ast().get(params[0]).kind else {
+            panic!("expected a wildcard type parameter");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "$type_wildcard_0"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 

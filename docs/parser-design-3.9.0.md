@@ -268,8 +268,8 @@ such as `(x: A, erased y: B) ?=> C`. They retain the plain `ValDef` parameter
 shape; `Given` remains on the surrounding `FunctionWithMods`, while
 `erased_params` records erasure positionally alongside ordinary parameters.
 Named parameters can use the full currently-supported `type_expr()` subset and
-compose recursively with ordinary or context arrows. Named tuple types, pure
-arrows, and type lambdas remain deferred. Supported
+compose recursively with ordinary or context arrows. Named tuple types and
+pure arrows remain deferred. Supported
 context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one positional boolean
 in `erased_params` per parameter (`false` for ordinary parameters and `true`
@@ -285,15 +285,23 @@ preserved. By-name parameters are supported in parenthesized ordinary and
 context-function types. The latter use `FunctionWithMods` with `Given` on the
 outer function and retain an all-`false` `erased_params` vector; the
 `ByNameTypeTree` itself carries no context metadata. Named by-name parameters,
-unnamed erased parameters, erased/by-name combinations, pure arrows, and type
-lambdas remain deferred.
+unnamed erased parameters, erased/by-name combinations, and pure arrows remain
+deferred.
 Polymorphic function types such as `[A] => A => A` reuse the shared
 `parse_type_param_clause(ParamOwner::Type)` grammar and are represented by
 `PolyFunction` with `TypeDef` children followed by a function-type body.
 Bounds and the currently-supported ordinary, context, by-name, and feature-gated
 erased function bodies compose through the existing `type_expr()` entry point.
-The ordinary `=>` is required; the type-lambda arrow `=>>` remains deferred and
-is not consumed as a polymorphic function type.
+The ordinary `=>` is required for this path and the type-lambda arrow `=>>` is
+kept distinct from it. A leading type-parameter clause followed by `=>>`, such
+as `[A] =>> List[A]`, is represented by the shared `LambdaTypeTree` with
+`TypeDef` parameters and a body parsed through the full `type_expr()` entry
+point. Nested higher-kinded clauses such as `[G[_]] =>> G[Int]` use a nested
+`LambdaTypeTree` in the `G` parameter's `rhs`; the wildcard remains the shared
+synthetic type-parameter `TypeDef`. Ordinary and context-function bodies
+compose recursively. Empty or
+malformed type-lambda clauses report diagnostics without consuming the
+following type-definition boundary.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters

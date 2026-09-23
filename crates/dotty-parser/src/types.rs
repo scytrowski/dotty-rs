@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    ByNameTypeTree, Function, FunctionWithMods, Modifier, Modifiers, Parens, PolyFunction, Tuple,
-    UntypedNode, ValDef,
+    ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
+    PolyFunction, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -61,8 +61,8 @@ where
 
     fn parse_function_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        if self.starts_poly_function_type() {
-            return self.parse_poly_function_type(mark);
+        if self.starts_bracketed_function_type() {
+            return self.parse_bracketed_function_type(mark);
         }
         if self.starts_empty_function_type() {
             self.advance();
@@ -135,12 +135,27 @@ where
         self.alloc_function_type(mark, params, body, arrow, erased_params)
     }
 
-    fn starts_poly_function_type(&self) -> bool {
+    fn starts_bracketed_function_type(&self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
     }
 
-    fn parse_poly_function_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+    fn parse_bracketed_function_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let type_params = self.parse_type_param_clause(crate::ParamOwner::Type);
+        if self.current_is_type_lambda_arrow() {
+            self.advance();
+            let body = self.type_expr();
+            if type_params.is_empty() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "a type lambda requires at least one type parameter",
+                );
+                return self.error_type(self.span_from(mark));
+            }
+            return self.alloc_from(
+                mark,
+                TreeKind::LambdaTypeTree(LambdaTypeTree { type_params, body }),
+            );
+        }
         if !self.current_is_arrow() {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -822,6 +837,7 @@ struct NamedFunctionParams {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::ast::{LambdaTypeTree, TypeDef};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
 
     #[test]
@@ -4583,7 +4599,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_type_lambda_arrows_out_of_polymorphic_function_types() {
+    fn parses_a_type_lambda_with_an_applied_body() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[A] =>> F[A]",
@@ -4602,11 +4618,201 @@ mod tests {
         );
 
         let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { type_params, body }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        assert_eq!(type_params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(type_params[0]).kind,
+            TreeKind::TypeDef(TypeDef { .. })
+        ));
+        assert!(matches!(
+            parser.ast().get(*body).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_type_parameter_order_in_a_type_lambda() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A, B] =>> Either[A, B]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+                token(TokenKind::Operator, 7, 10),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 17, 18),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::Comma), 19, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { type_params, .. }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        let names = type_params
+            .iter()
+            .map(|param| {
+                let TreeKind::TypeDef(definition) = &parser.ast().get(*param).kind else {
+                    panic!("expected a type parameter definition");
+                };
+                parser.names.resolve(definition.name.as_name().text())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["A", "B"]);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_lambda_with_an_ordinary_function_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>> A => A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { body, .. }) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        assert!(matches!(
+            parser.ast().get(*body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_lambda_with_a_context_function_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>> A ?=> A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { body, .. }) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(*body).kind
+        else {
+            panic!("expected a context function body");
+        };
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
+        assert_eq!(function.erased_params, vec![false]);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_an_empty_type_lambda_parameter_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[] =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 1, 2),
+                token(TokenKind::Operator, 3, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
         assert!(matches!(
             parser.ast().get(id).kind,
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
-        assert_eq!(parser.current_text(), Ok("=>>"));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_type_lambda_parameter_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A =>> X",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 3, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_type_lambda_body_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A] =>>",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
 
