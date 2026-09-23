@@ -244,12 +244,17 @@ parenthesized type grouping and tuple types, represented by the shared
 `Parens` and `Tuple` source nodes; tuple elements use the supported full type
 expression subset and compose with applied types
 ordinary function types (`A => B`, parenthesized and tuple parameter lists,
-and `() => R`), represented by the shared `Function` node. Function arrows
-associate to the right and bind below the supported union/intersection type
-operators, so function types compose with applied, tuple, union, and
-intersection types. Context-function arrows (`?=>`), named or erased
-function-type parameters, pure arrows, polymorphic function types, and type
-lambdas remain deferred. Supported context-function types use
+and `() => R`), represented by the shared `Function` node. Ordinary
+parenthesized function types also support named typed parameters such as
+`(x: A, y: B) => C`; each parameter is a direct `ValDef` child with a term
+name, a full currently-supported `type_expr()` type, no RHS, and default
+metadata. Backquoted parameter names and nested ordinary/context function
+types are preserved. Function arrows associate to the right and bind below
+the supported union/intersection type operators, so function types compose
+with applied, tuple, union, and intersection types. Named context-function
+parameters (`(x: A) ?=> B`), erased parameters, pure arrows, polymorphic
+function types, and type lambdas remain deferred. Supported context-function
+types use
 `FunctionWithMods` with exactly one `Given` modifier and one `false` entry in
 `erased_params` per parameter; `?=>` is right-associative and composes
 recursively with ordinary `=>`.
@@ -277,8 +282,10 @@ nodes, including when nested or used as applied type arguments. Type
 positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
 `TypeApply`. An empty `()` is not a standalone tuple type: it is accepted only
 as the parameter list of a zero-argument function type. Named tuple types
-remain deferred. An empty context-function parameter list (`() ?=> R`) is
-invalid and produces a focused parser diagnostic. The `derives` clause
+remain deferred unless the parenthesized list is followed by the ordinary
+function arrow and matches the named-parameter form above. An empty
+context-function parameter list (`() ?=> R`) is invalid and produces a
+focused parser diagnostic. The `derives` clause
 intentionally keeps its narrower
 qualified-identifier grammar, so `derives Eq[A]`, `derives Eq | Show`, and
 parenthesized derives types remain rejected until that grammar is expanded.
