@@ -87,11 +87,19 @@ where
         }
 
         if let Some(arrow) = self.named_function_type_arrow() {
-            let params = self.parse_named_function_params();
+            let allow_erased =
+                matches!(arrow, FunctionTypeArrow::Ordinary) && self.features().erased_definitions;
+            let params = self.parse_named_function_params(allow_erased);
             self.consume_function_type_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
-            return self.alloc_function_type(mark, params, body, arrow);
+            return self.alloc_function_type(
+                mark,
+                params.params,
+                body,
+                arrow,
+                params.erased_params,
+            );
         }
 
         if let Some(arrow) = self.unnamed_by_name_function_type_arrow() {
@@ -99,7 +107,8 @@ where
             self.consume_function_type_arrow(arrow);
             let body = self.type_expr();
             self.recover_missing_function_results();
-            return self.alloc_function_type(mark, params, body, arrow);
+            let erased_params = vec![false; params.len()];
+            return self.alloc_function_type(mark, params, body, arrow, erased_params);
         }
 
         let diagnostics_before = self.diagnostics.len();
@@ -120,7 +129,8 @@ where
         let body = self.type_expr();
         self.recover_missing_function_results();
         let params = self.function_type_params(parameter);
-        self.alloc_function_type(mark, params, body, arrow)
+        let erased_params = vec![false; params.len()];
+        self.alloc_function_type(mark, params, body, arrow, erased_params)
     }
 
     fn starts_empty_function_type(&mut self) -> bool {
@@ -148,7 +158,13 @@ where
         }
 
         let first_name = self.cursor.lookahead(1).clone();
-        let first_colon = self.cursor.lookahead(2).clone();
+        let erased_prefix = self.features().erased_definitions
+            && first_name.kind == TokenKind::Identifier
+            && self.token_text(&first_name).ok() == Some("erased");
+        let name_offset = if erased_prefix { 2 } else { 1 };
+        let colon_offset = if erased_prefix { 3 } else { 2 };
+        let first_name = self.cursor.lookahead(name_offset).clone();
+        let first_colon = self.cursor.lookahead(colon_offset).clone();
         if !matches!(
             first_name.kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
@@ -316,9 +332,10 @@ where
         }
     }
 
-    fn parse_named_function_params(&mut self) -> Vec<TreeId<Untyped>> {
+    fn parse_named_function_params(&mut self, allow_erased: bool) -> NamedFunctionParams {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
         let mut params = Vec::new();
+        let mut erased_params = Vec::new();
 
         loop {
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
@@ -333,7 +350,11 @@ where
                 break;
             }
 
-            let mark = self.mark();
+            let is_erased = allow_erased && self.current_is_erased_name();
+            if is_erased {
+                self.advance();
+            }
+            let parameter_mark = self.mark();
             let name = match self.intern_current_term_name() {
                 Ok(name)
                     if matches!(
@@ -373,7 +394,7 @@ where
 
             let type_tree = self.type_expr();
             params.push(self.alloc_from(
-                mark,
+                parameter_mark,
                 TreeKind::ValDef(ValDef {
                     name,
                     tpt: type_tree,
@@ -381,6 +402,7 @@ where
                     metadata: Modifiers::default(),
                 }),
             ));
+            erased_params.push(is_erased);
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self
@@ -412,7 +434,18 @@ where
             break;
         }
 
-        params
+        NamedFunctionParams {
+            params,
+            erased_params,
+        }
+    }
+
+    fn current_is_erased_name(&mut self) -> bool {
+        if self.current().kind != TokenKind::Identifier {
+            return false;
+        }
+        let erased = self.known_names().erased;
+        self.current_is_known_name(erased).unwrap_or(false)
     }
 
     fn accept_function_param_colon(&mut self) -> bool {
@@ -478,14 +511,23 @@ where
         params: Vec<TreeId<Untyped>>,
         body: TreeId<Untyped>,
         arrow: FunctionTypeArrow,
+        erased_params: Vec<bool>,
     ) -> TreeId<Untyped> {
         let kind = match arrow {
+            FunctionTypeArrow::Ordinary if erased_params.iter().any(|erased| *erased) => {
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
+                    params,
+                    result: body,
+                    modifiers: Modifiers::default(),
+                    erased_params,
+                }))
+            }
             FunctionTypeArrow::Ordinary => {
                 TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body }))
             }
             FunctionTypeArrow::Context => {
                 TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
-                    erased_params: vec![false; params.len()],
+                    erased_params,
                     modifiers: Modifiers {
                         modifiers: vec![Modifier::Given],
                         ..Modifiers::default()
@@ -719,6 +761,11 @@ const fn is_function_param_colon(kind: TokenKind) -> bool {
 enum FunctionTypeArrow {
     Ordinary,
     Context,
+}
+
+struct NamedFunctionParams {
+    params: Vec<TreeId<Untyped>>,
+    erased_params: Vec<bool>,
 }
 
 #[cfg(test)]
@@ -2330,6 +2377,59 @@ mod tests {
         ));
         assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
         assert_eq!(function.erased_params, vec![false]);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_erased_named_function_parameter_when_enabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased x: A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type with erased metadata");
+        };
+        assert_eq!(function.erased_params, vec![true]);
+        assert!(function.modifiers.modifiers.is_empty());
+        assert_eq!(function.params.len(), 1);
+        let parameter_name = {
+            let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+                panic!("expected a named function parameter");
+            };
+            *parameter.name.as_name()
+        };
+        assert_eq!(parser.names.resolve(parameter_name.text()), "x");
+        assert_eq!(
+            parser
+                .ast()
+                .get(function.params[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(8, 12).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
