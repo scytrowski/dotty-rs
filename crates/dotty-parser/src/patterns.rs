@@ -544,7 +544,12 @@ fn is_pattern_variable<S: TokenSource>(parser: &Parser<'_, '_, S>, tree: TreeId<
         return false;
     };
     let name = parser.names.resolve(identifier.name.text());
-    name == "_" || name.chars().next().is_some_and(char::is_lowercase)
+    if matches!(name, "false" | "true" | "null") {
+        return false;
+    }
+    name.chars()
+        .next()
+        .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
 }
 
 fn is_numeric_literal(kind: TokenKind) -> bool {
