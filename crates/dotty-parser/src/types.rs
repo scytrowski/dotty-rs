@@ -203,15 +203,14 @@ where
             );
         }
 
-        let match_type = self.alloc_from(
+        self.alloc_from(
             mark,
             TreeKind::MatchTypeTree(MatchTypeTree {
                 bound: None,
                 selector,
                 cases,
             }),
-        );
-        match_type
+        )
     }
 
     fn parse_match_type_cases(&mut self) -> Vec<TreeId<Untyped>> {

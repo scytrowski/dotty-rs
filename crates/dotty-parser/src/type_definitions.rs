@@ -97,11 +97,10 @@ where
                     .position
                     .map(|position| position.span().range().end()),
                 _ => None,
-            } {
-                if let Ok(range) = TextRange::new(lambda_start, end) {
-                    self.ast.get_mut(lambda).position =
-                        Some(SourceSpan::new(self.source_id, Span::without_point(range)));
-                }
+            } && let Ok(range) = TextRange::new(lambda_start, end)
+            {
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
             }
             lambda
         } else {
