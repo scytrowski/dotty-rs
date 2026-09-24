@@ -89,6 +89,20 @@ where
             return self.error_type(self.span_from(mark));
         }
 
+        if let Some(arrow) = self.unnamed_erased_function_type_arrow() {
+            let params = self.parse_unnamed_erased_function_params();
+            self.consume_function_type_arrow(arrow);
+            let body = self.type_expr();
+            self.recover_missing_function_results();
+            return self.alloc_function_type(
+                mark,
+                params.params,
+                body,
+                arrow,
+                params.erased_params,
+            );
+        }
+
         if let Some(arrow) = self.named_function_type_arrow() {
             let allow_erased = self.features().erased_definitions;
             let params = self.parse_named_function_params(allow_erased);
@@ -330,6 +344,66 @@ where
         }
     }
 
+    /// Recognizes the Scala 3.9-only leading unnamed erased parameter form.
+    ///
+    /// This deliberately does not recognize erased markers after the first
+    /// parameter or more than one leading marker. Those forms belong to a
+    /// later grammar increment and must not be accepted accidentally here.
+    fn unnamed_erased_function_type_arrow(&mut self) -> Option<FunctionTypeArrow> {
+        if !self.features().erased_definitions
+            || self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen)
+        {
+            return None;
+        }
+
+        let marker = self.cursor.lookahead(1).clone();
+        if marker.kind != TokenKind::Identifier || self.token_text(&marker).ok() != Some("erased") {
+            return None;
+        }
+
+        let first_type = self.cursor.lookahead(2).clone();
+        if first_type.kind == TokenKind::Punctuation(Punctuation::RightParen)
+            || first_type.kind == TokenKind::Eof
+        {
+            return None;
+        }
+
+        if is_function_param_colon(first_type.kind) {
+            return None;
+        }
+
+        // `(erased x: A)` is the already-supported named form. Keep it on
+        // that path rather than treating `x` as an unnamed type followed by a
+        // stray colon.
+        if matches!(
+            first_type.kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && is_function_param_colon(self.cursor.lookahead(3).kind)
+        {
+            return None;
+        }
+
+        let mut depth = 1usize;
+        let mut offset = 1usize;
+        loop {
+            let token = self.cursor.lookahead(offset).clone();
+            match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftParen) => depth += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self
+                            .lookahead_is_arrow(offset + 1)
+                            .then_some(FunctionTypeArrow::Ordinary);
+                    }
+                }
+                TokenKind::Eof => return None,
+                _ => {}
+            }
+            offset = offset.saturating_add(1);
+        }
+    }
+
     fn parse_unnamed_function_params(&mut self) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
         let mut params = Vec::new();
@@ -380,6 +454,72 @@ where
         }
 
         params
+    }
+
+    fn parse_unnamed_erased_function_params(&mut self) -> NamedFunctionParams {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
+        let mut params = Vec::new();
+        let mut erased_params = Vec::new();
+
+        if !self.current_is_erased_name() {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a leading `erased` function type parameter",
+            );
+            return NamedFunctionParams {
+                params,
+                erased_params,
+            };
+        }
+        self.advance();
+
+        params.push(self.type_expr());
+        erased_params.push(true);
+
+        loop {
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::RightParen))
+                {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a function type parameter after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+                if self.current_is_erased_name() {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "only the leading unnamed function type parameter may be `erased`",
+                    );
+                    self.recover_unnamed_function_params();
+                    self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+                    break;
+                }
+                params.push(self.type_expr());
+                erased_params.push(false);
+                continue;
+            }
+
+            if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                break;
+            }
+
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `,` or `)` after function type parameter",
+            );
+            self.recover_unnamed_function_params();
+            self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+            break;
+        }
+
+        NamedFunctionParams {
+            params,
+            erased_params,
+        }
     }
 
     fn recover_unnamed_function_params(&mut self) {
@@ -2497,6 +2637,123 @@ mod tests {
                 .range(),
             TextRange::new(8, 12).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_leading_unnamed_erased_function_parameter_when_enabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type with erased metadata");
+        };
+        assert_eq!(function.erased_params, vec![true]);
+        assert!(function.modifiers.modifiers.is_empty());
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_trailing_unnamed_function_parameters_after_one_leading_erased_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A, B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary function type with erased metadata");
+        };
+        assert_eq!(function.erased_params, vec![true, false]);
+        assert_eq!(function.params.len(), 2);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn leading_unnamed_erased_parameters_keep_full_type_and_result_parsing() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased List[A]) => A => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 12, 13),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Operator, 22, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(outer)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected an outer erased function type");
+        };
+        assert_eq!(outer.erased_params, vec![true]);
+        assert!(matches!(
+            parser.ast().get(outer.params[0]).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(outer.result).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
