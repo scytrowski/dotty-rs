@@ -2756,6 +2756,31 @@ mod tests {
     }
 
     #[test]
+    fn does_not_activate_leading_unnamed_erased_context_parameters_when_disabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A) ?=> B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(!matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
     fn preserves_mixed_leading_unnamed_erased_context_parameter_flags() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
