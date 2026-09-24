@@ -93,7 +93,9 @@ fixtures use a separate `block-erased` mode: their source imports
 matching `ParserFeatures` policy. The normalized
 `FunctionWithMods.erased_params` vector is compared positionally; context
 functions also expose their `Given` modifier through the normal normalized
-metadata.
+metadata. The corpus includes the narrow leading unnamed ordinary-function
+form `(erased A, B) => C`; its parameters remain type trees and the first
+`erased_params` entry is `true`.
 Singleton enum cases expose a separate `enum_case: true` metadata field; this
 is distinct from ordinary `case` metadata, and comma-separated singleton cases
 remain one normalized `PatDef`.
