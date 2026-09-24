@@ -341,17 +341,10 @@ where
 
             let mut parameter_metadata = metadata.clone();
             add_class_parameter_metadata(owner, first_ordinary_clause, &mut parameter_metadata);
-            let name = synthetic_term_param_name(self.names, next_index);
+            let parameter =
+                self.alloc_synthetic_context_parameter(mark, tpt, next_index, parameter_metadata);
             next_index = next_index.saturating_add(1);
-            params.push(self.alloc_from(
-                mark,
-                TreeKind::ValDef(ValDef {
-                    name,
-                    tpt,
-                    rhs: None,
-                    metadata: parameter_metadata,
-                }),
-            ));
+            params.push(parameter);
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
@@ -370,6 +363,25 @@ where
         }
 
         params
+    }
+
+    pub(crate) fn alloc_synthetic_context_parameter(
+        &mut self,
+        mark: crate::Mark,
+        tpt: TreeId<Untyped>,
+        index: usize,
+        metadata: Modifiers,
+    ) -> TreeId<Untyped> {
+        let name = synthetic_term_param_name(self.names, index);
+        self.alloc_from(
+            mark,
+            TreeKind::ValDef(ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata,
+            }),
+        )
     }
 
     fn parse_param_name(&mut self) -> TermName {

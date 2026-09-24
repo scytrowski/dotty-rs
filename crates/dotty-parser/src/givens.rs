@@ -3,7 +3,7 @@
 //! Alias, conditional, and structural forms share the same parser dispatch;
 //! semantic given synthesis remains outside this source-parser layer.
 
-use dotty_core::ast::{DefDef, Modifier, ModuleDef, TypeDef, ValDef};
+use dotty_core::ast::{DefDef, Modifier, Modifiers, ModuleDef, TypeDef, ValDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::modifiers::DefinitionPrefix;
@@ -59,7 +59,48 @@ where
         } else {
             Vec::new()
         };
-        let mut method_like = !type_params.is_empty()
+        let mut value_param_clauses = Vec::new();
+        let mut num_lead_params = 0;
+        let mut has_explicit_parameter_clause = false;
+        let tpt = loop {
+            if self.starts_given_parameter_clause() {
+                has_explicit_parameter_clause = true;
+                let clauses = self
+                    .parse_term_param_clauses(ParamOwner::Given)
+                    .into_iter()
+                    .filter(|clause| !clause.is_empty())
+                    .collect::<Vec<_>>();
+                num_lead_params += clauses.iter().map(Vec::len).sum::<usize>();
+                value_param_clauses.extend(clauses);
+                self.expect_arrow();
+                continue;
+            }
+
+            let mark = self.mark();
+            let candidate = self.with_location(location, |parser| {
+                parser.with_parse_kind(ParseKind::Type, |parser| parser.parse_infix_type())
+            });
+            if self.current_is_arrow() {
+                self.advance();
+                let metadata = Modifiers {
+                    modifiers: vec![Modifier::Given],
+                    ..Modifiers::default()
+                };
+                let parameter = self.alloc_synthetic_context_parameter(
+                    mark,
+                    candidate,
+                    num_lead_params.saturating_add(1),
+                    metadata,
+                );
+                num_lead_params = num_lead_params.saturating_add(1);
+                value_param_clauses.push(vec![parameter]);
+                continue;
+            }
+            break candidate;
+        };
+        let method_like = !type_params.is_empty()
+            || has_explicit_parameter_clause
+            || !value_param_clauses.is_empty()
             || prefix
                 .metadata
                 .modifiers
@@ -68,22 +109,6 @@ where
                 .metadata
                 .modifiers
                 .contains(&dotty_core::ast::Modifier::Erased);
-        let value_param_clauses = if self.starts_given_parameter_clause() {
-            method_like = true;
-            let clauses = self
-                .parse_term_param_clauses(ParamOwner::Given)
-                .into_iter()
-                .filter(|clause| !clause.is_empty())
-                .collect();
-            self.expect_arrow();
-            clauses
-        } else {
-            Vec::new()
-        };
-
-        let tpt = self.with_location(location, |parser| {
-            parser.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
-        });
 
         if self.current_is_given_colon() {
             return self.parse_structural_given(
@@ -495,6 +520,90 @@ mod tests {
                 .modifiers
                 .contains(&Modifier::PrivateLocal)
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_anonymous_given_type_condition_as_a_synthetic_using_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given H => I = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::Identifier, 15, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        let [parameter] = definition.value_param_clauses[0].as_slice() else {
+            panic!("expected one synthetic context parameter");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+            panic!("expected a value parameter");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x$1");
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn chains_anonymous_given_type_conditions_in_source_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given H => I => J = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        assert_eq!(definition.value_param_clauses.len(), 2);
+        let parameter_names = definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                let TreeKind::ValDef(parameter) = &parser.ast().get(clause[0]).kind else {
+                    panic!("expected a synthetic context parameter");
+                };
+                parser.names.resolve(parameter.name.as_name().text())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parameter_names, ["x$1", "x$2"]);
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 
