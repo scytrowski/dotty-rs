@@ -27,7 +27,7 @@ use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
 
 const SYMBOL_ANNOTATED: &[u8] =
-    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/SymbolAnnotated.tasty");
+    include_bytes!("../../../dotty-tasty-unpickler/tests/fixtures/semantic/SymbolAnnotated.tasty");
 /// `@SymbolMarker val x`, pinned the same way
 /// `dotty-tasty-unpickler/src/enter.rs`'s own unit tests pin it.
 const SYMBOL_ANNOTATED_X: u32 = 31;

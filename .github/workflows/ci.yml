@@ -18,6 +18,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
 
 jobs:
   checks:
@@ -28,17 +30,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Cache Cargo registry and build artifacts
+      - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/debug
-            target/.rustc_info.json
-          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-debug-
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
