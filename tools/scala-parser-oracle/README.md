@@ -95,7 +95,9 @@ matching `ParserFeatures` policy. The normalized
 functions also expose their `Given` modifier through the normal normalized
 metadata. The corpus includes the narrow leading unnamed ordinary-function
 form `(erased A, B) => C`; its parameters remain type trees and the first
-`erased_params` entry is `true`.
+`erased_params` entry is `true`. It also covers the corresponding context-
+function form `(erased A, B) ?=> C`, where the normalized function exposes
+the `Given` modifier and the same positional erased metadata.
 Singleton enum cases expose a separate `enum_case: true` metadata field; this
 is distinct from ordinary `case` metadata, and comma-separated singleton cases
 remain one normalized `PatDef`.
