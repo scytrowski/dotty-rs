@@ -344,9 +344,12 @@ Scala 3.9 `InfixType` expressions with generic symbolic and identifier
 operators, match types with ordered `CaseDef` children, ordinary/context
 function arrows, and wildcard type arguments with optional lower and upper
 bounds. Match-type patterns use `InfixType`, while results use the full
-`type_expr()` entry. The first increment accepts braced case regions such as
-`T match { case A => B }`; layout-only type case regions, bounded match-type
-definitions, and the remaining full type grammar are still deferred.
+`type_expr()` entry. Match types support braced case regions, applied and
+tuple case patterns, infix case patterns, wildcard cases, and bounded aliases
+with an upper bound. For a bounded alias, the upper bound is stored in the
+shared `MatchTypeTree.bound`; a lower bound combined with a match-type alias is
+diagnosed according to Scala's parser rule. Layout-only type case regions and
+the remaining full type grammar are still deferred.
 Wildcard syntax is enabled by the type-argument context (`List[?]` and
 `List[? >: String <: Number]`); a top-level `?` remains an invalid type and
 produces a parser diagnostic. `type_expr()` parses arrows outside the
@@ -414,7 +417,7 @@ placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
 their right-hand sides and parameter defaults are diagnosed, as are
 class-like members and definition modifiers. Refined type members,
-capture-checking refinements, opaque, bounded match-type definitions, and other
+capture-checking refinements, opaque, and other
 full type forms remain deferred.
 
 ### Class-like definitions and templates
@@ -573,9 +576,10 @@ _.name
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
 annotated, and refined type names, plus the supported generic infix-type
-forms. Remaining refined-type forms, opaque, bounded match-type definitions, and
-other full type forms remain deferred and produce a parser diagnostic in this
-milestone.
+forms. Remaining refined-type forms, opaque, and other full type forms remain
+deferred and produce a parser diagnostic in this milestone. Upper-bounded
+match-type aliases are supported when their right-hand side is a match type;
+lower bounds cannot be combined with that alias form.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the

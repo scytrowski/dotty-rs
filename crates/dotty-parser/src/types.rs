@@ -2017,6 +2017,32 @@ mod tests {
     }
 
     #[test]
+    fn recovers_a_match_type_with_a_missing_result_and_brace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match { case A =>",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::MatchTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_parenthesized_type_as_parens() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

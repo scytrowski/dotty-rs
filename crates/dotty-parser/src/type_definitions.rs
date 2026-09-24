@@ -4,7 +4,7 @@
 //! type bounds. Parameterized definitions reuse `type_params.rs` and preserve
 //! the source-level abstraction in `LambdaTypeTree`.
 
-use dotty_core::ast::{LambdaTypeTree, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, MatchTypeTree, TypeBoundsTree, TypeDef};
 use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
 use crate::modifiers::DefinitionPrefix;
@@ -90,6 +90,17 @@ where
                 let range = TextRange::new(lambda_start, end).expect("lambda span is ordered");
                 self.ast.get_mut(lambda).position =
                     Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            } else if let Some(end) = match self.ast.get(rhs).kind {
+                TreeKind::MatchTypeTree(_) => self
+                    .ast
+                    .get(rhs)
+                    .position
+                    .map(|position| position.span().range().end()),
+                _ => None,
+            } && let Ok(range) = TextRange::new(lambda_start, end)
+            {
+                self.ast.get_mut(lambda).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
             }
             lambda
         } else {
@@ -137,6 +148,18 @@ where
         location: Location,
         definition_start: u32,
     ) -> TreeId<Untyped> {
+        let bounds_start = self.current().span.start();
+        let low = if self.accept_type_operator(">:") {
+            Some(self.parse_type_definition_bound_type(location))
+        } else {
+            None
+        };
+        let high = if self.accept_type_operator("<:") {
+            Some(self.parse_type_definition_bound_type(location))
+        } else {
+            None
+        };
+
         if self.accept_type_operator("=") {
             let owns_layout = self.current().kind == TokenKind::Indent;
             if owns_layout {
@@ -160,20 +183,31 @@ where
             if owns_layout && self.current().kind == TokenKind::Outdent {
                 self.advance();
             }
+            if low.is_some() || high.is_some() {
+                if let TreeKind::MatchTypeTree(MatchTypeTree { bound, .. }) =
+                    &mut self.ast.get_mut(rhs).kind
+                {
+                    if low.is_none() {
+                        let bound_id = high;
+                        *bound = bound_id;
+                        if let Some(bound_id) = bound_id {
+                            self.extend_match_type_span(rhs, bound_id);
+                        }
+                    } else {
+                        self.report(
+                            ParseDiagnosticKind::UnexpectedToken,
+                            "a match type alias cannot have a lower type bound",
+                        );
+                    }
+                } else {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        "only a match type alias can combine a type bound with `=`",
+                    );
+                }
+            }
             return rhs;
         }
-
-        let bounds_start = self.current().span.start();
-        let low = if self.accept_type_operator(">:") {
-            Some(self.parse_type_definition_bound_type(location))
-        } else {
-            None
-        };
-        let high = if self.accept_type_operator("<:") {
-            Some(self.parse_type_definition_bound_type(location))
-        } else {
-            None
-        };
 
         if low.is_none() && high.is_none() {
             // Dotty represents an abstract declaration's empty bounds at the
@@ -191,6 +225,30 @@ where
                 alias: None,
             }),
         )
+    }
+
+    fn extend_match_type_span(&mut self, match_type: TreeId<Untyped>, bound: TreeId<Untyped>) {
+        let Some(bound_position) = self.ast.get(bound).position else {
+            return;
+        };
+        let Some(match_type_position) = self.ast.get(match_type).position else {
+            return;
+        };
+        let match_end = match &self.ast.get(match_type).kind {
+            TreeKind::MatchTypeTree(match_type_tree) => match_type_tree
+                .cases
+                .last()
+                .and_then(|case| self.ast.get(*case).position)
+                .map(|position| position.span().range().end())
+                .unwrap_or(match_type_position.span().range().end()),
+            _ => match_type_position.span().range().end(),
+        };
+        let range = TextRange::new(bound_position.span().range().start(), match_end);
+        let Ok(range) = range else {
+            return;
+        };
+        self.ast.get_mut(match_type).position =
+            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
     }
 
     fn parse_type_definition_bound_type(&mut self, location: Location) -> TreeId<Untyped> {
@@ -426,6 +484,128 @@ mod tests {
             TreeKind::TypeBoundsTree(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn attaches_an_upper_bound_to_a_parameterized_match_type_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type Elem[X] <: Any = X match { case _ => X }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 9),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Identifier, 10, 11),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    11,
+                    12,
+                ),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Operator, 20, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Keyword(HardKeyword::Match), 24, 29),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace),
+                    30,
+                    31,
+                ),
+                token(TokenKind::Keyword(HardKeyword::Case), 32, 36),
+                token(TokenKind::Identifier, 37, 38),
+                token(TokenKind::Operator, 39, 41),
+                token(TokenKind::Identifier, 42, 43),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBrace),
+                    44,
+                    45,
+                ),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { body, .. }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected LambdaTypeTree");
+        };
+        let TreeKind::MatchTypeTree(MatchTypeTree { bound, .. }) = parser.ast().get(body).kind
+        else {
+            panic!("expected MatchTypeTree");
+        };
+        assert!(bound.is_some());
+        assert!(matches!(
+            parser.ast().get(bound.unwrap()).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(body).position.unwrap().span().range(),
+            TextRange::new(16, 43).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_lower_bound_on_a_match_type_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type Elem >: Nothing = X match { case _ => X }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 20),
+                token(TokenKind::Operator, 21, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Keyword(HardKeyword::Match), 25, 30),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace),
+                    31,
+                    32,
+                ),
+                token(TokenKind::Keyword(HardKeyword::Case), 33, 37),
+                token(TokenKind::Identifier, 38, 39),
+                token(TokenKind::Operator, 40, 42),
+                token(TokenKind::Identifier, 43, 44),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBrace),
+                    45,
+                    46,
+                ),
+                token(TokenKind::Eof, 46, 46),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::MatchTypeTree(MatchTypeTree { bound, .. }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected MatchTypeTree");
+        };
+        assert!(bound.is_none());
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken })
+        );
     }
 
     #[test]
