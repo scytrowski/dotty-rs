@@ -691,6 +691,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
         TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => "ExtMethods",
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
+        TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
         TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
         TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
@@ -931,6 +932,7 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             vec![context_bound.bound]
         }
         TreeKind::ByNameTypeTree(by_name) => vec![by_name.result],
+        TreeKind::SingletonTypeTree(singleton) => vec![singleton.reference],
         TreeKind::TypeTree(_) => Vec::new(),
         TreeKind::Block(block) => {
             let mut children = Vec::with_capacity(block.stats.len() + 1);

@@ -1,7 +1,7 @@
 //! Shared parsing of dotted source references.
 
 use dotty_core::ast::{Ident, Select};
-use dotty_core::{Name, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{HardKeyword, Name, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
 
@@ -29,6 +29,17 @@ where
         &mut self,
         namespace: ReferenceNamespace,
     ) -> Result<TreeId<Untyped>, QualifiedReferenceError> {
+        self.parse_qualified_reference_until_keyword(namespace, None)
+    }
+
+    /// Parses a qualified reference while leaving a final `.<keyword>` suffix
+    /// for the caller. This is used by type syntax whose final selector is a
+    /// keyword rather than a term/type name, such as `x.type`.
+    pub(crate) fn parse_qualified_reference_until_keyword(
+        &mut self,
+        namespace: ReferenceNamespace,
+        terminal: Option<HardKeyword>,
+    ) -> Result<TreeId<Untyped>, QualifiedReferenceError> {
         let mark = self.mark();
         let Some((name, backquoted)) = self.current_reference_name(namespace) else {
             return Err(QualifiedReferenceError::MissingInitial);
@@ -36,7 +47,16 @@ where
         self.advance();
 
         let mut tree = self.alloc_from(mark, TreeKind::Ident(Ident { name, backquoted }));
-        while self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Dot)) {
+        while self
+            .cursor
+            .at(TokenKind::Punctuation(dotty_core::Punctuation::Dot))
+        {
+            if terminal
+                .is_some_and(|keyword| self.cursor.lookahead(1).kind == TokenKind::Keyword(keyword))
+            {
+                break;
+            }
+            self.advance();
             let Some((name, backquoted)) = self.current_reference_name(namespace) else {
                 return Err(QualifiedReferenceError::MissingSegment);
             };

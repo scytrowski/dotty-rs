@@ -37,7 +37,10 @@ Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
 Applied-type fixtures also cover Scala wildcard arguments, including unbounded
 wildcards and `>: ... <: ...` bounds. The parser keeps those bounds in the
 existing `TypeBoundsTree` and accepts wildcard syntax only in nested type
-argument positions.
+argument positions. Type-definition fixtures also cover path singleton types
+such as `x.type` and `foo.bar.type`; their term-valued references are rendered
+as `SingletonTypeTree`, while ordinary qualified type references remain in the
+type namespace.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
