@@ -64,6 +64,7 @@ where
         let mut has_explicit_parameter_clause = false;
         let parents = loop {
             if self.starts_given_parameter_clause() {
+                let clause_mark = self.mark();
                 has_explicit_parameter_clause = true;
                 let is_using = self.current_is_using_parameter_clause();
                 let clause = self.parse_single_term_param_clause(
@@ -75,6 +76,25 @@ where
                 num_lead_params += clause.len();
                 if !clause.is_empty() {
                     value_param_clauses.push(clause);
+                } else if num_lead_params > 0 {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a context parameter after `()`",
+                    );
+                    let missing_type = self.error_type(self.zero_width_span(clause_mark.start()));
+                    let parameter = self.alloc_synthetic_context_parameter(
+                        clause_mark,
+                        missing_type,
+                        num_lead_params.saturating_add(1),
+                        Modifiers {
+                            modifiers: vec![Modifier::Given],
+                            ..Modifiers::default()
+                        },
+                    );
+                    self.ast.get_mut(parameter).position =
+                        Some(self.zero_width_span(clause_mark.start()));
+                    num_lead_params = num_lead_params.saturating_add(1);
+                    value_param_clauses.push(vec![parameter]);
                 }
                 self.expect_arrow();
                 continue;
@@ -1085,6 +1105,64 @@ mod tests {
 
         let _ = parser.parse_given_definition(Location::Elsewhere);
 
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_a_later_empty_given_clause_as_an_error_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A => () => B = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        assert_eq!(definition.value_param_clauses.len(), 2);
+        assert_eq!(definition.value_param_clauses[0].len(), 1);
+        assert_eq!(definition.value_param_clauses[1].len(), 1);
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(definition.value_param_clauses[1][0]).kind
+        else {
+            panic!("expected a recovered context parameter");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x$2");
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Error(
+                dotty_core::ast::ErrorNode {
+                    kind: dotty_core::ast::ErrorNodeKind::MissingType
+                }
+            ))
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(definition.value_param_clauses[1][0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(11, 11).unwrap()
+        );
         assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
