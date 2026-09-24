@@ -1,4 +1,5 @@
 use super::*;
+use crate::ParseDiagnosticKind;
 use crate::compilation_unit::tests::{parser_for, token};
 use dotty_core::ast::{
     ApplyKind, Block, Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode,
@@ -2733,6 +2734,105 @@ fn parses_a_type_application_with_multiple_arguments() {
         TextRange::new(0, 9).unwrap()
     );
     assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn rejects_a_direct_wildcard_in_a_term_type_application() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo[?]",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+            token(TokenKind::Operator, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::TypeApply(ref type_apply) = parser.ast().get(id).kind else {
+        panic!("expected a type application");
+    };
+    assert!(matches!(
+        parser.ast().get(type_apply.args[0]).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn rejects_a_bounded_wildcard_in_a_term_type_application_and_preserves_the_closer() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo[? <: A]",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+            token(TokenKind::Operator, 4, 5),
+            token(TokenKind::Operator, 6, 8),
+            token(TokenKind::Identifier, 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+            token(TokenKind::Eof, 11, 11),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::TypeApply(ref type_apply) = parser.ast().get(id).kind else {
+        panic!("expected a type application");
+    };
+    assert!(matches!(
+        parser.ast().get(type_apply.args[0]).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn allows_a_wildcard_inside_a_nested_term_type_application() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo[List[?]]",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+            token(TokenKind::Identifier, 4, 8),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 8, 9),
+            token(TokenKind::Operator, 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+            token(TokenKind::Eof, 12, 12),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::TypeApply(ref type_apply) = parser.ast().get(id).kind else {
+        panic!("expected the outer type application");
+    };
+    let TreeKind::AppliedTypeTree(ref inner) = parser.ast().get(type_apply.args[0]).kind else {
+        panic!("expected a nested applied type");
+    };
+    assert!(matches!(
+        parser.ast().get(inner.args[0]).kind,
+        TreeKind::TypeBoundsTree(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]

@@ -336,7 +336,10 @@ forms, remains future work. Likewise, the type parser currently handles
 simple, recursively applied, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus the
 narrow Scala 3.9 union/intersection subset and ordinary/context function
-arrows. `type_expr()` parses both arrows above the `|` union layer, while `&`
+arrows, plus wildcard type arguments with optional lower and upper bounds.
+Wildcard syntax is enabled by the type-argument context (`List[?]` and
+`List[? >: String <: Number]`); a top-level `?` remains an invalid type and
+produces a parser diagnostic. `type_expr()` parses both arrows above the `|` union layer, while `&`
 binds tighter than `|`. The union and intersection operators produce
 source-level `InfixOp` trees with type-namespace operator names; ordinary
 arrows produce `Function` trees and context arrows produce `FunctionWithMods`.
@@ -372,8 +375,9 @@ bounds, backquoted type names, and one flat higher-kinded parameter clause
 (`type F[A] = A`). Parameterized declarations preserve their parameters in a
 shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. The supported
-recursive applied-type subset is represented by `AppliedTypeTree`; unions and
-intersections use `InfixOp` with `&` binding tighter than `|`. Generic infix
+recursive applied-type subset is represented by `AppliedTypeTree`; wildcard
+arguments use `TypeBoundsTree` with optional `low` and `high` children. Unions
+and intersections use `InfixOp` with `&` binding tighter than `|`. Generic infix
 types beyond those two operators, refined, opaque, match, and other full type
 forms remain deferred.
 

@@ -1,6 +1,6 @@
 use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
-    PolyFunction, Tuple, UntypedNode, ValDef,
+    PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -16,7 +16,7 @@ where
     /// The caller owns the tree that precedes the list; this helper is shared
     /// by term-level type applications and applied type trees so that their
     /// delimiter and recovery behavior stays identical.
-    pub(crate) fn parse_type_argument_list(&mut self) -> Vec<TreeId<Untyped>> {
+    pub(crate) fn parse_type_argument_list(&mut self, wild_ok: bool) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
 
         let mut args = Vec::new();
@@ -29,7 +29,7 @@ where
         }
 
         loop {
-            args.push(self.type_expr());
+            args.push(self.with_type_argument(wild_ok, |parser| parser.type_expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
                 break;
@@ -780,6 +780,22 @@ where
 
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        if self.current().kind == TokenKind::Operator && self.current_text_is("?") {
+            let wildcard = self.parse_wildcard_type(mark);
+            if self.allows_wildcard_type() {
+                return wildcard;
+            }
+            let position = self
+                .ast
+                .get(wildcard)
+                .position
+                .unwrap_or_else(|| self.current_span());
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "a wildcard type is only valid as a type argument",
+            );
+            return self.error_type(position);
+        }
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 return self.simple_type();
@@ -793,6 +809,28 @@ where
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedType, "expected a type operand");
         self.error_type(position)
+    }
+
+    fn parse_wildcard_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let low = if self.accept_type_bound_operator(">:") {
+            Some(self.type_expr())
+        } else {
+            None
+        };
+        let high = if self.accept_type_bound_operator("<:") {
+            Some(self.type_expr())
+        } else {
+            None
+        };
+        self.alloc_from(
+            mark,
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low,
+                high,
+                alias: None,
+            }),
+        )
     }
 
     fn parse_parenthesized_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -890,6 +928,19 @@ where
         Some(operator)
     }
 
+    fn accept_type_bound_operator(&mut self, expected: &str) -> bool {
+        if matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::ColonOp
+        ) && self.current_text_is(expected)
+        {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Parses the small simple-type subset needed by simple expressions.
     pub(crate) fn simple_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
@@ -899,7 +950,7 @@ where
             .cursor
             .at(TokenKind::Punctuation(Punctuation::LeftBracket))
         {
-            let args = self.parse_type_argument_list();
+            let args = self.parse_type_argument_list(true);
             tree = self.alloc_from(
                 mark,
                 dotty_core::TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
@@ -1011,6 +1062,332 @@ mod tests {
             TextRange::new(0, 3).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_unbounded_wildcard_as_a_nested_type_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[?]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert_eq!(applied.args.len(), 1);
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected a wildcard type bounds tree");
+        };
+        assert!(bounds.low.is_none() && bounds.high.is_none() && bounds.alias.is_none());
+        assert_eq!(
+            parser
+                .ast()
+                .get(applied.args[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(5, 6).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_a_backquoted_question_type_name_inside_type_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[`?`]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::BackquotedIdentifier, 5, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_a_top_level_wildcard_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "?",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_wildcard_with_an_upper_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? <: Number]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected wildcard bounds");
+        };
+        assert!(bounds.low.is_none());
+        let Some(high) = bounds.high else {
+            panic!("expected an upper bound");
+        };
+        assert!(matches!(parser.ast().get(high).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_wildcard_with_a_lower_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? >: String]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected wildcard bounds");
+        };
+        let Some(low) = bounds.low else {
+            panic!("expected a lower bound");
+        };
+        assert!(matches!(parser.ast().get(low).kind, TreeKind::Ident(_)));
+        assert!(bounds.high.is_none());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_wildcard_with_both_bounds() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? >: Low <: High]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 21),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected wildcard bounds");
+        };
+        assert!(matches!(
+            bounds.low.map(|id| &parser.ast().get(id).kind),
+            Some(TreeKind::Ident(_))
+        ));
+        assert!(matches!(
+            bounds.high.map(|id| &parser.ast().get(id).kind),
+            Some(TreeKind::Ident(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_wildcard_inside_a_nested_applied_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Map[String, List[? <: Number]]",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Identifier, 4, 10),
+                token(TokenKind::Punctuation(Punctuation::Comma), 10, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 16, 17),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 28),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 28, 29),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 29, 30),
+                token(TokenKind::Eof, 30, 30),
+            ],
+            &mut names,
+        );
+
+        let outer_id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref outer) = parser.ast().get(outer_id).kind else {
+            panic!("expected the outer applied type");
+        };
+        assert_eq!(outer.args.len(), 2);
+        let inner_id = outer.args[1];
+        let TreeKind::AppliedTypeTree(ref inner) = parser.ast().get(inner_id).kind else {
+            panic!("expected the nested applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(inner.args[0]).kind else {
+            panic!("expected nested wildcard bounds");
+        };
+        assert!(bounds.low.is_none() && bounds.high.is_some());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_wildcard_bound_before_the_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? <: ]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_wildcard_closer_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? >: String",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.type_expr();
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_a_following_type_argument_after_a_missing_wildcard_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[? <: , String]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 10, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert_eq!(applied.args.len(), 2);
+        assert!(matches!(
+            parser.ast().get(applied.args[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -5227,7 +5604,7 @@ mod tests {
             &mut names,
         );
 
-        let args = parser.parse_type_argument_list();
+        let args = parser.parse_type_argument_list(true);
         assert_eq!(args.len(), 2);
         assert!(args.iter().all(|id| matches!(
             parser.ast().get(*id).kind,

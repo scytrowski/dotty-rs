@@ -296,7 +296,7 @@ where
         mark: crate::Mark,
         function: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
-        let args = self.parse_type_argument_list();
+        let args = self.parse_type_argument_list(false);
         self.alloc_from(
             mark,
             TreeKind::TypeApply(dotty_core::ast::TypeApply { function, args }),
