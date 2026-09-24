@@ -3,7 +3,7 @@
 //! Alias, conditional, and structural forms share the same parser dispatch;
 //! semantic given synthesis remains outside this source-parser layer.
 
-use dotty_core::ast::{DefDef, Modifier, Modifiers, ModuleDef, TypeDef, ValDef};
+use dotty_core::ast::{DefDef, Modifier, Modifiers, ModuleDef, New, TypeDef, ValDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::modifiers::DefinitionPrefix;
@@ -62,7 +62,7 @@ where
         let mut value_param_clauses = Vec::new();
         let mut num_lead_params = 0;
         let mut has_explicit_parameter_clause = false;
-        let tpt = loop {
+        let parents = loop {
             if self.starts_given_parameter_clause() {
                 has_explicit_parameter_clause = true;
                 let clauses = self
@@ -77,9 +77,7 @@ where
             }
 
             let mark = self.mark();
-            let candidate = self.with_location(location, |parser| {
-                parser.with_parse_kind(ParseKind::Type, |parser| parser.parse_infix_type())
-            });
+            let candidate = self.parse_given_parent(location);
             if self.current_is_arrow() {
                 self.advance();
                 let metadata = Modifiers {
@@ -96,7 +94,9 @@ where
                 value_param_clauses.push(vec![parameter]);
                 continue;
             }
-            break candidate;
+            let mut parents = vec![candidate];
+            self.parse_given_parent_suffixes(&mut parents, location);
+            break parents;
         };
         let method_like = !type_params.is_empty()
             || has_explicit_parameter_clause
@@ -110,16 +110,23 @@ where
                 .modifiers
                 .contains(&dotty_core::ast::Modifier::Erased);
 
-        if self.current_is_given_colon() {
+        let structural = self.current_is_given_colon()
+            || parents.len() > 1
+            || parents
+                .iter()
+                .any(|parent| matches!(self.ast.get(*parent).kind, TreeKind::Apply(_)));
+        if structural {
             return self.parse_structural_given(
                 mark,
                 name,
                 type_params,
                 value_param_clauses,
-                tpt,
+                parents,
                 prefix.metadata,
             );
         }
+
+        let tpt = parents[0];
 
         let mut metadata = prefix.metadata;
         if !metadata.modifiers.contains(&Modifier::Given) {
@@ -175,7 +182,7 @@ where
         name: dotty_core::TermName,
         type_params: Vec<TreeId<Untyped>>,
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
-        parent: TreeId<Untyped>,
+        parents: Vec<TreeId<Untyped>>,
         mut metadata: dotty_core::ast::Modifiers,
     ) -> ParsedStatement {
         if !metadata.modifiers.contains(&Modifier::Given) {
@@ -189,7 +196,7 @@ where
             mark.start(),
             type_params.clone(),
             value_param_clauses.clone(),
-            parent,
+            parents,
             body,
         );
 
@@ -217,6 +224,89 @@ where
                     variance: None,
                 }),
             ))
+        }
+    }
+
+    fn parse_given_parent_suffixes(
+        &mut self,
+        parents: &mut Vec<TreeId<Untyped>>,
+        location: Location,
+    ) {
+        loop {
+            let newline_count = self.newlines_before_given_parent_separator();
+            let separator = match self.cursor.lookahead(newline_count).kind {
+                TokenKind::Punctuation(Punctuation::Comma)
+                | TokenKind::Keyword(HardKeyword::With) => true,
+                _ => false,
+            };
+            if !separator {
+                return;
+            }
+            for _ in 0..newline_count {
+                self.advance();
+            }
+            self.advance();
+            if matches!(
+                self.current().kind,
+                TokenKind::ColonFollow
+                    | TokenKind::ColonEol
+                    | TokenKind::ColonOp
+                    | TokenKind::Punctuation(Punctuation::Colon)
+                    | TokenKind::Eof
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+            ) && self.current_text().ok() == Some(":")
+            {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a given parent after the separator",
+                );
+                return;
+            }
+            parents.push(self.parse_given_parent(location));
+        }
+    }
+
+    fn parse_given_parent(&mut self, location: Location) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut parent = self.with_parse_kind(ParseKind::Type, |parser| {
+            if parser.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+                parser.with_location(location, |parser| parser.type_expr())
+            } else {
+                parser.with_location(location, |parser| parser.parse_infix_type())
+            }
+        });
+        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
+            parent = self.parse_type_application(mark, parent);
+        }
+        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            let new_tree = self.alloc(
+                TreeKind::New(New { tpt: parent }),
+                self.ast.get(parent).position,
+            );
+            parent = self.parse_application(mark, new_tree);
+            while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+                parent = self.parse_application(mark, parent);
+            }
+        }
+        parent
+    }
+
+    fn newlines_before_given_parent_separator(&mut self) -> usize {
+        let mut count = 0;
+        while matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            count += 1;
+        }
+        if matches!(
+            self.cursor.lookahead(count).kind,
+            TokenKind::Punctuation(Punctuation::Comma) | TokenKind::Keyword(HardKeyword::With)
+        ) {
+            count
+        } else {
+            0
         }
     }
 
@@ -740,6 +830,104 @@ mod tests {
             parser.ast().get(template.body[0]).kind,
             TreeKind::DefDef(_)
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_structural_given_with_with_separated_parents() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A with B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::With), 8, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a structural given");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(given)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a module definition");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(given.template).kind else {
+            panic!("expected a template");
+        };
+        assert_eq!(template.parents.len(), 2);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_structural_given_with_constructor_and_type_parents() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given C() with D",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::With), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a structural given");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(given)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a module definition");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(given.template).kind else {
+            panic!("expected a template");
+        };
+        assert_eq!(template.parents.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.parents[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_structural_given_with_comma_separated_parents() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given C(), D",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a structural given");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(given)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a module definition");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(given.template).kind else {
+            panic!("expected a template");
+        };
+        assert_eq!(template.parents.len(), 2);
         assert!(parser.diagnostics().is_empty());
     }
 
