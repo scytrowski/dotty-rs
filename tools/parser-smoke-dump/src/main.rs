@@ -683,6 +683,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::DefDef(_) => "DefDef",
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
         TreeKind::Template(template)
             if !template.metadata.derives.is_empty() || !template.metadata.uses.is_empty() =>
         {
@@ -888,6 +889,18 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::RefinedTypeTree(refined) => {
+            let mut children = Vec::with_capacity(refined.refinements.len() + 1);
+            let include_parent = arena.get(refined.tpt).position.is_some_and(|position| {
+                let range = position.span().range();
+                range.start() != range.end()
+            });
+            if include_parent {
+                children.push(refined.tpt);
+            }
+            children.extend(refined.refinements.iter().copied());
+            children
+        }
         TreeKind::Template(template) => {
             let mut children = Vec::with_capacity(
                 1 + template.parents.len()

@@ -337,7 +337,7 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles
-simple, recursively applied, projected, annotated, parenthesized, and tuple type names needed by
+simple, recursively applied, projected, annotated, refined, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus the
 narrow Scala 3.9 union/intersection subset and ordinary/context function
 arrows, plus wildcard type arguments with optional lower and upper bounds.
@@ -398,7 +398,12 @@ the supported union/intersection layers. Path
 singleton aliases use `SingletonTypeTree` and preserve the term-valued path
 that precedes `.type`; literal singleton aliases use the same node around a
 decoded `Literal`. Unions and intersections use `InfixOp` with `&` binding
-tighter than `|`. Generic infix types beyond those two operators, refined,
+tighter than `|`. Refined types use the shared `RefinedTypeTree`; the initial
+subset supports abstract, aliased, and upper-bounded `TypeDef` members in
+source order, including the parentless `{ type X }` form. Parentless
+refinements use a zero-width `TypeTree` only as the non-optional AST parent
+placeholder and do not create a semantic refinement scope. Term members,
+refined type members, capture-checking refinements, generic infix types,
 opaque, match, and other full type forms remain deferred.
 
 ### Class-like definitions and templates
@@ -512,8 +517,8 @@ parentheses and tuples, syntactic selections including `this.member` and
 simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
 named extractor arguments. Extractor-looking source patterns intentionally
 remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
-phases. Sequence patterns, `given`, quoted and XML patterns, full
-`RefinedType`, remaining definition forms and full template semantics, legacy
+phases. Sequence patterns, `given`, quoted and XML patterns, remaining
+refined-type forms, remaining definition forms and full template semantics, legacy
 given syntax, remaining control flow (`do`/`while`),
 interpolation, quotes, and macros remain follow-up increments.
 
@@ -557,9 +562,10 @@ _.name
 ```
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
-union, and intersection type names. Generic infix types beyond `|` and `&`,
-refined, opaque, match, and other full type forms (for example `Foo + Bar`)
-remain deferred and produce a parser diagnostic in this milestone.
+annotated, and refined type names, plus the supported union and intersection
+forms. Generic infix types beyond `|` and `&`, remaining refined-type members,
+opaque, match, and other full type forms (for example `Foo + Bar`) remain
+deferred and produce a parser diagnostic in this milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the

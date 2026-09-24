@@ -1,11 +1,13 @@
 use dotty_core::ast::{
     Annotated, ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers,
-    NamedArg, Parens, PolyFunction, Select, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    NamedArg, Parens, PolyFunction, RefinedTypeTree, Select, Tuple, TypeBoundsTree, UntypedNode,
+    ValDef,
 };
 use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
-use crate::{ParseDiagnosticKind, Parser};
+use crate::statements::ParsedStatement;
+use crate::{Location, ParseDiagnosticKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -769,13 +771,111 @@ where
     }
 
     fn parse_intersection_type(&mut self) -> TreeId<Untyped> {
-        let mut tree = self.parse_annotated_type();
+        let mut tree = self.parse_refined_type();
         while let Some(operator) = self.accept_type_infix_operator("&") {
             self.consume_type_infix_newlines();
-            let right = self.parse_annotated_type();
+            let right = self.parse_refined_type();
             tree = self.alloc_infix(tree, operator, right);
         }
         tree
+    }
+
+    /// Parses `annotatedType` followed by zero or more refinement bodies.
+    ///
+    /// A parentless refinement is represented with the existing zero-width
+    /// `TypeTree` placeholder because `RefinedTypeTree` deliberately keeps a
+    /// non-optional parent across AST phases. It remains a syntax-only
+    /// placeholder; no refinement scope or semantic owner is created here.
+    fn parse_refined_type(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut tree = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+            self.synthetic_type_tree_at(mark.start())
+        } else {
+            self.parse_annotated_type()
+        };
+
+        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+            let refinements = self.parse_refinement_body();
+            tree = self.alloc_from(
+                mark,
+                TreeKind::RefinedTypeTree(RefinedTypeTree {
+                    tpt: tree,
+                    refinements,
+                }),
+            );
+        }
+        tree
+    }
+
+    fn parse_refinement_body(&mut self) -> Vec<TreeId<Untyped>> {
+        self.advance();
+        self.consume_refinement_separators();
+
+        let mut refinements = Vec::new();
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Outdent | TokenKind::Eof
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
+                if let ParsedStatement::Definition(definition) =
+                    self.parse_type_definition(Location::InBlock)
+                {
+                    refinements.push(definition);
+                }
+            } else {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "only type declarations are supported in a type refinement",
+                );
+                self.recover_refinement_member();
+            }
+
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing a type refinement",
+                );
+                let recovery_checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(recovery_checkpoint) {
+                    break;
+                }
+            }
+            self.consume_refinement_separators();
+        }
+
+        self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
+        refinements
+    }
+
+    fn consume_refinement_separators(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Punctuation(Punctuation::Semicolon)
+        ) {
+            self.advance();
+        }
+    }
+
+    fn recover_refinement_member(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Outdent
+                | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::Semicolon)
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn parse_annotated_type(&mut self) -> TreeId<Untyped> {
@@ -1307,7 +1407,9 @@ struct NamedFunctionParams {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{ContextBoundTypeTree, ContextBounds, LambdaTypeTree, TypeDef};
+    use dotty_core::ast::{
+        ContextBoundTypeTree, ContextBounds, LambdaTypeTree, RefinedTypeTree, TypeDef,
+    };
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
 
     #[test]
@@ -7905,6 +8007,193 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_abstract_type_member_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(RefinedTypeTree { tpt, refinements }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a refined type");
+        };
+        assert!(matches!(parser.ast().get(*tpt).kind, TreeKind::Ident(_)));
+        assert_eq!(refinements.len(), 1);
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(refinements[0]).kind else {
+            panic!("expected a type member");
+        };
+        assert!(matches!(
+            parser.ast().get(rhs).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 12).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_alias_member_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X = String }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Identifier, 13, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(RefinedTypeTree { refinements, .. }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a refined type");
+        };
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(refinements[0]).kind else {
+            panic!("expected a type member");
+        };
+        assert!(matches!(parser.ast().get(rhs).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_the_source_order_of_multiple_type_member_refinements() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X; type Y = Int }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Type), 12, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(RefinedTypeTree { refinements, .. }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refinements.len(), 2);
+        let TreeKind::TypeDef(first) = &parser.ast().get(refinements[0]).kind else {
+            panic!("expected the first type member");
+        };
+        let TreeKind::TypeDef(second) = &parser.ast().get(refinements[1]).kind else {
+            panic!("expected the second type member");
+        };
+        assert_eq!(parser.names.resolve(first.name.as_name().text()), "X");
+        assert_eq!(parser.names.resolve(second.name.as_name().text()), "Y");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_parentless_refinement_with_a_synthetic_parent() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ type X }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(RefinedTypeTree { tpt, refinements }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a parentless refined type");
+        };
+        assert!(matches!(parser.ast().get(*tpt).kind, TreeKind::TypeTree(_)));
+        assert_eq!(
+            parser.ast().get(*tpt).position.unwrap().span().range(),
+            TextRange::new(0, 0).unwrap()
+        );
+        assert_eq!(refinements.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_refinement_closer_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leaves_an_enclosing_outdent_after_a_missing_refinement_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Outdent, 10, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Outdent);
         assert!(!parser.diagnostics().is_empty());
     }
 }
