@@ -815,6 +815,7 @@ where
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral
             | TokenKind::StringLiteral
+            | TokenKind::CharLiteral
             | TokenKind::Keyword(HardKeyword::True)
             | TokenKind::Keyword(HardKeyword::False)
             | TokenKind::Keyword(HardKeyword::Null) => {
@@ -843,6 +844,7 @@ where
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number_constant(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
+            TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::Keyword(HardKeyword::True) => {
                 self.parse_literal(mark, Constant::Boolean(true))
             }
@@ -1895,6 +1897,60 @@ mod tests {
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 5).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_character_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "'a'",
+            vec![
+                token(TokenKind::CharLiteral, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Char(0x61)
+            })
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 3).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn decodes_an_escaped_character_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            r#"'\n'"#,
+            vec![
+                token(TokenKind::CharLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Char(0x0a)
+            })
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 

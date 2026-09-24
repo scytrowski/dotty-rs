@@ -128,6 +128,22 @@ where
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
     }
 
+    pub(crate) fn parse_char(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let Ok(text) = self.current_text() else {
+            return self.unexpected_expression();
+        };
+        let Some(value) = decode_char_literal(text) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(
+            mark,
+            TreeKind::Literal(Literal {
+                value: Constant::Char(value),
+            }),
+        )
+    }
+
     pub(crate) fn parse_literal(&mut self, mark: crate::Mark, value: Constant) -> TreeId<Untyped> {
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -243,6 +259,23 @@ fn decode_string_literal(text: &str) -> Option<DecodedString> {
     } else {
         text.strip_prefix('"')?.strip_suffix('"')?
     };
+    decode_literal_body(body, multiline)
+}
+
+fn decode_char_literal(text: &str) -> Option<u16> {
+    let body = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let decoded = decode_literal_body(body, false)?;
+    match decoded {
+        DecodedString::Scalar(value) => {
+            let mut units = value.encode_utf16();
+            let unit = units.next()?;
+            units.next().is_none().then_some(unit)
+        }
+        DecodedString::Utf16(units) => (units.len() == 1).then_some(units[0]),
+    }
+}
+
+fn decode_literal_body(body: &str, raw: bool) -> Option<DecodedString> {
     let characters: Vec<char> = body.chars().collect();
     let mut units = Vec::new();
     let mut index = 0;
@@ -250,7 +283,7 @@ fn decode_string_literal(text: &str) -> Option<DecodedString> {
     while index < characters.len() {
         let character = characters[index];
         index += 1;
-        if multiline || character != '\\' {
+        if raw || character != '\\' {
             let mut encoded = [0; 2];
             units.extend(character.encode_utf16(&mut encoded).iter().copied());
             continue;
