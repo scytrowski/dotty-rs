@@ -6,6 +6,7 @@ import dotty.tools.dotc.core.Contexts.ContextBase
 import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
+import scala.util.control.NonFatal
 
 object Main:
   def main(args: Array[String]): Unit =
@@ -33,7 +34,7 @@ object Main:
         if fields.length != 2 then
           throw IllegalArgumentException(s"invalid oracle manifest entry: $line")
         try println(parseAndRender(fields(0), fields(1)))
-        catch case error: Throwable => println(renderOracleFailure(fields(1), error))
+        catch case NonFatal(error) => println(renderOracleFailure(fields(1), error))
 
   private def renderOracleFailure(path: String, error: Throwable): String =
     val message = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
