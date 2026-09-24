@@ -184,6 +184,7 @@ super, qualified super, and simple mixin-qualified super
 new with simple or qualified type names and constructor applications
 simple type applications such as foo[A] and foo[A, B]
 match types with braced type cases, including wildcard cases
+opaque type aliases, including parameterized and bounded aliases
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
 expression type ascriptions with the supported simple/infix type parser
@@ -417,7 +418,7 @@ placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
 their right-hand sides and parameter defaults are diagnosed, as are
 class-like members and definition modifiers. Refined type members,
-capture-checking refinements, opaque, and other
+capture-checking refinements and other
 full type forms remain deferred.
 
 ### Class-like definitions and templates
@@ -501,7 +502,8 @@ parameterized or parented cases remain `TypeDef(Template(...))` with
 The current subset
 preserves annotations, source order for hard modifiers (`abstract`, `final`,
 `sealed`, `implicit`, `lazy`, and `override`), supported soft modifiers
-(`inline`, `transparent`, `open`, and `infix`), and `private`/`protected`
+(`inline`, `transparent`, `open`, `infix`, and contextual `opaque` for type
+definitions), and `private`/`protected`
 visibility with an optional qualifier. The prefix is recognized only in a
 definition position; soft words remain ordinary identifiers everywhere else.
 Duplicate modifiers and malformed annotations produce diagnostics while
@@ -516,7 +518,9 @@ new shared tree kind. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
 annotations, constructor-level enum-case annotations/modifiers, enum-case
 bodies, and feature-dependent
-`opaque`/`erased`/`tracked`/`into`/`update` modifiers remain deferred.
+`erased`/`tracked`/`into`/`update` modifiers remain deferred. `opaque` is
+recognized only before a type definition; it remains an ordinary identifier in
+other positions.
 
 The current source-level pattern grammar is layered as:
 
@@ -576,7 +580,7 @@ _.name
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
 annotated, and refined type names, plus the supported generic infix-type
-forms. Remaining refined-type forms, opaque, and other full type forms remain
+forms. Remaining refined-type forms and other full type forms remain
 deferred and produce a parser diagnostic in this milestone. Upper-bounded
 match-type aliases are supported when their right-hand side is a match type;
 lower bounds cannot be combined with that alias form.

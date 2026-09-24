@@ -132,6 +132,7 @@ remain one normalized `PatDef`.
 Fixtures under `fixtures/compilation/` use `compilation` mode. Scala calls the
 real `Parser.compilationUnit()` entry and Rust calls `parse_compilation_unit`.
 The corpus covers empty and explicit package roots, nested packages, ordered
-top-level definitions, and import/export clauses. Dotty returns `EmptyTree`
+top-level definitions, opaque type aliases (including parameterized and
+bounded forms), and import/export clauses. Dotty returns `EmptyTree`
 for an empty compilation unit; the Scala renderer normalizes that one case to
 the Rust parser's documented zero-width empty `PackageDef` root.
