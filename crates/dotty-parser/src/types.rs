@@ -1824,6 +1824,38 @@ mod tests {
     }
 
     #[test]
+    fn recovers_a_missing_named_tuple_element_colon() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(name: String, age)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 5),
+                token(TokenKind::Punctuation(Punctuation::Colon), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::Comma), 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.kind(), ParseDiagnosticKind::ExpectedToken))
+        );
+    }
+
+    #[test]
     fn tuple_type_elements_use_full_type_expressions() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
