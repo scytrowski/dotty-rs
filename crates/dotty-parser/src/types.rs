@@ -2,7 +2,7 @@ use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
     PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
-use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::{ParseDiagnosticKind, Parser};
@@ -965,6 +965,22 @@ where
     /// Parses only `id { '.' id }`, for grammar positions whose suffixes have
     /// a distinct meaning (for example the current `derives` production).
     pub(crate) fn simple_type_reference(&mut self) -> TreeId<Untyped> {
+        if self.starts_path_singleton_type() {
+            let mark = self.mark();
+            let reference = self
+                .parse_qualified_reference_until_keyword(
+                    ReferenceNamespace::Term,
+                    Some(HardKeyword::Type),
+                )
+                .expect("path singleton lookahead guarantees a term reference");
+            self.expect(TokenKind::Punctuation(Punctuation::Dot));
+            self.expect(TokenKind::Keyword(HardKeyword::Type));
+            return self.alloc_from(
+                mark,
+                TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference }),
+            );
+        }
+
         match self.parse_qualified_reference(ReferenceNamespace::Type) {
             Ok(tree) => tree,
             Err(QualifiedReferenceError::MissingInitial) => {
@@ -982,6 +998,32 @@ where
                 );
                 self.error_type(self.current_span())
             }
+        }
+    }
+
+    fn starts_path_singleton_type(&mut self) -> bool {
+        let mut offset = 0;
+        if !matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return false;
+        }
+
+        loop {
+            if self.cursor.lookahead(offset + 1).kind != TokenKind::Punctuation(Punctuation::Dot) {
+                return false;
+            }
+            if self.cursor.lookahead(offset + 2).kind == TokenKind::Keyword(HardKeyword::Type) {
+                return true;
+            }
+            if !matches!(
+                self.cursor.lookahead(offset + 2).kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            ) {
+                return false;
+            }
+            offset += 2;
         }
     }
 }
@@ -1723,6 +1765,70 @@ mod tests {
         let name = ident.name;
         drop(parser);
         assert_eq!(names.resolve(name.text()), "Value");
+    }
+
+    #[test]
+    fn parses_a_path_singleton_type_with_a_term_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.type",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::Ident(reference) = parser.ast().get(singleton.reference).kind else {
+            panic!("expected a term reference");
+        };
+        assert!(reference.name.is_term());
+        let reference_name = reference.name.text();
+        let span = parser.ast().get(id).position.unwrap().span().range();
+        let diagnostics_empty = parser.diagnostics().is_empty();
+        let at_eof = parser.current().kind == TokenKind::Eof;
+        drop(parser);
+        assert_eq!(names.resolve(reference_name), "x");
+        assert_eq!(span, TextRange::new(0, 6).unwrap());
+        assert!(diagnostics_empty);
+        assert!(at_eof);
+    }
+
+    #[test]
+    fn parses_a_qualified_path_singleton_type_in_the_term_namespace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "foo.bar.type",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+                token(TokenKind::Identifier, 4, 7),
+                token(TokenKind::Punctuation(Punctuation::Dot), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Type), 8, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::Select(selection) = parser.ast().get(singleton.reference).kind else {
+            panic!("expected a qualified term reference");
+        };
+        assert!(selection.name.is_term());
+        assert!(matches!(
+            parser.ast().get(selection.qualifier).kind,
+            TreeKind::Ident(ident) if ident.name.is_term()
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
