@@ -10,6 +10,12 @@ fi
 
 scala3_root=$(cd "$1" && pwd)
 shift
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+actual_revision=$(git -C "$scala3_root" rev-parse HEAD 2>/dev/null || true)
+if [[ "$actual_revision" != "$expected_revision" ]]; then
+  echo "expected Scala 3.9.0 revision $expected_revision, got ${actual_revision:-unknown}" >&2
+  exit 1
+fi
 
 roots=()
 for relative_root in library/src compiler/src; do
@@ -24,4 +30,4 @@ done
 repo_dir=$(cd "${script_dir}/../.." && pwd)
 cd "$repo_dir"
 exec cargo run --quiet --locked -p dotty-parser-corpus-report -- \
-  "${roots[@]}" "$@"
+  "${roots[@]}" --source-version 3.9.0 --source-revision "$actual_revision" "$@"

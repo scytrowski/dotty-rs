@@ -37,6 +37,11 @@ cargo run --locked -p dotty-parser-corpus-report -- \
   --root tools/scala-parser-oracle/fixtures --output /tmp/report.json
 ```
 
+The convenience runner verifies the pinned Scala checkout revision before
+parsing and records both version and revision in the report. This keeps a
+checked-in baseline reproducible rather than silently measuring a newer
+compiler tree.
+
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact
 Scala/Rust differential gate for the checked-in fixture corpus. This report is
 the larger source-compatibility measurement and does not weaken that gate.

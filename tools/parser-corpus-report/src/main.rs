@@ -19,12 +19,16 @@ struct Options {
     roots: Vec<PathBuf>,
     output: Option<PathBuf>,
     timeout: Duration,
+    source_version: Option<String>,
+    source_revision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct Report {
     schema_version: u32,
     corpus_roots: Vec<String>,
+    source_version: Option<String>,
+    source_revision: Option<String>,
     files_attempted: usize,
     files_parsed_without_diagnostics: usize,
     files_parsed_with_recoverable_diagnostics: usize,
@@ -89,7 +93,12 @@ fn main() {
         .iter()
         .map(|path| parse_one(path, &options.roots, options.timeout))
         .collect::<Vec<_>>();
-    let report = build_report(&outcomes, &options.roots);
+    let report = build_report(
+        &outcomes,
+        &options.roots,
+        options.source_version,
+        options.source_revision,
+    );
 
     if let Some(output) = options.output {
         if let Err(error) = write_report(&output, &report) {
@@ -108,6 +117,8 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut roots = Vec::new();
     let mut output = None;
     let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+    let mut source_version = None;
+    let mut source_revision = None;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -123,6 +134,12 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
                     return Err("--timeout-ms must be greater than zero".to_owned());
                 }
                 timeout = Duration::from_millis(millis);
+            }
+            "--source-version" => {
+                source_version = Some(next_argument(&mut args, "--source-version")?);
+            }
+            "--source-revision" => {
+                source_revision = Some(next_argument(&mut args, "--source-revision")?);
             }
             "--help" | "-h" => {
                 return Err(
@@ -140,6 +157,8 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         roots,
         output,
         timeout,
+        source_version,
+        source_revision,
     })
 }
 
@@ -323,10 +342,17 @@ fn root_label(root: &Path) -> String {
     name.to_owned()
 }
 
-fn build_report(outcomes: &[FileOutcome], roots: &[PathBuf]) -> Report {
+fn build_report(
+    outcomes: &[FileOutcome],
+    roots: &[PathBuf],
+    source_version: Option<String>,
+    source_revision: Option<String>,
+) -> Report {
     let mut report = Report {
         schema_version: 1,
         corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
+        source_version,
+        source_revision,
         files_attempted: outcomes.len(),
         files_parsed_without_diagnostics: 0,
         files_parsed_with_recoverable_diagnostics: 0,
