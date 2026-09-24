@@ -79,7 +79,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>]"
+                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>]"
             );
             std::process::exit(2);
         }
@@ -167,7 +167,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>]".to_owned(),
+                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -429,6 +429,18 @@ fn build_report(
             if entry.examples.len() < 5 {
                 entry.examples.push(outcome.path.clone());
             }
+        } else if outcome.scanner_diagnostics != 0 {
+            let entry = report
+                .first_failure_histogram
+                .entry("ScannerDiagnostics".to_owned())
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(outcome.path.clone());
+            }
         }
     }
     report
@@ -492,6 +504,12 @@ fn print_summary(report: &Report) {
     println!("  panics: {}", report.panics);
     println!("  hangs: {}", report.hangs);
     println!("  scanner diagnostics: {}", report.scanner_diagnostics);
+    if let Some(files) = report.scala_oracle_files {
+        println!("  Scala oracle files: {files}");
+    }
+    if let Some(failures) = report.scala_oracle_failures {
+        println!("  Scala oracle failures: {failures}");
+    }
     if !report.diagnostic_histogram.is_empty() {
         println!("  diagnostic histogram:");
         for (kind, count) in &report.diagnostic_histogram {
@@ -543,6 +561,25 @@ mod tests {
             message: "unsupported `class`  syntax".to_owned(),
         });
         assert_eq!(bucket, "UnsupportedSyntax: unsupported class syntax");
+    }
+
+    #[test]
+    fn report_preserves_source_and_oracle_metadata() {
+        let roots = vec![PathBuf::from("/tmp/scala3/library/src")];
+        let report = build_report(
+            &[],
+            &roots,
+            Some("3.9.0".to_owned()),
+            Some("revision".to_owned()),
+            Some(12),
+            Some(1),
+        );
+
+        assert_eq!(report.corpus_roots, vec!["library/src"]);
+        assert_eq!(report.source_version.as_deref(), Some("3.9.0"));
+        assert_eq!(report.source_revision.as_deref(), Some("revision"));
+        assert_eq!(report.scala_oracle_files, Some(12));
+        assert_eq!(report.scala_oracle_failures, Some(1));
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
