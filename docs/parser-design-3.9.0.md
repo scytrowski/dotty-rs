@@ -175,7 +175,7 @@ The currently implemented expression grammar covers:
 ```text
 identifier, backquoted identifier
 integer, long, decimal, exponent, float, and double literals
-string literals
+string literals and interpolated strings with simple or braced splices
 true, false, null, this
 (expr), (), and (a, b, ...)
 simple selections such as foo.bar and foo.`bar`
@@ -524,6 +524,13 @@ bodies, and feature-dependent
 recognized only before a type definition; it remains an ordinary identifier in
 other positions.
 
+String interpolation uses the scanner's `InterpolationId`/`StringPart` protocol
+and the existing `InterpolatedString` node. Parts remain source-level literal,
+identifier, and braced `Block` trees in source order; semantic expansion to
+`StringContext` and interpolator-specific behavior are outside the parser.
+Literal-fragment spans follow Scala 3.9's decoded-length rule, including
+escaped dollars.
+
 The current source-level pattern grammar is layered as:
 
 ```text
@@ -539,7 +546,7 @@ remain `Apply`/`TypeApply`; semantic `UnApply` lowering belongs to later
 phases. Sequence patterns, `given`, quoted and XML patterns, remaining
 refined-type forms, remaining definition forms and full template semantics, legacy
 given syntax, remaining control flow (`do`/`while`),
-interpolation, quotes, and macros remain follow-up increments.
+quotes, and macros remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards, and expression bodies. Case bodies are represented
