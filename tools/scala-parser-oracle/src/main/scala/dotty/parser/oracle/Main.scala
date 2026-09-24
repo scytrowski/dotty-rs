@@ -181,7 +181,15 @@ object Main:
         fields += field("literal", quote(slice(tuple, source)))
       case _ =>
 
-    val rawChildren = childTrees(tree)
+    if normalizedKind == "InterpolatedString" then
+      fields += field("prefix", quote(slice(tree, source).takeWhile(_ != '"')))
+
+    val rawChildren =
+      if normalizedKind == "InterpolatedString" then
+        childTrees(tree).flatMap: child =>
+          if child.getClass.getSimpleName.stripSuffix("$") == "Thicket" then childTrees(child)
+          else child :: Nil
+      else childTrees(tree)
     val operatorIndex = normalizedKind match
       case "PrefixOp"  => Some(0)
       case "InfixOp"   => Some(1)

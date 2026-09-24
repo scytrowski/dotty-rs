@@ -1,0 +1,1 @@
+s"value = ${foo + bar}"
