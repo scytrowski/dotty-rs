@@ -1,0 +1,12 @@
+[package]
+name = "dotty-parser-corpus-report"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dotty-core = { path = "../../crates/dotty-core" }
+dotty-lexer = { path = "../../crates/dotty-lexer" }
+dotty-parser = { path = "../../crates/dotty-parser" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
