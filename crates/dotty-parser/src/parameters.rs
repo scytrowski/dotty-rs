@@ -31,7 +31,7 @@ where
                 if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
                     break;
                 }
-                if parser.current_is_unsupported_parameter_clause() {
+                if parser.current_is_legacy_implicit_parameter_clause() {
                     clauses.push(parser.parse_unsupported_term_param_clause());
                     continue;
                 }
@@ -57,13 +57,10 @@ where
 
     fn parse_unsupported_term_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
-        let message =
-            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit) {
-                "legacy `implicit` parameter clauses are not supported; use a named `using` clause"
-            } else {
-                "anonymous `using` parameter clauses are not supported; name the context parameter"
-            };
-        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+        self.report(
+            ParseDiagnosticKind::UnsupportedSyntax,
+            "legacy `implicit` parameter clauses are not supported; use a named `using` clause",
+        );
         self.recover_term_param_clause();
         Vec::new()
     }
@@ -77,7 +74,7 @@ where
         is_using: bool,
         num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
-        if self.current_is_unsupported_parameter_clause() {
+        if self.current_is_legacy_implicit_parameter_clause() {
             self.parse_unsupported_term_param_clause()
         } else {
             self.parse_term_param_clause_with_policy(
@@ -279,7 +276,7 @@ where
                 .unwrap_or(false)
     }
 
-    pub(crate) fn current_is_unsupported_parameter_clause(&mut self) -> bool {
+    pub(crate) fn current_is_legacy_implicit_parameter_clause(&mut self) -> bool {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return false;
         }
@@ -922,6 +919,60 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["x$1", "x$2"]);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_a_trailing_comma_in_anonymous_using_clause_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using Context, )",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 14),
+                token(TokenKind::Punctuation(Punctuation::Comma), 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_missing_anonymous_using_clause_delimiter_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using Context",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
