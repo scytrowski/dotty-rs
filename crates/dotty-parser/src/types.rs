@@ -830,7 +830,7 @@ where
             | TokenKind::DecimalLiteral
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
-            | TokenKind::DoubleLiteral => self.parse_number(mark),
+            | TokenKind::DoubleLiteral => self.parse_number_constant(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
                 self.parse_literal(mark, Constant::Boolean(true))
@@ -1893,7 +1893,84 @@ mod tests {
         };
         assert!(matches!(
             parser.ast().get(singleton.reference).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Int(42)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_long_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1L",
+            vec![
+                token(TokenKind::LongLiteral, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Long(1)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_float_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5f",
+            vec![
+                token(TokenKind::FloatLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::FloatBits(0x3fc0_0000)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_double_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "1.5d",
+            vec![
+                token(TokenKind::DoubleLiteral, 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::DoubleBits(0x3ff8_0000_0000_0000)
+            })
         ));
         assert!(parser.diagnostics().is_empty());
     }
@@ -1944,6 +2021,61 @@ mod tests {
             TreeKind::Literal(dotty_core::ast::Literal {
                 value: Constant::Boolean(false)
             })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn composes_a_literal_singleton_type_inside_an_applied_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[42]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::IntegerLiteral, 5, 7),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn composes_string_literal_singletons_with_a_union() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "\"a\" | \"b\"",
+            vec![
+                token(TokenKind::StringLiteral, 0, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::StringLiteral, 6, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind else {
+            panic!("expected a union type");
+        };
+        assert!(matches!(
+            parser.ast().get(infix.left).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(infix.right).kind,
+            TreeKind::SingletonTypeTree(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }

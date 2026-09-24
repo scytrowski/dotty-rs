@@ -17,6 +17,22 @@ where
         self.parse_number_with_spelling(mark, token_kind, spelling)
     }
 
+    /// Parses a numeric literal as a semantic constant for type syntax.
+    /// Expression parsing deliberately keeps unsuffixed numbers as raw
+    /// `Number` nodes, but Dotty's `SingletonTypeTree` wraps a `Literal`.
+    pub(crate) fn parse_number_constant(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let token_kind = self.current().kind;
+        let spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+        let Some(value) = numeric_constant(token_kind, spelling) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(mark, TreeKind::Literal(Literal { value }))
+    }
+
     pub(crate) fn parse_negative_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let token_kind = self.current().kind;
         let token_spelling = match self.current_text() {
@@ -158,6 +174,32 @@ fn parse_double_literal(spelling: &str) -> Option<f64> {
         .replace('_', "")
         .parse()
         .ok()
+}
+
+fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
+    match token_kind {
+        TokenKind::IntegerLiteral => parse_integer_literal(spelling).map(Constant::Int),
+        TokenKind::LongLiteral => parse_long_literal(spelling).map(Constant::Long),
+        TokenKind::DecimalLiteral | TokenKind::ExponentLiteral => {
+            spelling.replace('_', "").parse().ok().map(Constant::double)
+        }
+        TokenKind::FloatLiteral => parse_float_literal(spelling).map(Constant::float),
+        TokenKind::DoubleLiteral => parse_double_literal(spelling).map(Constant::double),
+        _ => None,
+    }
+}
+
+fn parse_integer_literal(spelling: &str) -> Option<i32> {
+    let digits = spelling.replace('_', "");
+    let radix = integer_radix(Some(&digits));
+    let digits = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+        .or_else(|| digits.strip_prefix("0b"))
+        .or_else(|| digits.strip_prefix("0B"))
+        .unwrap_or(&digits);
+    let value = u64::from_str_radix(digits, radix).ok()?;
+    i32::try_from(value).ok()
 }
 
 enum DecodedString {
