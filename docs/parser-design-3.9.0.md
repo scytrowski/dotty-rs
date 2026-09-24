@@ -433,9 +433,8 @@ Braced and scanner-provided indented template bodies retain every member in
 source order, including nested definitions and expressions. A self value is
 stored in the existing `Template.self_val`; its source-level `ValDef` carries
 `PrivateLocal`, matching Dotty's parser tree. The current type subset accepts
-simple qualified self types; compound `InfixType` forms are diagnosed and
-recovered at the self arrow until the fuller type grammar lands. This is
-deliberately different from an expression block, whose last expression is its result. Layout
+simple qualified and compound `InfixType` self types. This is deliberately
+different from an expression block, whose last expression is its result. Layout
 classification remains owned by the scanner; the parser only feeds back the
 `ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
 template region. The parser preserves `derives` and ordered `uses` metadata in
