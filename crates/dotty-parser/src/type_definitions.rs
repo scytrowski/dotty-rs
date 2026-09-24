@@ -694,6 +694,59 @@ mod tests {
     }
 
     #[test]
+    fn malformed_unnamed_erased_context_function_type_preserves_a_following_definition() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "type A = (erased A ?=> B\ntype B = C",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    9,
+                    10,
+                ),
+                token(TokenKind::Identifier, 10, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Newline, 24, 25),
+                token(TokenKind::Keyword(HardKeyword::Type), 25, 29),
+                token(TokenKind::Identifier, 30, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        })
+        .compilation_unit();
+
+        let TreeKind::Block(ref block) = result.ast.get(result.root).kind else {
+            panic!("expected a compilation-unit block");
+        };
+        assert_eq!(block.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(block.stats[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(block.stats[1]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+    }
+
+    #[test]
     fn parses_a_type_alias_inside_a_layout_region() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
