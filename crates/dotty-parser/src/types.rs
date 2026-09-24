@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, NamedArg,
-    Parens, PolyFunction, Select, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    Annotated, ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers,
+    NamedArg, Parens, PolyFunction, Select, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -769,11 +769,27 @@ where
     }
 
     fn parse_intersection_type(&mut self) -> TreeId<Untyped> {
-        let mut tree = self.parse_type_operand();
+        let mut tree = self.parse_annotated_type();
         while let Some(operator) = self.accept_type_infix_operator("&") {
             self.consume_type_infix_newlines();
-            let right = self.parse_type_operand();
+            let right = self.parse_annotated_type();
             tree = self.alloc_infix(tree, operator, right);
+        }
+        tree
+    }
+
+    fn parse_annotated_type(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut tree = self.parse_type_operand();
+        while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            let annotation = self.parse_annotation();
+            tree = self.alloc_from(
+                mark,
+                TreeKind::Annotated(Annotated {
+                    expr: tree,
+                    annotation,
+                }),
+            );
         }
         tree
     }
@@ -6327,6 +6343,164 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(inner.op.text()), "&");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_annotation_as_an_annotated_tree() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A @Ann",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 3, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Annotated(annotated) = &parser.ast().get(id).kind else {
+            panic!("expected an annotated type");
+        };
+        assert!(matches!(
+            parser.ast().get(annotated.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(annotated.annotation).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_repeated_type_annotations() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A @Foo @Bar",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 3, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 8, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Annotated(outer) = &parser.ast().get(id).kind else {
+            panic!("expected an outer annotated type");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.expr).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn type_annotations_bind_before_union_and_intersection() {
+        let mut names = NameInterner::new();
+        let mut union_parser = parser_for(
+            "A @Ann | B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 3, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let union = union_parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(union)) =
+            &union_parser.ast().get(union).kind
+        else {
+            panic!("expected a union type");
+        };
+        assert!(matches!(
+            union_parser.ast().get(union.left).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(union_parser.diagnostics().is_empty());
+
+        let mut intersection_parser = parser_for(
+            "A & B @Ann",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+        let intersection = intersection_parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(intersection)) =
+            &intersection_parser.ast().get(intersection).kind
+        else {
+            panic!("expected an intersection type");
+        };
+        assert!(matches!(
+            intersection_parser.ast().get(intersection.right).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(intersection_parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parenthesized_type_annotations_wrap_the_grouped_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(A | B) @Ann",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 9, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Annotated(annotated) = &parser.ast().get(id).kind else {
+            panic!("expected an annotated parenthesized type");
+        };
+        assert!(matches!(
+            parser.ast().get(annotated.expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_type_annotation_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A @",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]

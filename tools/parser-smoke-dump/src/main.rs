@@ -676,6 +676,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Export(_) => "Export",
         TreeKind::Bind(_) => "Bind",
         TreeKind::Alternative(_) => "Alternative",
+        TreeKind::Annotated(_) => "Annotated",
         TreeKind::Typed(_) => "Typed",
         TreeKind::Assign(_) => "Assign",
         TreeKind::ValDef(_) => "ValDef",
@@ -818,6 +819,7 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::NamedArg(named) => vec![named.arg],
         TreeKind::Bind(bind) => vec![bind.body],
         TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
+        TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],
         TreeKind::Typed(typed) => vec![typed.expr, typed.tpt],
         TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
         TreeKind::If(if_tree) => {
