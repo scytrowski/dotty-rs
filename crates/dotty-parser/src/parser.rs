@@ -137,10 +137,18 @@ where
     }
 
     /// Runs a nested type parse in a type-argument position.
-    pub(crate) fn with_type_argument<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
-        self.type_argument_depth += 1;
+    pub(crate) fn with_type_argument<T>(
+        &mut self,
+        wild_ok: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if wild_ok {
+            self.type_argument_depth += 1;
+        }
         let result = parse(self);
-        self.type_argument_depth -= 1;
+        if wild_ok {
+            self.type_argument_depth -= 1;
+        }
         result
     }
 

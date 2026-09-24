@@ -16,7 +16,7 @@ where
     /// The caller owns the tree that precedes the list; this helper is shared
     /// by term-level type applications and applied type trees so that their
     /// delimiter and recovery behavior stays identical.
-    pub(crate) fn parse_type_argument_list(&mut self) -> Vec<TreeId<Untyped>> {
+    pub(crate) fn parse_type_argument_list(&mut self, wild_ok: bool) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
 
         let mut args = Vec::new();
@@ -29,7 +29,7 @@ where
         }
 
         loop {
-            args.push(self.with_type_argument(|parser| parser.type_expr()));
+            args.push(self.with_type_argument(wild_ok, |parser| parser.type_expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
                 break;
@@ -946,7 +946,7 @@ where
             .cursor
             .at(TokenKind::Punctuation(Punctuation::LeftBracket))
         {
-            let args = self.parse_type_argument_list();
+            let args = self.parse_type_argument_list(true);
             tree = self.alloc_from(
                 mark,
                 dotty_core::TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
@@ -5600,7 +5600,7 @@ mod tests {
             &mut names,
         );
 
-        let args = parser.parse_type_argument_list();
+        let args = parser.parse_type_argument_list(true);
         assert_eq!(args.len(), 2);
         assert!(args.iter().all(|id| matches!(
             parser.ast().get(*id).kind,
