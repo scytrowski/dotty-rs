@@ -164,7 +164,6 @@ where
             return self.error_type(self.span_from(mark));
         }
 
-        self.report_poly_function_variance(&type_params);
         self.advance();
         let body = self.type_expr();
         if type_params.is_empty() || !self.is_function_type(body) {
@@ -4638,7 +4637,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_covariance_in_a_type_lambda_parameter() {
+    fn rejects_covariance_in_a_type_lambda_parameter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[+A] =>> Producer[A]",
@@ -4670,12 +4669,12 @@ mod tests {
             definition.variance,
             Some(dotty_core::types::Variance::Covariant)
         );
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
-    fn preserves_contravariance_in_a_type_lambda_parameter() {
+    fn rejects_contravariance_in_a_type_lambda_parameter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[-A] =>> Consumer[A]",
@@ -4707,7 +4706,7 @@ mod tests {
             definition.variance,
             Some(dotty_core::types::Variance::Contravariant)
         );
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

@@ -21,7 +21,6 @@ where
             return self.error_expr(self.current_span());
         }
 
-        self.report_poly_function_variance(&type_params);
         if self.arrow_starts_indented_body() {
             self.observe_arrow_indented();
         }
