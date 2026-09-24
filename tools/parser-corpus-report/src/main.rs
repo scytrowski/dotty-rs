@@ -106,11 +106,11 @@ fn main() {
         options.oracle_failures,
     );
 
-    if let Some(output) = options.output {
-        if let Err(error) = write_report(&output, &report) {
-            eprintln!("failed to write report {}: {error}", output.display());
-            std::process::exit(1);
-        }
+    if let Some(output) = options.output
+        && let Err(error) = write_report(&output, &report)
+    {
+        eprintln!("failed to write report {}: {error}", output.display());
+        std::process::exit(1);
     }
 
     print_summary(&report);
@@ -360,10 +360,10 @@ fn root_label(root: &Path) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("root");
-    if name == "src" {
-        if let Some(parent) = root.parent().and_then(|parent| parent.file_name()) {
-            return Path::new(parent).join(name).display().to_string();
-        }
+    if name == "src"
+        && let Some(parent) = root.parent().and_then(|parent| parent.file_name())
+    {
+        return Path::new(parent).join(name).display().to_string();
     }
     name.to_owned()
 }
@@ -453,7 +453,7 @@ fn first_failure_bucket(diagnostic: &DiagnosticSummary) -> String {
             normalize_message(&diagnostic.message)
         )
     } else {
-        format!("{}", diagnostic.kind)
+        diagnostic.kind.to_string()
     }
 }
 
