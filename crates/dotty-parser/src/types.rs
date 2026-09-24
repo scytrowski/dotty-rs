@@ -763,10 +763,22 @@ where
     /// as expression operators. The operand remains a refined type, so
     /// function arrows can continue to own the outer precedence level.
     pub(crate) fn parse_infix_type(&mut self) -> TreeId<Untyped> {
+        self.parse_infix_type_inner(false)
+    }
+
+    /// Parses a context-bound type, where the contextual `as` alias belongs
+    /// to the surrounding type-parameter grammar rather than to InfixType.
+    pub(crate) fn parse_context_bound_type_expr(&mut self) -> TreeId<Untyped> {
+        self.parse_infix_type_inner(true)
+    }
+
+    fn parse_infix_type_inner(&mut self, stop_at_context_bound_alias: bool) -> TreeId<Untyped> {
         let mut top = self.parse_refined_type();
         let mut operators = Vec::new();
 
-        while let Some((operator, offset)) = self.current_type_infix_operator() {
+        while let Some((operator, offset)) =
+            self.current_type_infix_operator(stop_at_context_bound_alias)
+        {
             let checkpoint = self.cursor.checkpoint();
             let spelling = self.names.resolve(operator.text());
             let operator_precedence = crate::infix::precedence(spelling);
@@ -804,7 +816,10 @@ where
         self.reduce_type_operator_stack(&mut operators, top, 0, true, None)
     }
 
-    fn current_type_infix_operator(&mut self) -> Option<(Name, u32)> {
+    fn current_type_infix_operator(
+        &mut self,
+        stop_at_context_bound_alias: bool,
+    ) -> Option<(Name, u32)> {
         if !matches!(
             self.current().kind,
             TokenKind::Identifier
@@ -822,8 +837,7 @@ where
             || self.current_text_is("<:")
             || self.current_text_is(">:")
             || self.current_text_is("#")
-            || self.current_text_is("as")
-            || self.current_text_is("erased")
+            || stop_at_context_bound_alias && self.current_text_is("as")
             || !self.type_operator_has_following_operand()
         {
             return None;
@@ -6825,10 +6839,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_an_identifier_type_operator() {
+    fn parses_a_contextual_word_as_a_type_operator_outside_context_bounds() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
-            "A op B",
+            "A as B",
             vec![
                 token(TokenKind::Identifier, 0, 1),
                 token(TokenKind::Identifier, 2, 4),
@@ -6843,7 +6857,7 @@ mod tests {
         else {
             panic!("expected an identifier infix type");
         };
-        assert_eq!(parser.names.resolve(infix.op.text()), "op");
+        assert_eq!(parser.names.resolve(infix.op.text()), "as");
         assert_eq!(
             parser.ast().get(id).position.unwrap().span().range(),
             TextRange::new(0, 6).unwrap()
