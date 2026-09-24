@@ -796,6 +796,17 @@ where
             );
             return self.error_type(position);
         }
+        if self.current().kind == TokenKind::Operator
+            && self.current_text_is("-")
+            && is_numeric_type_literal(self.cursor.lookahead(1).kind)
+        {
+            self.advance();
+            let reference = self.parse_negative_number_constant(mark);
+            return self.alloc_from(
+                mark,
+                TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference }),
+            );
+        }
         match self.current().kind {
             TokenKind::IntegerLiteral
             | TokenKind::LongLiteral
@@ -1093,6 +1104,18 @@ const fn is_type_recovery_boundary(kind: TokenKind) -> bool {
                     | Punctuation::RightBracket
                     | Punctuation::RightParen
             )
+    )
+}
+
+const fn is_numeric_type_literal(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
     )
 }
 
@@ -1901,6 +1924,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_negative_integer_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "-42",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::IntegerLiteral, 1, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Int(-42)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_long_literal_as_a_singleton_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -2020,6 +2069,31 @@ mod tests {
             parser.ast().get(singleton.reference).kind,
             TreeKind::Literal(dotty_core::ast::Literal {
                 value: Constant::Boolean(false)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_null_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "null",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Null), 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Null
             })
         ));
         assert!(parser.diagnostics().is_empty());

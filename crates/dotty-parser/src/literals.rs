@@ -33,6 +33,20 @@ where
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
     }
 
+    pub(crate) fn parse_negative_number_constant(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let token_kind = self.current().kind;
+        let token_spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+        let spelling = format!("-{token_spelling}");
+        let Some(value) = numeric_constant(token_kind, &spelling) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(mark, TreeKind::Literal(Literal { value }))
+    }
+
     pub(crate) fn parse_negative_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let token_kind = self.current().kind;
         let token_spelling = match self.current_text() {
@@ -191,6 +205,13 @@ fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
 
 fn parse_integer_literal(spelling: &str) -> Option<i32> {
     let digits = spelling.replace('_', "");
+    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
+        (true, digits)
+    } else if let Some(digits) = digits.strip_prefix('+') {
+        (false, digits)
+    } else {
+        (false, digits.as_str())
+    };
     let radix = integer_radix(Some(&digits));
     let digits = digits
         .strip_prefix("0x")
@@ -199,7 +220,15 @@ fn parse_integer_literal(spelling: &str) -> Option<i32> {
         .or_else(|| digits.strip_prefix("0B"))
         .unwrap_or(&digits);
     let value = u64::from_str_radix(digits, radix).ok()?;
-    i32::try_from(value).ok()
+    if negative {
+        if value == 1_u64 << 31 {
+            Some(i32::MIN)
+        } else {
+            i32::try_from(value).ok()?.checked_neg()
+        }
+    } else {
+        i32::try_from(value).ok()
+    }
 }
 
 enum DecodedString {
