@@ -3,6 +3,14 @@ name = "dotty-tasty-unpickler"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+corpus = []
+
 [dependencies]
 dotty-tasty = { path = "../dotty-tasty" }
 dotty-core = { path = "../dotty-core" }
+
+[[test]]
+name = "symbol_annotation_corpus"
+path = "tests/symbol_annotation_corpus.rs"
+required-features = ["corpus"]

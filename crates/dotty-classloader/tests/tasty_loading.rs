@@ -17,6 +17,9 @@ use dotty_core::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "support/cross_adapter_annotations.rs"]
+mod cross_adapter_annotations;
+
 struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
