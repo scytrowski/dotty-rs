@@ -1092,7 +1092,7 @@ where
         }
     }
 
-    fn parse_parent(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_parent(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let mut parent =
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type());
@@ -1267,18 +1267,18 @@ where
         start: u32,
         type_params: Vec<TreeId<Untyped>>,
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
-        parent: TreeId<Untyped>,
+        parents: Vec<TreeId<Untyped>>,
         body: Vec<TreeId<Untyped>>,
     ) -> TreeId<Untyped> {
         let (constructor, constructor_start) = self.synthetic_given_constructor(
             start,
             type_params,
             value_param_clauses,
-            parent,
+            &parents,
             &body,
         );
         let tail = TemplateTail {
-            parents: vec![parent],
+            parents,
             self_val: None,
             body,
             metadata: UntypedTemplateMetadata::default(),
@@ -1303,7 +1303,7 @@ where
         start: u32,
         type_params: Vec<TreeId<Untyped>>,
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
-        parent: TreeId<Untyped>,
+        parents: &[TreeId<Untyped>],
         body: &[TreeId<Untyped>],
     ) -> (TreeId<Untyped>, u32) {
         for type_param in &type_params {
@@ -1343,11 +1343,12 @@ where
                     .position
                     .map(|position| position.span().range().start())
             });
-        let parent_start = self
-            .ast
-            .get(parent)
-            .position
-            .map(|position| position.span().range().start());
+        let parent_start = parents.first().and_then(|parent| {
+            self.ast
+                .get(*parent)
+                .position
+                .map(|position| position.span().range().start())
+        });
         let body_start = body.first().and_then(|member| {
             self.ast
                 .get(*member)

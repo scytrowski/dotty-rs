@@ -139,6 +139,15 @@ where
             }
         }
 
+        if owner == ParamOwner::Given && current_is_anonymous_context_type(self) {
+            return self.parse_anonymous_using_types(
+                owner,
+                first_ordinary_clause,
+                metadata,
+                num_lead_params,
+            );
+        }
+
         if !is_using && self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             return params;
         }
@@ -341,17 +350,10 @@ where
 
             let mut parameter_metadata = metadata.clone();
             add_class_parameter_metadata(owner, first_ordinary_clause, &mut parameter_metadata);
-            let name = synthetic_term_param_name(self.names, next_index);
+            let parameter =
+                self.alloc_synthetic_context_parameter(mark, tpt, next_index, parameter_metadata);
             next_index = next_index.saturating_add(1);
-            params.push(self.alloc_from(
-                mark,
-                TreeKind::ValDef(ValDef {
-                    name,
-                    tpt,
-                    rhs: None,
-                    metadata: parameter_metadata,
-                }),
-            ));
+            params.push(parameter);
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
@@ -370,6 +372,25 @@ where
         }
 
         params
+    }
+
+    pub(crate) fn alloc_synthetic_context_parameter(
+        &mut self,
+        mark: crate::Mark,
+        tpt: TreeId<Untyped>,
+        index: usize,
+        metadata: Modifiers,
+    ) -> TreeId<Untyped> {
+        let name = synthetic_term_param_name(self.names, index);
+        self.alloc_from(
+            mark,
+            TreeKind::ValDef(ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata,
+            }),
+        )
     }
 
     fn parse_param_name(&mut self) -> TermName {
@@ -448,6 +469,13 @@ fn is_parameter_colon_at<S: dotty_core::TokenSource>(
             | TokenKind::ColonOp
             | TokenKind::Punctuation(Punctuation::Colon)
     ) && parser.token_text(&token).ok() == Some(":")
+}
+
+fn current_is_anonymous_context_type<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> bool {
+    parser.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
+        && !is_parameter_colon_at(parser, 1)
 }
 
 fn is_class_parameter_owner(owner: ParamOwner) -> bool {
