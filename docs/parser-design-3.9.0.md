@@ -337,7 +337,7 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles
-simple, recursively applied, parenthesized, and tuple type names needed by
+simple, recursively applied, projected, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus the
 narrow Scala 3.9 union/intersection subset and ordinary/context function
 arrows, plus wildcard type arguments with optional lower and upper bounds.
@@ -362,8 +362,9 @@ while an ordinary qualified type such as `foo.Bar` remains in the type
 namespace. Singleton types compose with the supported applied, union, and
 function type forms. Literal singleton types for strings, characters, numbers,
 booleans, and `null` are represented by `SingletonTypeTree` around the existing
-`Literal` tree. `this.type`, `super.x.type`, and type projections using `#`
-remain deferred.
+`Literal` tree. Type projections such as `T#Member`, `F[A]#Result`, and
+repeated `#` suffixes use the existing `Select` node with type-namespace
+names. `this.type` and `super.x.type` remain deferred.
 An empty
 context-function parameter list (`() ?=> R`) is invalid and produces a
 focused parser diagnostic. The `derives` clause
@@ -388,8 +389,9 @@ bounds, backquoted type names, and one flat higher-kinded parameter clause
 (`type F[A] = A`). Parameterized declarations preserve their parameters in a
 shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. The supported
-recursive applied-type subset is represented by `AppliedTypeTree`; wildcard
-arguments use `TypeBoundsTree` with optional `low` and `high` children. Path
+recursive applied-type and type-projection subset is represented by
+`AppliedTypeTree` and type-namespace `Select` nodes; wildcard arguments use
+`TypeBoundsTree` with optional `low` and `high` children. Path
 singleton aliases use `SingletonTypeTree` and preserve the term-valued path
 that precedes `.type`; literal singleton aliases use the same node around a
 decoded `Literal`. Unions and intersections use `InfixOp` with `&` binding

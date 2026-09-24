@@ -1,6 +1,6 @@
 use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, NamedArg,
-    Parens, PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    Parens, PolyFunction, Select, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -1098,20 +1098,66 @@ where
         let mark = self.mark();
         let mut tree = self.simple_type_reference();
 
-        while self
-            .cursor
-            .at(TokenKind::Punctuation(Punctuation::LeftBracket))
-        {
-            let args = self.parse_type_argument_list(true);
+        loop {
+            if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBracket))
+            {
+                let args = self.parse_type_argument_list(true);
+                tree = self.alloc_from(
+                    mark,
+                    dotty_core::TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                        tpt: tree,
+                        args,
+                    }),
+                );
+                continue;
+            }
+
+            if !self.accept_type_projection_operator() {
+                break;
+            }
+
+            let Some((name, backquoted)) = self.current_type_projection_name() else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type projection member after `#`",
+                );
+                break;
+            };
+            self.advance();
             tree = self.alloc_from(
                 mark,
-                dotty_core::TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
-                    tpt: tree,
-                    args,
+                TreeKind::Select(Select {
+                    qualifier: tree,
+                    name,
+                    backquoted,
                 }),
             );
         }
         tree
+    }
+
+    fn accept_type_projection_operator(&mut self) -> bool {
+        if self.current().kind == TokenKind::Operator && self.current_text_is("#") {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn current_type_projection_name(&mut self) -> Option<(Name, bool)> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return None;
+        }
+
+        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+        let name = *self.intern_current_type_name().ok()?.as_name();
+        Some((name, backquoted))
     }
 
     /// Parses a qualified type reference or a path singleton type. Grammar
@@ -6549,6 +6595,112 @@ mod tests {
             TreeKind::Ident(ident) if ident.name.is_type()
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_type_projection_with_type_namespace_names() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T#Member",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_type();
+        let TreeKind::Select(selection) = &parser.ast().get(id).kind else {
+            panic!("expected a type projection");
+        };
+        assert!(selection.name.is_type());
+        assert!(matches!(
+            parser.ast().get(selection.qualifier).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 8).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn composes_type_projection_after_applied_type_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "F[A]#Result",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_type();
+        let TreeKind::Select(selection) = &parser.ast().get(id).kind else {
+            panic!("expected an applied type projection");
+        };
+        assert!(selection.name.is_type());
+        let TreeKind::AppliedTypeTree(applied) = &parser.ast().get(selection.qualifier).kind else {
+            panic!("expected an applied type as the projection qualifier");
+        };
+        assert_eq!(applied.args.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_type_projection_member_without_consuming_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T#",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_type();
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType))
+        );
+    }
+
+    #[test]
+    fn leaves_the_following_definition_boundary_after_a_missing_projection_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T#\nNext",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Newline, 2, 3),
+                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        parser.simple_type();
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.current_text().unwrap(), "\n");
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 
     #[test]
