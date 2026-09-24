@@ -8354,4 +8354,135 @@ mod tests {
         assert!(rhs.is_none());
         assert!(parser.diagnostics().is_empty());
     }
+
+    #[test]
+    fn diagnoses_a_rhs_and_preserves_a_following_type_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { val x: Int = 1; type Y = String }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Val), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::ColonFollow, 9, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::IntegerLiteral, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Type), 20, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Operator, 27, 28),
+                token(TokenKind::Identifier, 29, 35),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 36, 37),
+                token(TokenKind::Eof, 37, 37),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refined.refinements.len(), 2);
+        assert!(matches!(
+            parser.ast().get(refined.refinements[1]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_a_default_argument_in_a_refinement_method() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { def f(x: Int = 1): String }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Def), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::IntegerLiteral, 19, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+                token(TokenKind::ColonFollow, 21, 22),
+                token(TokenKind::Identifier, 23, 29),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_class_member_without_swallowing_a_following_type_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { class C; type Y }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Class), 4, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Type), 13, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refined.refinements.len(), 1);
+        assert!(matches!(
+            parser.ast().get(refined.refinements[0]).kind,
+            TreeKind::TypeDef(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_modifier_without_swallowing_a_following_type_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { private val x: Int; type Y }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Private), 4, 11),
+                token(TokenKind::Keyword(HardKeyword::Val), 12, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::ColonFollow, 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 22, 23),
+                token(TokenKind::Keyword(HardKeyword::Type), 24, 28),
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refined.refinements.len(), 1);
+        assert!(!parser.diagnostics().is_empty());
+    }
 }
