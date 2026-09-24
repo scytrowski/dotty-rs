@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dotty_core::{NameInterner, SourceId, SourceText};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
@@ -58,7 +59,7 @@ struct FileOutcome {
     scanner_diagnostics: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum Status {
     Clean,
     RecoverableDiagnostics,
@@ -67,14 +68,26 @@ enum Status {
     Hang,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DiagnosticSummary {
     kind: String,
     message: String,
 }
 
 fn main() {
-    let options = match parse_options(env::args().skip(1)) {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--worker")
+    {
+        if let Err(error) = run_worker(arguments.get(1)) {
+            eprintln!("worker failed: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+
+    let options = match parse_options(arguments.into_iter()) {
         Ok(options) => options,
         Err(error) => {
             eprintln!("{error}");
@@ -93,10 +106,7 @@ fn main() {
         }
     };
 
-    let outcomes = files
-        .iter()
-        .map(|path| parse_one(path, &options.roots, options.timeout))
-        .collect::<Vec<_>>();
+    let outcomes = parse_files(&files, &options.roots, options.timeout);
     let report = build_report(
         &outcomes,
         &options.roots,
@@ -226,47 +236,86 @@ fn collect_scala_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> 
     Ok(())
 }
 
+fn parse_files(files: &[PathBuf], roots: &[PathBuf], timeout: Duration) -> Vec<FileOutcome> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = thread::available_parallelism()
+        .map(|parallelism| parallelism.get().min(4))
+        .unwrap_or(1)
+        .min(files.len());
+    let (job_sender, job_receiver) = mpsc::channel::<(usize, PathBuf)>();
+    let (result_sender, result_receiver) = mpsc::channel::<(usize, FileOutcome)>();
+    let job_receiver = Arc::new(Mutex::new(job_receiver));
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let job_receiver = Arc::clone(&job_receiver);
+        let result_sender = result_sender.clone();
+        let roots = roots.to_vec();
+        workers.push(thread::spawn(move || {
+            loop {
+                let job = job_receiver.lock().expect("job queue lock poisoned").recv();
+                let Ok((index, path)) = job else {
+                    break;
+                };
+                let outcome = parse_one(&path, &roots, timeout);
+                if result_sender.send((index, outcome)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(result_sender);
+
+    for (index, path) in files.iter().cloned().enumerate() {
+        job_sender
+            .send((index, path))
+            .expect("parser worker pool unexpectedly stopped");
+    }
+    drop(job_sender);
+
+    let mut outcomes = result_receiver.into_iter().collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("parser worker thread panicked");
+    }
+    outcomes.sort_by_key(|(index, _)| *index);
+    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
 fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
     let display_path = display_path(path, roots);
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => {
-            return FileOutcome {
-                path: display_path,
-                status: Status::ScannerFailure,
-                diagnostics: vec![DiagnosticSummary {
-                    kind: "IoError".to_owned(),
-                    message: error.to_string(),
-                }],
-                scanner_diagnostics: 0,
-            };
-        }
+    let executable = match env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => return process_failure(display_path, "ProcessError", error.to_string()),
     };
+    let mut command = Command::new(executable);
+    command
+        .arg("--worker")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
 
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_source(&source)));
-        let _ = sender.send(result);
-    });
-
-    match receiver.recv_timeout(timeout) {
-        Ok(Ok(outcome)) => FileOutcome {
-            path: display_path,
-            status: outcome.status,
-            diagnostics: outcome.diagnostics,
-            scanner_diagnostics: outcome.scanner_diagnostics,
+    match run_command_with_timeout(command, timeout) {
+        Ok(CommandResult::Exited {
+            success: true,
+            stdout,
+        }) => match serde_json::from_slice::<WorkerResult>(&stdout) {
+            Ok(outcome) => FileOutcome {
+                path: display_path,
+                status: outcome.status,
+                diagnostics: outcome.diagnostics,
+                scanner_diagnostics: outcome.scanner_diagnostics,
+            },
+            Err(error) => process_failure(display_path, "WorkerProtocol", error.to_string()),
         },
-        Ok(Err(_)) => FileOutcome {
-            path: display_path,
-            status: Status::Panic,
-            diagnostics: vec![DiagnosticSummary {
-                kind: "Panic".to_owned(),
-                message: "parser worker panicked".to_owned(),
-            }],
-            scanner_diagnostics: 0,
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => FileOutcome {
+        Ok(CommandResult::Exited { success: false, .. }) => process_failure(
+            display_path,
+            "WorkerProcess",
+            "parser worker exited unsuccessfully",
+        ),
+        Ok(CommandResult::TimedOut) => FileOutcome {
             path: display_path,
             status: Status::Hang,
             diagnostics: vec![DiagnosticSummary {
@@ -275,15 +324,105 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
             }],
             scanner_diagnostics: 0,
         },
-        Err(mpsc::RecvTimeoutError::Disconnected) => FileOutcome {
-            path: display_path,
-            status: Status::Panic,
+        Err(error) => process_failure(display_path, "ProcessError", error.to_string()),
+    }
+}
+
+fn process_failure(path: String, kind: &str, message: impl Into<String>) -> FileOutcome {
+    FileOutcome {
+        path,
+        status: Status::Panic,
+        diagnostics: vec![DiagnosticSummary {
+            kind: kind.to_owned(),
+            message: message.into(),
+        }],
+        scanner_diagnostics: 0,
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkerResult {
+    status: Status,
+    diagnostics: Vec<DiagnosticSummary>,
+    scanner_diagnostics: usize,
+}
+
+fn run_worker(path: Option<&String>) -> io::Result<()> {
+    let path = path.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing path"))?;
+    let result = match fs::read_to_string(path) {
+        Ok(source) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_source(&source))) {
+                Ok(parsed) => WorkerResult {
+                    status: parsed.status,
+                    diagnostics: parsed.diagnostics,
+                    scanner_diagnostics: parsed.scanner_diagnostics,
+                },
+                Err(_) => WorkerResult {
+                    status: Status::Panic,
+                    diagnostics: vec![DiagnosticSummary {
+                        kind: "Panic".to_owned(),
+                        message: "parser worker panicked".to_owned(),
+                    }],
+                    scanner_diagnostics: 0,
+                },
+            }
+        }
+        Err(error) => WorkerResult {
+            status: Status::ScannerFailure,
             diagnostics: vec![DiagnosticSummary {
-                kind: "Panic".to_owned(),
-                message: "parser worker disconnected".to_owned(),
+                kind: "IoError".to_owned(),
+                message: error.to_string(),
             }],
             scanner_diagnostics: 0,
         },
+    };
+    serde_json::to_writer(io::stdout(), &result).map_err(io::Error::other)?;
+    io::stdout().write_all(b"\n")
+}
+
+enum CommandResult {
+    Exited { success: bool, stdout: Vec<u8> },
+    TimedOut,
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> io::Result<CommandResult> {
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .expect("worker stdout must be piped for the result protocol");
+    let reader = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = reader
+                    .join()
+                    .map_err(|_| io::Error::other("worker stdout reader panicked"))??;
+                return Ok(CommandResult::Exited {
+                    success: status.success(),
+                    stdout,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            let _ = reader.join();
+            return Ok(CommandResult::TimedOut);
+        }
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -552,6 +691,20 @@ mod tests {
         let parsed = parse_source("object C");
         assert!(matches!(parsed.status, Status::Clean));
         assert!(parsed.diagnostics.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_the_worker_process_before_returning() {
+        let mut command = Command::new("sleep");
+        command.arg("30").stdout(Stdio::piped());
+        let started = Instant::now();
+
+        let result = run_command_with_timeout(command, Duration::from_millis(20))
+            .expect("spawn and reap the worker process");
+
+        assert!(matches!(result, CommandResult::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
