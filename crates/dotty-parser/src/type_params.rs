@@ -147,34 +147,6 @@ where
             None
         };
 
-        let context_bound_start = if self.context.param_owner == Some(ParamOwner::Type)
-            && self.accept_context_bound_colon()
-        {
-            // Dotty parses a context bound in this position and strips it
-            // from the source-level type-lambda parameter tree.  Keep the
-            // bound's type syntactically consumed so the enclosing clause
-            // remains synchronized, but do not attach it to TypeDef: the
-            // shared AST has no context-bound field on type parameters.
-            let bound_start = self.current().span.start();
-            if matches!(
-                self.current().kind,
-                TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket)
-                    | TokenKind::Eof
-            ) || self.current_is_arrow()
-                || self.current_is_type_lambda_arrow()
-            {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a context-bound type after `:`",
-                );
-            } else {
-                let _ = self.parse_bound_type();
-            }
-            Some(bound_start)
-        } else {
-            None
-        };
-
         let explicit_bounds_start = self.current().span.start();
         let low = if self.accept_operator(">:") {
             Some(self.parse_bound_type())
@@ -187,6 +159,11 @@ where
             None
         };
         let has_explicit_bounds = low.is_some() || high.is_some();
+        let context_bound_start = if self.context.param_owner == Some(ParamOwner::Type) {
+            self.strip_context_bounds()
+        } else {
+            None
+        };
         let empty_bounds_start = nested_params
             .as_ref()
             .and_then(|params| {
@@ -338,6 +315,75 @@ where
         is_context_bound_colon
     }
 
+    fn strip_context_bounds(&mut self) -> Option<u32> {
+        let mut first_bound_start = None;
+        let mut reported = false;
+
+        while self.accept_context_bound_colon() {
+            let bound_start = self.current().span.start();
+            first_bound_start.get_or_insert(bound_start);
+            if !reported {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "context bounds are not allowed for a polymorphic function type parameter",
+                );
+                reported = true;
+            }
+            self.consume_context_bound();
+        }
+
+        first_bound_start
+    }
+
+    fn consume_context_bound(&mut self) {
+        if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
+            if self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a context-bound type between `{` and `}`",
+                );
+                return;
+            }
+
+            loop {
+                if self.context_bound_type_is_missing() {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a context-bound type",
+                    );
+                    break;
+                }
+                let _ = self.parse_bound_type();
+                if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    break;
+                }
+                if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a context-bound type after `,`",
+                    );
+                    break;
+                }
+            }
+            self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
+        } else if self.context_bound_type_is_missing() {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a context-bound type after `:`",
+            );
+        } else {
+            let _ = self.parse_bound_type();
+        }
+    }
+
+    fn context_bound_type_is_missing(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket) | TokenKind::Eof
+        ) || self.current_is_arrow()
+            || self.current_is_type_lambda_arrow()
+    }
+
     fn recover_type_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
@@ -476,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_a_context_bound_from_a_type_lambda_parameter() {
+    fn reports_and_strips_a_context_bound_from_a_type_lambda_parameter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[A: Show]",
@@ -501,7 +547,7 @@ mod tests {
             panic!("expected synthetic type bounds");
         };
         assert!(low.is_none() && high.is_none() && alias.is_none());
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

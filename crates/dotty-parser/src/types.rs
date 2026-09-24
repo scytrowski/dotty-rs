@@ -4749,7 +4749,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_a_context_bound_in_a_type_lambda_like_dotty() {
+    fn reports_and_strips_a_context_bound_in_a_type_lambda() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "[A: Show] =>> X",
@@ -4781,7 +4781,75 @@ mod tests {
             panic!("expected a type parameter definition");
         };
         assert!(definition.metadata.modifiers.is_empty());
-        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_and_strips_a_context_bound_after_an_upper_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A <: Base: Show] =>> A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 3, 5),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Operator, 18, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::LambdaTypeTree(LambdaTypeTree { type_params, .. }) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a type lambda");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(type_params[0]).kind else {
+            panic!("expected a type parameter definition");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.rhs).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_and_strips_multiple_braced_context_bounds() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: {Show, Ord}] =>> A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Identifier, 5, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 15, 16),
+                token(TokenKind::Operator, 17, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::LambdaTypeTree(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -5046,7 +5114,7 @@ mod tests {
             TreeKind::LambdaTypeTree(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.diagnostics().len(), 2);
     }
 
     #[test]

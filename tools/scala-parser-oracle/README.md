@@ -48,10 +48,12 @@ applied, argument, block, and indented bodies. Context-function parameters are
 compared through their normalized `given` marker on `ValDef`.
 The polyfunction fixtures cover source polymorphic function literals and
 polymorphic function types: type-parameter clauses with lower and upper
-bounds, declared variance, nested type bodies, context/by-name bodies, and
+bounds, nested type bodies, context/by-name bodies, and
 value-parameter function bodies. Type-lambda fixtures additionally cover
 applied, tuple, union/intersection, and nested polymorphic bodies; context
-bounds are consumed and normalized to Dotty's stripped source-tree shape. The
+bounds are consumed, diagnosed, and normalized to Dotty's stripped source-tree
+shape. Explicit variance in `ParamOwner::Type` is diagnosed rather than
+included as a valid fixture. The
 placeholder fixtures cover synthetic-function lowering for infix expressions,
 selections, applications, multiple parameters, and nested placeholder scopes;
 the oracle normalizes Dotty's `WildcardFunction` and generated names to the
