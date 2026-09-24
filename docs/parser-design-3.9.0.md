@@ -351,6 +351,12 @@ positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
 as the parameter list of a zero-argument function type. Named tuple types
 remain deferred unless the parenthesized list is followed by a supported
 ordinary or context function arrow and matches the named-parameter form above.
+A path singleton type such as `x.type` or `foo.bar.type` is represented by the
+existing `SingletonTypeTree`; its reference is parsed in the term namespace,
+while an ordinary qualified type such as `foo.Bar` remains in the type
+namespace. Singleton types compose with the supported applied, union, and
+function type forms. Literal singleton types, `this.type`, `super.x.type`, and
+type projections using `#` remain deferred.
 An empty
 context-function parameter list (`() ?=> R`) is invalid and produces a
 focused parser diagnostic. The `derives` clause
@@ -376,10 +382,11 @@ bounds, backquoted type names, and one flat higher-kinded parameter clause
 shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. The supported
 recursive applied-type subset is represented by `AppliedTypeTree`; wildcard
-arguments use `TypeBoundsTree` with optional `low` and `high` children. Unions
-and intersections use `InfixOp` with `&` binding tighter than `|`. Generic infix
-types beyond those two operators, refined, opaque, match, and other full type
-forms remain deferred.
+arguments use `TypeBoundsTree` with optional `low` and `high` children. Path
+singleton aliases use `SingletonTypeTree` and preserve the term-valued path
+that precedes `.type`. Unions and intersections use `InfixOp` with `&`
+binding tighter than `|`. Generic infix types beyond those two operators,
+refined, opaque, match, and other full type forms remain deferred.
 
 ### Class-like definitions and templates
 
