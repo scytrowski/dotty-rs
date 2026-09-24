@@ -14,6 +14,20 @@ where
         };
         self.advance();
 
+        if self.current().kind != TokenKind::StringPart {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected an interpolated string part",
+            );
+            return self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(InterpolatedString {
+                    prefix,
+                    parts: Vec::new(),
+                })),
+            );
+        }
+
         let mut parts = Vec::new();
         let mut first_part = true;
         loop {
@@ -46,19 +60,20 @@ where
     fn parse_interpolated_part(&mut self, first: bool) -> TreeId<Untyped> {
         let token = self.current().clone();
         let source = self.current_text().unwrap_or_default();
-        let delimiter_len = if source.starts_with("\"\"\"") { 3 } else { 1 };
+        let opening_delimiter_len = if source.starts_with("\"\"\"") { 3 } else { 1 };
+        let closing_delimiter_len = if source.ends_with("\"\"\"") { 3 } else { 1 };
         let mut start = token.span.start();
         let mut end = token.span.end();
 
         if first {
-            start = start.saturating_add(delimiter_len);
+            start = start.saturating_add(opening_delimiter_len);
         }
         match self.cursor.lookahead(1).kind {
             TokenKind::Identifier | TokenKind::Punctuation(Punctuation::LeftBrace) => {
                 end = end.saturating_sub(1);
             }
             TokenKind::StringPart => {}
-            _ => end = end.saturating_sub(delimiter_len),
+            _ => end = end.saturating_sub(closing_delimiter_len),
         }
         if end < start {
             end = start;
@@ -68,6 +83,8 @@ where
             .source
             .slice(TextRange::new(start, end).expect("interpolation span is ordered"))
             .unwrap_or_default();
+        let logical_length = interpolated_fragment_utf16_length(value);
+        end = source_byte_offset_at_utf16(self.source.as_str(), start, logical_length);
         let range = TextRange::new(start, end).expect("interpolation span is ordered");
         self.advance();
         let value = self.names.intern(value);
@@ -81,6 +98,48 @@ where
             )),
         )
     }
+}
+
+fn interpolated_fragment_utf16_length(source: &str) -> usize {
+    let mut length = 0;
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '$' && characters.peek() == Some(&'$') {
+            characters.next();
+            length += 1;
+        } else if character == '\\'
+            && characters
+                .peek()
+                .is_some_and(|next| matches!(next, '"' | '\\'))
+        {
+            characters.next();
+            length += 1;
+        } else {
+            length += character.len_utf16();
+        }
+    }
+    length
+}
+
+fn source_byte_offset_at_utf16(source: &str, start: u32, length: usize) -> u32 {
+    let start = start as usize;
+    let start_units = source[..start].encode_utf16().count();
+    let target_units = start_units + length;
+    if target_units == start_units {
+        return start as u32;
+    }
+
+    let mut units = 0;
+    for (offset, character) in source.char_indices() {
+        if units >= target_units {
+            return offset as u32;
+        }
+        units += character.len_utf16();
+        if units >= target_units {
+            return (offset + character.len_utf8()) as u32;
+        }
+    }
+    source.len() as u32
 }
 
 #[cfg(test)]
@@ -179,6 +238,66 @@ mod tests {
         assert_eq!(
             parser.ast().get(parts[2]).position.unwrap().span().range(),
             TextRange::new(8, 8).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_a_missing_initial_string_part_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "s",
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            crate::ParseDiagnosticKind::ExpectedExpression
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn uses_decoded_length_for_escaped_dollar_spans() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "s\"cost $$\"",
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            parser.ast().get(tree).kind.clone()
+        else {
+            panic!("expected interpolated string");
+        };
+
+        assert_eq!(interpolation.parts.len(), 1);
+        assert_eq!(
+            parser
+                .ast()
+                .get(interpolation.parts[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(2, 8).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
