@@ -219,6 +219,8 @@ where
             Some(Modifier::Open)
         } else if name == known.infix {
             Some(Modifier::Infix)
+        } else if self.starts_opaque_type_definition() {
+            Some(Modifier::Opaque)
         } else {
             None
         }
@@ -232,11 +234,31 @@ where
             return false;
         };
         let known = self.known_names();
-        name == known.opaque
-            || name == known.erased
-            || name == known.tracked
-            || name == known.into
-            || name == known.update
+        name == known.erased || name == known.tracked || name == known.into || name == known.update
+    }
+
+    fn starts_opaque_type_definition(&mut self) -> bool {
+        if self.current().kind != TokenKind::Identifier {
+            return false;
+        }
+        let Ok(name) = self.intern_current_term_name() else {
+            return false;
+        };
+        if name != self.known_names().opaque {
+            return false;
+        }
+
+        for offset in 1..=8 {
+            let kind = self.cursor.lookahead(offset).kind;
+            if kind == TokenKind::Keyword(HardKeyword::Type) {
+                return true;
+            }
+            if is_prefix_continuation(kind) {
+                continue;
+            }
+            break;
+        }
+        false
     }
 
     pub(crate) fn parse_annotation(&mut self) -> TreeId<Untyped> {
@@ -413,6 +435,41 @@ mod tests {
             token(TokenKind::Eof, 6, 6),
         ];
         let mut parser = parser_for("inline", tokens, &mut names);
+        assert!(!parser.starts_definition_prefix());
+    }
+
+    #[test]
+    fn opaque_is_a_modifier_only_before_a_type_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        assert!(parser.starts_definition_prefix());
+        let prefix = parser.parse_definition_prefix();
+        assert_eq!(prefix.metadata.modifiers, vec![Modifier::Opaque]);
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Type));
+    }
+
+    #[test]
+    fn opaque_remains_an_identifier_outside_a_type_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque value",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
         assert!(!parser.starts_definition_prefix());
     }
 
