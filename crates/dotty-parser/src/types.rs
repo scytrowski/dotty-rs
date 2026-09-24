@@ -2,7 +2,7 @@ use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
     PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
-use dotty_core::{HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::{ParseDiagnosticKind, Parser};
@@ -797,6 +797,18 @@ where
             return self.error_type(position);
         }
         match self.current().kind {
+            TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::Keyword(HardKeyword::True)
+            | TokenKind::Keyword(HardKeyword::False)
+            | TokenKind::Keyword(HardKeyword::Null) => {
+                return self.parse_literal_singleton_type(mark);
+            }
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 return self.simple_type();
             }
@@ -809,6 +821,34 @@ where
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedType, "expected a type operand");
         self.error_type(position)
+    }
+
+    fn parse_literal_singleton_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let literal = match self.current().kind {
+            TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral => self.parse_number(mark),
+            TokenKind::StringLiteral => self.parse_string(mark),
+            TokenKind::Keyword(HardKeyword::True) => {
+                self.parse_literal(mark, Constant::Boolean(true))
+            }
+            TokenKind::Keyword(HardKeyword::False) => {
+                self.parse_literal(mark, Constant::Boolean(false))
+            }
+            TokenKind::Keyword(HardKeyword::Null) => self.parse_literal(mark, Constant::Null),
+            _ => {
+                let position = self.current_span();
+                self.report(ParseDiagnosticKind::ExpectedType, "expected a literal type");
+                return self.error_type(position);
+            }
+        };
+        self.alloc_from(
+            mark,
+            TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference: literal }),
+        )
     }
 
     fn parse_wildcard_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -1804,6 +1844,108 @@ mod tests {
         assert_eq!(span, TextRange::new(0, 6).unwrap());
         assert!(diagnostics_empty);
         assert!(at_eof);
+    }
+
+    #[test]
+    fn parses_a_string_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "\"foo\"",
+            vec![
+                token(TokenKind::StringLiteral, 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::String(_)
+            })
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 5).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_integer_literal_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "42",
+            vec![
+                token(TokenKind::IntegerLiteral, 0, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_true_as_a_boolean_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "true",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::True), 0, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Boolean(true)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_false_as_a_boolean_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "false",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::False), 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a literal singleton type");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Boolean(false)
+            })
+        ));
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
