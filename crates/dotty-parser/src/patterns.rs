@@ -3,8 +3,8 @@ use dotty_core::ast::{
     UntypedNode,
 };
 use dotty_core::{
-    Constant, HardKeyword, Punctuation, SourceId, SourceSpan, SourceText, Span, TextRange,
-    TokenKind, TokenSource, TreeId, TreeKind, Untyped,
+    Constant, HardKeyword, Punctuation, SourceId, SourceSpan, SourceText, Span, TermName,
+    TextRange, TokenKind, TokenSource, TreeId, TreeKind, Untyped,
 };
 
 use crate::{Location, ParseDiagnosticKind, ParseKind, ParseResult, Parser};
@@ -59,7 +59,6 @@ where
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
-        self.consume_deferred_sequence_marker();
         if !self.current_text_is("|") {
             return first;
         }
@@ -76,7 +75,6 @@ where
                 break;
             }
             let alternative = self.pattern1();
-            self.consume_deferred_sequence_marker();
             alternatives.push(alternative);
         }
 
@@ -110,7 +108,7 @@ where
 
     pub(crate) fn pattern2(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        let pattern = self.infix_pattern();
+        let pattern = self.pattern3(self.context.location);
         if !self.current_text_is("@") {
             return pattern;
         }
@@ -124,7 +122,7 @@ where
             return pattern;
         };
         self.advance();
-        let body = self.pattern3();
+        let body = self.pattern3(self.context.location);
         self.alloc_from(
             mark,
             TreeKind::Bind(Bind {
@@ -134,22 +132,60 @@ where
         )
     }
 
-    fn pattern3(&mut self) -> TreeId<Untyped> {
+    fn pattern3(&mut self, location: Location) -> TreeId<Untyped> {
+        let mark = self.mark();
         let pattern = self.infix_pattern();
-        self.consume_deferred_sequence_marker();
+        if !self.current_is_sequence_marker() {
+            return pattern;
+        }
+
+        let following = self.cursor.lookahead(1).kind;
+        let followed_by_pattern_delimiter = following
+            == TokenKind::Punctuation(Punctuation::RightParen)
+            || (following == TokenKind::Punctuation(Punctuation::Comma)
+                && matches!(
+                    self.cursor.lookahead(2).kind,
+                    TokenKind::Punctuation(Punctuation::RightParen) | TokenKind::Eof
+                ));
+        let at_fragment_end = following == TokenKind::Eof;
+        if !followed_by_pattern_delimiter && !at_fragment_end {
+            return pattern;
+        }
+
+        let star_mark = self.mark();
+        self.advance();
+        if location == Location::InPatternArgs && is_pattern_variable(self, pattern) {
+            let wildcard_star_name = *TermName::new(self.names.intern("_*")).as_name();
+            let wildcard_star = self.alloc_from(
+                star_mark,
+                TreeKind::Ident(Ident {
+                    name: wildcard_star_name,
+                    backquoted: false,
+                }),
+            );
+            return self.alloc_from(
+                mark,
+                TreeKind::Typed(TypedExpr {
+                    expr: pattern,
+                    tpt: wildcard_star,
+                }),
+            );
+        }
+
+        let message = if location == Location::InPatternArgs {
+            "`*` must follow a pattern variable"
+        } else {
+            "sequence patterns are only allowed in extractor arguments"
+        };
+        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
         pattern
     }
 
-    fn consume_deferred_sequence_marker(&mut self) {
-        if self.current().kind != TokenKind::Operator || !self.current_text_is("*") {
-            return;
-        }
-
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "sequence patterns are not supported yet",
-        );
-        self.advance();
+    fn current_is_sequence_marker(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::Identifier
+        ) && self.current_text_is("*")
     }
 
     fn infix_pattern(&mut self) -> TreeId<Untyped> {
@@ -501,6 +537,14 @@ fn is_identifier_kind(kind: TokenKind) -> bool {
         kind,
         TokenKind::Identifier | TokenKind::BackquotedIdentifier
     )
+}
+
+fn is_pattern_variable<S: TokenSource>(parser: &Parser<'_, '_, S>, tree: TreeId<Untyped>) -> bool {
+    let TreeKind::Ident(identifier) = &parser.ast().get(tree).kind else {
+        return false;
+    };
+    let name = parser.names.resolve(identifier.name.text());
+    name == "_" || name.chars().next().is_some_and(char::is_lowercase)
 }
 
 fn is_numeric_literal(kind: TokenKind) -> bool {
@@ -1146,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_one_focused_diagnostic_for_an_extractor_sequence_pattern() {
+    fn parses_an_extractor_sequence_pattern_as_typed_wildcard_star() {
         let mut names = NameInterner::new();
         let parser = parser_for(
             "Foo(xs*)",
@@ -1162,15 +1206,43 @@ mod tests {
         );
         let result = parser.parse_pattern_fragment();
 
-        assert_eq!(result.diagnostics.len(), 1);
+        let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+            panic!("expected extractor application");
+        };
+        let TreeKind::Typed(typed) = &result.ast.get(application.args[0]).kind else {
+            panic!("expected a typed sequence pattern");
+        };
+        let TreeKind::Ident(pattern_variable) = &result.ast.get(typed.expr).kind else {
+            panic!("expected a pattern variable");
+        };
+        let TreeKind::Ident(wildcard_star) = &result.ast.get(typed.tpt).kind else {
+            panic!("expected the `_*` sequence marker");
+        };
+        assert_eq!(names.resolve(pattern_variable.name.text()), "xs");
+        assert_eq!(names.resolve(wildcard_star.name.text()), "_*");
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 8).unwrap()
         );
+        assert_eq!(
+            result
+                .ast
+                .get(application.args[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(4, 7).unwrap()
+        );
+        assert_eq!(
+            result.ast.get(typed.tpt).position.unwrap().span().range(),
+            TextRange::new(6, 7).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
-    fn reports_one_focused_diagnostic_for_a_sequence_pattern_after_a_comma() {
+    fn parses_a_trailing_extractor_sequence_pattern_after_a_comma() {
         let mut names = NameInterner::new();
         let parser = parser_for(
             "Foo(head, tail*)",
@@ -1188,10 +1260,91 @@ mod tests {
         );
         let result = parser.parse_pattern_fragment();
 
+        let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+            panic!("expected extractor application");
+        };
+        assert_eq!(application.args.len(), 2);
+        assert!(matches!(
+            result.ast.get(application.args[1]).kind,
+            TreeKind::Typed(_)
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_sequence_marker_inside_a_tuple_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "(x*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 4).unwrap()
+        );
+    }
+
+    #[test]
+    fn keeps_ordinary_star_infix_pattern_parsing_unchanged() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "a * b",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_sequence_marker_after_a_stable_pattern_name() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(Items*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
         );
     }
 }
