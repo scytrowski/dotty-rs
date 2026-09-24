@@ -414,8 +414,8 @@ placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
 their right-hand sides and parameter defaults are diagnosed, as are
 class-like members and definition modifiers. Refined type members,
-capture-checking refinements, opaque, match, and other full type forms remain
-deferred.
+capture-checking refinements, opaque, bounded match-type definitions, and other
+full type forms remain deferred.
 
 ### Class-like definitions and templates
 
@@ -573,8 +573,9 @@ _.name
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
 annotated, and refined type names, plus the supported generic infix-type
-forms. Remaining refined-type forms, opaque, match, and other full type forms
-remain deferred and produce a parser diagnostic in this milestone.
+forms. Remaining refined-type forms, opaque, bounded match-type definitions, and
+other full type forms remain deferred and produce a parser diagnostic in this
+milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the
