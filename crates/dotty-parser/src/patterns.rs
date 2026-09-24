@@ -682,6 +682,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_bounded_wildcard_in_a_pattern_type_application_and_preserves_the_closer() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo[? >: L <: U]",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::TypeApply(ref type_apply) = result.ast.get(result.root).kind else {
+            panic!("expected a pattern type application");
+        };
+        assert!(matches!(
+            result.ast.get(type_apply.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+    }
+
+    #[test]
     fn allows_a_wildcard_inside_a_nested_pattern_type_application() {
         let mut names = NameInterner::new();
         let parser = parser_for(

@@ -781,15 +781,19 @@ where
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         if self.current().kind == TokenKind::Operator && self.current_text_is("?") {
+            let wildcard = self.parse_wildcard_type(mark);
             if self.allows_wildcard_type() {
-                return self.parse_wildcard_type(mark);
+                return wildcard;
             }
-            let position = self.current_span();
+            let position = self
+                .ast
+                .get(wildcard)
+                .position
+                .unwrap_or_else(|| self.current_span());
             self.report(
                 ParseDiagnosticKind::ExpectedType,
                 "a wildcard type is only valid as a type argument",
             );
-            self.advance();
             return self.error_type(position);
         }
         match self.current().kind {

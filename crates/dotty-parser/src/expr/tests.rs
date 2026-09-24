@@ -2769,6 +2769,40 @@ fn rejects_a_direct_wildcard_in_a_term_type_application() {
 }
 
 #[test]
+fn rejects_a_bounded_wildcard_in_a_term_type_application_and_preserves_the_closer() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo[? <: A]",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 3, 4),
+            token(TokenKind::Operator, 4, 5),
+            token(TokenKind::Operator, 6, 8),
+            token(TokenKind::Identifier, 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+            token(TokenKind::Eof, 11, 11),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::TypeApply(ref type_apply) = parser.ast().get(id).kind else {
+        panic!("expected a type application");
+    };
+    assert!(matches!(
+        parser.ast().get(type_apply.args[0]).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn allows_a_wildcard_inside_a_nested_term_type_application() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
