@@ -16,11 +16,12 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
 
 The convenience runner creates one compilation-mode manifest and sends it to
 the Scala 3.9 oracle once. Each Rust source file is parsed in an isolated
-worker process with a timeout. A panic or hang is reported as a hard failure;
-when a timeout occurs, the worker process is killed and reaped before the next
-file starts, so parser state and OS resources cannot accumulate in detached
-threads. A recoverable parser diagnostic does not make the command fail; a
-non-zero exit status is reserved for scanner failures, panics, and hangs.
+worker process with a timeout. A worker/process failure, panic, or hang is
+reported as a hard failure; when a timeout occurs, the worker process is killed
+and reaped before the next file starts, so parser state and OS resources cannot
+accumulate in detached threads. A recoverable parser diagnostic does not make
+the command fail; a non-zero exit status is reserved for scanner failures,
+worker/process failures, panics, and hangs.
 
 The JSON report is deterministic: files are sorted, histogram keys are sorted,
 and each failure bucket keeps at most five representative paths. Its schema

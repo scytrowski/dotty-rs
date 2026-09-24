@@ -64,6 +64,7 @@ enum Status {
     Clean,
     RecoverableDiagnostics,
     ScannerFailure,
+    ProcessFailure,
     Panic,
     Hang,
 }
@@ -331,7 +332,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
 fn process_failure(path: String, kind: &str, message: impl Into<String>) -> FileOutcome {
     FileOutcome {
         path,
-        status: Status::Panic,
+        status: Status::ProcessFailure,
         diagnostics: vec![DiagnosticSummary {
             kind: kind.to_owned(),
             message: message.into(),
@@ -538,7 +539,7 @@ fn build_report(
         match outcome.status {
             Status::Clean => report.files_parsed_without_diagnostics += 1,
             Status::RecoverableDiagnostics => report.files_parsed_with_recoverable_diagnostics += 1,
-            Status::ScannerFailure | Status::Panic | Status::Hang => {
+            Status::ScannerFailure | Status::ProcessFailure | Status::Panic | Status::Hang => {
                 report.hard_parser_failures += 1;
                 if matches!(outcome.status, Status::Panic) {
                     report.panics += 1;
@@ -714,6 +715,36 @@ mod tests {
             message: "unsupported `class`  syntax".to_owned(),
         });
         assert_eq!(bucket, "UnsupportedSyntax: unsupported class syntax");
+    }
+
+    #[test]
+    fn process_failure_is_not_counted_as_parser_panic() {
+        let outcome = process_failure(
+            "broken.scala".to_owned(),
+            "WorkerProtocol",
+            "invalid worker output",
+        );
+        let report = build_report(&[outcome], &[], None, None, None, None);
+
+        assert_eq!(report.hard_parser_failures, 1);
+        assert_eq!(report.panics, 0);
+    }
+
+    #[test]
+    fn parser_panic_is_counted_separately_from_process_failure() {
+        let outcome = FileOutcome {
+            path: "panic.scala".to_owned(),
+            status: Status::Panic,
+            diagnostics: vec![DiagnosticSummary {
+                kind: "Panic".to_owned(),
+                message: "parser worker panicked".to_owned(),
+            }],
+            scanner_diagnostics: 0,
+        };
+        let report = build_report(&[outcome], &[], None, None, None, None);
+
+        assert_eq!(report.hard_parser_failures, 1);
+        assert_eq!(report.panics, 1);
     }
 
     #[test]
