@@ -4,7 +4,7 @@
 //! type bounds. Parameterized definitions reuse `type_params.rs` and preserve
 //! the source-level abstraction in `LambdaTypeTree`.
 
-use dotty_core::ast::{LambdaTypeTree, MatchTypeTree, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{LambdaTypeTree, MatchTypeTree, Modifier, TypeBoundsTree, TypeDef};
 use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
 use crate::modifiers::DefinitionPrefix;
@@ -28,6 +28,7 @@ where
         let mark = crate::Mark {
             start: prefix.start,
         };
+        let opaque = prefix.metadata.modifiers.contains(&Modifier::Opaque);
         self.advance();
 
         let name = self.parse_type_definition_name();
@@ -53,7 +54,7 @@ where
                     .map(|position| position.span().range().end())
             })
             .unwrap_or(mark.start);
-        let rhs = self.parse_type_definition_rhs(location, empty_bounds_start);
+        let rhs = self.parse_type_definition_rhs(location, empty_bounds_start, opaque);
         let rhs = if let Some(mark) = type_params_mark {
             let lambda_start = type_params
                 .first()
@@ -147,6 +148,7 @@ where
         &mut self,
         location: Location,
         definition_start: u32,
+        opaque: bool,
     ) -> TreeId<Untyped> {
         let bounds_start = self.current().span.start();
         let low = if self.accept_type_operator(">:") {
@@ -199,6 +201,8 @@ where
                             "a match type alias cannot have a lower type bound",
                         );
                     }
+                } else if opaque {
+                    return self.alloc_opaque_type_bounds(low, high, rhs);
                 } else {
                     self.report(
                         ParseDiagnosticKind::UnexpectedToken,
@@ -210,12 +214,18 @@ where
         }
 
         if low.is_none() && high.is_none() {
+            if opaque {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `=` after an opaque type definition",
+                );
+            }
             // Dotty represents an abstract declaration's empty bounds at the
             // start of the type definition, rather than after its name.
             return self.synthetic_type_bounds(definition_start);
         }
 
-        self.alloc_from(
+        let bounds = self.alloc_from(
             crate::Mark {
                 start: bounds_start,
             },
@@ -224,7 +234,53 @@ where
                 high,
                 alias: None,
             }),
-        )
+        );
+        if opaque {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=` after an opaque type bound",
+            );
+        }
+        bounds
+    }
+
+    fn alloc_opaque_type_bounds(
+        &mut self,
+        low: Option<TreeId<Untyped>>,
+        high: Option<TreeId<Untyped>>,
+        alias: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        let start = low
+            .or(high)
+            .and_then(|bound| self.ast.get(bound).position)
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| {
+                self.ast
+                    .get(alias)
+                    .position
+                    .map_or(self.mark().start(), |position| {
+                        position.span().range().start()
+                    })
+            });
+        let end = self
+            .ast
+            .get(alias)
+            .position
+            .map(|position| position.span().range().end())
+            .unwrap_or(start);
+        let bounds = self.alloc_from(
+            crate::Mark { start },
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low,
+                high,
+                alias: Some(alias),
+            }),
+        );
+        if let Ok(range) = TextRange::new(start, end) {
+            self.ast.get_mut(bounds).position =
+                Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+        }
+        bounds
     }
 
     fn extend_match_type_span(&mut self, match_type: TreeId<Untyped>, bound: TreeId<Untyped>) {
@@ -288,7 +344,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{LambdaTypeTree, TypeBoundsTree, TypeDef};
+    use dotty_core::ast::{LambdaTypeTree, Modifier, TypeBoundsTree, TypeDef};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
     #[test]
@@ -322,6 +378,163 @@ mod tests {
             TextRange::new(0, 10).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_opaque_type_alias_with_opaque_metadata() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type UserId = Long",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef {
+            ref metadata, rhs, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::Opaque]);
+        assert!(matches!(parser.ast().get(rhs).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_parameterized_opaque_type_alias() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type Id[A] = A",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 14),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftBracket),
+                    14,
+                    15,
+                ),
+                token(TokenKind::Identifier, 15, 16),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightBracket),
+                    16,
+                    17,
+                ),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef {
+            ref metadata, rhs, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::Opaque]);
+        let TreeKind::LambdaTypeTree(LambdaTypeTree {
+            ref type_params,
+            body,
+        }) = parser.ast().get(rhs).kind
+        else {
+            panic!("expected LambdaTypeTree");
+        };
+        assert_eq!(type_params.len(), 1);
+        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_bounds_and_alias_for_an_opaque_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type Both >: Lower <: Upper = Impl",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 25),
+                token(TokenKind::Operator, 26, 28),
+                token(TokenKind::Identifier, 29, 34),
+                token(TokenKind::Operator, 35, 36),
+                token(TokenKind::Identifier, 37, 41),
+                token(TokenKind::Eof, 41, 41),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::TypeDef(TypeDef {
+            ref metadata, rhs, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected TypeDef");
+        };
+        assert_eq!(metadata.modifiers, vec![Modifier::Opaque]);
+        let TreeKind::TypeBoundsTree(TypeBoundsTree { low, high, alias }) =
+            parser.ast().get(rhs).kind
+        else {
+            panic!("expected TypeBoundsTree");
+        };
+        assert!(low.is_some() && high.is_some() && alias.is_some());
+        assert_eq!(
+            parser.ast().get(rhs).position.unwrap().span().range(),
+            TextRange::new(20, 41).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_an_opaque_bound_without_swallowing_the_next_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type Broken <: Upper\ntype Next = Impl",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Type), 28, 32),
+                token(TokenKind::Identifier, 33, 37),
+                token(TokenKind::Operator, 38, 39),
+                token(TokenKind::Identifier, 40, 44),
+                token(TokenKind::Eof, 44, 44),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the malformed opaque definition");
+        };
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+
+        parser.advance();
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the following type definition");
+        };
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::TypeDef(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

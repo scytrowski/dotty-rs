@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 
@@ -208,6 +208,7 @@ object Main:
       "override" -> Override,
       "inline" -> Inline,
       "transparent" -> Transparent,
+      "opaque" -> Opaque,
       "open" -> Open,
       "infix" -> Infix,
       "var" -> Mutable,
