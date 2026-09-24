@@ -17,6 +17,36 @@ where
         self.parse_number_with_spelling(mark, token_kind, spelling)
     }
 
+    /// Parses a numeric literal as a semantic constant for type syntax.
+    /// Expression parsing deliberately keeps unsuffixed numbers as raw
+    /// `Number` nodes, but Dotty's `SingletonTypeTree` wraps a `Literal`.
+    pub(crate) fn parse_number_constant(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let token_kind = self.current().kind;
+        let spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+        let Some(value) = numeric_constant(token_kind, spelling) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(mark, TreeKind::Literal(Literal { value }))
+    }
+
+    pub(crate) fn parse_negative_number_constant(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let token_kind = self.current().kind;
+        let token_spelling = match self.current_text() {
+            Ok(spelling) => spelling,
+            Err(_) => return self.unexpected_expression(),
+        };
+        let spelling = format!("-{token_spelling}");
+        let Some(value) = numeric_constant(token_kind, &spelling) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(mark, TreeKind::Literal(Literal { value }))
+    }
+
     pub(crate) fn parse_negative_number(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let token_kind = self.current().kind;
         let token_spelling = match self.current_text() {
@@ -98,6 +128,22 @@ where
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
     }
 
+    pub(crate) fn parse_char(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let Ok(text) = self.current_text() else {
+            return self.unexpected_expression();
+        };
+        let Some(value) = decode_char_literal(text) else {
+            return self.unexpected_expression();
+        };
+        self.advance();
+        self.alloc_from(
+            mark,
+            TreeKind::Literal(Literal {
+                value: Constant::Char(value),
+            }),
+        )
+    }
+
     pub(crate) fn parse_literal(&mut self, mark: crate::Mark, value: Constant) -> TreeId<Untyped> {
         self.advance();
         self.alloc_from(mark, TreeKind::Literal(Literal { value }))
@@ -160,6 +206,47 @@ fn parse_double_literal(spelling: &str) -> Option<f64> {
         .ok()
 }
 
+fn numeric_constant(token_kind: TokenKind, spelling: &str) -> Option<Constant> {
+    match token_kind {
+        TokenKind::IntegerLiteral => parse_integer_literal(spelling).map(Constant::Int),
+        TokenKind::LongLiteral => parse_long_literal(spelling).map(Constant::Long),
+        TokenKind::DecimalLiteral | TokenKind::ExponentLiteral => {
+            spelling.replace('_', "").parse().ok().map(Constant::double)
+        }
+        TokenKind::FloatLiteral => parse_float_literal(spelling).map(Constant::float),
+        TokenKind::DoubleLiteral => parse_double_literal(spelling).map(Constant::double),
+        _ => None,
+    }
+}
+
+fn parse_integer_literal(spelling: &str) -> Option<i32> {
+    let digits = spelling.replace('_', "");
+    let (negative, digits) = if let Some(digits) = digits.strip_prefix('-') {
+        (true, digits)
+    } else if let Some(digits) = digits.strip_prefix('+') {
+        (false, digits)
+    } else {
+        (false, digits.as_str())
+    };
+    let radix = integer_radix(Some(digits));
+    let digits = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+        .or_else(|| digits.strip_prefix("0b"))
+        .or_else(|| digits.strip_prefix("0B"))
+        .unwrap_or(digits);
+    let value = u64::from_str_radix(digits, radix).ok()?;
+    if negative {
+        if value == 1_u64 << 31 {
+            Some(i32::MIN)
+        } else {
+            i32::try_from(value).ok()?.checked_neg()
+        }
+    } else {
+        i32::try_from(value).ok()
+    }
+}
+
 enum DecodedString {
     Scalar(String),
     Utf16(Vec<u16>),
@@ -172,6 +259,23 @@ fn decode_string_literal(text: &str) -> Option<DecodedString> {
     } else {
         text.strip_prefix('"')?.strip_suffix('"')?
     };
+    decode_literal_body(body, multiline)
+}
+
+fn decode_char_literal(text: &str) -> Option<u16> {
+    let body = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let decoded = decode_literal_body(body, false)?;
+    match decoded {
+        DecodedString::Scalar(value) => {
+            let mut units = value.encode_utf16();
+            let unit = units.next()?;
+            units.next().is_none().then_some(unit)
+        }
+        DecodedString::Utf16(units) => (units.len() == 1).then_some(units[0]),
+    }
+}
+
+fn decode_literal_body(body: &str, raw: bool) -> Option<DecodedString> {
     let characters: Vec<char> = body.chars().collect();
     let mut units = Vec::new();
     let mut index = 0;
@@ -179,7 +283,7 @@ fn decode_string_literal(text: &str) -> Option<DecodedString> {
     while index < characters.len() {
         let character = characters[index];
         index += 1;
-        if multiline || character != '\\' {
+        if raw || character != '\\' {
             let mut encoded = [0; 2];
             units.extend(character.encode_utf16(&mut encoded).iter().copied());
             continue;

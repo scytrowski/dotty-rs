@@ -40,7 +40,8 @@ existing `TypeBoundsTree` and accepts wildcard syntax only in nested type
 argument positions. Type-definition fixtures also cover path singleton types
 such as `x.type` and `foo.bar.type`; their term-valued references are rendered
 as `SingletonTypeTree`, while ordinary qualified type references remain in the
-type namespace.
+type namespace. They also cover literal singleton aliases for strings, characters,
+numbers, booleans, and `null`, including applied and union compositions.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
