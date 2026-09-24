@@ -962,17 +962,23 @@ where
         tree
     }
 
-    /// Parses only `id { '.' id }`, for grammar positions whose suffixes have
-    /// a distinct meaning (for example the current `derives` production).
+    /// Parses a qualified type reference or a path singleton type. Grammar
+    /// positions whose suffixes have a distinct meaning (for example the
+    /// current `derives` production) use this shared type entry point.
     pub(crate) fn simple_type_reference(&mut self) -> TreeId<Untyped> {
         if self.starts_path_singleton_type() {
             let mark = self.mark();
-            let reference = self
-                .parse_qualified_reference_until_keyword(
-                    ReferenceNamespace::Term,
-                    Some(HardKeyword::Type),
-                )
-                .expect("path singleton lookahead guarantees a term reference");
+            let Ok(reference) = self.parse_qualified_reference_until_keyword(
+                ReferenceNamespace::Term,
+                Some(HardKeyword::Type),
+            ) else {
+                let position = self.current_span();
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a path before `.type`",
+                );
+                return self.error_type(position);
+            };
             self.expect(TokenKind::Punctuation(Punctuation::Dot));
             self.expect(TokenKind::Keyword(HardKeyword::Type));
             return self.alloc_from(
