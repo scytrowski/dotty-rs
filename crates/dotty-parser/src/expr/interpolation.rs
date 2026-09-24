@@ -79,15 +79,16 @@ where
             end = start;
         }
 
-        let value = self
+        let source_value = self
             .source
             .slice(TextRange::new(start, end).expect("interpolation span is ordered"))
             .unwrap_or_default();
-        let logical_length = interpolated_fragment_utf16_length(value);
+        let value = interpolated_fragment_value(source_value);
+        let logical_length = value.encode_utf16().count();
         end = source_byte_offset_at_utf16(self.source.as_str(), start, logical_length);
         let range = TextRange::new(start, end).expect("interpolation span is ordered");
         self.advance();
-        let value = self.names.intern(value);
+        let value = self.names.intern(&value);
         self.alloc(
             TreeKind::Literal(Literal {
                 value: Constant::String(value),
@@ -100,30 +101,25 @@ where
     }
 }
 
-fn interpolated_fragment_utf16_length(source: &str) -> usize {
-    let mut length = 0;
+fn interpolated_fragment_value(source: &str) -> String {
+    let mut value = String::with_capacity(source.len());
     let mut characters = source.chars().peekable();
     while let Some(character) = characters.next() {
         if character == '$' && characters.peek() == Some(&'$') {
             characters.next();
-            length += 1;
-        } else if character == '\\'
-            && characters
-                .peek()
-                .is_some_and(|next| matches!(next, '"' | '\\'))
-        {
-            characters.next();
-            length += 1;
+            value.push('$');
         } else {
-            length += character.len_utf16();
+            value.push(character);
         }
     }
-    length
+    value
 }
 
 fn source_byte_offset_at_utf16(source: &str, start: u32, length: usize) -> u32 {
-    let start = start as usize;
-    let start_units = source[..start].encode_utf16().count();
+    let requested_start = start as usize;
+    let prefix = source.get(..requested_start).unwrap_or(source);
+    let start = prefix.len();
+    let start_units = prefix.encode_utf16().count();
     let target_units = start_units + length;
     if target_units == start_units {
         return start as u32;
@@ -146,8 +142,8 @@ fn source_byte_offset_at_utf16(source: &str, start: u32, length: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Ident, InterpolatedString};
-    use dotty_core::{NameInterner, Punctuation, TextRange};
+    use dotty_core::ast::{Ident, InterpolatedString, Literal};
+    use dotty_core::{Constant, NameInterner, Punctuation, TextRange};
 
     #[test]
     fn parses_simple_interpolation_parts() {
@@ -299,6 +295,36 @@ mod tests {
                 .range(),
             TextRange::new(2, 8).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn stores_the_scanner_value_for_escaped_dollars() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "s\"cost $$5\"",
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            parser.ast().get(tree).kind.clone()
+        else {
+            panic!("expected interpolated string");
+        };
+        let TreeKind::Literal(Literal {
+            value: Constant::String(value),
+        }) = &parser.ast().get(interpolation.parts[0]).kind
+        else {
+            panic!("expected string fragment literal");
+        };
+
+        assert_eq!(parser.names.resolve(*value), "cost $5");
         assert!(parser.diagnostics().is_empty());
     }
 }
