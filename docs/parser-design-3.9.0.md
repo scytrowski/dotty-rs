@@ -338,15 +338,18 @@ subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles
 simple, recursively applied, projected, annotated, refined, parenthesized, and tuple type names needed by
-these ascriptions, type applications, and type-definition bounds, plus the
-narrow Scala 3.9 union/intersection subset and ordinary/context function
-arrows, plus wildcard type arguments with optional lower and upper bounds.
+these ascriptions, type applications, and type-definition bounds, plus
+Scala 3.9 `InfixType` expressions with generic symbolic and identifier
+operators, ordinary/context function arrows, and wildcard type arguments
+with optional lower and upper bounds.
 Wildcard syntax is enabled by the type-argument context (`List[?]` and
 `List[? >: String <: Number]`); a top-level `?` remains an invalid type and
-produces a parser diagnostic. `type_expr()` parses both arrows above the `|` union layer, while `&`
-binds tighter than `|`. The union and intersection operators produce
-source-level `InfixOp` trees with type-namespace operator names; ordinary
-arrows produce `Function` trees and context arrows produce `FunctionWithMods`.
+produces a parser diagnostic. `type_expr()` parses arrows outside the
+infix-type layer using the shared Scala precedence buckets; `&` still binds
+tighter than `|`, and operators ending in `:` associate to the right. All
+infix type operators produce source-level `InfixOp` trees with type-namespace
+operator names; ordinary arrows produce `Function` trees and context arrows
+produce `FunctionWithMods`.
 Parenthesized
 grouping and tuples preserve the shared source-level `Parens` and `Tuple`
 nodes, including when nested or used as applied type arguments. Type
@@ -406,8 +409,8 @@ placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
 their right-hand sides and parameter defaults are diagnosed, as are
 class-like members and definition modifiers. Refined type members,
-capture-checking refinements, generic infix types, opaque, match, and other
-full type forms remain deferred.
+capture-checking refinements, opaque, match, and other full type forms remain
+deferred.
 
 ### Class-like definitions and templates
 
@@ -430,9 +433,8 @@ Braced and scanner-provided indented template bodies retain every member in
 source order, including nested definitions and expressions. A self value is
 stored in the existing `Template.self_val`; its source-level `ValDef` carries
 `PrivateLocal`, matching Dotty's parser tree. The current type subset accepts
-simple qualified self types; compound `InfixType` forms are diagnosed and
-recovered at the self arrow until the fuller type grammar lands. This is
-deliberately different from an expression block, whose last expression is its result. Layout
+simple qualified and compound `InfixType` self types. This is deliberately
+different from an expression block, whose last expression is its result. Layout
 classification remains owned by the scanner; the parser only feeds back the
 `ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
 template region. The parser preserves `derives` and ordered `uses` metadata in
@@ -565,10 +567,9 @@ _.name
 ```
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
-annotated, and refined type names, plus the supported union and intersection
-forms. Generic infix types beyond `|` and `&`, remaining refined-type forms,
-opaque, match, and other full type forms (for example `Foo + Bar`) remain
-deferred and produce a parser diagnostic in this milestone.
+annotated, and refined type names, plus the supported generic infix-type
+forms. Remaining refined-type forms, opaque, match, and other full type forms
+remain deferred and produce a parser diagnostic in this milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the

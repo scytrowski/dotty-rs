@@ -55,8 +55,7 @@ where
     /// Parses the currently supported function and infix type subset.
     ///
     /// `simple_type` deliberately remains an atomic/applied type parser. The
-    /// higher-level entries own function-arrow and union/intersection
-    /// precedence.
+    /// higher-level entries own function-arrow precedence.
     pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
         self.parse_function_type()
     }
@@ -130,7 +129,7 @@ where
         }
 
         let diagnostics_before = self.diagnostics.len();
-        let parameter = self.parse_union_type();
+        let parameter = self.parse_infix_type();
         if self.diagnostics.len() != diagnostics_before {
             return parameter;
         }
@@ -760,24 +759,153 @@ where
         }
     }
 
-    pub(crate) fn parse_union_type(&mut self) -> TreeId<Untyped> {
-        let mut tree = self.parse_intersection_type();
-        while let Some(operator) = self.accept_type_infix_operator("|") {
-            self.consume_type_infix_newlines();
-            let right = self.parse_intersection_type();
-            tree = self.alloc_infix(tree, operator, right);
-        }
-        tree
+    /// Parses `InfixType` with the same precedence and associativity contract
+    /// as expression operators. The operand remains a refined type, so
+    /// function arrows can continue to own the outer precedence level.
+    pub(crate) fn parse_infix_type(&mut self) -> TreeId<Untyped> {
+        self.parse_infix_type_inner(false)
     }
 
-    fn parse_intersection_type(&mut self) -> TreeId<Untyped> {
-        let mut tree = self.parse_refined_type();
-        while let Some(operator) = self.accept_type_infix_operator("&") {
+    /// Parses a context-bound type, where the contextual `as` alias belongs
+    /// to the surrounding type-parameter grammar rather than to InfixType.
+    pub(crate) fn parse_context_bound_type_expr(&mut self) -> TreeId<Untyped> {
+        self.parse_infix_type_inner(true)
+    }
+
+    fn parse_infix_type_inner(&mut self, stop_at_context_bound_alias: bool) -> TreeId<Untyped> {
+        let mut top = self.parse_refined_type();
+        let mut operators = Vec::new();
+
+        while let Some((operator, offset)) =
+            self.current_type_infix_operator(stop_at_context_bound_alias)
+        {
+            let checkpoint = self.cursor.checkpoint();
+            let spelling = self.names.resolve(operator.text());
+            let operator_precedence = crate::infix::precedence(spelling);
+            let operator_left_associative = !crate::infix::is_right_associative(spelling);
+
+            top = self.reduce_type_operator_stack(
+                &mut operators,
+                top,
+                operator_precedence,
+                operator_left_associative,
+                Some(operator),
+            );
+            self.advance();
+            operators.push(crate::OpInfo {
+                operand: top,
+                operator,
+                offset,
+            });
             self.consume_type_infix_newlines();
-            let right = self.parse_refined_type();
-            tree = self.alloc_infix(tree, operator, right);
+
+            let operand_checkpoint = self.cursor.checkpoint();
+            top = self.parse_refined_type();
+            if !self.cursor.progressed_since(operand_checkpoint) {
+                break;
+            }
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing an infix type",
+                );
+                break;
+            }
         }
-        tree
+
+        self.reduce_type_operator_stack(&mut operators, top, 0, true, None)
+    }
+
+    fn current_type_infix_operator(
+        &mut self,
+        stop_at_context_bound_alias: bool,
+    ) -> Option<(Name, u32)> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Operator
+                | TokenKind::ColonOp
+        ) {
+            return None;
+        }
+
+        // Arrows, bounds, projections, a bare colon, and contextual markers
+        // belong to their own type productions rather than to InfixType.
+        if self.current_is_structural_operator()
+            || self.current_text_is(":")
+            || self.current_text_is("<:")
+            || self.current_text_is(">:")
+            || self.current_text_is("#")
+            || stop_at_context_bound_alias && self.current_text_is("as")
+            || !self.type_operator_has_following_operand()
+        {
+            return None;
+        }
+
+        let operator = *self.intern_current_type_name().ok()?.as_name();
+        Some((operator, self.current().span.start()))
+    }
+
+    fn type_operator_has_following_operand(&mut self) -> bool {
+        let mut offset = 1;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        let next = self.cursor.lookahead(offset).clone();
+        self.can_start_type_operand(&next)
+            || matches!(
+                self.current().kind,
+                TokenKind::Operator | TokenKind::ColonOp
+            ) && matches!(
+                next.kind,
+                TokenKind::Eof
+                    | TokenKind::Punctuation(
+                        Punctuation::Comma
+                            | Punctuation::RightBracket
+                            | Punctuation::RightParen
+                            | Punctuation::RightBrace
+                    )
+            )
+    }
+
+    fn reduce_type_operator_stack(
+        &mut self,
+        operators: &mut Vec<crate::OpInfo>,
+        mut top: TreeId<Untyped>,
+        precedence: u8,
+        left_associative: bool,
+        next_operator: Option<Name>,
+    ) -> TreeId<Untyped> {
+        if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
+            let stack_spelling = self.names.resolve(stack_top.operator.text()).to_owned();
+            let next_spelling = self.names.resolve(next_operator.text()).to_owned();
+            if crate::infix::has_mixed_associativity(&stack_spelling, &next_spelling) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    format!(
+                        "mixed left- and right-associative type operators `{stack_spelling}` and `{next_spelling}`"
+                    ),
+                );
+            }
+        }
+
+        while let Some(stack_top) = operators.last() {
+            let stack_spelling = self.names.resolve(stack_top.operator.text());
+            let stack_precedence = crate::infix::precedence(stack_spelling);
+            if !(precedence < stack_precedence
+                || left_associative && precedence == stack_precedence)
+            {
+                break;
+            }
+
+            let stack_top = operators.pop().expect("type operator stack was non-empty");
+            top = self.alloc_infix(stack_top.operand, stack_top.operator, top);
+        }
+        top
     }
 
     /// Parses `annotatedType` followed by zero or more refinement bodies.
@@ -1231,10 +1359,8 @@ where
         ) {
             offset += 1;
         }
-        if !matches!(
-            self.cursor.lookahead(offset).kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) {
+        let next = self.cursor.lookahead(offset).clone();
+        if !self.can_start_type_operand(&next) {
             return;
         }
 
@@ -1248,18 +1374,28 @@ where
         }
     }
 
-    fn accept_type_infix_operator(&mut self, expected: &str) -> Option<Name> {
-        if !matches!(
-            self.current().kind,
-            TokenKind::Operator | TokenKind::ColonOp
-        ) || !self.current_text_is(expected)
-        {
-            return None;
+    fn can_start_type_operand(&self, token: &dotty_core::Token) -> bool {
+        match token.kind {
+            TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::IntegerLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::CharLiteral
+            | TokenKind::Keyword(HardKeyword::True)
+            | TokenKind::Keyword(HardKeyword::False)
+            | TokenKind::Keyword(HardKeyword::Null)
+            | TokenKind::Punctuation(Punctuation::LeftParen) => true,
+            TokenKind::Operator => self
+                .token_text(token)
+                .ok()
+                .is_some_and(|text| matches!(text, "-" | "?")),
+            _ => false,
         }
-
-        let operator = *self.intern_current_type_name().ok()?.as_name();
-        self.advance();
-        Some(operator)
     }
 
     fn accept_type_bound_operator(&mut self, expected: &str) -> bool {
@@ -6703,6 +6839,162 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_contextual_word_as_a_type_operator_outside_context_bounds() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A as B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Identifier, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an identifier infix type");
+        };
+        assert_eq!(parser.names.resolve(infix.op.text()), "as");
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 6).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn type_operators_follow_shared_precedence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A * B + C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an outer infix type");
+        };
+        assert_eq!(parser.names.resolve(outer.op.text()), "+");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(inner)) =
+            &parser.ast().get(outer.left).kind
+        else {
+            panic!("expected a nested multiplicative type");
+        };
+        assert_eq!(parser.names.resolve(inner.op.text()), "*");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn colon_terminated_type_operators_are_right_associative() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A :: B :: C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(outer)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected an outer right-associative type");
+        };
+        assert_eq!(parser.names.resolve(outer.op.text()), "::");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(inner)) =
+            &parser.ast().get(outer.right).kind
+        else {
+            panic!("expected a nested right-associative type");
+        };
+        assert_eq!(parser.names.resolve(inner.op.text()), "::");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_mixed_type_operator_associativity() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A + B +: C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("mixed left- and right-associative")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn consumes_a_newline_after_an_identifier_type_operator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A op\nB",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Identifier, 2, 4),
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_infix_type_operand_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A +",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_union_inside_type_arguments() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -6838,7 +7130,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unimplemented_type_operators_unconsumed() {
+    fn parses_general_symbolic_type_operators() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "A || B",
@@ -6851,9 +7143,13 @@ mod tests {
             &mut names,
         );
 
-        parser.type_expr();
-        assert_eq!(parser.current().kind, TokenKind::Operator);
-        assert_eq!(parser.current_text().unwrap(), "||");
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a generic infix type");
+        };
+        assert_eq!(parser.names.resolve(infix.op.text()), "||");
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 

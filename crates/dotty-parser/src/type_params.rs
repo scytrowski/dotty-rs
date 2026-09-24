@@ -436,7 +436,9 @@ where
             );
             self.error_type(self.span_from(mark))
         } else {
-            self.parse_bound_type()
+            self.with_parse_kind(ParseKind::Type, |parser| {
+                parser.parse_context_bound_type_expr()
+            })
         };
         let name = self.parse_context_bound_alias();
         self.alloc_from(
