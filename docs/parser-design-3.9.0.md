@@ -337,7 +337,7 @@ The implemented selections and applications are only the simple-expression
 subset above. Full selection/application grammar, including advanced argument
 forms, named/using argument validation, and the remaining colon-argument
 forms, remains future work. Likewise, the type parser currently handles
-simple, recursively applied, projected, parenthesized, and tuple type names needed by
+simple, recursively applied, projected, annotated, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus the
 narrow Scala 3.9 union/intersection subset and ordinary/context function
 arrows, plus wildcard type arguments with optional lower and upper bounds.
@@ -391,7 +391,10 @@ shared `LambdaTypeTree`; an abstract declaration with no explicit bounds uses
 the existing zero-width `TypeBoundsTree` representation. The supported
 recursive applied-type and type-projection subset is represented by
 `AppliedTypeTree` and type-namespace `Select` nodes; wildcard arguments use
-`TypeBoundsTree` with optional `low` and `high` children. Path
+`TypeBoundsTree` with optional `low` and `high` children. Annotated types use
+the shared `Annotated` node and reuse the definition annotation grammar; the
+annotation binds to the immediately preceding simple/parenthesized type before
+the supported union/intersection layers. Path
 singleton aliases use `SingletonTypeTree` and preserve the term-valued path
 that precedes `.type`; literal singleton aliases use the same node around a
 decoded `Literal`. Unions and intersections use `InfixOp` with `&` binding

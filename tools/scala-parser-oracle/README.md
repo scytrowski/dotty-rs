@@ -47,6 +47,8 @@ shared `Tuple` node and exercise full type expressions inside named elements;
 the function and context-function arrow lookahead remains compared separately.
 Type projection fixtures cover `T#Member`, applied qualifiers such as
 `F[A]#Result`, dotted qualifiers, and repeated projection suffixes.
+Annotated type fixtures cover single and repeated annotations, annotation
+arguments, and binding around union, intersection, and parenthesized types.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
