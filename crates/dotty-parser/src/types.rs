@@ -817,17 +817,9 @@ where
             TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Outdent | TokenKind::Eof
         ) {
             let checkpoint = self.cursor.checkpoint();
-            if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
-                if let ParsedStatement::Definition(definition) =
-                    self.parse_type_definition(Location::InBlock)
-                {
-                    refinements.push(definition);
-                }
+            if let Some(definition) = self.parse_refinement_member() {
+                refinements.push(definition);
             } else {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "only type declarations are supported in a type refinement",
-                );
                 self.recover_refinement_member();
             }
 
@@ -847,6 +839,76 @@ where
 
         self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
         refinements
+    }
+
+    fn parse_refinement_member(&mut self) -> Option<TreeId<Untyped>> {
+        let member_start = self.mark();
+        let current_kind = self.current().kind;
+        let statement = match current_kind {
+            TokenKind::Keyword(HardKeyword::Type) => self.parse_type_definition(Location::InBlock),
+            TokenKind::Keyword(HardKeyword::Val | HardKeyword::Var) => {
+                self.parse_value_definition(Location::InBlock)
+            }
+            TokenKind::Keyword(HardKeyword::Def) => self.parse_method_definition(Location::InBlock),
+            TokenKind::Keyword(
+                HardKeyword::Class | HardKeyword::Trait | HardKeyword::Object | HardKeyword::Enum,
+            )
+            | TokenKind::CaseClass
+            | TokenKind::CaseObject => {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "class-like definitions are not allowed in a type refinement",
+                );
+                return None;
+            }
+            _ if self.starts_definition_prefix() => {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "modifiers and annotations are not allowed in a type refinement",
+                );
+                return None;
+            }
+            _ => {
+                self.report(
+                    ParseDiagnosticKind::UnsupportedSyntax,
+                    "expected a type, val, var, or def declaration in a type refinement",
+                );
+                return None;
+            }
+        };
+
+        let ParsedStatement::Definition(definition) = statement else {
+            return None;
+        };
+        self.validate_refinement_member(definition, member_start);
+        Some(definition)
+    }
+
+    fn validate_refinement_member(&mut self, member: TreeId<Untyped>, mark: crate::Mark) {
+        let has_rhs = match &self.ast.get(member).kind {
+            TreeKind::ValDef(definition) => definition.rhs.is_some(),
+            TreeKind::DefDef(definition) => {
+                definition.rhs.is_some()
+                    || definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .any(|parameter| {
+                            matches!(
+                                self.ast.get(*parameter).kind,
+                                TreeKind::ValDef(ref parameter) if parameter.rhs.is_some()
+                            )
+                        })
+            }
+            _ => false,
+        };
+        if has_rhs {
+            self.report_at(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                self.span_from(mark),
+                "refinement val, var, and def declarations cannot have a right-hand side or default argument",
+            );
+        }
     }
 
     fn consume_refinement_separators(&mut self) {
@@ -1408,7 +1470,8 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
-        ContextBoundTypeTree, ContextBounds, LambdaTypeTree, RefinedTypeTree, TypeDef,
+        ContextBoundTypeTree, ContextBounds, DefDef, LambdaTypeTree, RefinedTypeTree, TypeDef,
+        ValDef,
     };
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
 
@@ -8195,5 +8258,100 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Outdent);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_val_declaration_member_in_a_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { val x: Int }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Val), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::ColonFollow, 9, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        let TreeKind::ValDef(ValDef { rhs, .. }) = &parser.ast().get(refined.refinements[0]).kind
+        else {
+            panic!("expected a val declaration");
+        };
+        assert!(rhs.is_none());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_var_declaration_member_in_a_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { var y: String }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Var), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::ColonFollow, 9, 10),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(refined.refinements[0]).kind else {
+            panic!("expected a var declaration");
+        };
+        assert!(
+            definition
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Var)
+        );
+        assert!(definition.rhs.is_none());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_def_declaration_member_in_a_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { def value: Result }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Def), 4, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::ColonFollow, 13, 14),
+                token(TokenKind::Identifier, 15, 21),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        let TreeKind::DefDef(DefDef { rhs, .. }) = &parser.ast().get(refined.refinements[0]).kind
+        else {
+            panic!("expected a def declaration");
+        };
+        assert!(rhs.is_none());
+        assert!(parser.diagnostics().is_empty());
     }
 }
