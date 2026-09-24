@@ -1119,6 +1119,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_method_anonymous_using_clause_with_a_synthetic_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f(using Ctx) = body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+                    5,
+                    6,
+                ),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(
+                    TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+                    15,
+                    16,
+                ),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::Identifier, 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a definition statement");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        let [parameter] = definition.value_param_clauses[0].as_slice() else {
+            panic!("expected one using parameter");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+            panic!("expected parameter ValDef");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x$1");
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_a_method_default_parameter_value() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

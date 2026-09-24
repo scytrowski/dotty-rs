@@ -28,13 +28,19 @@ where
         };
 
         let mut param_clauses = Vec::new();
+        let mut num_lead_params = 0;
         if !type_params.is_empty() {
             param_clauses.push(type_params);
         }
 
         while self.current_is_using_parameter_clause() {
-            let clause =
-                self.parse_single_term_param_clause(ParamOwner::ExtensionPrefix, false, true);
+            let clause = self.parse_single_term_param_clause(
+                ParamOwner::ExtensionPrefix,
+                false,
+                true,
+                num_lead_params,
+            );
+            num_lead_params += clause.len();
             if !clause.is_empty() {
                 param_clauses.push(clause);
             }
@@ -43,7 +49,12 @@ where
         let receiver = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && !self.current_is_using_parameter_clause()
         {
-            self.parse_single_term_param_clause(ParamOwner::ExtensionPrefix, true, false)
+            self.parse_single_term_param_clause(
+                ParamOwner::ExtensionPrefix,
+                true,
+                false,
+                num_lead_params,
+            )
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -57,6 +68,7 @@ where
                 "an extension must have exactly one receiver parameter",
             );
         } else {
+            num_lead_params += receiver.len();
             param_clauses.push(receiver);
         }
 
@@ -68,8 +80,13 @@ where
                     "only `using` clauses may follow an extension receiver",
                 );
             }
-            let clause =
-                self.parse_single_term_param_clause(ParamOwner::ExtensionFollow, false, is_using);
+            let clause = self.parse_single_term_param_clause(
+                ParamOwner::ExtensionFollow,
+                false,
+                is_using,
+                num_lead_params,
+            );
+            num_lead_params += clause.len();
             if !clause.is_empty() {
                 param_clauses.push(clause);
             }

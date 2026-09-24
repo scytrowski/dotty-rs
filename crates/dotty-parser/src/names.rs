@@ -14,6 +14,12 @@ pub(crate) fn anonymous_type_name(names: &mut NameInterner) -> TypeName {
     TypeName::new(names.intern(""))
 }
 
+/// Returns the deterministic name Dotty assigns to an anonymous context
+/// parameter parsed from a context type.
+pub(crate) fn synthetic_term_param_name(names: &mut NameInterner, index: usize) -> TermName {
+    TermName::new(names.intern(&format!("x${index}")))
+}
+
 /// Parser-known Scala 3.9.0 soft keywords.
 ///
 /// The lexer deliberately leaves these words as identifiers. The parser
