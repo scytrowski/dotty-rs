@@ -8,6 +8,7 @@
 use dotty_core::ast::{Modifier, Modifiers, ValDef};
 use dotty_core::{Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
+use crate::names::synthetic_term_param_name;
 use crate::{ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -22,6 +23,7 @@ where
         self.with_param_owner(Some(owner), |parser| {
             let mut clauses = Vec::new();
             let mut first_ordinary_clause = true;
+            let mut num_lead_params = 0;
             loop {
                 parser.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
                     Punctuation::LeftParen,
@@ -34,17 +36,20 @@ where
                     continue;
                 }
                 let is_using = parser.current_is_using_parameter_clause();
-                clauses.push(if is_using {
-                    parser.parse_term_param_clause_with_policy(owner, false, true)
+                let clause = if is_using {
+                    parser.parse_term_param_clause_with_policy(owner, false, true, num_lead_params)
                 } else {
                     let clause = parser.parse_term_param_clause_with_policy(
                         owner,
                         first_ordinary_clause,
                         false,
+                        num_lead_params,
                     );
                     first_ordinary_clause = false;
                     clause
-                });
+                };
+                num_lead_params += clause.len();
+                clauses.push(clause);
             }
             clauses
         })
@@ -70,11 +75,17 @@ where
         owner: ParamOwner,
         first_ordinary_clause: bool,
         is_using: bool,
+        num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
         if self.current_is_unsupported_parameter_clause() {
             self.parse_unsupported_term_param_clause()
         } else {
-            self.parse_term_param_clause_with_policy(owner, first_ordinary_clause, is_using)
+            self.parse_term_param_clause_with_policy(
+                owner,
+                first_ordinary_clause,
+                is_using,
+                num_lead_params,
+            )
         }
     }
 
@@ -102,6 +113,7 @@ where
         owner: ParamOwner,
         first_ordinary_clause: bool,
         is_using: bool,
+        num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
         let mut params = Vec::new();
@@ -113,6 +125,14 @@ where
 
         if is_using {
             self.advance();
+            if self.current_is_anonymous_using_type() {
+                return self.parse_anonymous_using_types(
+                    owner,
+                    first_ordinary_clause,
+                    metadata,
+                    num_lead_params,
+                );
+            }
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
@@ -266,13 +286,93 @@ where
         if self.cursor.lookahead(1).kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit) {
             return true;
         }
-        if !self.current_is_using_parameter_clause() {
-            return false;
+        false
+    }
+
+    fn current_is_anonymous_using_type(&mut self) -> bool {
+        self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
+            && !is_parameter_colon_at(self, 1)
+    }
+
+    fn parse_anonymous_using_types(
+        &mut self,
+        owner: ParamOwner,
+        first_ordinary_clause: bool,
+        metadata: Modifiers,
+        num_lead_params: usize,
+    ) -> Vec<TreeId<Untyped>> {
+        let mut params = Vec::new();
+        let mut next_index = num_lead_params.saturating_add(1);
+
+        loop {
+            if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
+                if params.is_empty() {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a parameter type after `using`",
+                    );
+                }
+                self.advance();
+                break;
+            }
+            if matches!(
+                self.current().kind,
+                TokenKind::Eof
+                    | TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+            ) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a parameter type after `using`",
+                );
+                break;
+            }
+
+            let mark = self.mark();
+            let checkpoint = self.cursor.checkpoint();
+            let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr());
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing an anonymous `using` parameter",
+                );
+                self.recover_term_param_clause();
+                break;
+            }
+
+            let mut parameter_metadata = metadata.clone();
+            add_class_parameter_metadata(owner, first_ordinary_clause, &mut parameter_metadata);
+            let name = synthetic_term_param_name(self.names, next_index);
+            next_index = next_index.saturating_add(1);
+            params.push(self.alloc_from(
+                mark,
+                TreeKind::ValDef(ValDef {
+                    name,
+                    tpt,
+                    rhs: None,
+                    metadata: parameter_metadata,
+                }),
+            ));
+
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a parameter type after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
+
+            self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+            break;
         }
-        matches!(
-            self.cursor.lookahead(2).kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) && !is_parameter_colon_at(self, 3)
+
+        params
     }
 
     fn parse_param_name(&mut self) -> TermName {
@@ -355,6 +455,21 @@ fn is_parameter_colon_at<S: dotty_core::TokenSource>(
 
 fn is_class_parameter_owner(owner: ParamOwner) -> bool {
     matches!(owner, ParamOwner::Class | ParamOwner::CaseClass)
+}
+
+fn add_class_parameter_metadata(
+    owner: ParamOwner,
+    first_ordinary_clause: bool,
+    metadata: &mut Modifiers,
+) {
+    if !is_class_parameter_owner(owner) {
+        return;
+    }
+
+    metadata.modifiers.push(Modifier::ParamAccessor);
+    if owner != ParamOwner::CaseClass || !first_ordinary_clause {
+        metadata.modifiers.push(Modifier::PrivateLocal);
+    }
 }
 
 fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
@@ -748,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_anonymous_using_clauses_as_explicitly_unsupported() {
+    fn parses_an_anonymous_using_clause_with_a_synthetic_name() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(using Ctx)",
@@ -764,14 +879,78 @@ mod tests {
 
         let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
 
-        assert_eq!(clauses, vec![Vec::new()]);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
-        );
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        let TreeKind::ValDef(ValDef {
+            name, ref metadata, ..
+        }) = parser.ast().get(clauses[0][0]).kind
+        else {
+            panic!("expected an anonymous using parameter");
+        };
+        assert_eq!(parser.names.resolve(name.as_name().text()), "x$1");
+        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_multiple_anonymous_using_types_in_source_order() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using A, B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 2);
+        let names = clauses[0]
+            .iter()
+            .map(|parameter| match &parser.ast().get(*parameter).kind {
+                TreeKind::ValDef(value) => parser.names.resolve(value.name.as_name().text()),
+                _ => panic!("expected an anonymous using parameter"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["x$1", "x$2"]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn anonymous_using_names_follow_leading_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(value: Value)(using Context)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 14, 15),
+                token(TokenKind::Identifier, 15, 20),
+                token(TokenKind::Identifier, 21, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        let TreeKind::ValDef(value) = &parser.ast().get(clauses[1][0]).kind else {
+            panic!("expected an anonymous using parameter");
+        };
+        assert_eq!(parser.names.resolve(value.name.as_name().text()), "x$2");
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
