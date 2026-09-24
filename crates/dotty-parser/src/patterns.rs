@@ -121,12 +121,30 @@ where
             self.advance();
             return pattern;
         };
+        let binder_name = identifier.name;
         self.advance();
         let body = self.pattern3(self.context.location);
+
+        // Dotty keeps a bound sequence wildcard as a typed binder rather than
+        // nesting a Bind around the wildcard's Typed node: `x @ _*` becomes
+        // `Typed(x, _*)`. Other binders retain the ordinary Bind shape.
+        let wildcard_sequence_type = match &self.ast().get(body).kind {
+            TreeKind::Typed(typed)
+                if is_ident_named(self, typed.expr, "_")
+                    && is_ident_named(self, typed.tpt, "_*") =>
+            {
+                Some(typed.tpt)
+            }
+            _ => None,
+        };
+        if let Some(tpt) = wildcard_sequence_type {
+            return self.alloc_from(mark, TreeKind::Typed(TypedExpr { expr: pattern, tpt }));
+        }
+
         self.alloc_from(
             mark,
             TreeKind::Bind(Bind {
-                name: identifier.name,
+                name: binder_name,
                 body,
             }),
         )
@@ -550,6 +568,17 @@ fn is_pattern_variable<S: TokenSource>(parser: &Parser<'_, '_, S>, tree: TreeId<
     name.chars()
         .next()
         .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
+}
+
+fn is_ident_named<S: TokenSource>(
+    parser: &Parser<'_, '_, S>,
+    tree: TreeId<Untyped>,
+    spelling: &str,
+) -> bool {
+    matches!(
+        &parser.ast().get(tree).kind,
+        TreeKind::Ident(identifier) if parser.names.resolve(identifier.name.text()) == spelling
+    )
 }
 
 fn is_numeric_literal(kind: TokenKind) -> bool {
@@ -1242,6 +1271,48 @@ mod tests {
         assert_eq!(
             result.ast.get(typed.tpt).position.unwrap().span().range(),
             TextRange::new(6, 7).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_bound_wildcard_sequence_with_dotty_typed_shape() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Foo(x @ _*)",
+            vec![
+                token(TokenKind::Identifier, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+            panic!("expected extractor application");
+        };
+        let arg = application.args[0];
+        let TreeKind::Typed(typed) = &result.ast.get(arg).kind else {
+            panic!("expected Dotty's typed bound-sequence shape");
+        };
+        let TreeKind::Ident(binder) = &result.ast.get(typed.expr).kind else {
+            panic!("expected the binder identifier as the typed expression");
+        };
+        let TreeKind::Ident(sequence_marker) = &result.ast.get(typed.tpt).kind else {
+            panic!("expected the `_*` sequence marker as the type");
+        };
+
+        assert_eq!(names.resolve(binder.name.text()), "x");
+        assert_eq!(names.resolve(sequence_marker.name.text()), "_*");
+        assert_eq!(
+            result.ast.get(arg).position.unwrap().span().range(),
+            TextRange::new(4, 10).unwrap()
         );
         assert!(result.diagnostics.is_empty());
     }
