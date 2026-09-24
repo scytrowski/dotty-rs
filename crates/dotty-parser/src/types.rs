@@ -2890,6 +2890,83 @@ mod tests {
     }
 
     #[test]
+    fn reports_an_unterminated_leading_unnamed_erased_parameter_list_without_consuming_following_type_tokens()
+     {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(8, 9).unwrap()
+        );
+        assert_eq!(parser.current().span, TextRange::new(8, 9).unwrap());
+    }
+
+    #[test]
+    fn recovers_a_repeated_arrow_after_a_leading_unnamed_erased_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A) => => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Operator, 14, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(14, 16).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn preserves_mixed_erased_parameter_flags_in_source_order() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
