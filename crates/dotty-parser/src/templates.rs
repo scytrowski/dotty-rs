@@ -172,7 +172,7 @@ where
             );
         }
         let tpt = if has_colon {
-            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.parse_union_type())
+            self.with_parse_kind(crate::ParseKind::Type, |parser| parser.parse_infix_type())
         } else {
             self.synthetic_type_tree_at(mark.start())
         };
