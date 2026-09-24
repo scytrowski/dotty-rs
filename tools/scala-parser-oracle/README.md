@@ -110,7 +110,9 @@ distinctions,
 modern `given` aliases and structural templates, and `ExtMethods` parameter
 clauses with method/export children. Anonymous given names remain empty rather
 than being replaced with synthetic names; anonymous `using` type parameters use
-Dotty's deterministic `x$N` names. Extension fixtures cover generic and
+Dotty's deterministic `x$N` names. Given fixtures also cover `GivenType`
+condition chains, parenthesized anonymous context types, constructor parents,
+and comma- or `with`-separated structural parent lists. Extension fixtures cover generic and
 `using` prefixes, receiver ordering, braced/indented bodies, rejection of a
 colon directly after the header, method modifiers and annotations, multiple
 methods, and exports. Constructor parent applications remain in the same

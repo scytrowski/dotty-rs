@@ -466,9 +466,13 @@ given T = rhs                  -> ValDef
 given name: T = rhs            -> ValDef
 given [A] => T = rhs            -> DefDef
 given (using ctx: Ctx) => T = rhs -> DefDef
+given T => U = rhs              -> DefDef(using x$1: T)
+given (T, U) => V = rhs         -> DefDef(using x$1: T, x$2: U)
 given T: body                  -> ModuleDef(Template(...))
 given name: T: body            -> ModuleDef(Template(...))
 given [A] => T: body            -> TypeDef(Template(...))
+given A with B                  -> ModuleDef(Template(parents = [A, B]))
+given A(), B                    -> ModuleDef(Template(parents = [A(), B]))
 ```
 
 Anonymous givens use the canonical empty interned term name; the parser does
@@ -476,10 +480,13 @@ not synthesize a `$given_N` spelling. Unparameterized non-inline aliases carry
 Dotty's parser-added `Given`, `Final`, and `Lazy` metadata where applicable.
 Parameterized and `inline` aliases are represented as `DefDef` trees, and
 structural bodies reuse the ordinary `Template` machinery. Given conditions
-currently support type parameters and named or anonymous `using` clauses. The
-full `GivenType` grammar remains deferred. Anonymous context-type parameters
-use Dotty's deterministic synthetic `x$N` names and retain `Given` metadata;
-semantic given synthesis remains outside the parser.
+support type parameters, named or anonymous `using` clauses, anonymous
+parenthesized context types, and `GivenType => GivenSig` chains. Context-type
+parameters use Dotty's deterministic synthetic `x$N` names and retain `Given`
+metadata. Structural givens preserve constructor applications and comma- or
+`with`-separated parent lists in the shared `Template`; semantic given
+synthesis, legacy migration syntax, and semantic resolution remain outside the
+parser.
 
 An extension is represented by the existing `UntypedNode::ExtensionMethods`
 wrapper. Its parameter clauses remain in source order: leading type parameters,
