@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 <scala3-checkout> [--output <report.json>] [--timeout-ms <n>]" >&2
+  exit 2
+fi
+
+scala3_root=$(cd "$1" && pwd)
+shift
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+actual_revision=$(git -C "$scala3_root" rev-parse HEAD 2>/dev/null || true)
+if [[ "$actual_revision" != "$expected_revision" ]]; then
+  echo "expected Scala 3.9.0 revision $expected_revision, got ${actual_revision:-unknown}" >&2
+  exit 1
+fi
+
+roots=()
+for relative_root in library/src compiler/src; do
+  root="${scala3_root}/${relative_root}"
+  if [[ ! -d "$root" ]]; then
+    echo "Scala 3.9 source directory does not exist: $root" >&2
+    exit 1
+  fi
+  roots+=(--root "$root")
+done
+
+repo_dir=$(cd "${script_dir}/../.." && pwd)
+cd "$repo_dir"
+manifest=$(mktemp)
+scala_output=$(mktemp)
+trap 'rm -f "$manifest" "$scala_output"' EXIT
+
+find "${scala3_root}/library/src" "${scala3_root}/compiler/src" \
+  -type f -name '*.scala' -printf 'compilation\t%p\n' | sort >"$manifest"
+file_count=$(wc -l <"$manifest" | tr -d '[:space:]')
+tools/scala-parser-oracle/run --batch "$manifest" >"$scala_output"
+oracle_count=$(grep -c '^{' "$scala_output" || true)
+if [[ "$oracle_count" != "$file_count" ]]; then
+  echo "Scala oracle output count mismatch: expected $file_count, got $oracle_count" >&2
+  exit 1
+fi
+oracle_failures=$(grep -c '"kind":"OracleFailure"' "$scala_output" || true)
+echo "Scala 3.9 parser oracle: $oracle_count files"
+if [[ "$oracle_failures" != 0 ]]; then
+  echo "Scala 3.9 parser oracle failures: $oracle_failures"
+fi
+exec cargo run --quiet --locked -p dotty-parser-corpus-report -- \
+  "${roots[@]}" --source-version 3.9.0 --source-revision "$actual_revision" \
+  --oracle-files "$oracle_count" --oracle-failures "$oracle_failures" "$@"

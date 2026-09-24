@@ -684,6 +684,27 @@ as the manually dispatched `Scala 3.9 parser oracle` workflow in
 that workflow; it is intentionally not part of the automatic push/PR checks
 while the oracle remains an opt-in, comparatively expensive parser gate.
 
+## Real-source compatibility report
+
+`tools/parser-corpus-report/run` measures parser coverage over the pinned
+Scala 3.9.0 checkout. It discovers `library/src` and `compiler/src`, parses
+all Scala files in one Rust process, and writes a deterministic JSON report:
+
+```text
+tools/parser-corpus-report/run /path/to/scala3-3.9.0 \
+  --output /tmp/parser-corpus-3.9.0.json
+```
+
+The report separates clean files, files with recoverable diagnostics, scanner
+failures, panics, and hangs. It also aggregates `ParseDiagnosticKind` and
+normalized first-failure buckets with representative paths. The initial
+baseline is checked in at
+`tools/parser-corpus-report/baseline-scala3-3.9.0.json`, generated from Scala
+3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`. The baseline is a
+measurement of the current parser, not a claim that the full Scala grammar is
+implemented; its highest-frequency buckets are backlog input for later parser
+issues.
+
 ## Extension rule
 
 Each grammar increment should add the smallest AST construction and focused
