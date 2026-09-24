@@ -6683,6 +6683,27 @@ mod tests {
     }
 
     #[test]
+    fn leaves_the_following_definition_boundary_after_a_missing_projection_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T#\nNext",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Newline, 2, 3),
+                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        parser.simple_type();
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.current_text().unwrap(), "\n");
+        assert_eq!(parser.diagnostics().len(), 1);
+    }
+
+    #[test]
     fn parses_nested_and_repeated_applied_simple_types() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
