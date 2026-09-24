@@ -76,7 +76,9 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Function, PolyFunction, TypeDef, UntypedNode};
+    use dotty_core::ast::{
+        ContextBoundTypeTree, ContextBounds, Function, PolyFunction, TypeDef, UntypedNode,
+    };
     use dotty_core::{NameInterner, TextRange, Token, TokenValue};
 
     #[test]
@@ -172,6 +174,114 @@ mod tests {
         };
         assert_eq!(type_params.len(), 2);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_context_bounds_in_a_polymorphic_function_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show as show] => (x: A) => x",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(18, 20).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 21, 22),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::ColonOp, 23, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 26, 27),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(28, 30).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::PolyFunction(PolyFunction {
+            ref type_params,
+            ..
+        })) = parser.ast().get(tree).kind
+        else {
+            panic!("expected a polymorphic function");
+        };
+        let TreeKind::TypeDef(parameter) = &parser.ast().get(type_params[0]).kind else {
+            panic!("expected a type parameter definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(ContextBounds {
+            context_bounds,
+            ..
+        })) = &parser.ast().get(parameter.rhs).kind
+        else {
+            panic!("expected preserved context bounds");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(ContextBoundTypeTree {
+            name,
+            ..
+        })) = &parser.ast().get(context_bounds[0]).kind
+        else {
+            panic!("expected a context-bound type tree");
+        };
+        assert!(name.is_some());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_variance_in_a_polymorphic_function_literal() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[+A] => (x: A) => x",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(1, 2).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(5, 7).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonOp, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(15, 17).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

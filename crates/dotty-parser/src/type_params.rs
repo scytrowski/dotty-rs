@@ -1,4 +1,7 @@
-use dotty_core::ast::{LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef};
+use dotty_core::ast::{
+    ContextBoundTypeTree, ContextBounds, LambdaTypeTree, Modifiers, TypeBoundsTree, TypeDef,
+    UntypedNode,
+};
 use dotty_core::types::Variance;
 use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
@@ -17,6 +20,62 @@ where
     /// entry point without introducing a second square-bracket grammar.
     pub(crate) fn parse_type_param_clause(&mut self, owner: ParamOwner) -> Vec<TreeId<Untyped>> {
         self.with_param_owner(Some(owner), |parser| parser.type_param_clause())
+    }
+
+    /// Removes context-bound wrappers after a `=>>` arrow has established a
+    /// type lambda. Ordinary polymorphic function types retain these wrappers
+    /// in their source tree.
+    pub(crate) fn strip_type_lambda_context_bounds(&mut self, params: &[TreeId<Untyped>]) {
+        for &param in params {
+            let (bounds, first_context_bound, context_bounds_span) = match &self.ast.get(param).kind
+            {
+                TreeKind::TypeDef(definition) => match &self.ast.get(definition.rhs).kind {
+                    TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context_bounds)) => (
+                        Some(context_bounds.bounds),
+                        context_bounds.context_bounds.first().copied(),
+                        self.ast.get(definition.rhs).position,
+                    ),
+                    _ => (None, None, None),
+                },
+                _ => (None, None, None),
+            };
+            let Some(bounds) = bounds else {
+                continue;
+            };
+
+            self.report_at(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                context_bounds_span.unwrap_or_else(|| self.current_span()),
+                "context bounds are not allowed for a polymorphic function type parameter",
+            );
+
+            if let TreeKind::TypeDef(definition) = &mut self.ast.get_mut(param).kind {
+                definition.rhs = bounds;
+                definition
+                    .metadata
+                    .modifiers
+                    .retain(|modifier| !matches!(modifier, dotty_core::ast::Modifier::Param));
+            }
+
+            let start = first_context_bound
+                .and_then(|bound| {
+                    self.ast
+                        .get(bound)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .or_else(|| {
+                    self.ast
+                        .get(param)
+                        .position
+                        .map(|position| position.span().range().end())
+                });
+            if let Some(start) = start {
+                let range = TextRange::new(start, start).expect("zero-width context bound span");
+                self.ast.get_mut(param).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+        }
     }
 
     fn type_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
@@ -62,6 +121,12 @@ where
             }
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a type parameter after `,`",
+                    );
+                }
                 continue;
             }
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket)
@@ -178,6 +243,43 @@ where
         } else {
             self.synthetic_type_bounds(empty_bounds_start)
         };
+        let context_bounds = if self.context.param_owner == Some(ParamOwner::Type) {
+            self.parse_context_bounds(name)
+        } else {
+            None
+        };
+        if !has_explicit_bounds
+            && let Some(start) = context_bounds.as_ref().and_then(|bounds| {
+                bounds.first().and_then(|bound| {
+                    self.ast
+                        .get(*bound)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+            })
+        {
+            let range = TextRange::new(start, start).expect("zero-width context bound span");
+            self.ast.get_mut(bounds).position =
+                Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+        }
+        let rhs = if let Some(context_bounds) = context_bounds {
+            self.alloc_from(
+                crate::Mark {
+                    start: self
+                        .ast
+                        .get(context_bounds[0])
+                        .position
+                        .map(|position| position.span().range().start())
+                        .unwrap_or(mark.start),
+                },
+                TreeKind::PhaseSpecific(UntypedNode::ContextBounds(ContextBounds {
+                    bounds,
+                    context_bounds,
+                })),
+            )
+        } else {
+            bounds
+        };
         let rhs = if let Some(nested_params) = nested_params {
             let lambda_start = nested_params
                 .first()
@@ -194,7 +296,7 @@ where
                 },
                 TreeKind::LambdaTypeTree(LambdaTypeTree {
                     type_params: nested_params,
-                    body: bounds,
+                    body: rhs,
                 }),
             );
             if !has_explicit_bounds {
@@ -205,7 +307,7 @@ where
             }
             lambda
         } else {
-            bounds
+            rhs
         };
 
         self.alloc_from(
@@ -280,6 +382,102 @@ where
         }
     }
 
+    fn accept_context_bound_colon(&mut self) -> bool {
+        let is_context_bound_colon = matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Colon)
+                | TokenKind::ColonFollow
+                | TokenKind::ColonOp
+        ) && self.current_text_is(":");
+        if is_context_bound_colon {
+            self.advance();
+        }
+        is_context_bound_colon
+    }
+
+    fn parse_context_bounds(&mut self, parameter: TypeName) -> Option<Vec<TreeId<Untyped>>> {
+        let mut context_bounds = Vec::new();
+        while self.accept_context_bound_colon() {
+            if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
+                if self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a context-bound type between `{` and `}`",
+                    );
+                } else {
+                    loop {
+                        context_bounds.push(self.parse_context_bound_type(parameter));
+                        if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                            break;
+                        }
+                        if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
+                            self.report(
+                                ParseDiagnosticKind::ExpectedType,
+                                "expected a context-bound type after `,`",
+                            );
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
+                }
+            } else {
+                context_bounds.push(self.parse_context_bound_type(parameter));
+            }
+        }
+        (!context_bounds.is_empty()).then_some(context_bounds)
+    }
+
+    fn parse_context_bound_type(&mut self, parameter: TypeName) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let bound = if self.context_bound_type_is_missing() {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a context-bound type",
+            );
+            self.error_type(self.span_from(mark))
+        } else {
+            self.parse_bound_type()
+        };
+        let name = self.parse_context_bound_alias();
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(ContextBoundTypeTree {
+                bound,
+                parameter,
+                name,
+            })),
+        )
+    }
+
+    fn parse_context_bound_alias(&mut self) -> Option<dotty_core::names::TermName> {
+        if !(self.current().kind == TokenKind::Identifier && self.current_text_is("as")) {
+            return None;
+        }
+        self.advance();
+        match self.current().kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let name = self.intern_current_term_name().ok();
+                self.advance();
+                name
+            }
+            _ => {
+                self.report(
+                    ParseDiagnosticKind::ExpectedExpression,
+                    "expected a context-bound alias after `as`",
+                );
+                None
+            }
+        }
+    }
+
+    fn context_bound_type_is_missing(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBracket) | TokenKind::Eof
+        ) || self.current_is_arrow()
+            || self.current_is_type_lambda_arrow()
+    }
+
     fn recover_type_param_clause(&mut self) {
         while !matches!(
             self.current().kind,
@@ -329,7 +527,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{TypeBoundsTree, TypeDef};
+    use dotty_core::ast::{ContextBounds, TypeBoundsTree, TypeDef, UntypedNode};
     use dotty_core::{NameInterner, TextRange, Token, TokenValue};
 
     #[test]
@@ -415,6 +613,66 @@ mod tests {
             ]
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_a_context_bound_until_the_arrow_kind_is_known() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Colon), 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(params[0]).kind else {
+            panic!("expected a type parameter definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(ContextBounds {
+            bounds,
+            context_bounds,
+        })) = &parser.ast().get(rhs).kind
+        else {
+            panic!("expected context bounds");
+        };
+        assert!(matches!(
+            parser.ast().get(*bounds).kind,
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low: None,
+                high: None,
+                alias: None
+            })
+        ));
+        assert_eq!(context_bounds.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_trailing_type_lambda_parameter_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A,]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_type_param_clause(ParamOwner::Type);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 
     #[test]

@@ -299,9 +299,20 @@ as `[A] =>> List[A]`, is represented by the shared `LambdaTypeTree` with
 point. Nested higher-kinded clauses such as `[G[_]] =>> G[Int]` use a nested
 `LambdaTypeTree` in the `G` parameter's `rhs`; the wildcard remains the shared
 synthetic type-parameter `TypeDef`. Ordinary and context-function bodies
-compose recursively. Empty or
-malformed type-lambda clauses report diagnostics without consuming the
-following type-definition boundary.
+compose recursively. Type-lambda parameters preserve lower/upper bounds;
+explicit `+`/`-` variance is rejected for `ParamOwner::Type`, matching Dotty,
+and their bodies compose with applied, tuple,
+union/intersection, ordinary function, context-function, and nested
+polymorphic-function types. Ordinary polymorphic function types preserve
+parser-level `ContextBounds` wrappers, including each bound's parameter name
+and optional `as` alias. A context bound in a type-lambda parameter is
+consumed, reported as unsupported syntax, and stripped from the source-level
+tree only after the `=>>` arrow identifies the type-lambda path, matching the
+current Dotty parser shape. Bounds are parsed before the context-bound suffix,
+including repeated and braced context-bound forms. Empty or malformed
+type-lambda clauses report diagnostics without consuming the
+following type-definition boundary, including incomplete commas, nested
+parameter clauses, and missing context-bound types.
 parameterized type aliases and abstract declarations using the shared
 `LambdaTypeTree` and higher-kinded type-parameter machinery
 explicit function literals with empty, named, wildcard, and typed parameters
