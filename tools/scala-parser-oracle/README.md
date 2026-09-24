@@ -34,6 +34,10 @@ empty tuple, tuples, simple selections and applications, `super`, `new`,
 simple type applications, applied union/intersection types, repeated suffix
 chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
+Applied-type fixtures also cover Scala wildcard arguments, including unbounded
+wildcards and `>: ... <: ...` bounds. The parser keeps those bounds in the
+existing `TypeBoundsTree` and accepts wildcard syntax only in nested type
+argument positions.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
