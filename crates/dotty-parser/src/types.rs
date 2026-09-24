@@ -1728,6 +1728,7 @@ where
                 );
             }
 
+            self.convert_this_or_super_reference_to_type_namespace(reference);
             return reference;
         }
 
@@ -1860,6 +1861,17 @@ where
         let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
         let name = *self.intern_current_term_name().ok()?.as_name();
         Some((name, backquoted))
+    }
+
+    fn convert_this_or_super_reference_to_type_namespace(&mut self, tree: TreeId<Untyped>) {
+        let qualifier = match self.ast.get(tree).kind {
+            TreeKind::Select(selection) => selection.qualifier,
+            _ => return,
+        };
+        self.convert_this_or_super_reference_to_type_namespace(qualifier);
+        if let TreeKind::Select(selection) = &mut self.ast.get_mut(tree).kind {
+            selection.name = *dotty_core::TypeName::new(selection.name.text()).as_name();
+        }
     }
 
     fn starts_this_or_super_type_reference(&mut self) -> bool {
@@ -3568,6 +3580,7 @@ mod tests {
         else {
             panic!("expected a selected super member");
         };
+        assert!(name.is_term());
         assert!(matches!(
             parser.ast().get(qualifier).kind,
             TreeKind::Super(Super { mix: None, .. })
@@ -3679,7 +3692,7 @@ mod tests {
             parser.ast().get(qualifier).kind,
             TreeKind::This(This { qual: None })
         ));
-        assert!(name.is_term());
+        assert!(name.is_type());
         assert!(parser.diagnostics().is_empty());
         assert_eq!(
             parser.ast().get(id).position.unwrap().span().range(),
@@ -3702,13 +3715,17 @@ mod tests {
         );
 
         let id = parser.type_expr();
-        let TreeKind::Select(Select { qualifier, .. }) = parser.ast().get(id).kind else {
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(id).kind
+        else {
             panic!("expected an ordinary super selection");
         };
         assert!(matches!(
             parser.ast().get(qualifier).kind,
             TreeKind::Super(Super { mix: None, .. })
         ));
+        assert!(name.is_type());
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -3730,9 +3747,10 @@ mod tests {
         );
 
         let id = parser.type_expr();
-        let TreeKind::Select(_) = parser.ast().get(id).kind else {
+        let TreeKind::Select(Select { name, .. }) = parser.ast().get(id).kind else {
             panic!("expected an ordinary mixin-qualified super selection");
         };
+        assert!(name.is_type());
         assert!(parser.diagnostics().is_empty());
     }
 
