@@ -82,7 +82,8 @@ where
 
             let mark = self.mark();
             let candidate = self.parse_given_parent(location);
-            if self.current_is_arrow() {
+            let is_given_type = !matches!(self.ast.get(candidate).kind, TreeKind::Apply(_));
+            if self.current_is_arrow() && is_given_type {
                 self.advance();
                 let parameter_position = self.ast.get(candidate).position;
                 let metadata = Modifiers {
@@ -940,6 +941,45 @@ mod tests {
             panic!("expected a template");
         };
         assert_eq!(template.parents.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.parents[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn treats_a_constructor_parent_before_an_arrow_as_structural() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A() => B = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Identifier, 17, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a structural given");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(given)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected a module definition");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(given.template).kind else {
+            panic!("expected a template");
+        };
+        assert_eq!(template.parents.len(), 1);
         assert!(matches!(
             parser.ast().get(template.parents[0]).kind,
             TreeKind::Apply(_)
