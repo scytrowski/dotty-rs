@@ -702,6 +702,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::If(_) => "If",
         TreeKind::While(_) => "While",
         TreeKind::Match(_) => "Match",
+        TreeKind::MatchTypeTree(_) => "MatchTypeTree",
         TreeKind::CaseDef(_) => "CaseDef",
         TreeKind::This(_) => "This",
         TreeKind::Super(_) => "Super",
@@ -852,6 +853,15 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
                 children.push(match_tree.selector);
             }
             children.extend(match_tree.cases.iter().copied());
+            children
+        }
+        TreeKind::MatchTypeTree(match_type) => {
+            let mut children = Vec::with_capacity(match_type.cases.len() + 1);
+            if let Some(bound) = match_type.bound {
+                children.push(bound);
+            }
+            children.push(match_type.selector);
+            children.extend(match_type.cases.iter().copied());
             children
         }
         TreeKind::CaseDef(case_def) => {

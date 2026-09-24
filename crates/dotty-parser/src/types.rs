@@ -263,6 +263,7 @@ where
             Some(TokenKind::Punctuation(Punctuation::RightBrace)),
             |parser| parser.type_expr(),
         );
+        self.consume_match_type_case_end();
         self.alloc_from(
             mark,
             TreeKind::CaseDef(CaseDef {
@@ -322,6 +323,21 @@ where
             TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Indent
+                | TokenKind::Punctuation(Punctuation::Semicolon)
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn consume_match_type_case_end(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline
+                | TokenKind::Newlines
                 | TokenKind::Punctuation(Punctuation::Semicolon)
         ) {
             let checkpoint = self.cursor.checkpoint();
