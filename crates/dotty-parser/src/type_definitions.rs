@@ -503,6 +503,41 @@ mod tests {
     }
 
     #[test]
+    fn recovers_an_opaque_bound_without_swallowing_the_next_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type Broken <: Upper\ntype Next = Impl",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Type), 28, 32),
+                token(TokenKind::Identifier, 33, 37),
+                token(TokenKind::Operator, 38, 39),
+                token(TokenKind::Identifier, 40, 44),
+                token(TokenKind::Eof, 44, 44),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the malformed opaque definition");
+        };
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+
+        parser.advance();
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the following type definition");
+        };
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::TypeDef(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn statement_dispatch_classifies_type_as_a_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
