@@ -1832,6 +1832,84 @@ mod tests {
     }
 
     #[test]
+    fn composes_a_path_singleton_type_inside_an_applied_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[x.type]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::Dot), 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn composes_a_path_singleton_type_with_a_union() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.type | String",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind else {
+            panic!("expected a union type");
+        };
+        assert!(matches!(
+            parser.ast().get(infix.left).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        assert_eq!(parser.names.resolve(infix.op.text()), "|");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_path_singleton_segment_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Eof, 2, 2),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        ));
+    }
+
+    #[test]
     fn parses_a_union_type_with_a_type_namespace_operator() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
