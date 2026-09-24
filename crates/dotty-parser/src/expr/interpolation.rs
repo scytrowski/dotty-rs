@@ -1,4 +1,4 @@
-use dotty_core::ast::{InterpolatedString, Literal, UntypedNode};
+use dotty_core::ast::{InterpolatedString, Literal, This, UntypedNode};
 use dotty_core::{Constant, Punctuation, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
@@ -38,7 +38,13 @@ where
 
             match self.current().kind {
                 TokenKind::Identifier => {
-                    parts.push(self.simple_expr());
+                    if self.current_text_is("this") {
+                        let position = self.current_span();
+                        self.advance();
+                        parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
+                    } else {
+                        parts.push(self.simple_expr());
+                    }
                 }
                 TokenKind::Punctuation(Punctuation::LeftBrace) => {
                     parts.push(self.expr());
@@ -325,6 +331,46 @@ mod tests {
         };
 
         assert_eq!(parser.names.resolve(*value), "cost $5");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_this_as_the_special_simple_splice() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "s\"$this\"",
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 2),
+                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::StringPart, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.simple_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            parser.ast().get(tree).kind.clone()
+        else {
+            panic!("expected interpolated string");
+        };
+
+        assert_eq!(interpolation.parts.len(), 3);
+        assert!(matches!(
+            parser.ast().get(interpolation.parts[1]).kind,
+            TreeKind::This(This { qual: None })
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(interpolation.parts[1])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(3, 7).unwrap()
+        );
         assert!(parser.diagnostics().is_empty());
     }
 }
