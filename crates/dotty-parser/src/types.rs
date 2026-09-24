@@ -814,16 +814,15 @@ where
         let mut refinements = Vec::new();
         while !matches!(
             self.current().kind,
-            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
+            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Outdent | TokenKind::Eof
         ) {
             let checkpoint = self.cursor.checkpoint();
             if self.current().kind == TokenKind::Keyword(HardKeyword::Type) {
-                let ParsedStatement::Definition(definition) =
+                if let ParsedStatement::Definition(definition) =
                     self.parse_type_definition(Location::InBlock)
-                else {
-                    unreachable!("type refinement parsing must return a definition")
-                };
-                refinements.push(definition);
+                {
+                    refinements.push(definition);
+                }
             } else {
                 self.report(
                     ParseDiagnosticKind::UnsupportedSyntax,
@@ -856,7 +855,6 @@ where
             TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Indent
-                | TokenKind::Outdent
                 | TokenKind::Punctuation(Punctuation::Semicolon)
         ) {
             self.advance();
@@ -8171,6 +8169,31 @@ mod tests {
             TreeKind::RefinedTypeTree(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leaves_an_enclosing_outdent_after_a_missing_refinement_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { type X",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Type), 4, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Outdent, 10, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Outdent);
         assert!(!parser.diagnostics().is_empty());
     }
 }
