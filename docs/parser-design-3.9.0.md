@@ -402,9 +402,12 @@ tighter than `|`. Refined types use the shared `RefinedTypeTree`; the initial
 subset supports abstract, aliased, and upper-bounded `TypeDef` members in
 source order, including the parentless `{ type X }` form. Parentless
 refinements use a zero-width `TypeTree` only as the non-optional AST parent
-placeholder and do not create a semantic refinement scope. Term members,
-refined type members, capture-checking refinements, generic infix types,
-opaque, match, and other full type forms remain deferred.
+placeholder and do not create a semantic refinement scope. Declaration-only
+`val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
+their right-hand sides and parameter defaults are diagnosed, as are
+class-like members and definition modifiers. Refined type members,
+capture-checking refinements, generic infix types, opaque, match, and other
+full type forms remain deferred.
 
 ### Class-like definitions and templates
 
@@ -563,7 +566,7 @@ _.name
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
 annotated, and refined type names, plus the supported union and intersection
-forms. Generic infix types beyond `|` and `&`, remaining refined-type members,
+forms. Generic infix types beyond `|` and `&`, remaining refined-type forms,
 opaque, match, and other full type forms (for example `Foo + Bar`) remain
 deferred and produce a parser diagnostic in this milestone.
 

@@ -316,6 +316,14 @@ where
                     | TokenKind::Keyword(dotty_core::HardKeyword::Case)
                     | TokenKind::Punctuation(Punctuation::RightBrace)
             ))
+            && !(self.context.block_end.is_some()
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Newline
+                        | TokenKind::Newlines
+                        | TokenKind::Outdent
+                        | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::Semicolon)
+                ))
         {
             let checkpoint = self.cursor.checkpoint();
             self.advance();

@@ -50,10 +50,11 @@ Type projection fixtures cover `T#Member`, applied qualifiers such as
 Annotated type fixtures cover single and repeated annotations, annotation
 arguments, and binding around union, intersection, and parenthesized types.
 Refined-type fixtures cover `RefinedTypeTree` parents with abstract, aliased,
-and upper-bounded `TypeDef` members, multiple members in source order,
-annotated and applied parents, and the parentless refinement form. Term
-members, refined type members, capture-checking refinements, and generic infix
-types remain outside this parser milestone.
+and upper-bounded `TypeDef` members, declaration-only `val`, `var`, and `def`
+members, multiple members in source order, annotated and applied parents, and
+the parentless refinement form. RHS-bearing declarations, default arguments,
+class-like members, modifiers, refined type members, capture-checking
+refinements, and generic infix types remain outside this parser milestone.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
