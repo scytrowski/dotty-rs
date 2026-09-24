@@ -49,6 +49,7 @@ where
                     }),
                 )
             }
+            TokenKind::InterpolationId => self.parse_interpolated_string(mark),
             TokenKind::IntegerLiteral
             | TokenKind::LongLiteral
             | TokenKind::DecimalLiteral

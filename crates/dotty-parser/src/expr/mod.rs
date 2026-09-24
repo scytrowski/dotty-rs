@@ -6,6 +6,7 @@ use crate::{ParseKind, Parser};
 mod arguments;
 mod control_flow;
 mod for_expr;
+mod interpolation;
 mod lambda;
 mod match_expr;
 mod operators;
