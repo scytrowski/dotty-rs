@@ -1,6 +1,6 @@
 use dotty_core::ast::{
     ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
-    PolyFunction, Tuple, UntypedNode, ValDef,
+    PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -29,7 +29,7 @@ where
         }
 
         loop {
-            args.push(self.type_expr());
+            args.push(self.with_type_argument(|parser| parser.type_expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
                 break;
@@ -780,6 +780,18 @@ where
 
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        if self.current_text_is("?") {
+            if self.allows_wildcard_type() {
+                return self.parse_wildcard_type(mark);
+            }
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "a wildcard type is only valid as a type argument",
+            );
+            self.advance();
+            return self.error_type(position);
+        }
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 return self.simple_type();
@@ -793,6 +805,18 @@ where
         let position = self.current_span();
         self.report(ParseDiagnosticKind::ExpectedType, "expected a type operand");
         self.error_type(position)
+    }
+
+    fn parse_wildcard_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        self.alloc_from(
+            mark,
+            TreeKind::TypeBoundsTree(TypeBoundsTree {
+                low: None,
+                high: None,
+                alias: None,
+            }),
+        )
     }
 
     fn parse_parenthesized_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -1011,6 +1035,70 @@ mod tests {
             TextRange::new(0, 3).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_unbounded_wildcard_as_a_nested_type_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[?]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert_eq!(applied.args.len(), 1);
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected a wildcard type bounds tree");
+        };
+        assert!(bounds.low.is_none() && bounds.high.is_none() && bounds.alias.is_none());
+        assert_eq!(
+            parser
+                .ast()
+                .get(applied.args[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(5, 6).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_a_top_level_wildcard_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "?",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

@@ -28,6 +28,7 @@ where
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
+    pub(crate) type_argument_depth: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
     pub(crate) defer_template_outdent_feedback: bool,
@@ -64,6 +65,7 @@ where
             known_names,
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
+            type_argument_depth: 0,
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
             defer_template_outdent_feedback: false,
@@ -132,6 +134,18 @@ where
         let result = parse(self);
         self.context.location = previous;
         result
+    }
+
+    /// Runs a nested type parse in a type-argument position.
+    pub(crate) fn with_type_argument<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        self.type_argument_depth += 1;
+        let result = parse(self);
+        self.type_argument_depth -= 1;
+        result
+    }
+
+    pub(crate) const fn allows_wildcard_type(&self) -> bool {
+        self.type_argument_depth > 0
     }
 
     /// Runs a nested parse with a temporary grammar category.
