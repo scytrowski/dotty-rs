@@ -273,6 +273,10 @@ Unnamed parameters remain type trees rather than `ValDef` nodes, and
 `FunctionWithMods.erased_params` records `[true, false]` in source order.
 This parser deliberately recognizes only one leading unnamed `erased` marker;
 non-leading and repeated unnamed erased markers remain outside this increment.
+Context-function types support the same narrow leading unnamed form, such as
+`(erased A, B) ?=> C`. These parameters remain type trees, `Given` belongs to
+the surrounding `FunctionWithMods`, and `erased_params` records
+`[true, false]`; the form composes with nested ordinary and context arrows.
 Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types and
 pure arrows remain deferred. Supported
@@ -291,8 +295,7 @@ preserved. By-name parameters are supported in parenthesized ordinary and
 context-function types. The latter use `FunctionWithMods` with `Given` on the
 outer function and retain an all-`false` `erased_params` vector; the
 `ByNameTypeTree` itself carries no context metadata. Named by-name parameters,
-unnamed erased parameters, erased/by-name combinations, and pure arrows remain
-deferred.
+erased/by-name combinations, and pure arrows remain deferred.
 Polymorphic function types such as `[A] => A => A` reuse the shared
 `parse_type_param_clause(ParamOwner::Type)` grammar and are represented by
 `PolyFunction` with `TypeDef` children followed by a function-type body.
