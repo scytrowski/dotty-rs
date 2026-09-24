@@ -1031,6 +1031,46 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_given_type_condition_without_swallowing_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given H =>",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_given_definition(Location::Elsewhere);
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_missing_given_parent_after_with() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A with",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::With), 8, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_given_definition(Location::Elsewhere);
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn does_not_treat_a_multiline_colon_as_a_named_given() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
