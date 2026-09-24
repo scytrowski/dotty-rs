@@ -95,7 +95,9 @@ mode calls Dotty's real `Parser.pattern()` entry and Rust mode calls the
 parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
 in synthetic `match` expressions. The normalized tree compares `Bind`,
 `Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
-arguments as they appear before semantic extractor lowering.
+arguments as they appear before semantic extractor lowering. Sequence-pattern
+fixtures cover trailing extractor arguments, nested extractors, wildcard and
+backquoted variables, while preserving ordinary infix operators such as `*:`.
 
 Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, object, and enum nodes; primary
