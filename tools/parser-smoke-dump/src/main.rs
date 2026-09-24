@@ -442,6 +442,12 @@ fn render_tree(
                 quote(names.resolve(postfix.op.text()))
             ));
         }
+        TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolated)) => {
+            fields.push(format!(
+                "\"prefix\":{}",
+                quote(names.resolve(interpolated.prefix.text()))
+            ));
+        }
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
             fields.push(format!(
                 "\"erased_params\":[{}]",
@@ -720,6 +726,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => "InterpolatedString",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
@@ -983,6 +990,9 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => vec![prefix.operand],
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => vec![infix.left, infix.right],
         TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => vec![postfix.operand],
+        TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolated)) => {
+            interpolated.parts.clone()
+        }
         TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
             let mut children = function.params.clone();
             children.push(function.body);
