@@ -32,7 +32,12 @@ object Main:
         val fields = line.split("\\t", -1)
         if fields.length != 2 then
           throw IllegalArgumentException(s"invalid oracle manifest entry: $line")
-        println(parseAndRender(fields(0), fields(1)))
+        try println(parseAndRender(fields(0), fields(1)))
+        catch case error: Throwable => println(renderOracleFailure(fields(1), error))
+
+  private def renderOracleFailure(path: String, error: Throwable): String =
+    val message = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
+    s"""{"kind":"OracleFailure","path":${quote(path)},"error":${quote(message)}}"""
 
   private def parseAndRender(mode: String, path: String): String =
     val sourcePath = Paths.get(path)

@@ -6,6 +6,8 @@
   ],
   "source_version": "3.9.0",
   "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 30,
   "files_attempted": 1236,
   "files_parsed_without_diagnostics": 320,
   "files_parsed_with_recoverable_diagnostics": 916,

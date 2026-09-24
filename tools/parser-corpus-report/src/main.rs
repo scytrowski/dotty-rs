@@ -21,6 +21,8 @@ struct Options {
     timeout: Duration,
     source_version: Option<String>,
     source_revision: Option<String>,
+    oracle_files: Option<usize>,
+    oracle_failures: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +31,8 @@ struct Report {
     corpus_roots: Vec<String>,
     source_version: Option<String>,
     source_revision: Option<String>,
+    scala_oracle_files: Option<usize>,
+    scala_oracle_failures: Option<usize>,
     files_attempted: usize,
     files_parsed_without_diagnostics: usize,
     files_parsed_with_recoverable_diagnostics: usize,
@@ -98,6 +102,8 @@ fn main() {
         &options.roots,
         options.source_version,
         options.source_revision,
+        options.oracle_files,
+        options.oracle_failures,
     );
 
     if let Some(output) = options.output {
@@ -119,6 +125,8 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut source_version = None;
     let mut source_revision = None;
+    let mut oracle_files = None;
+    let mut oracle_failures = None;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -141,6 +149,22 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             "--source-revision" => {
                 source_revision = Some(next_argument(&mut args, "--source-revision")?);
             }
+            "--oracle-files" => {
+                let value = next_argument(&mut args, "--oracle-files")?;
+                oracle_files = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid oracle file count: {value}"))?,
+                );
+            }
+            "--oracle-failures" => {
+                let value = next_argument(&mut args, "--oracle-failures")?;
+                oracle_failures = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid oracle failure count: {value}"))?,
+                );
+            }
             "--help" | "-h" => {
                 return Err(
                     "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>]".to_owned(),
@@ -159,6 +183,8 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         timeout,
         source_version,
         source_revision,
+        oracle_files,
+        oracle_failures,
     })
 }
 
@@ -347,12 +373,16 @@ fn build_report(
     roots: &[PathBuf],
     source_version: Option<String>,
     source_revision: Option<String>,
+    oracle_files: Option<usize>,
+    oracle_failures: Option<usize>,
 ) -> Report {
     let mut report = Report {
         schema_version: 1,
         corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
         source_version,
         source_revision,
+        scala_oracle_files: oracle_files,
+        scala_oracle_failures: oracle_failures,
         files_attempted: outcomes.len(),
         files_parsed_without_diagnostics: 0,
         files_parsed_with_recoverable_diagnostics: 0,
