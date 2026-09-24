@@ -42,6 +42,9 @@ such as `x.type` and `foo.bar.type`; their term-valued references are rendered
 as `SingletonTypeTree`, while ordinary qualified type references remain in the
 type namespace. They also cover literal singleton aliases for strings, characters,
 numbers, booleans, and `null`, including applied and union compositions.
+Named tuple type fixtures preserve element names as `NamedArg` children of the
+shared `Tuple` node and exercise full type expressions inside named elements;
+the function and context-function arrow lookahead remains compared separately.
 Backquoted identifier fixtures cover standalone and selected names. The
 corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression

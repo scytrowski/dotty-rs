@@ -278,8 +278,12 @@ Context-function types support the same narrow leading unnamed form, such as
 the surrounding `FunctionWithMods`, and `erased_params` records
 `[true, false]`; the form composes with nested ordinary and context arrows.
 Named parameters can use the full currently-supported `type_expr()` subset and
-compose recursively with ordinary or context arrows. Named tuple types and
-pure arrows remain deferred. Supported
+compose recursively with ordinary or context arrows. Named tuple types such as
+`(name: String, age: Int)` are represented by the shared `Tuple` node with
+`NamedArg` children; each child preserves its term name and a full
+`type_expr()` element type. The lookahead for a following `=>` or `?=>` still
+selects the named function-parameter path instead. Pure arrows remain deferred.
+Supported
 context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one positional boolean
 in `erased_params` per parameter (`false` for ordinary parameters and `true`
@@ -348,9 +352,10 @@ grouping and tuples preserve the shared source-level `Parens` and `Tuple`
 nodes, including when nested or used as applied type arguments. Type
 positions use `AppliedTypeTree`; the term-level `foo[A]` form remains
 `TypeApply`. An empty `()` is not a standalone tuple type: it is accepted only
-as the parameter list of a zero-argument function type. Named tuple types
-remain deferred unless the parenthesized list is followed by a supported
-ordinary or context function arrow and matches the named-parameter form above.
+as the parameter list of a zero-argument function type. Named tuple types use
+`NamedArg` children inside the existing `Tuple` node, while a following
+ordinary or context function arrow continues to select named `ValDef`
+parameters instead.
 A path singleton type such as `x.type` or `foo.bar.type` is represented by the
 existing `SingletonTypeTree`; its reference is parsed in the term namespace,
 while an ordinary qualified type such as `foo.Bar` remains in the type
