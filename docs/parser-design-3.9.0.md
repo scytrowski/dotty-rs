@@ -113,9 +113,9 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `for`, `try`, and `match`
-produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
-of a panic.
+Valid but not yet implemented constructs such as `do ... while`, `quote`, and
+XML syntax produce an `UnsupportedSyntax` diagnostic and a recoverable error
+tree instead of a panic.
 
 ## AST root and current grammar
 
@@ -183,6 +183,7 @@ simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
 new with simple or qualified type names and constructor applications
 simple type applications such as foo[A] and foo[A, B]
+match types with braced type cases, including wildcard cases
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
 expression type ascriptions with the supported simple/infix type parser
@@ -340,8 +341,12 @@ forms, remains future work. Likewise, the type parser currently handles
 simple, recursively applied, projected, annotated, refined, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus
 Scala 3.9 `InfixType` expressions with generic symbolic and identifier
-operators, ordinary/context function arrows, and wildcard type arguments
-with optional lower and upper bounds.
+operators, match types with ordered `CaseDef` children, ordinary/context
+function arrows, and wildcard type arguments with optional lower and upper
+bounds. Match-type patterns use `InfixType`, while results use the full
+`type_expr()` entry. The first increment accepts braced case regions such as
+`T match { case A => B }`; layout-only type case regions, bounded match-type
+definitions, and the remaining full type grammar are still deferred.
 Wildcard syntax is enabled by the type-argument context (`List[?]` and
 `List[? >: String <: Number]`); a top-level `?` remains an invalid type and
 produces a parser diagnostic. `type_expr()` parses arrows outside the
@@ -409,8 +414,8 @@ placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
 their right-hand sides and parameter defaults are diagnosed, as are
 class-like members and definition modifiers. Refined type members,
-capture-checking refinements, opaque, match, and other full type forms remain
-deferred.
+capture-checking refinements, opaque, bounded match-type definitions, and other
+full type forms remain deferred.
 
 ### Class-like definitions and templates
 
@@ -568,8 +573,9 @@ _.name
 
 Type-parameter bounds currently accept simple, qualified, recursively applied,
 annotated, and refined type names, plus the supported generic infix-type
-forms. Remaining refined-type forms, opaque, match, and other full type forms
-remain deferred and produce a parser diagnostic in this milestone.
+forms. Remaining refined-type forms, opaque, bounded match-type definitions, and
+other full type forms remain deferred and produce a parser diagnostic in this
+milestone.
 
 Placeholder parameters are scoped to the complete expression that contains
 them. A nested expression such as `foo(bar(_))` therefore creates the

@@ -54,8 +54,10 @@ and upper-bounded `TypeDef` members, declaration-only `val`, `var`, and `def`
 members, multiple members in source order, annotated and applied parents, and
 the parentless refinement form. RHS-bearing declarations, default arguments,
 class-like members, modifiers, refined type members, capture-checking
-refinements, capture-checking type syntax, and match types remain outside this
-parser milestone. Generic symbolic and identifier infix types are compared in
+refinements, capture-checking type syntax, and bounded match-type definitions
+remain outside this parser milestone. Core match types are compared in the
+type-definition fixtures, including ordered `CaseDef` children and full type
+results. Generic symbolic and identifier infix types are compared in
 the type-definition fixtures, including shared precedence, right-associative
 colon operators, and newlines after an operator.
 Backquoted identifier fixtures cover standalone and selected names. The

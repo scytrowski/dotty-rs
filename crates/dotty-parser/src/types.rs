@@ -1,13 +1,13 @@
 use dotty_core::ast::{
-    Annotated, ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers,
-    NamedArg, Parens, PolyFunction, RefinedTypeTree, Select, Tuple, TypeBoundsTree, UntypedNode,
-    ValDef,
+    Annotated, ByNameTypeTree, CaseDef, Function, FunctionWithMods, Ident, LambdaTypeTree,
+    MatchTypeTree, Modifier, Modifiers, NamedArg, Parens, PolyFunction, RefinedTypeTree, Select,
+    Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::ParsedStatement;
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -140,6 +140,8 @@ where
         } else if self.current_is_context_arrow() {
             self.advance();
             FunctionTypeArrow::Context
+        } else if self.current().kind == TokenKind::Keyword(HardKeyword::Match) {
+            return self.parse_match_type(mark, parameter);
         } else {
             return parameter;
         };
@@ -148,6 +150,202 @@ where
         let params = self.function_type_params(parameter);
         let erased_params = vec![false; params.len()];
         self.alloc_function_type(mark, params, body, arrow, erased_params)
+    }
+
+    /// Parses the first source-level match-type form:
+    /// `selector match { case InfixType => Type }`.
+    ///
+    /// Match-type cases deliberately do not use the expression pattern
+    /// parser. Dotty parses their left-hand side as an `InfixType`, while the
+    /// result remains a complete type, so the two sides have different
+    /// grammar entries even though they share the `CaseDef` AST node.
+    fn parse_match_type(
+        &mut self,
+        mark: crate::Mark,
+        selector: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        self.advance();
+        let indented = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
+            false
+        } else {
+            self.consume_match_type_separators();
+            if self.accept(TokenKind::Indent) {
+                true
+            } else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `{` or an indented case region after `match`",
+                );
+                false
+            }
+        };
+
+        let cases = self.parse_match_type_cases();
+        if indented {
+            self.consume_match_type_separators();
+            if !self.accept(TokenKind::Outdent) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected an outdent to close match-type cases",
+                );
+            }
+        } else if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `}` to close match-type cases",
+            );
+        }
+
+        if cases.is_empty() {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected at least one `case` clause after match type",
+            );
+        }
+
+        self.alloc_from(
+            mark,
+            TreeKind::MatchTypeTree(MatchTypeTree {
+                bound: None,
+                selector,
+                cases,
+            }),
+        )
+    }
+
+    fn parse_match_type_cases(&mut self) -> Vec<TreeId<Untyped>> {
+        let mut cases = Vec::new();
+        self.consume_match_type_separators();
+        while self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+            let checkpoint = self.cursor.checkpoint();
+            cases.push(self.parse_match_type_case());
+            self.consume_match_type_separators();
+            if !self.cursor.progressed_since(checkpoint) {
+                self.report(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    "parser made no progress while parsing match-type cases",
+                );
+                break;
+            }
+        }
+        cases
+    }
+
+    fn parse_match_type_case(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        self.expect(TokenKind::Keyword(HardKeyword::Case));
+
+        let pattern = self.with_parse_kind(ParseKind::Type, |parser| {
+            parser.with_location(Location::InPattern, |parser| {
+                parser.parse_match_type_case_pattern()
+            })
+        });
+
+        if !self.current_is_arrow() {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after match-type case pattern",
+            );
+            self.recover_match_type_case();
+            let body = self.error_type(self.current_span());
+            return self.alloc_from(
+                mark,
+                TreeKind::CaseDef(CaseDef {
+                    pattern,
+                    guard: None,
+                    body,
+                }),
+            );
+        }
+
+        self.advance();
+        let body = self.with_block_end(
+            Some(TokenKind::Punctuation(Punctuation::RightBrace)),
+            |parser| parser.type_expr(),
+        );
+        self.consume_match_type_case_end();
+        self.alloc_from(
+            mark,
+            TreeKind::CaseDef(CaseDef {
+                pattern,
+                guard: None,
+                body,
+            }),
+        )
+    }
+
+    fn parse_match_type_case_pattern(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Identifier
+            && self.current_text_is("_")
+            && self.lookahead_is_arrow(1)
+        {
+            let mark = self.mark();
+            let Ok(type_name) = self.intern_current_type_name() else {
+                let position = self.current_span();
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a valid match-type wildcard",
+                );
+                return self.error_type(position);
+            };
+            self.advance();
+            return self.alloc_from(
+                mark,
+                TreeKind::Ident(Ident {
+                    name: *type_name.as_name(),
+                    backquoted: false,
+                }),
+            );
+        }
+
+        self.parse_infix_type()
+    }
+
+    fn recover_match_type_case(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+                | TokenKind::Eof
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn consume_match_type_separators(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Punctuation(Punctuation::Semicolon)
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn consume_match_type_case_end(&mut self) {
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Punctuation(Punctuation::Semicolon)
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn starts_bracketed_function_type(&self) -> bool {
@@ -1610,10 +1808,213 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
-        ContextBoundTypeTree, ContextBounds, DefDef, LambdaTypeTree, RefinedTypeTree, TypeDef,
-        ValDef,
+        CaseDef, ContextBoundTypeTree, ContextBounds, DefDef, InfixOp, LambdaTypeTree,
+        MatchTypeTree, RefinedTypeTree, TypeDef, ValDef,
     };
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
+
+    #[test]
+    fn parses_a_braced_match_type_with_ordered_cases() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match { case String => Int; case Int => Long }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 21),
+                token(TokenKind::Operator, 22, 24),
+                token(TokenKind::Identifier, 25, 28),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 28, 29),
+                token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
+                token(TokenKind::Identifier, 35, 38),
+                token(TokenKind::Operator, 39, 41),
+                token(TokenKind::Identifier, 42, 46),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 47, 48),
+                token(TokenKind::Eof, 48, 48),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::MatchTypeTree(MatchTypeTree {
+            bound,
+            selector,
+            ref cases,
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected a match type");
+        };
+        assert!(bound.is_none());
+        assert!(matches!(
+            parser.ast().get(selector).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(
+            parser.ast().get(cases[0]).kind,
+            TreeKind::CaseDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(cases[1]).kind,
+            TreeKind::CaseDef(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 48).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_match_type_wildcard_case_as_an_identifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match { case _ => C }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::MatchTypeTree(MatchTypeTree { ref cases, .. }) = parser.ast().get(id).kind
+        else {
+            panic!("expected a match type");
+        };
+        let TreeKind::CaseDef(CaseDef { pattern, body, .. }) = parser.ast().get(cases[0]).kind
+        else {
+            panic!("expected a type case");
+        };
+        let TreeKind::Ident(wildcard) = parser.ast().get(pattern).kind else {
+            panic!("expected wildcard identifier pattern");
+        };
+        assert_eq!(parser.names.resolve(wildcard.name.text()), "_");
+        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_infix_types_in_match_type_selector_and_case_pattern() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A | B match { case C | D => E }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Case), 14, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Operator, 21, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Operator, 25, 27),
+                token(TokenKind::Identifier, 28, 29),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::MatchTypeTree(MatchTypeTree {
+            selector,
+            ref cases,
+            ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected a match type");
+        };
+        assert!(matches!(
+            parser.ast().get(selector).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp { .. }))
+        ));
+        let TreeKind::CaseDef(CaseDef { pattern, .. }) = parser.ast().get(cases[0]).kind else {
+            panic!("expected a type case");
+        };
+        assert!(matches!(
+            parser.ast().get(pattern).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(InfixOp { .. }))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_match_type_results_as_full_types() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match { case _ => A => B }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Operator, 22, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::MatchTypeTree(MatchTypeTree { ref cases, .. }) = parser.ast().get(id).kind
+        else {
+            panic!("expected a match type");
+        };
+        let TreeKind::CaseDef(CaseDef { body, .. }) = parser.ast().get(cases[0]).kind else {
+            panic!("expected a type case");
+        };
+        assert!(matches!(
+            parser.ast().get(body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_match_type_case_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match { case A C case B => D }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Keyword(HardKeyword::Case), 19, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Operator, 26, 28),
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::MatchTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
 
     #[test]
     fn parses_a_parenthesized_type_as_parens() {
