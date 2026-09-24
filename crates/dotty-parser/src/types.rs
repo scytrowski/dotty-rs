@@ -4842,6 +4842,10 @@ mod tests {
         };
         assert!(definition.metadata.modifiers.is_empty());
         assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 8).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

@@ -27,22 +27,25 @@ where
     /// in their source tree.
     pub(crate) fn strip_type_lambda_context_bounds(&mut self, params: &[TreeId<Untyped>]) {
         for &param in params {
-            let (bounds, first_context_bound) = match &self.ast.get(param).kind {
+            let (bounds, first_context_bound, context_bounds_span) = match &self.ast.get(param).kind
+            {
                 TreeKind::TypeDef(definition) => match &self.ast.get(definition.rhs).kind {
                     TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context_bounds)) => (
                         Some(context_bounds.bounds),
                         context_bounds.context_bounds.first().copied(),
+                        self.ast.get(definition.rhs).position,
                     ),
-                    _ => (None, None),
+                    _ => (None, None, None),
                 },
-                _ => (None, None),
+                _ => (None, None, None),
             };
             let Some(bounds) = bounds else {
                 continue;
             };
 
-            self.report(
+            self.report_at(
                 ParseDiagnosticKind::UnsupportedSyntax,
+                context_bounds_span.unwrap_or_else(|| self.current_span()),
                 "context bounds are not allowed for a polymorphic function type parameter",
             );
 
