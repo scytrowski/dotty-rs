@@ -1706,7 +1706,7 @@ where
             );
         }
 
-        if self.starts_this_or_super_singleton_type() {
+        if self.starts_this_or_super_type_reference() {
             let mark = self.mark();
             let Ok(reference) = self.parse_this_or_super_reference(mark) else {
                 let position = self.current_span();
@@ -1716,12 +1716,19 @@ where
                 );
                 return self.error_type(position);
             };
-            self.expect(TokenKind::Punctuation(Punctuation::Dot));
-            self.expect(TokenKind::Keyword(HardKeyword::Type));
-            return self.alloc_from(
-                mark,
-                TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference }),
-            );
+
+            if self.current().kind == TokenKind::Punctuation(Punctuation::Dot)
+                && self.cursor.lookahead(1).kind == TokenKind::Keyword(HardKeyword::Type)
+            {
+                self.advance();
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference }),
+                );
+            }
+
+            return reference;
         }
 
         match self.parse_qualified_reference(ReferenceNamespace::Type) {
@@ -1855,7 +1862,7 @@ where
         Some((name, backquoted))
     }
 
-    fn starts_this_or_super_singleton_type(&mut self) -> bool {
+    fn starts_this_or_super_type_reference(&mut self) -> bool {
         match self.current().kind {
             TokenKind::Keyword(HardKeyword::This) => {
                 self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
@@ -3644,6 +3651,88 @@ mod tests {
             panic!("expected a super reference");
         };
         assert!(mix.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_this_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "this.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::This), 0, 4),
+                token(TokenKind::Punctuation(Punctuation::Dot), 4, 5),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary this selection");
+        };
+        assert!(matches!(
+            parser.ast().get(qualifier).kind,
+            TreeKind::This(This { qual: None })
+        ));
+        assert!(name.is_term());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_super_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(Select { qualifier, .. }) = parser.ast().get(id).kind else {
+            panic!("expected an ordinary super selection");
+        };
+        assert!(matches!(
+            parser.ast().get(qualifier).kind,
+            TreeKind::Super(Super { mix: None, .. })
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_mixin_qualified_super_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super[Base].member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Dot), 11, 12),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(_) = parser.ast().get(id).kind else {
+            panic!("expected an ordinary mixin-qualified super selection");
+        };
         assert!(parser.diagnostics().is_empty());
     }
 
