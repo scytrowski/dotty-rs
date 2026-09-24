@@ -234,7 +234,14 @@ where
             return false;
         };
         let known = self.known_names();
-        name == known.erased || name == known.tracked || name == known.into || name == known.update
+        name == known.erased
+            || name == known.tracked
+            || name == known.into
+            || name == known.update
+            // `opaque` is a contextual modifier only for `opaque type`, but
+            // it must remain deferred elsewhere so unsupported modifier
+            // recovery preserves the following definition boundary.
+            || name == known.opaque
     }
 
     fn starts_opaque_type_definition(&mut self) -> bool {
