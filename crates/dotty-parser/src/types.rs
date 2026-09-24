@@ -1894,6 +1894,34 @@ mod tests {
     }
 
     #[test]
+    fn composes_a_path_singleton_type_with_an_intersection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.type & String",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind else {
+            panic!("expected an intersection type");
+        };
+        assert!(matches!(
+            parser.ast().get(infix.left).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        assert_eq!(parser.names.resolve(infix.op.text()), "&");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn recovers_a_missing_path_singleton_segment_without_hanging() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
