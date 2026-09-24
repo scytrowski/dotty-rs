@@ -240,11 +240,10 @@ where
     ) {
         loop {
             let newline_count = self.newlines_before_given_parent_separator();
-            let separator = match self.cursor.lookahead(newline_count).kind {
-                TokenKind::Punctuation(Punctuation::Comma)
-                | TokenKind::Keyword(HardKeyword::With) => true,
-                _ => false,
-            };
+            let separator = matches!(
+                self.cursor.lookahead(newline_count).kind,
+                TokenKind::Punctuation(Punctuation::Comma) | TokenKind::Keyword(HardKeyword::With)
+            );
             if !separator {
                 return;
             }
