@@ -303,11 +303,13 @@ compose recursively. Type-lambda parameters preserve lower/upper bounds;
 explicit `+`/`-` variance is rejected for `ParamOwner::Type`, matching Dotty,
 and their bodies compose with applied, tuple,
 union/intersection, ordinary function, context-function, and nested
-polymorphic-function types. A context bound in a type-lambda parameter is
+polymorphic-function types. Ordinary polymorphic function types preserve
+parser-level `ContextBounds` wrappers, including each bound's parameter name
+and optional `as` alias. A context bound in a type-lambda parameter is
 consumed, reported as unsupported syntax, and stripped from the source-level
-tree, matching the current Dotty parser shape; the shared `TypeDef` contract
-has no context-bound field. Bounds are parsed before the context-bound
-suffix, including repeated and braced context-bound forms. Empty or malformed
+tree only after the `=>>` arrow identifies the type-lambda path, matching the
+current Dotty parser shape. Bounds are parsed before the context-bound suffix,
+including repeated and braced context-bound forms. Empty or malformed
 type-lambda clauses report diagnostics without consuming the
 following type-definition boundary, including incomplete commas, nested
 parameter clauses, and missing context-bound types.

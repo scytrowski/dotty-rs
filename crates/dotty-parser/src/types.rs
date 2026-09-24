@@ -143,6 +143,7 @@ where
         let type_params = self.parse_type_param_clause(crate::ParamOwner::Type);
         if self.current_is_type_lambda_arrow() {
             self.advance();
+            self.strip_type_lambda_context_bounds(&type_params);
             let body = self.type_expr();
             if type_params.is_empty() {
                 self.report(
@@ -837,7 +838,7 @@ struct NamedFunctionParams {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{LambdaTypeTree, TypeDef};
+    use dotty_core::ast::{ContextBoundTypeTree, ContextBounds, LambdaTypeTree, TypeDef};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
 
     #[test]
@@ -4571,6 +4572,65 @@ mod tests {
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_context_bounds_in_an_ordinary_polymorphic_function_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show as show] => A => A",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Operator, 23, 25),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::PolyFunction(poly)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a polymorphic function type");
+        };
+        let TreeKind::TypeDef(parameter) = &parser.ast().get(poly.type_params[0]).kind else {
+            panic!("expected a type parameter definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(ContextBounds {
+            bounds,
+            context_bounds,
+        })) = &parser.ast().get(parameter.rhs).kind
+        else {
+            panic!("expected preserved context bounds");
+        };
+        assert!(matches!(
+            parser.ast().get(*bounds).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
+        assert_eq!(context_bounds.len(), 1);
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(ContextBoundTypeTree {
+            name,
+            ..
+        })) = &parser.ast().get(context_bounds[0]).kind
+        else {
+            panic!("expected a context-bound type tree");
+        };
+        let alias = *name;
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(
+            alias.map(|name| names.resolve(name.as_name().text())),
+            Some("show")
+        );
     }
 
     #[test]

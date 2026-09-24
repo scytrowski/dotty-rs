@@ -48,7 +48,8 @@ applied, argument, block, and indented bodies. Context-function parameters are
 compared through their normalized `given` marker on `ValDef`.
 The polyfunction fixtures cover source polymorphic function literals and
 polymorphic function types: type-parameter clauses with lower and upper
-bounds, nested type bodies, context/by-name bodies, and
+bounds, ordinary context-bound wrappers (including aliases), nested type
+bodies, context/by-name bodies, and
 value-parameter function bodies. Type-lambda fixtures additionally cover
 applied, tuple, union/intersection, and nested polymorphic bodies; context
 bounds are consumed, diagnosed, and normalized to Dotty's stripped source-tree
