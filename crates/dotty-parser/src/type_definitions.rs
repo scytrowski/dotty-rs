@@ -186,9 +186,6 @@ where
                 self.advance();
             }
             if low.is_some() || high.is_some() {
-                if opaque {
-                    return self.alloc_opaque_type_bounds(low, high, rhs);
-                }
                 if let TreeKind::MatchTypeTree(MatchTypeTree { bound, .. }) =
                     &mut self.ast.get_mut(rhs).kind
                 {
@@ -204,6 +201,8 @@ where
                             "a match type alias cannot have a lower type bound",
                         );
                     }
+                } else if opaque {
+                    return self.alloc_opaque_type_bounds(low, high, rhs);
                 } else {
                     self.report(
                         ParseDiagnosticKind::UnexpectedToken,
