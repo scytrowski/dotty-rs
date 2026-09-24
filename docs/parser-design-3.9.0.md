@@ -368,15 +368,17 @@ as the parameter list of a zero-argument function type. Named tuple types use
 `NamedArg` children inside the existing `Tuple` node, while a following
 ordinary or context function arrow continues to select named `ValDef`
 parameters instead.
-A path singleton type such as `x.type` or `foo.bar.type` is represented by the
-existing `SingletonTypeTree`; its reference is parsed in the term namespace,
-while an ordinary qualified type such as `foo.Bar` remains in the type
-namespace. Singleton types compose with the supported applied, union, and
+A path singleton type such as `x.type`, `foo.bar.type`, `this.type`,
+`Outer.this.type`, `super.x.type`, or `Outer.super.x.type` is represented by
+the existing `SingletonTypeTree`; its reference is parsed in the term
+namespace, while an ordinary qualified type such as `foo.Bar` remains in the
+type namespace. Singleton types compose with the supported applied, union, and
 function type forms. Literal singleton types for strings, characters, numbers,
 booleans, and `null` are represented by `SingletonTypeTree` around the existing
 `Literal` tree. Type projections such as `T#Member`, `F[A]#Result`, and
 repeated `#` suffixes use the existing `Select` node with type-namespace
-names. `this.type` and `super.x.type` remain deferred.
+names. The parser preserves `This` and `Super` references syntactically; it
+does not resolve enclosing classes or superclass targets.
 An empty
 context-function parameter list (`() ?=> R`) is invalid and produces a
 focused parser diagnostic. The `derives` clause

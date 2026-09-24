@@ -479,6 +479,10 @@ fn render_tree(
     };
     if let TreeKind::Super(super_tree) = &tree.kind
         && matches!(arena.get(super_tree.qual).kind, TreeKind::This(this) if this.qual.is_none())
+        && !arena.get(super_tree.qual).position.is_some_and(|position| {
+            let range = position.span().range();
+            range.start() == range.end()
+        })
         && let Some(position) = tree.position
     {
         let start = position.span().range().start();

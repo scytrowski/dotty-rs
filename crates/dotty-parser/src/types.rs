@@ -1,9 +1,12 @@
 use dotty_core::ast::{
     Annotated, ByNameTypeTree, CaseDef, Function, FunctionWithMods, Ident, LambdaTypeTree,
     MatchTypeTree, Modifier, Modifiers, NamedArg, Parens, PolyFunction, RefinedTypeTree, Select,
-    Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    Super, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
-use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{
+    Constant, HardKeyword, Name, Punctuation, SourceSpan, Span, TokenKind, TreeId, TreeKind,
+    Untyped,
+};
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::ParsedStatement;
@@ -1329,7 +1332,9 @@ where
             | TokenKind::Keyword(HardKeyword::Null) => {
                 return self.parse_literal_singleton_type(mark);
             }
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+            TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Keyword(HardKeyword::This | HardKeyword::Super) => {
                 return self.simple_type();
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
@@ -1701,6 +1706,32 @@ where
             );
         }
 
+        if self.starts_this_or_super_type_reference() {
+            let mark = self.mark();
+            let Ok(reference) = self.parse_this_or_super_reference(mark) else {
+                let position = self.current_span();
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a path before `.type`",
+                );
+                return self.error_type(position);
+            };
+
+            if self.current().kind == TokenKind::Punctuation(Punctuation::Dot)
+                && self.cursor.lookahead(1).kind == TokenKind::Keyword(HardKeyword::Type)
+            {
+                self.advance();
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::SingletonTypeTree(dotty_core::ast::SingletonTypeTree { reference }),
+                );
+            }
+
+            self.convert_this_or_super_reference_to_type_namespace(reference);
+            return reference;
+        }
+
         match self.parse_qualified_reference(ReferenceNamespace::Type) {
             Ok(tree) => tree,
             Err(QualifiedReferenceError::MissingInitial) => {
@@ -1718,6 +1749,150 @@ where
                 );
                 self.error_type(self.current_span())
             }
+        }
+    }
+
+    fn parse_this_or_super_reference(
+        &mut self,
+        mark: crate::Mark,
+    ) -> Result<TreeId<Untyped>, QualifiedReferenceError> {
+        let current_kind = self.current().kind;
+        let mut tree = match current_kind {
+            TokenKind::Keyword(HardKeyword::This) => {
+                self.advance();
+                self.alloc_from(mark, TreeKind::This(dotty_core::ast::This { qual: None }))
+            }
+            TokenKind::Keyword(HardKeyword::Super) => {
+                let mix_start = (self.cursor.lookahead(1).kind
+                    == TokenKind::Punctuation(Punctuation::LeftBracket))
+                .then(|| self.cursor.lookahead(2).span.start());
+                let mix_position = mix_start.map(|start| self.zero_width_span_at(start));
+                let tree = self.parse_super(mark, None);
+                if let Some(position) = mix_position {
+                    self.adjust_mixin_super_qualifier_span(tree, position);
+                }
+                tree
+            }
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                if self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+                    && self.cursor.lookahead(2).kind == TokenKind::Keyword(HardKeyword::This) =>
+            {
+                let Ok(name) = self.intern_current_type_name() else {
+                    return Err(QualifiedReferenceError::MissingInitial);
+                };
+                self.advance();
+                self.expect(TokenKind::Punctuation(Punctuation::Dot));
+                self.expect(TokenKind::Keyword(HardKeyword::This));
+                self.alloc_from(
+                    mark,
+                    TreeKind::This(dotty_core::ast::This {
+                        qual: Some(*name.as_name()),
+                    }),
+                )
+            }
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                if self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+                    && self.cursor.lookahead(2).kind == TokenKind::Keyword(HardKeyword::Super) =>
+            {
+                let qualifier_start = self.current().span.start();
+                let super_start = self.cursor.lookahead(2).span.start();
+                let mix_position = (self.cursor.lookahead(3).kind
+                    == TokenKind::Punctuation(Punctuation::LeftBracket))
+                .then(|| self.span_at(qualifier_start, super_start));
+                let tree = self.parse_qualified_super(mark);
+                if let Some(position) = mix_position {
+                    self.adjust_mixin_super_qualifier_span(tree, position);
+                }
+                tree
+            }
+            _ => return Err(QualifiedReferenceError::MissingInitial),
+        };
+
+        while self.cursor.at(TokenKind::Punctuation(Punctuation::Dot))
+            && self.cursor.lookahead(1).kind != TokenKind::Keyword(HardKeyword::Type)
+        {
+            self.advance();
+            let Some((name, backquoted)) = self.current_term_reference_name() else {
+                return Err(QualifiedReferenceError::MissingSegment);
+            };
+            self.advance();
+            tree = self.alloc_from(
+                mark,
+                TreeKind::Select(dotty_core::ast::Select {
+                    qualifier: tree,
+                    name,
+                    backquoted,
+                }),
+            );
+        }
+
+        Ok(tree)
+    }
+
+    fn zero_width_span_at(&self, start: u32) -> SourceSpan {
+        self.span_at(start, start)
+    }
+
+    fn span_at(&self, start: u32, end: u32) -> SourceSpan {
+        let range = dotty_core::TextRange::new(start, end).expect("ordered source span");
+        SourceSpan::new(self.source_id, Span::without_point(range))
+    }
+
+    fn adjust_mixin_super_qualifier_span(&mut self, tree: TreeId<Untyped>, position: SourceSpan) {
+        let super_id = match self.ast.get(tree).kind {
+            TreeKind::Select(select) => select.qualifier,
+            _ => return,
+        };
+        let qualifier = match self.ast.get(super_id).kind {
+            TreeKind::Super(Super { qual, mix: Some(_) }) => qual,
+            _ => return,
+        };
+        self.ast.get_mut(qualifier).position = Some(position);
+    }
+
+    fn current_term_reference_name(&mut self) -> Option<(Name, bool)> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return None;
+        }
+
+        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+        let name = *self.intern_current_term_name().ok()?.as_name();
+        Some((name, backquoted))
+    }
+
+    fn convert_this_or_super_reference_to_type_namespace(&mut self, tree: TreeId<Untyped>) {
+        let qualifier = match self.ast.get(tree).kind {
+            TreeKind::Select(selection) => selection.qualifier,
+            _ => return,
+        };
+        self.convert_this_or_super_reference_to_type_namespace(qualifier);
+        if let TreeKind::Select(selection) = &mut self.ast.get_mut(tree).kind {
+            selection.name = *dotty_core::TypeName::new(selection.name.text()).as_name();
+        }
+    }
+
+    fn starts_this_or_super_type_reference(&mut self) -> bool {
+        match self.current().kind {
+            TokenKind::Keyword(HardKeyword::This) => {
+                self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+            }
+            TokenKind::Keyword(HardKeyword::Super) => {
+                matches!(
+                    self.cursor.lookahead(1).kind,
+                    TokenKind::Punctuation(Punctuation::Dot | Punctuation::LeftBracket)
+                )
+            }
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+                    && matches!(
+                        self.cursor.lookahead(2).kind,
+                        TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
+                    )
+            }
+            _ => false,
         }
     }
 
@@ -1809,7 +1984,7 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
         CaseDef, ContextBoundTypeTree, ContextBounds, DefDef, InfixOp, LambdaTypeTree,
-        MatchTypeTree, RefinedTypeTree, TypeDef, ValDef,
+        MatchTypeTree, RefinedTypeTree, Select, Super, This, TypeDef, ValDef,
     };
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
 
@@ -3318,6 +3493,287 @@ mod tests {
             TreeKind::Ident(ident) if ident.name.is_term()
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_this_type_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "this.type",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::This), 0, 4),
+                token(TokenKind::Punctuation(Punctuation::Dot), 4, 5),
+                token(TokenKind::Keyword(HardKeyword::Type), 5, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        assert!(matches!(
+            parser.ast().get(singleton.reference).kind,
+            TreeKind::This(This { qual: None })
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 9).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_qualified_this_type_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Outer.this.type",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Keyword(HardKeyword::This), 6, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Type), 11, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::This(This { qual: Some(outer) }) = parser.ast().get(singleton.reference).kind
+        else {
+            panic!("expected a qualified this reference");
+        };
+        assert!(parser.diagnostics().is_empty());
+        assert!(outer.is_type());
+        drop(parser);
+        assert_eq!(names.resolve(outer.text()), "Outer");
+    }
+
+    #[test]
+    fn parses_super_member_type_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super.member.type",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Dot), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Type), 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(singleton.reference).kind
+        else {
+            panic!("expected a selected super member");
+        };
+        assert!(name.is_term());
+        assert!(matches!(
+            parser.ast().get(qualifier).kind,
+            TreeKind::Super(Super { mix: None, .. })
+        ));
+        assert!(parser.diagnostics().is_empty());
+        let selected_name = name;
+        drop(parser);
+        assert_eq!(names.resolve(selected_name.text()), "member");
+    }
+
+    #[test]
+    fn parses_qualified_super_member_type_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Outer.super.member.type",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Super), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::Dot), 11, 12),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Type), 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(singleton.reference).kind
+        else {
+            panic!("expected a selected super member");
+        };
+        let TreeKind::Super(Super { qual, mix }) = parser.ast().get(qualifier).kind else {
+            panic!("expected a qualified super reference");
+        };
+        assert!(mix.is_none());
+        assert!(matches!(
+            parser.ast().get(qual).kind,
+            TreeKind::This(This { qual: Some(_) })
+        ));
+        assert!(parser.diagnostics().is_empty());
+        let selected_name = name;
+        drop(parser);
+        assert_eq!(names.resolve(selected_name.text()), "member");
+    }
+
+    #[test]
+    fn parses_mixin_qualified_super_member_type_as_a_singleton_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super[Base].member.type",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Dot), 11, 12),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Type), 19, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(id).kind else {
+            panic!("expected a singleton type tree");
+        };
+        let TreeKind::Select(Select { qualifier, .. }) = parser.ast().get(singleton.reference).kind
+        else {
+            panic!("expected a selected super member");
+        };
+        let TreeKind::Super(Super { mix, .. }) = parser.ast().get(qualifier).kind else {
+            panic!("expected a super reference");
+        };
+        assert!(mix.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_this_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "this.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::This), 0, 4),
+                token(TokenKind::Punctuation(Punctuation::Dot), 4, 5),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary this selection");
+        };
+        assert!(matches!(
+            parser.ast().get(qualifier).kind,
+            TreeKind::This(This { qual: None })
+        ));
+        assert!(name.is_type());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 11).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_super_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super.member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(Select {
+            qualifier, name, ..
+        }) = parser.ast().get(id).kind
+        else {
+            panic!("expected an ordinary super selection");
+        };
+        assert!(matches!(
+            parser.ast().get(qualifier).kind,
+            TreeKind::Super(Super { mix: None, .. })
+        ));
+        assert!(name.is_type());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_mixin_qualified_super_member_type_as_an_ordinary_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "super[Base].member",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Dot), 11, 12),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::Select(Select { name, .. }) = parser.ast().get(id).kind else {
+            panic!("expected an ordinary mixin-qualified super selection");
+        };
+        assert!(name.is_type());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_missing_this_singleton_type_suffix_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "this.",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::This), 0, 4),
+                token(TokenKind::Punctuation(Punctuation::Dot), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        parser.type_expr();
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        ));
     }
 
     #[test]
