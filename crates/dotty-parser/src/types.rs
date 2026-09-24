@@ -2759,6 +2759,137 @@ mod tests {
     }
 
     #[test]
+    fn does_not_activate_leading_unnamed_erased_parameters_when_disabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(!matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn rejects_a_second_unnamed_erased_marker_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A, erased B) => C",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+                token(TokenKind::Operator, 21, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_trailing_comma_after_a_leading_unnamed_erased_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A,) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Operator, 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_leading_unnamed_erased_parameter_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased) => B",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_missing_leading_unnamed_erased_function_result() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(erased A) =>",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Operator, 11, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            erased_definitions: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let _ = parser.type_expr();
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn preserves_mixed_erased_parameter_flags_in_source_order() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
