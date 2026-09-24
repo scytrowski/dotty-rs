@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, Parens,
-    PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    ByNameTypeTree, Function, FunctionWithMods, LambdaTypeTree, Modifier, Modifiers, NamedArg,
+    Parens, PolyFunction, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{Constant, HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
@@ -226,8 +226,8 @@ where
     ///
     /// Parenthesized type parsing must not treat the colon after `name` as a
     /// tuple element. We only commit when the matching right parenthesis is
-    /// followed by one of the two supported function arrows; named tuple
-    /// types remain on the existing recovery path for now.
+    /// followed by one of the two supported function arrows. If there is no
+    /// arrow, a leading `name: Type` element is parsed as a named tuple type.
     fn named_function_type_arrow(&mut self) -> Option<FunctionTypeArrow> {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return None;
@@ -897,6 +897,10 @@ where
             return self.error_type(position);
         }
 
+        if self.starts_named_tuple_element() {
+            return self.parse_named_tuple_type(mark);
+        }
+
         let inner = self.type_expr();
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
@@ -933,6 +937,101 @@ where
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Tuple(dotty_core::ast::Tuple { elements })),
         )
+    }
+
+    fn starts_named_tuple_element(&mut self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && is_function_param_colon(self.cursor.lookahead(1).kind)
+    }
+
+    fn parse_named_tuple_type(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let mut elements = Vec::new();
+        loop {
+            let element_mark = self.mark();
+            let name = match self.intern_current_term_name() {
+                Ok(name)
+                    if matches!(
+                        self.current().kind,
+                        TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                    ) =>
+                {
+                    self.advance();
+                    *name.as_name()
+                }
+                _ => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a named tuple element",
+                    );
+                    self.recover_named_tuple_element();
+                    if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                        continue;
+                    }
+                    self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+                    break;
+                }
+            };
+
+            if !self.accept_function_param_colon() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `:` after named tuple element",
+                );
+                self.recover_named_tuple_element();
+                if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    continue;
+                }
+                self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+                break;
+            }
+
+            let element_type = self.type_expr();
+            elements.push(self.alloc_from(
+                element_mark,
+                TreeKind::NamedArg(NamedArg {
+                    name,
+                    arg: element_type,
+                }),
+            ));
+
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::RightParen))
+                {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a named tuple element after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
+
+            self.expect(TokenKind::Punctuation(Punctuation::RightParen));
+            break;
+        }
+
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple { elements })),
+        )
+    }
+
+    fn recover_named_tuple_element(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen) | TokenKind::Eof
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn consume_type_infix_newlines(&mut self) {
@@ -1568,6 +1667,107 @@ mod tests {
         );
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_named_tuple_type_elements_as_named_args() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(name: String, age: Int)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 5),
+                token(TokenKind::Punctuation(Punctuation::Colon), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::Comma), 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::Colon), 18, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parser.ast().get(id).kind else {
+            panic!("expected a named tuple type");
+        };
+        let elements = tuple.elements.clone();
+        assert_eq!(elements.len(), 2);
+        let element_names = elements
+            .iter()
+            .map(|element| match &parser.ast().get(*element).kind {
+                TreeKind::NamedArg(named) => named.name.text(),
+                _ => panic!("expected a named tuple element"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parser.names.resolve(element_names[0]), "name");
+        assert_eq!(parser.names.resolve(element_names[1]), "age");
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_named_function_type_disambiguation() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(name: String, age: Int) => Result",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 5),
+                token(TokenKind::Punctuation(Punctuation::Colon), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::Comma), 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::Colon), 18, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Operator, 25, 27),
+                token(TokenKind::Identifier, 28, 34),
+                token(TokenKind::Eof, 34, 34),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_a_trailing_comma_in_a_named_tuple_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(name: String,)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 5),
+                token(TokenKind::Punctuation(Punctuation::Colon), 5, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Punctuation(Punctuation::Comma), 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType))
+        );
     }
 
     #[test]
@@ -3385,7 +3585,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_named_tuple_types_deferred_without_an_arrow() {
+    fn parses_named_tuple_types_without_an_arrow() {
         let mut names = NameInterner::new();
         let parser = parser_for(
             "type T = (x: A, y: B)",
@@ -3408,7 +3608,7 @@ mod tests {
         );
 
         let result = parser.compilation_unit();
-        assert!(!result.diagnostics.is_empty());
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
