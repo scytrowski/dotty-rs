@@ -454,7 +454,10 @@ Sequence capture references, `.only[...]`/`.rd` forms, auxiliary constructors,
 and semantic template processing remain future work. Direct enum-case
 annotations, access modifiers, and qualified visibility are preserved as
 definition metadata; constructor-level annotations/modifiers after the case
-name, enum-case bodies, and enum-case `derives`/`uses` remain deferred.
+name and enum-case `derives`/`uses` remain deferred. Per-case template bodies
+are not Scala 3.9 syntax: the parser reports them as unexpected and recovers
+past the rejected braced or indented body so following enum cases remain
+available.
 
 ### Contextual definitions
 
