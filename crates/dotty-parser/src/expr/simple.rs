@@ -143,7 +143,7 @@ where
         )
     }
 
-    fn parse_qualified_super(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+    pub(crate) fn parse_qualified_super(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let qualifier_mark = self.mark();
         let Ok(name) = self.intern_current_type_name() else {
             return self.unexpected_expression();
