@@ -1740,6 +1740,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_full_type_expressions_in_named_tuple_elements() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(items: List[A], callback: X => Y)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 12, 13),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Identifier, 17, 25),
+                token(TokenKind::Punctuation(Punctuation::Colon), 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Operator, 29, 31),
+                token(TokenKind::Identifier, 32, 33),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 33, 34),
+                token(TokenKind::Eof, 34, 34),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parser.ast().get(id).kind else {
+            panic!("expected a named tuple type");
+        };
+        assert!(matches!(
+            parser
+                .ast()
+                .get(match &parser.ast().get(tuple.elements[0]).kind {
+                    TreeKind::NamedArg(named) => named.arg,
+                    _ => panic!("expected a named tuple element"),
+                })
+                .kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert!(matches!(
+            parser
+                .ast()
+                .get(match &parser.ast().get(tuple.elements[1]).kind {
+                    TreeKind::NamedArg(named) => named.arg,
+                    _ => panic!("expected a named tuple element"),
+                })
+                .kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn recovers_a_trailing_comma_in_a_named_tuple_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
