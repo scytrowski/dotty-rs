@@ -355,8 +355,8 @@ A path singleton type such as `x.type` or `foo.bar.type` is represented by the
 existing `SingletonTypeTree`; its reference is parsed in the term namespace,
 while an ordinary qualified type such as `foo.Bar` remains in the type
 namespace. Singleton types compose with the supported applied, union, and
-function type forms. Literal singleton types for strings, numbers, booleans,
-and `null` are represented by `SingletonTypeTree` around the existing
+function type forms. Literal singleton types for strings, characters, numbers,
+booleans, and `null` are represented by `SingletonTypeTree` around the existing
 `Literal` tree. `this.type`, `super.x.type`, and type projections using `#`
 remain deferred.
 An empty
