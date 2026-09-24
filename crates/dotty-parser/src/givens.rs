@@ -84,6 +84,7 @@ where
             let candidate = self.parse_given_parent(location);
             if self.current_is_arrow() {
                 self.advance();
+                let parameter_position = self.ast.get(candidate).position;
                 let metadata = Modifiers {
                     modifiers: vec![Modifier::Given],
                     ..Modifiers::default()
@@ -94,6 +95,7 @@ where
                     num_lead_params.saturating_add(1),
                     metadata,
                 );
+                self.ast.get_mut(parameter).position = parameter_position;
                 num_lead_params = num_lead_params.saturating_add(1);
                 value_param_clauses.push(vec![parameter]);
                 continue;
