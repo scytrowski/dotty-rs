@@ -139,6 +139,15 @@ where
             }
         }
 
+        if owner == ParamOwner::Given && current_is_anonymous_context_type(self) {
+            return self.parse_anonymous_using_types(
+                owner,
+                first_ordinary_clause,
+                metadata,
+                num_lead_params,
+            );
+        }
+
         if !is_using && self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
             return params;
         }
@@ -460,6 +469,13 @@ fn is_parameter_colon_at<S: dotty_core::TokenSource>(
             | TokenKind::ColonOp
             | TokenKind::Punctuation(Punctuation::Colon)
     ) && parser.token_text(&token).ok() == Some(":")
+}
+
+fn current_is_anonymous_context_type<S: dotty_core::TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> bool {
+    parser.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
+        && !is_parameter_colon_at(parser, 1)
 }
 
 fn is_class_parameter_owner(owner: ParamOwner) -> bool {

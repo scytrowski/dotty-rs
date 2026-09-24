@@ -65,13 +65,17 @@ where
         let parents = loop {
             if self.starts_given_parameter_clause() {
                 has_explicit_parameter_clause = true;
-                let clauses = self
-                    .parse_term_param_clauses(ParamOwner::Given)
-                    .into_iter()
-                    .filter(|clause| !clause.is_empty())
-                    .collect::<Vec<_>>();
-                num_lead_params += clauses.iter().map(Vec::len).sum::<usize>();
-                value_param_clauses.extend(clauses);
+                let is_using = self.current_is_using_parameter_clause();
+                let clause = self.parse_single_term_param_clause(
+                    ParamOwner::Given,
+                    true,
+                    is_using,
+                    num_lead_params,
+                );
+                num_lead_params += clause.len();
+                if !clause.is_empty() {
+                    value_param_clauses.push(clause);
+                }
                 self.expect_arrow();
                 continue;
             }
@@ -694,6 +698,49 @@ mod tests {
             parser.ast().get(definition.tpt).kind,
             TreeKind::Ident(_)
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_parenthesized_anonymous_given_type_conditions() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given (H, I) => J = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Operator, 18, 19),
+                token(TokenKind::Identifier, 20, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert_eq!(definition.value_param_clauses[0].len(), 2);
+        let names = definition.value_param_clauses[0]
+            .iter()
+            .map(|parameter| {
+                let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+                    panic!("expected a value parameter");
+                };
+                parser.names.resolve(parameter.name.as_name().text())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["x$1", "x$2"]);
         assert!(parser.diagnostics().is_empty());
     }
 
