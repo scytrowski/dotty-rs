@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 <scala3-checkout> [--output <report.json>] [--timeout-ms <n>]" >&2
+  exit 2
+fi
+
+scala3_root=$(cd "$1" && pwd)
+shift
+
+roots=()
+for relative_root in library/src compiler/src; do
+  root="${scala3_root}/${relative_root}"
+  if [[ ! -d "$root" ]]; then
+    echo "Scala 3.9 source directory does not exist: $root" >&2
+    exit 1
+  fi
+  roots+=(--root "$root")
+done
+
+repo_dir=$(cd "${script_dir}/../.." && pwd)
+cd "$repo_dir"
+exec cargo run --quiet --locked -p dotty-parser-corpus-report -- \
+  "${roots[@]}" "$@"

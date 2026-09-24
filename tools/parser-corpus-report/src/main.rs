@@ -24,6 +24,7 @@ struct Options {
 #[derive(Debug, Serialize)]
 struct Report {
     schema_version: u32,
+    corpus_roots: Vec<String>,
     files_attempted: usize,
     files_parsed_without_diagnostics: usize,
     files_parsed_with_recoverable_diagnostics: usize,
@@ -88,7 +89,7 @@ fn main() {
         .iter()
         .map(|path| parse_one(path, &options.roots, options.timeout))
         .collect::<Vec<_>>();
-    let report = build_report(&outcomes);
+    let report = build_report(&outcomes, &options.roots);
 
     if let Some(output) = options.output {
         if let Err(error) = write_report(&output, &report) {
@@ -300,19 +301,32 @@ fn parse_source(source: &str) -> ParsedSource {
 fn display_path(path: &Path, roots: &[PathBuf]) -> String {
     for root in roots {
         if let Ok(relative) = path.strip_prefix(root) {
-            let root_name = root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("root");
-            return Path::new(root_name).join(relative).display().to_string();
+            return Path::new(&root_label(root))
+                .join(relative)
+                .display()
+                .to_string();
         }
     }
     path.display().to_string()
 }
 
-fn build_report(outcomes: &[FileOutcome]) -> Report {
+fn root_label(root: &Path) -> String {
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("root");
+    if name == "src" {
+        if let Some(parent) = root.parent().and_then(|parent| parent.file_name()) {
+            return Path::new(parent).join(name).display().to_string();
+        }
+    }
+    name.to_owned()
+}
+
+fn build_report(outcomes: &[FileOutcome], roots: &[PathBuf]) -> Report {
     let mut report = Report {
         schema_version: 1,
+        corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
         files_attempted: outcomes.len(),
         files_parsed_without_diagnostics: 0,
         files_parsed_with_recoverable_diagnostics: 0,
