@@ -267,6 +267,12 @@ accept named erased parameters such as `(erased x: A) ?=> B` and mixed clauses
 such as `(x: A, erased y: B) ?=> C`. They retain the plain `ValDef` parameter
 shape; `Given` remains on the surrounding `FunctionWithMods`, while
 `erased_params` records erasure positionally alongside ordinary parameters.
+With `ParserFeatures::erased_definitions` enabled, ordinary function types also
+support the narrow Scala 3.9 leading unnamed form `(erased A, B) => C`.
+Unnamed parameters remain type trees rather than `ValDef` nodes, and
+`FunctionWithMods.erased_params` records `[true, false]` in source order.
+This parser deliberately recognizes only one leading unnamed `erased` marker;
+non-leading and repeated unnamed erased markers remain outside this increment.
 Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types and
 pure arrows remain deferred. Supported
