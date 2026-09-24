@@ -392,8 +392,8 @@ inside a brace or indented `Block`; a typed declaration without `=` has no
 RHS. The shared definition-prefix layer now preserves source annotations,
 hard modifiers, the supported soft modifiers, and private/protected visibility
 including qualifiers on the definition nodes. It deliberately does not yet
-handle constructors, legacy `(implicit ...)` clauses, anonymous `(using T)`
-clauses, context-type shorthand, or the remaining definition forms.
+handle constructors, legacy `(implicit ...)` clauses, context-type shorthand
+outside parameter clauses, or the remaining definition forms.
 Unsupported parameter forms produce an explicit unsupported-syntax diagnostic
 and synchronize at the closing parenthesis.
 
@@ -476,8 +476,10 @@ not synthesize a `$given_N` spelling. Unparameterized non-inline aliases carry
 Dotty's parser-added `Given`, `Final`, and `Lazy` metadata where applicable.
 Parameterized and `inline` aliases are represented as `DefDef` trees, and
 structural bodies reuse the ordinary `Template` machinery. Given conditions
-currently support type parameters and named `using` clauses; anonymous
-context-type parameters and the full `GivenType` grammar remain deferred.
+currently support type parameters and named or anonymous `using` clauses. The
+full `GivenType` grammar remains deferred. Anonymous context-type parameters
+use Dotty's deterministic synthetic `x$N` names and retain `Given` metadata;
+semantic given synthesis remains outside the parser.
 
 An extension is represented by the existing `UntypedNode::ExtensionMethods`
 wrapper. Its parameter clauses remain in source order: leading type parameters,
