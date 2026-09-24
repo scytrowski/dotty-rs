@@ -817,7 +817,11 @@ where
             TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Outdent | TokenKind::Eof
         ) {
             let checkpoint = self.cursor.checkpoint();
-            if let Some(definition) = self.parse_refinement_member() {
+            let member = self.with_block_end(
+                Some(TokenKind::Punctuation(Punctuation::RightBrace)),
+                |parser| parser.parse_refinement_member(),
+            );
+            if let Some(definition) = member {
                 refinements.push(definition);
             } else {
                 self.recover_refinement_member();
@@ -8483,6 +8487,32 @@ mod tests {
             panic!("expected a refined type");
         };
         assert_eq!(refined.refinements.len(), 1);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_a_malformed_refinement_method_at_the_closing_brace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { def f( }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Def), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
     }
 }
