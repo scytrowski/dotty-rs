@@ -212,13 +212,13 @@ fn parse_integer_literal(spelling: &str) -> Option<i32> {
     } else {
         (false, digits.as_str())
     };
-    let radix = integer_radix(Some(&digits));
+    let radix = integer_radix(Some(digits));
     let digits = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
         .or_else(|| digits.strip_prefix("0b"))
         .or_else(|| digits.strip_prefix("0B"))
-        .unwrap_or(&digits);
+        .unwrap_or(digits);
     let value = u64::from_str_radix(digits, radix).ok()?;
     if negative {
         if value == 1_u64 << 31 {
