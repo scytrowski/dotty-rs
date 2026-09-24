@@ -780,7 +780,7 @@ where
 
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        if self.current_text_is("?") {
+        if self.current().kind == TokenKind::Operator && self.current_text_is("?") {
             if self.allows_wildcard_type() {
                 return self.parse_wildcard_type(mark);
             }
@@ -1095,6 +1095,33 @@ mod tests {
                 .range(),
             TextRange::new(5, 6).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_a_backquoted_question_type_name_inside_type_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[`?`]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::BackquotedIdentifier, 5, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::Ident(_)
+        ));
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
