@@ -2101,6 +2101,19 @@ fn extension_prefix_parameters_are_derived_for_each_top_level_method() {
                 derived_symbol.position,
                 named.parsed.ast.get(parameter_tree).position
             );
+            assert_eq!(
+                derived_symbol.origin,
+                dotty_core::SymbolOrigin::Source(named.source)
+            );
+            let method_scope = named.index.scope_of(method).unwrap();
+            assert_eq!(
+                named
+                    .store
+                    .scopes
+                    .get(method_scope)
+                    .lookup(&derived_symbol.name),
+                Some(derived)
+            );
         }
     }
 
