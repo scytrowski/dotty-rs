@@ -466,7 +466,11 @@ not inferred from constructor shape or body contents.
 
 The supported subset preserves class type parameters, primary constructor
 term-parameter clauses, simple `extends` parent types, constructor arguments,
-and comma/`with` parent lists. Parent constructor syntax remains source-level
+and comma/`with` parent lists. Scala 3.9 trailing commas before `)` are
+accepted in ordinary named term-parameter clauses for constructors and
+methods. The same trailing-comma rule applies to ordinary and `using`
+parameter clauses; a same-line comma immediately before `)` is diagnosed.
+Parent constructor syntax remains source-level
 `Apply(Select(New(parent), <init>), args)`; resolving the parent or its
 constructor is a later semantic phase. When the shared AST requires a
 constructor for an otherwise empty class-like template, the parser allocates
