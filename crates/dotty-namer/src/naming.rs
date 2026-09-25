@@ -20,6 +20,12 @@ pub enum NamerError {
     RootIsNotPackage { tree_index: u32 },
     /// A definition tree was assigned more than one semantic symbol.
     DuplicateSourceTreeSymbol { source: SourceId, tree_index: u32 },
+    /// A source tree was assigned more than one derived symbol for one owner.
+    DuplicateDerivedSourceTreeSymbol {
+        owner: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
     /// A tree did not have the shape required by a naming routine.
@@ -48,6 +54,16 @@ impl fmt::Display for NamerError {
                 f,
                 "source {} tree {tree_index} already has a semantic symbol",
                 source.index()
+            ),
+            Self::DuplicateDerivedSourceTreeSymbol {
+                owner,
+                source,
+                tree_index,
+            } => write!(
+                f,
+                "source {} tree {tree_index} already has a derived semantic symbol for owner {}",
+                source.index(),
+                owner.index()
             ),
             Self::DuplicateDeclarationScope { symbol } => {
                 write!(
