@@ -148,7 +148,9 @@ Package bodies may be braced, scanner-provided indented regions, or the
 unbraced outermost package form. Import and export clauses preserve source
 order and expand comma-separated expressions into separate `Import` or
 `Export` statement trees. Their selectors retain aliases, wildcard selectors,
-and the narrow `given T` type-bound form. Arbitrary top-level expressions and
+and the narrow `given T` type-bound form. Named selectors accept both modern
+`as` renames and Scala 3.9's deprecated `=>` compatibility spelling, including
+renaming to `_` to hide a name. Arbitrary top-level expressions and
 package objects remain unsupported; imports and exports are also retained as
 statements inside supported blocks and templates.
 
