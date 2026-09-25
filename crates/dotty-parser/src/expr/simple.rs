@@ -7,7 +7,7 @@ use dotty_core::{
 };
 
 use crate::Parser;
-use crate::statements::StatementSequenceBoundary;
+use crate::statements::{ParsedStatement, StatementSequenceBoundary};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -135,8 +135,9 @@ where
             TokenKind::Punctuation(Punctuation::LeftBracket) => {
                 self.advance();
                 self.type_quote_depth += 1;
-                let body =
-                    self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr());
+                let body = self.with_parse_kind(crate::ParseKind::Type, |parser| {
+                    parser.parse_type_quote_body()
+                });
                 self.type_quote_depth -= 1;
                 if !self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
                     self.report(
@@ -166,6 +167,57 @@ where
                     }),
                 )
             }
+        }
+    }
+
+    /// Parses Dotty's `TypeBlock ::= { TypeBlockStat semi } Type` used by
+    /// quoted types. A type block with local aliases is represented by the
+    /// shared `Block` node, just like Dotty's source tree.
+    fn parse_type_quote_body(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut stats = Vec::new();
+
+        while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type) {
+            let checkpoint = self.cursor.checkpoint();
+            if let ParsedStatement::Definition(definition) =
+                self.parse_type_definition(crate::Location::InBlock)
+            {
+                stats.push(definition);
+            }
+
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+
+            let mut consumed_separator = false;
+            while matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Punctuation(Punctuation::Semicolon)
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+            ) {
+                consumed_separator = true;
+                self.advance();
+            }
+
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)
+                && !consumed_separator
+            {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "expected a separator between quoted type definitions",
+                );
+                break;
+            }
+        }
+
+        let expr = self.type_expr();
+        if stats.is_empty() {
+            expr
+        } else {
+            self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
         }
     }
 

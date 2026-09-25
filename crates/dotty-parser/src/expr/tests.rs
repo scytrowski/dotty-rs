@@ -142,6 +142,56 @@ fn parses_a_quoted_type_with_the_type_grammar() {
 }
 
 #[test]
+fn parses_local_type_definitions_in_a_quoted_type_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[type A = Int; A]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 10),
+            token(TokenKind::Identifier, 11, 14),
+            token(TokenKind::Punctuation(Punctuation::Semicolon), 14, 15),
+            token(TokenKind::Identifier, 16, 17),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(quote.body).kind else {
+        panic!("expected a TypeBlock represented as Block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::TypeDef(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(2, 17).unwrap()
+    );
+}
+
+#[test]
 fn parses_a_braced_expression_splice_inside_a_quote() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
