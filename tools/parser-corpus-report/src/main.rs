@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dotty_core::{NameInterner, SourceId, SourceText};
+use dotty_core::{Packages, SemanticStore, SourceId, SourceText};
 use dotty_lexer::ContextualScanner;
+use dotty_namer::name_compilation_unit;
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,7 @@ struct Options {
     source_revision: Option<String>,
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
+    namer: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +45,18 @@ struct Report {
     scanner_diagnostics: usize,
     diagnostic_histogram: BTreeMap<String, usize>,
     first_failure_histogram: BTreeMap<String, FailureBucket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namer: Option<NamerReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct NamerReport {
+    files_parse_prevented_naming: usize,
+    files_namer_ran: usize,
+    files_namer_succeeded: usize,
+    files_namer_returned_error: usize,
+    files_named_after_parser_recovery: usize,
+    namer_error_histogram: BTreeMap<String, FailureBucket>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +71,13 @@ struct FileOutcome {
     status: Status,
     diagnostics: Vec<DiagnosticSummary>,
     scanner_diagnostics: usize,
+    namer: Option<NamerOutcome>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum NamerOutcome {
+    Success,
+    Error { kind: String, message: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,7 +102,10 @@ fn main() {
         .first()
         .is_some_and(|argument| argument == "--worker")
     {
-        if let Err(error) = run_worker(arguments.get(1)) {
+        if let Err(error) = run_worker(
+            arguments.get(1),
+            arguments.iter().any(|arg| arg == "--namer"),
+        ) {
             eprintln!("worker failed: {error}");
             std::process::exit(2);
         }
@@ -93,7 +117,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>]"
+                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
             );
             std::process::exit(2);
         }
@@ -107,7 +131,7 @@ fn main() {
         }
     };
 
-    let outcomes = parse_files(&files, &options.roots, options.timeout);
+    let outcomes = parse_files(&files, &options.roots, options.timeout, options.namer);
     let report = build_report(
         &outcomes,
         &options.roots,
@@ -115,6 +139,7 @@ fn main() {
         options.source_revision,
         options.oracle_files,
         options.oracle_failures,
+        options.namer,
     );
 
     if let Some(output) = options.output
@@ -138,6 +163,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut source_revision = None;
     let mut oracle_files = None;
     let mut oracle_failures = None;
+    let mut namer = false;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -176,9 +202,10 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
                         .map_err(|_| format!("invalid oracle failure count: {value}"))?,
                 );
             }
+            "--namer" => namer = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>]".to_owned(),
+                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -196,6 +223,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         source_revision,
         oracle_files,
         oracle_failures,
+        namer,
     })
 }
 
@@ -237,7 +265,12 @@ fn collect_scala_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> 
     Ok(())
 }
 
-fn parse_files(files: &[PathBuf], roots: &[PathBuf], timeout: Duration) -> Vec<FileOutcome> {
+fn parse_files(
+    files: &[PathBuf],
+    roots: &[PathBuf],
+    timeout: Duration,
+    namer: bool,
+) -> Vec<FileOutcome> {
     if files.is_empty() {
         return Vec::new();
     }
@@ -261,7 +294,7 @@ fn parse_files(files: &[PathBuf], roots: &[PathBuf], timeout: Duration) -> Vec<F
                 let Ok((index, path)) = job else {
                     break;
                 };
-                let outcome = parse_one(&path, &roots, timeout);
+                let outcome = parse_one(&path, &roots, timeout, namer);
                 if result_sender.send((index, outcome)).is_err() {
                     break;
                 }
@@ -285,7 +318,7 @@ fn parse_files(files: &[PathBuf], roots: &[PathBuf], timeout: Duration) -> Vec<F
     outcomes.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
-fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
+fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> FileOutcome {
     let display_path = display_path(path, roots);
     let executable = match env::current_exe() {
         Ok(executable) => executable,
@@ -297,6 +330,9 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if namer {
+        command.arg("--namer");
+    }
 
     match run_command_with_timeout(command, timeout) {
         Ok(CommandResult::Exited {
@@ -308,6 +344,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
                 status: outcome.status,
                 diagnostics: outcome.diagnostics,
                 scanner_diagnostics: outcome.scanner_diagnostics,
+                namer: outcome.namer,
             },
             Err(error) => process_failure(display_path, "WorkerProtocol", error.to_string()),
         },
@@ -324,6 +361,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration) -> FileOutcome {
                 message: format!("parser exceeded {} ms", timeout.as_millis()),
             }],
             scanner_diagnostics: 0,
+            namer: None,
         },
         Err(error) => process_failure(display_path, "ProcessError", error.to_string()),
     }
@@ -338,6 +376,7 @@ fn process_failure(path: String, kind: &str, message: impl Into<String>) -> File
             message: message.into(),
         }],
         scanner_diagnostics: 0,
+        namer: None,
     }
 }
 
@@ -346,17 +385,21 @@ struct WorkerResult {
     status: Status,
     diagnostics: Vec<DiagnosticSummary>,
     scanner_diagnostics: usize,
+    namer: Option<NamerOutcome>,
 }
 
-fn run_worker(path: Option<&String>) -> io::Result<()> {
+fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
     let path = path.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing path"))?;
     let result = match fs::read_to_string(path) {
         Ok(source) => {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_source(&source))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_source(&source, namer)
+            })) {
                 Ok(parsed) => WorkerResult {
                     status: parsed.status,
                     diagnostics: parsed.diagnostics,
                     scanner_diagnostics: parsed.scanner_diagnostics,
+                    namer: parsed.namer,
                 },
                 Err(_) => WorkerResult {
                     status: Status::Panic,
@@ -365,6 +408,7 @@ fn run_worker(path: Option<&String>) -> io::Result<()> {
                         message: "parser worker panicked".to_owned(),
                     }],
                     scanner_diagnostics: 0,
+                    namer: None,
                 },
             }
         }
@@ -375,6 +419,7 @@ fn run_worker(path: Option<&String>) -> io::Result<()> {
                 message: error.to_string(),
             }],
             scanner_diagnostics: 0,
+            namer: None,
         },
     };
     serde_json::to_writer(io::stdout(), &result).map_err(io::Error::other)?;
@@ -431,9 +476,10 @@ struct ParsedSource {
     status: Status,
     diagnostics: Vec<DiagnosticSummary>,
     scanner_diagnostics: usize,
+    namer: Option<NamerOutcome>,
 }
 
-fn parse_source(source: &str) -> ParsedSource {
+fn parse_source(source: &str, run_namer: bool) -> ParsedSource {
     let scanner = match ContextualScanner::new(source) {
         Ok(scanner) => scanner,
         Err(error) => {
@@ -444,6 +490,7 @@ fn parse_source(source: &str) -> ParsedSource {
                     message: error.to_string(),
                 }],
                 scanner_diagnostics: 0,
+                namer: None,
             };
         }
     };
@@ -458,11 +505,17 @@ fn parse_source(source: &str) -> ParsedSource {
                     message: error.to_string(),
                 }],
                 scanner_diagnostics,
+                namer: None,
             };
         }
     };
-    let mut names = NameInterner::new();
-    let result = parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+    let mut store = SemanticStore::new();
+    let result = parse_compilation_unit(
+        source_text,
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
     let diagnostics = result
         .diagnostics
         .iter()
@@ -476,11 +529,53 @@ fn parse_source(source: &str) -> ParsedSource {
     } else {
         Status::RecoverableDiagnostics
     };
+    let namer = run_namer.then(|| {
+        let mut packages = Packages::new();
+        match name_compilation_unit(
+            &result.ast,
+            result.root,
+            SourceId::from_index(0),
+            "Corpus.scala",
+            &mut store,
+            &mut packages,
+        ) {
+            Ok(_) => NamerOutcome::Success,
+            Err(error) => NamerOutcome::Error {
+                kind: namer_error_kind(&error),
+                message: error.to_string(),
+            },
+        }
+    });
     ParsedSource {
         status,
         diagnostics,
         scanner_diagnostics,
+        namer,
     }
+}
+
+fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
+    match error {
+        dotty_namer::NamerError::RootIsNotPackage { .. } => "RootIsNotPackage",
+        dotty_namer::NamerError::DuplicateSourceTreeSymbol { .. } => "DuplicateSourceTreeSymbol",
+        dotty_namer::NamerError::DuplicateDerivedSourceTreeSymbol { .. } => {
+            "DuplicateDerivedSourceTreeSymbol"
+        }
+        dotty_namer::NamerError::DuplicateExtensionPrefixClauses { .. } => {
+            "DuplicateExtensionPrefixClauses"
+        }
+        dotty_namer::NamerError::DuplicateDeclarationScope { .. } => "DuplicateDeclarationScope",
+        dotty_namer::NamerError::DuplicateDeclarationContext { .. } => {
+            "DuplicateDeclarationContext"
+        }
+        dotty_namer::NamerError::MalformedAstShape { .. } => "MalformedAstShape",
+        dotty_namer::NamerError::InvalidVisibilityQualifier { .. } => "InvalidVisibilityQualifier",
+        dotty_namer::NamerError::UnsupportedGivenNameShape { .. } => "UnsupportedGivenNameShape",
+        dotty_namer::NamerError::AnonymousGivenWithoutParents { .. } => {
+            "AnonymousGivenWithoutParents"
+        }
+    }
+    .to_owned()
 }
 
 fn display_path(path: &Path, roots: &[PathBuf]) -> String {
@@ -515,6 +610,7 @@ fn build_report(
     source_revision: Option<String>,
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
+    collect_namer: bool,
 ) -> Report {
     let mut report = Report {
         schema_version: 1,
@@ -532,9 +628,37 @@ fn build_report(
         scanner_diagnostics: 0,
         diagnostic_histogram: BTreeMap::new(),
         first_failure_histogram: BTreeMap::new(),
+        namer: collect_namer.then(NamerReport::default),
     };
 
     for outcome in outcomes {
+        if let Some(namer) = &mut report.namer {
+            match &outcome.namer {
+                None => namer.files_parse_prevented_naming += 1,
+                Some(NamerOutcome::Success) => {
+                    namer.files_namer_ran += 1;
+                    namer.files_namer_succeeded += 1;
+                    if matches!(outcome.status, Status::RecoverableDiagnostics) {
+                        namer.files_named_after_parser_recovery += 1;
+                    }
+                }
+                Some(NamerOutcome::Error { kind, .. }) => {
+                    namer.files_namer_ran += 1;
+                    namer.files_namer_returned_error += 1;
+                    let entry = namer
+                        .namer_error_histogram
+                        .entry(kind.clone())
+                        .or_insert_with(|| FailureBucket {
+                            count: 0,
+                            examples: Vec::new(),
+                        });
+                    entry.count += 1;
+                    if entry.examples.len() < 5 {
+                        entry.examples.push(outcome.path.clone());
+                    }
+                }
+            }
+        }
         report.scanner_diagnostics += outcome.scanner_diagnostics;
         match outcome.status {
             Status::Clean => report.files_parsed_without_diagnostics += 1,
@@ -665,6 +789,25 @@ fn print_summary(report: &Report) {
             }
         }
     }
+    if let Some(namer) = &report.namer {
+        println!(
+            "  files naming was prevented by scanning: {}",
+            namer.files_parse_prevented_naming
+        );
+        println!("  files the namer processed: {}", namer.files_namer_ran);
+        println!("  namer successes: {}", namer.files_namer_succeeded);
+        println!("  typed namer errors: {}", namer.files_namer_returned_error);
+        println!(
+            "  successes after parser recovery: {}",
+            namer.files_named_after_parser_recovery
+        );
+        for (kind, bucket) in &namer.namer_error_histogram {
+            println!("    {kind}: {}", bucket.count);
+            for example in &bucket.examples {
+                println!("      - {example}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -689,9 +832,63 @@ mod tests {
 
     #[test]
     fn clean_source_has_no_diagnostics() {
-        let parsed = parse_source("object C");
+        let parsed = parse_source("object C", false);
         assert!(matches!(parsed.status, Status::Clean));
         assert!(parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn namer_runs_on_a_clean_compilation_unit() {
+        let parsed = parse_source("object C", true);
+
+        assert!(matches!(parsed.status, Status::Clean));
+        assert!(matches!(parsed.namer, Some(NamerOutcome::Success)));
+    }
+
+    #[test]
+    fn namer_runs_on_a_recovered_compilation_unit() {
+        let parsed = parse_source("object C { def = }", true);
+
+        assert!(matches!(parsed.status, Status::RecoverableDiagnostics));
+        assert!(parsed.namer.is_some());
+    }
+
+    #[test]
+    fn report_counts_recovered_namer_successes_and_typed_errors_separately() {
+        let outcomes = [
+            FileOutcome {
+                path: "clean.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::Success),
+            },
+            FileOutcome {
+                path: "recovered.scala".to_owned(),
+                status: Status::RecoverableDiagnostics,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::Success),
+            },
+            FileOutcome {
+                path: "failed.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::Error {
+                    kind: "MalformedAstShape".to_owned(),
+                    message: "bad shape".to_owned(),
+                }),
+            },
+        ];
+        let report = build_report(&outcomes, &[], None, None, None, None, true);
+        let namer = report.namer.expect("namer report enabled");
+
+        assert_eq!(namer.files_namer_ran, 3);
+        assert_eq!(namer.files_namer_succeeded, 2);
+        assert_eq!(namer.files_namer_returned_error, 1);
+        assert_eq!(namer.files_named_after_parser_recovery, 1);
+        assert_eq!(namer.namer_error_histogram["MalformedAstShape"].count, 1);
     }
 
     #[cfg(unix)]
@@ -724,7 +921,7 @@ mod tests {
             "WorkerProtocol",
             "invalid worker output",
         );
-        let report = build_report(&[outcome], &[], None, None, None, None);
+        let report = build_report(&[outcome], &[], None, None, None, None, false);
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.panics, 0);
@@ -740,8 +937,9 @@ mod tests {
                 message: "parser worker panicked".to_owned(),
             }],
             scanner_diagnostics: 0,
+            namer: None,
         };
-        let report = build_report(&[outcome], &[], None, None, None, None);
+        let report = build_report(&[outcome], &[], None, None, None, None, false);
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.panics, 1);
@@ -757,6 +955,7 @@ mod tests {
             Some("revision".to_owned()),
             Some(12),
             Some(1),
+            false,
         );
 
         assert_eq!(report.corpus_roots, vec!["library/src"]);
