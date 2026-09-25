@@ -33,11 +33,12 @@ pub enum NamerError {
         tree_index: u32,
         expected: &'static str,
     },
-    /// A source visibility form whose access boundary is not modeled yet.
-    UnsupportedVisibility {
+    /// A qualified source visibility does not name an enclosing access boundary.
+    InvalidVisibilityQualifier {
         tree_index: u32,
         position: Option<SourceSpan>,
-        syntax: VisibilitySyntax,
+        qualifier: dotty_core::Name,
+        protected: bool,
     },
 }
 
@@ -81,16 +82,15 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} does not have expected shape: {expected}"
                 )
             }
-            Self::UnsupportedVisibility {
-                tree_index, syntax, ..
+            Self::InvalidVisibilityQualifier {
+                tree_index,
+                protected,
+                ..
             } => {
-                let visibility = match syntax {
-                    VisibilitySyntax::Private { .. } => "private",
-                    VisibilitySyntax::Protected { .. } => "protected",
-                };
+                let visibility = if *protected { "protected" } else { "private" };
                 write!(
                     f,
-                    "tree {tree_index} has an unresolved qualified {visibility} visibility"
+                    "tree {tree_index} has an invalid qualified {visibility} visibility"
                 )
             }
         }
@@ -1551,17 +1551,25 @@ impl Namer<'_> {
             Some(VisibilitySyntax::Private {
                 qualifier: Some(qualifier),
             }) if supported_this_qualifier(Some(*qualifier)) => Ok(Visibility::Private),
-            Some(VisibilitySyntax::Protected { qualifier })
-                if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
-            {
-                Ok(Visibility::Protected)
-            }
-            Some(
-                syntax @ (VisibilitySyntax::Private { .. } | VisibilitySyntax::Protected { .. }),
-            ) => Err(NamerError::UnsupportedVisibility {
+            Some(VisibilitySyntax::Protected { qualifier: None }) => Ok(Visibility::Protected),
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(qualifier),
+            }) if supported_this_qualifier(Some(*qualifier)) => Ok(Visibility::Protected),
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }) => Err(NamerError::InvalidVisibilityQualifier {
                 tree_index: tree.index(),
                 position: self.arena.get(tree).position,
-                syntax: *syntax,
+                qualifier: *qualifier,
+                protected: false,
+            }),
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(qualifier),
+            }) => Err(NamerError::InvalidVisibilityQualifier {
+                tree_index: tree.index(),
+                position: self.arena.get(tree).position,
+                qualifier: *qualifier,
+                protected: true,
             }),
         }
     }
@@ -2374,7 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_qualified_class_visibility_is_rejected() {
+    fn non_enclosing_qualified_class_visibility_is_rejected() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let source = SourceId::from_index(21);
@@ -2400,19 +2408,18 @@ mod tests {
 
         assert_eq!(
             name_package(&arena, root, 21, &mut store, &mut packages).unwrap_err(),
-            NamerError::UnsupportedVisibility {
+            NamerError::InvalidVisibilityQualifier {
                 tree_index: class.index(),
                 position,
-                syntax: VisibilitySyntax::Private {
-                    qualifier: Some(qualifier),
-                },
+                qualifier,
+                protected: false,
             }
         );
         assert!(packages.get(&["visibility"]).is_none());
     }
 
     #[test]
-    fn unsupported_qualified_protected_visibility_keeps_its_qualifier() {
+    fn non_enclosing_qualified_protected_visibility_is_rejected() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let qualifier = *dotty_core::TermName::new(store.names.intern("Owner")).as_name();
@@ -2432,12 +2439,11 @@ mod tests {
 
         assert_eq!(
             name_package(&arena, root, 76, &mut store, &mut packages).unwrap_err(),
-            NamerError::UnsupportedVisibility {
+            NamerError::InvalidVisibilityQualifier {
                 tree_index: class.index(),
                 position: None,
-                syntax: VisibilitySyntax::Protected {
-                    qualifier: Some(qualifier),
-                },
+                qualifier,
+                protected: true,
             }
         );
     }
