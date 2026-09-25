@@ -56,7 +56,21 @@ struct NamerReport {
     files_namer_succeeded: usize,
     files_namer_returned_error: usize,
     files_named_after_parser_recovery: usize,
-    namer_error_histogram: BTreeMap<String, FailureBucket>,
+    files_with_invariant_failures: usize,
+    namer_error_histogram: BTreeMap<String, NamerFailureBucket>,
+    invariant_failure_histogram: BTreeMap<String, FailureBucket>,
+}
+
+#[derive(Debug, Serialize)]
+struct NamerFailureBucket {
+    count: usize,
+    examples: Vec<NamerErrorExample>,
+}
+
+#[derive(Debug, Serialize)]
+struct NamerErrorExample {
+    path: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,7 +90,7 @@ struct FileOutcome {
 
 #[derive(Debug, Serialize, Deserialize)]
 enum NamerOutcome {
-    Success,
+    Success { invariant_violations: Vec<String> },
     Error { kind: String, message: String },
 }
 
@@ -539,7 +553,9 @@ fn parse_source(source: &str, run_namer: bool) -> ParsedSource {
             &mut store,
             &mut packages,
         ) {
-            Ok(_) => NamerOutcome::Success,
+            Ok(index) => NamerOutcome::Success {
+                invariant_violations: index.validate(&store),
+            },
             Err(error) => NamerOutcome::Error {
                 kind: namer_error_kind(&error),
                 message: error.to_string(),
@@ -635,26 +651,47 @@ fn build_report(
         if let Some(namer) = &mut report.namer {
             match &outcome.namer {
                 None => namer.files_parse_prevented_naming += 1,
-                Some(NamerOutcome::Success) => {
+                Some(NamerOutcome::Success {
+                    invariant_violations,
+                }) => {
                     namer.files_namer_ran += 1;
                     namer.files_namer_succeeded += 1;
                     if matches!(outcome.status, Status::RecoverableDiagnostics) {
                         namer.files_named_after_parser_recovery += 1;
                     }
+                    if !invariant_violations.is_empty() {
+                        namer.files_with_invariant_failures += 1;
+                        for violation in invariant_violations {
+                            let entry = namer
+                                .invariant_failure_histogram
+                                .entry(violation.clone())
+                                .or_insert_with(|| FailureBucket {
+                                    count: 0,
+                                    examples: Vec::new(),
+                                });
+                            entry.count += 1;
+                            if entry.examples.len() < 5 {
+                                entry.examples.push(outcome.path.clone());
+                            }
+                        }
+                    }
                 }
-                Some(NamerOutcome::Error { kind, .. }) => {
+                Some(NamerOutcome::Error { kind, message }) => {
                     namer.files_namer_ran += 1;
                     namer.files_namer_returned_error += 1;
                     let entry = namer
                         .namer_error_histogram
                         .entry(kind.clone())
-                        .or_insert_with(|| FailureBucket {
+                        .or_insert_with(|| NamerFailureBucket {
                             count: 0,
                             examples: Vec::new(),
                         });
                     entry.count += 1;
                     if entry.examples.len() < 5 {
-                        entry.examples.push(outcome.path.clone());
+                        entry.examples.push(NamerErrorExample {
+                            path: outcome.path.clone(),
+                            message: message.clone(),
+                        });
                     }
                 }
             }
@@ -801,8 +838,18 @@ fn print_summary(report: &Report) {
             "  successes after parser recovery: {}",
             namer.files_named_after_parser_recovery
         );
+        println!(
+            "  files with semantic invariant failures: {}",
+            namer.files_with_invariant_failures
+        );
         for (kind, bucket) in &namer.namer_error_histogram {
             println!("    {kind}: {}", bucket.count);
+            for example in &bucket.examples {
+                println!("      - {}: {}", example.path, example.message);
+            }
+        }
+        for (invariant, bucket) in &namer.invariant_failure_histogram {
+            println!("    invariant {invariant}: {}", bucket.count);
             for example in &bucket.examples {
                 println!("      - {example}");
             }
@@ -842,7 +889,7 @@ mod tests {
         let parsed = parse_source("object C", true);
 
         assert!(matches!(parsed.status, Status::Clean));
-        assert!(matches!(parsed.namer, Some(NamerOutcome::Success)));
+        assert!(matches!(parsed.namer, Some(NamerOutcome::Success { .. })));
     }
 
     #[test]
@@ -861,14 +908,18 @@ mod tests {
                 status: Status::Clean,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
-                namer: Some(NamerOutcome::Success),
+                namer: Some(NamerOutcome::Success {
+                    invariant_violations: vec!["scope owner mismatch".to_owned()],
+                }),
             },
             FileOutcome {
                 path: "recovered.scala".to_owned(),
                 status: Status::RecoverableDiagnostics,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
-                namer: Some(NamerOutcome::Success),
+                namer: Some(NamerOutcome::Success {
+                    invariant_violations: Vec::new(),
+                }),
             },
             FileOutcome {
                 path: "failed.scala".to_owned(),
@@ -889,6 +940,11 @@ mod tests {
         assert_eq!(namer.files_namer_returned_error, 1);
         assert_eq!(namer.files_named_after_parser_recovery, 1);
         assert_eq!(namer.namer_error_histogram["MalformedAstShape"].count, 1);
+        assert_eq!(namer.files_with_invariant_failures, 1);
+        assert_eq!(
+            namer.invariant_failure_histogram["scope owner mismatch"].count,
+            1
+        );
     }
 
     #[cfg(unix)]
