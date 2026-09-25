@@ -119,7 +119,10 @@ enum EnteredHeader {
         package_path: Vec<String>,
     },
     ModuleClass {
+        tree: TreeId<Untyped>,
         template: TreeId<Untyped>,
+        object_symbol: SymbolId,
+        enclosing_scope: ScopeId,
         symbol: SymbolId,
         scope: ScopeId,
         package_path: Vec<String>,
@@ -166,7 +169,7 @@ pub fn name_compilation_unit(
 ) -> Result<SourceSemanticIndex, NamerError> {
     let checkpoint = store.checkpoint();
     let package_mark = packages.mark();
-    let (result, scope_insertions) = {
+    let (result, scope_insertions, companion_links) = {
         let mut namer = Namer {
             arena,
             source,
@@ -176,12 +179,19 @@ pub fn name_compilation_unit(
             root,
             index: SourceSemanticIndex::new(),
             scope_insertions: Vec::new(),
+            companion_links: Vec::new(),
         };
         let result = namer.index(root).map(|()| namer.index);
-        (result, namer.scope_insertions)
+        (result, namer.scope_insertions, namer.companion_links)
     };
     match result {
-        Ok(index) => Ok(index),
+        Ok(index) => {
+            for (class, object) in companion_links {
+                store.symbols.get_mut(class).links.companion = Some(object);
+                store.symbols.get_mut(object).links.companion = Some(class);
+            }
+            Ok(index)
+        }
         Err(error) => {
             for (scope, symbol) in scope_insertions.into_iter().rev() {
                 store.scopes.get_mut(scope).remove(symbol);
@@ -202,6 +212,7 @@ struct Namer<'a> {
     root: TreeId<Untyped>,
     index: SourceSemanticIndex,
     scope_insertions: Vec<(ScopeId, SymbolId)>,
+    companion_links: Vec<(SymbolId, SymbolId)>,
 }
 
 impl Namer<'_> {
@@ -434,7 +445,10 @@ impl Namer<'_> {
         self.index.record_scope(symbol, scope)?;
 
         Ok(Some(EnteredHeader::ModuleClass {
+            tree,
             template: definition.template,
+            object_symbol,
+            enclosing_scope: owner_context.scope,
             symbol,
             scope,
             package_path: owner_context.package_path.clone(),
@@ -479,11 +493,19 @@ impl Namer<'_> {
                 package_path,
             } => (tree, symbol, scope, package_path),
             EnteredHeader::ModuleClass {
+                tree,
                 template,
+                object_symbol,
+                enclosing_scope,
                 symbol,
                 scope,
                 package_path,
-            } => return self.scan_template_body(template, symbol, scope, package_path),
+            } => {
+                if let Some(class) = self.source_companion_class(tree, enclosing_scope) {
+                    self.companion_links.push((class, object_symbol));
+                }
+                return self.scan_template_body(template, symbol, scope, package_path);
+            }
             EnteredHeader::Method {
                 tree,
                 symbol,
@@ -503,6 +525,33 @@ impl Namer<'_> {
             return Ok(());
         };
         self.scan_template_body(definition.rhs, symbol, scope, package_path)
+    }
+
+    fn source_companion_class(
+        &self,
+        object_tree: TreeId<Untyped>,
+        enclosing_scope: ScopeId,
+    ) -> Option<SymbolId> {
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &self.arena.get(object_tree).kind
+        else {
+            return None;
+        };
+        let name = *TypeName::new(module.name.as_name().text()).as_name();
+        let mut candidates = self
+            .store
+            .scopes
+            .get(enclosing_scope)
+            .lookup_all(&name)
+            .iter()
+            .copied()
+            .filter(|symbol| {
+                let symbol = self.store.symbols.get(*symbol);
+                matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+                    && matches!(symbol.origin, SymbolOrigin::Source(_))
+            });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
     }
 
     fn scan_template_body(
@@ -2040,6 +2089,74 @@ mod tests {
             None,
             "the object term is not linked to its module class"
         );
+        assert_eq!(store.symbols.get(module_class).links.companion, None);
+    }
+
+    #[test]
+    fn nested_object_links_to_its_unique_source_class_companion() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Foo", vec![], None, vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![class, object],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "companions", vec![outer]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(81);
+        let index = name_package(&arena, root, 81, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let class_symbol = index.symbol_at(source, class).unwrap();
+        let outer = store.symbols.get(class_symbol).owner.unwrap();
+        let outer_scope = index.scope_of(outer).unwrap();
+        let module_class = type_symbol(&mut store, outer_scope, "Foo$").unwrap();
+
+        assert_eq!(
+            store.symbols.get(class_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(class_symbol)
+        );
+        assert_eq!(store.symbols.get(module_class).links.companion, None);
+    }
+
+    #[test]
+    fn nested_object_does_not_link_when_source_class_companion_is_ambiguous() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let second = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Foo", vec![], None, vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![first, second, object],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "ambiguouscompanions", vec![outer]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(82);
+        let index = name_package(&arena, root, 82, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let first_symbol = index.symbol_at(source, first).unwrap();
+        let second_symbol = index.symbol_at(source, second).unwrap();
+
+        assert_eq!(store.symbols.get(first_symbol).links.companion, None);
+        assert_eq!(store.symbols.get(second_symbol).links.companion, None);
+        assert_eq!(store.symbols.get(object_symbol).links.companion, None);
     }
 
     #[test]
