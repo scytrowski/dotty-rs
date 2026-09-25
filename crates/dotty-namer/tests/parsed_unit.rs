@@ -471,3 +471,192 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
         Some(constructor_symbol)
     );
 }
+
+#[test]
+fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
+    use dotty_core::TermName;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "class C { val member: Int; def convert[A](x: Int)(y: Int): Int = x; type Alias = Int }\ndef top = 0";
+    let source = SourceId::from_index(39);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+        panic!("first package statement should be the class");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let field_tree = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+        .unwrap();
+    let method_tree = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::DefDef(_)))
+        .unwrap();
+    let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+        unreachable!("method tree was found above");
+    };
+    let alias_tree = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| match &parsed.ast.get(*tree).kind {
+            TreeKind::TypeDef(definition) => {
+                !matches!(parsed.ast.get(definition.rhs).kind, TreeKind::Template(_))
+            }
+            _ => false,
+        })
+        .unwrap();
+    let method_body = method.rhs.unwrap();
+    let top_level_method = package.stats[1];
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Members.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = *class_definition.name.as_name();
+    let class_symbol = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(&class_name)
+        .unwrap();
+    let class_scope = index.scope_of(class_symbol).unwrap();
+    let field_tree_name = match &parsed.ast.get(field_tree).kind {
+        TreeKind::ValDef(field) => *field.name.as_name(),
+        _ => unreachable!(),
+    };
+    let field_symbol = store
+        .scopes
+        .get(class_scope)
+        .lookup(&field_tree_name)
+        .unwrap();
+    let method_symbol = index.symbol_at(source, method_tree).unwrap();
+    let method_scope = index.scope_of(method_symbol).unwrap();
+    let method_type_name = match &parsed.ast.get(method.type_params[0]).kind {
+        TreeKind::TypeDef(parameter) => *parameter.name.as_name(),
+        _ => unreachable!(),
+    };
+    let method_type_symbol = store
+        .scopes
+        .get(method_scope)
+        .lookup(&method_type_name)
+        .unwrap();
+    let method_value_names = method
+        .value_param_clauses
+        .iter()
+        .map(|clause| match &parsed.ast.get(clause[0]).kind {
+            TreeKind::ValDef(parameter) => *parameter.name.as_name(),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    let method_value_symbols = method_value_names
+        .iter()
+        .map(|name| store.scopes.get(method_scope).lookup(name).unwrap())
+        .collect::<Vec<_>>();
+    let alias_name = match &parsed.ast.get(alias_tree).kind {
+        TreeKind::TypeDef(alias) => *alias.name.as_name(),
+        _ => unreachable!(),
+    };
+    let alias_symbol = store.scopes.get(class_scope).lookup(&alias_name).unwrap();
+    let top_name = TermName::new(store.names.intern("top"));
+
+    assert_eq!(
+        store.symbols.get(field_symbol).kind,
+        dotty_core::SymbolKind::Field
+    );
+    assert_eq!(store.symbols.get(field_symbol).owner, Some(class_symbol));
+    assert_eq!(index.symbol_at(source, field_tree), Some(field_symbol));
+    assert_eq!(
+        store.symbols.get(method_symbol).kind,
+        dotty_core::SymbolKind::Method
+    );
+    assert_eq!(store.symbols.get(method_symbol).owner, Some(class_symbol));
+    assert_eq!(store.scopes.get(method_scope).owner, Some(method_symbol));
+    assert_eq!(
+        store.symbols.get(method_type_symbol).kind,
+        dotty_core::SymbolKind::TypeParameter
+    );
+    assert_eq!(
+        store.symbols.get(method_type_symbol).owner,
+        Some(method_symbol)
+    );
+    assert_eq!(
+        index.symbol_at(source, method.type_params[0]),
+        Some(method_type_symbol)
+    );
+    assert_eq!(
+        store.symbols.get(method_value_symbols[0]).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(method_value_symbols[1]).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(method_value_symbols[0]).owner,
+        Some(method_symbol)
+    );
+    assert_eq!(
+        store.symbols.get(method_value_symbols[1]).owner,
+        Some(method_symbol)
+    );
+    assert_eq!(
+        index.symbol_at(source, method.value_param_clauses[0][0]),
+        Some(method_value_symbols[0])
+    );
+    assert_eq!(
+        index.symbol_at(source, method.value_param_clauses[1][0]),
+        Some(method_value_symbols[1])
+    );
+    assert_eq!(
+        store.scopes.get(class_scope).lookup(&method_value_names[0]),
+        None
+    );
+    assert_eq!(
+        store.scopes.get(class_scope).lookup(&method_value_names[1]),
+        None
+    );
+    assert_eq!(
+        store.symbols.get(alias_symbol).kind,
+        dotty_core::SymbolKind::TypeAlias
+    );
+    assert_eq!(store.symbols.get(alias_symbol).owner, Some(class_symbol));
+    assert_eq!(
+        store.symbols.get(alias_symbol).info,
+        dotty_core::SymbolInfo::Missing
+    );
+    assert_eq!(index.symbol_at(source, alias_tree), Some(alias_symbol));
+    assert_eq!(index.symbol_at(source, method_body), None);
+    assert_eq!(index.symbol_at(source, top_level_method), None);
+    assert_eq!(
+        store
+            .scopes
+            .get(root_package.scope)
+            .lookup(top_name.as_name()),
+        None
+    );
+}

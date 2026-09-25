@@ -364,7 +364,24 @@ impl Namer<'_> {
                 continue;
             }
             match &self.arena.get(member).kind {
-                TreeKind::TypeDef(_) => self.enter_class_or_trait(member, &class_context)?,
+                TreeKind::TypeDef(definition) => {
+                    let definition = definition.clone();
+                    if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
+                        self.enter_class_or_trait(member, &class_context)?;
+                    } else {
+                        self.enter_symbol(
+                            member,
+                            *definition.name.as_name(),
+                            symbol,
+                            scope,
+                            SymbolSpec {
+                                kind: SymbolKind::TypeAlias,
+                                flags: SymbolFlags::EMPTY,
+                                visibility: Visibility::Public,
+                            },
+                        )?;
+                    }
+                }
                 TreeKind::ValDef(definition) => {
                     let definition = definition.clone();
                     self.enter_symbol(
@@ -1668,6 +1685,38 @@ mod tests {
 
         assert_eq!(overloads, &[first_symbol, second_symbol]);
         assert_ne!(first_symbol, second_symbol);
+    }
+
+    #[test]
+    fn class_type_alias_is_owned_mapped_and_left_incomplete() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(38);
+        let rhs = type_tree(&mut arena);
+        let alias = arena.alloc(Tree {
+            kind: TreeKind::TypeDef(TypeDef {
+                name: TypeName::new(store.names.intern("Alias")),
+                rhs,
+                metadata: Modifiers::default(),
+                variance: None,
+            }),
+            position: None,
+            ty: (),
+        });
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![alias], None);
+        let root = package_with_stat(&mut arena, &mut store, "aliases", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 38, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["aliases"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let alias_symbol = type_symbol(&mut store, class_scope, "Alias").unwrap();
+
+        assert_eq!(store.symbols.get(alias_symbol).kind, SymbolKind::TypeAlias);
+        assert_eq!(store.symbols.get(alias_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(alias_symbol).info, SymbolInfo::Missing);
+        assert_eq!(index.symbol_at(source, alias), Some(alias_symbol));
     }
 
     #[test]
