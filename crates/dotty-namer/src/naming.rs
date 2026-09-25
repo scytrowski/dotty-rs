@@ -1003,12 +1003,19 @@ impl Namer<'_> {
                     expected: "TypeDef class type parameter",
                 });
             };
-            let spec = self.source_symbol_spec(
+            let mut spec = self.source_symbol_spec(
                 *parameter_tree,
                 &parameter.metadata,
                 symbol,
                 SymbolKind::TypeParameter,
             )?;
+            if parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::PrivateLocal)
+            {
+                spec.visibility = Visibility::Private;
+            }
             self.enter_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
@@ -1064,13 +1071,41 @@ impl Namer<'_> {
             symbol,
             SymbolKind::Constructor,
         )?;
-        self.enter_symbol(
+        let constructor_symbol = self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
             symbol,
             scope,
             constructor_spec,
         )?;
+        let constructor_scope = self
+            .store
+            .scopes
+            .alloc(Scope::new(Some(constructor_symbol)));
+        self.index
+            .record_scope(constructor_symbol, constructor_scope)?;
+
+        for parameter_tree in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef class type parameter",
+                });
+            };
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                constructor_symbol,
+                SymbolKind::TypeParameter,
+            )?;
+            self.enter_derived_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                constructor_symbol,
+                constructor_scope,
+                spec,
+            )?;
+        }
 
         let mut nested_headers = Vec::new();
         for member in &template.body {
@@ -1397,6 +1432,33 @@ impl Namer<'_> {
         });
         self.store.scopes.get_mut(scope).enter(name, symbol);
         self.index.record_symbol(self.source, tree, symbol)?;
+        Ok(symbol)
+    }
+
+    fn enter_derived_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        scope: ScopeId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner),
+            kind: spec.kind,
+            flags: spec.flags,
+            visibility: spec.visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        });
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.scope_insertions.push((scope, symbol));
+        self.index
+            .record_derived_symbol(owner, self.source, tree, symbol)?;
         Ok(symbol)
     }
 

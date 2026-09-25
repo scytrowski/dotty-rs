@@ -483,6 +483,82 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
 }
 
 #[test]
+fn parsed_class_type_parameter_has_distinct_class_and_constructor_identities() {
+    use dotty_core::{SymbolInfo, SymbolKind, TypeName};
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "class C[A]";
+    let source = SourceId::from_index(94);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &parsed.ast.get(class_tree).kind else {
+        panic!("source declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+        panic!("primary constructor should be a DefDef");
+    };
+    let parameter_tree = constructor.type_params[0];
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Generic.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let class_symbol = index.symbol_at(source, class_tree).unwrap();
+    let class_scope = index.scope_of(class_symbol).unwrap();
+    let constructor_symbol = index.symbol_at(source, template.constructor).unwrap();
+    let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+    let canonical = index.symbol_at(source, parameter_tree).unwrap();
+    let derived = index
+        .derived_symbol_at(constructor_symbol, source, parameter_tree)
+        .unwrap();
+    let type_name = TypeName::new(store.names.intern("A"));
+
+    assert_ne!(canonical, derived);
+    assert_eq!(store.symbols.get(canonical).kind, SymbolKind::TypeParameter);
+    assert_eq!(store.symbols.get(canonical).owner, Some(class_symbol));
+    assert_eq!(store.symbols.get(canonical).visibility, Visibility::Private);
+    assert_eq!(store.symbols.get(derived).kind, SymbolKind::TypeParameter);
+    assert_eq!(store.symbols.get(derived).owner, Some(constructor_symbol));
+    assert_eq!(store.symbols.get(derived).info, SymbolInfo::Missing);
+    assert_eq!(
+        store.scopes.get(class_scope).lookup(type_name.as_name()),
+        Some(canonical)
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(constructor_scope)
+            .lookup(type_name.as_name()),
+        Some(derived)
+    );
+    assert_eq!(index.symbol_at(source, parameter_tree), Some(canonical));
+    assert_eq!(
+        index.derived_symbol_at(constructor_symbol, source, parameter_tree),
+        Some(derived)
+    );
+}
+
+#[test]
 fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     use dotty_core::TermName;
     use dotty_lexer::ContextualScanner;
