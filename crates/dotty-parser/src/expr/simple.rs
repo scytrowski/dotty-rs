@@ -649,6 +649,7 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBrace))
                 && can_apply
+                && !self.is_new_without_template_support(qualifier)
             {
                 let argument = self.parse_block(self.mark());
                 qualifier = self.alloc_from(
@@ -672,6 +673,16 @@ where
             }
         }
         qualifier
+    }
+
+    fn is_new_without_template_support(&self, tree: TreeId<Untyped>) -> bool {
+        let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
+            return matches!(self.ast.get(tree).kind, TreeKind::New(_));
+        };
+        let TreeKind::Select(selection) = &self.ast.get(application.function).kind else {
+            return false;
+        };
+        matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_))
     }
 
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {

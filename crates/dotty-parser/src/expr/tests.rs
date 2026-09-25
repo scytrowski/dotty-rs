@@ -171,6 +171,33 @@ fn parses_a_braced_case_lambda_as_an_application_argument() {
 }
 
 #[test]
+fn does_not_treat_a_new_template_body_as_a_braced_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo {}",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 9, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(Apply { ref args, .. }) = parser.ast().get(tree).kind else {
+        panic!("expected the supported constructor application");
+    };
+
+    assert!(args.is_empty());
+    assert_eq!(
+        parser.current().kind,
+        TokenKind::Punctuation(Punctuation::LeftBrace)
+    );
+}
+
+#[test]
 fn reports_a_missing_closing_brace_after_case_lambda_clauses() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
