@@ -403,18 +403,7 @@ impl Namer<'_> {
                     if kind == SymbolKind::Method {
                         self.enter_method(member, &definition, symbol, scope)?;
                     } else {
-                        self.enter_symbol(
-                            member,
-                            *definition.name.as_name(),
-                            symbol,
-                            scope,
-                            SymbolSpec {
-                                kind,
-                                flags: Self::source_flags(&definition.metadata.modifiers),
-                                visibility: self
-                                    .source_visibility(member, &definition.metadata.visibility)?,
-                            },
-                        )?;
+                        self.enter_secondary_constructor(member, &definition, symbol, scope)?;
                     }
                 }
                 _ => {}
@@ -505,6 +494,61 @@ impl Namer<'_> {
                 name,
                 method,
                 method_scope,
+                SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags,
+                    visibility: Visibility::Public,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn enter_secondary_constructor(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        owner: SymbolId,
+        class_scope: ScopeId,
+    ) -> Result<(), NamerError> {
+        let mut value_parameters = Vec::new();
+        for clause in &definition.value_param_clauses {
+            for parameter in clause {
+                let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
+                else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter.index(),
+                        expected: "ValDef secondary constructor value parameter",
+                    });
+                };
+                value_parameters.push((
+                    *parameter,
+                    *parameter_definition.name.as_name(),
+                    Self::source_flags(&parameter_definition.metadata.modifiers),
+                ));
+            }
+        }
+
+        let constructor = self.enter_symbol(
+            tree,
+            *definition.name.as_name(),
+            owner,
+            class_scope,
+            SymbolSpec {
+                kind: SymbolKind::Constructor,
+                flags: Self::source_flags(&definition.metadata.modifiers),
+                visibility: self.source_visibility(tree, &definition.metadata.visibility)?,
+            },
+        )?;
+        let constructor_scope = self.store.scopes.alloc(Scope::new(Some(constructor)));
+        self.index.record_scope(constructor, constructor_scope)?;
+
+        for (parameter_tree, name, flags) in value_parameters {
+            self.enter_symbol(
+                parameter_tree,
+                name,
+                constructor,
+                constructor_scope,
                 SymbolSpec {
                     kind: SymbolKind::Parameter,
                     flags,
@@ -2157,6 +2201,60 @@ mod tests {
         assert_eq!(
             store.scopes.get(class_scope).lookup_all(init.as_name()),
             &[primary_symbol, constructor_symbol]
+        );
+    }
+
+    #[test]
+    fn secondary_constructor_parameters_are_owned_and_scoped_by_constructor() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(56);
+        let parameter = value_parameter(&mut arena, &mut store, "x", vec![], None);
+        let secondary = method_definition(
+            &mut arena,
+            &mut store,
+            "<init>",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![secondary], None);
+        let root = package_with_stat(&mut arena, &mut store, "constructors", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 56, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["constructors"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = index.symbol_at(source, secondary).unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert_eq!(
+            store.symbols.get(constructor_symbol).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(constructor_scope)
+                .lookup_all(&store.symbols.get(parameter_symbol).name),
+            &[parameter_symbol]
+        );
+        assert!(
+            store
+                .scopes
+                .get(class_scope)
+                .lookup_all(&store.symbols.get(parameter_symbol).name)
+                .is_empty()
         );
     }
 
