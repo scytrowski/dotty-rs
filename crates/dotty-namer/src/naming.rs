@@ -276,6 +276,7 @@ impl Namer<'_> {
                     Modifier::Final => SymbolFlags::FINAL,
                     Modifier::Sealed => SymbolFlags::SEALED,
                     Modifier::Case => SymbolFlags::CASE,
+                    Modifier::Implicit => SymbolFlags::IMPLICIT,
                     _ => SymbolFlags::EMPTY,
                 };
                 flags | flag
@@ -887,6 +888,14 @@ mod tests {
     #[test]
     fn case_class_sets_the_case_symbol_flag() {
         assert_eq!(entered_class_flags(vec![Modifier::Case]), SymbolFlags::CASE);
+    }
+
+    #[test]
+    fn implicit_class_sets_the_implicit_symbol_flag() {
+        assert_eq!(
+            entered_class_flags(vec![Modifier::Implicit]),
+            SymbolFlags::IMPLICIT
+        );
     }
 
     #[test]

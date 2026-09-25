@@ -203,6 +203,59 @@ fn a_parsed_final_class_sets_the_final_symbol_flag() {
     assert!(store.symbols.get(class).flags.contains(SymbolFlags::FINAL));
 }
 
+#[test]
+fn a_parsed_implicit_class_sets_the_implicit_symbol_flag() {
+    let source_text = "implicit class C(x: Int)";
+    let source = SourceId::from_index(13);
+    let mut store = SemanticStore::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        VecTokenSource {
+            tokens: vec![
+                token(TokenKind::Keyword(HardKeyword::Implicit), 0, 8),
+                token(TokenKind::Keyword(HardKeyword::Class), 9, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::Colon), 18, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            index: 0,
+        },
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+
+    name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "ImplicitClass.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = TypeName::new(store.names.intern("C"));
+    let class = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(class_name.as_name())
+        .unwrap();
+
+    assert!(
+        store
+            .symbols
+            .get(class)
+            .flags
+            .contains(SymbolFlags::IMPLICIT)
+    );
+}
+
 fn token(kind: TokenKind, start: u32, end: u32) -> Token {
     Token {
         kind,
