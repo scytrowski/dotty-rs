@@ -448,7 +448,10 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
         store.symbols.get(x_symbol).kind,
         dotty_core::SymbolKind::Parameter
     );
-    assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+    assert_eq!(
+        store.scopes.get(class_scope).lookup(x_name.as_name()),
+        Some(x_symbol)
+    );
     assert_eq!(
         store.symbols.get(y_symbol).kind,
         dotty_core::SymbolKind::Field
