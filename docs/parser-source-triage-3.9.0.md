@@ -28,7 +28,7 @@ exceptional files are excluded from conclusions about Dotty tree behavior.
 | --- | ---: | ---: | --- |
 | `ExpectedExpression` | 243 files | 20 | Case clauses in ordinary `match` bodies: 8; case-lambda / partial-function bodies: 4; named `end` markers: 4; remaining 4 are heterogeneous expression/layout cases. |
 | `ExpectedToken` | 215 files | 20 | Legacy import selector rename `=>`: 8; newline/indentation before `match` cases: 3; trailing parameter-clause comma: 1; remaining 8 span type/parameter forms and nested lambda argument syntax. |
-| `UnexpectedToken` | 159 files | 20 | “Expected block statement separator”: 10; “expected template member separator”: 7; “expected top-level statement separator”: 3. At least 3 of the first group are at `}` after a complete final block expression; the rest include case/closure bodies and need separate context. |
+| `UnexpectedToken` | 159 files | 20 | “Expected block statement separator”: 10; “expected template member separator”: 7; “expected top-level statement separator”: 3. At least 3 of the first group are reported at `}` after an expression, but they occur in different enclosing constructs. |
 | `ExpectedType` | 109 files | 20 | Heterogeneous type grammar: capture-checking `^` forms (2), symbolic/infix type names (4), plus by-name types, annotations, context-parameter annotations, and other distinct forms. No single ordinary type production explains the bucket. |
 | `ExpectedPattern` | 3 files | 3 | One continued alternative after `|`; one character-literal alternative; one symbolic operator name in a value pattern. |
 
@@ -41,7 +41,7 @@ Representative source locations and minimal examples:
 | Named `end` markers | 4/20 `ExpectedExpression` samples fail at `end` in `DesugarEnums.scala`, `CheckShadowing.scala`, `Splicing.scala`, and `Objects.scala`. Separately, #194 counted 18 files in the generic top-level-expression diagnostic bucket, including `end SetupAPI`. | Dotty treats a named end marker as a layout terminator, not an expression; Rust currently reaches expression/top-level recovery at it. | Missing ordinary Scala 3 layout syntax; medium priority. [#226](https://github.com/scytrowski/dotty-rs/issues/226). |
 | Legacy import rename arrow | 8/20 `ExpectedToken`, including `Definitions.scala`, `Plugins.scala`, `MessageRendering.scala`, and `Enumeration.scala`. | Dotty 3.9 parses `import java.lang.{String => JString}`; Rust expects a selector delimiter after the imported name. Modern `as` remains supported. | Deprecated but accepted compatibility syntax; medium priority. [#225](https://github.com/scytrowski/dotty-rs/issues/225). |
 | Trailing comma in parameter clause | 1/20 `ExpectedToken`, `compiler/src/dotty/tools/MainGenericCompiler.scala`, at `)` after a trailing comma. | Dotty accepts `class C(x: Int,)`; Rust reports that another parameter was expected. | Missing ordinary Scala syntax; medium/low priority. [#228](https://github.com/scytrowski/dotty-rs/issues/228). |
-| Final expression before block close | 10/20 `UnexpectedToken` diagnostics have the generic block-separator message; at least 3 are at `}` after the final expression in `BTypeLoader.scala`, `LazyVals.scala`, or `WeakHashSet.scala`. | Dotty accepts a block ending in an expression immediately followed by `}`. Rust reports a missing block separator at the closer in these cases. Minimal shape: `def f = { val x = 1; x }`. | Likely block-termination/recovery bug; verify scanner interaction. High priority. [#224](https://github.com/scytrowski/dotty-rs/issues/224). |
+| Block-separator diagnostics at nested closers | 10/20 `UnexpectedToken` diagnostics have the generic block-separator message; at least 3 are reported at `}` in `BTypeLoader.scala`, `LazyVals.scala`, and `WeakHashSet.scala`. | The enclosing sources are valid in Dotty, but their contexts differ (case bodies and nested local definitions). A standalone ordinary block such as `def f = { val x = 1; x }` parses cleanly in Rust, so the current evidence does not establish one shared block-termination bug. | Recovery/context follow-up only after a common reproducer is identified; do not count these as a confirmed standalone block bug. |
 | Pattern start and alternative edge cases | All 3 `ExpectedPattern` files: `ScalaPrimitivesOps.scala` (line continuation after `|`), `GenericSignatureVisitor.scala` (`'B' | 'C'`), `StdNames.scala` (`val * : N`). | Dotty parses all three source forms; Rust rejects at the alternative/pattern start. The operator-name case is a value-pattern/definition issue, not the same root as literal patterns. | Missing ordinary pattern syntax; lower priority due low observed frequency. [#227](https://github.com/scytrowski/dotty-rs/issues/227), [#230](https://github.com/scytrowski/dotty-rs/issues/230). |
 
 ## Deferred or not yet independently classified
@@ -56,9 +56,10 @@ Representative source locations and minimal examples:
   them into one implementation issue. Triage them when a concrete syntax family
   is prioritized.
 - `UnexpectedToken` is especially cascade-prone: the 10 block-separator
-  messages do not mean 10 instances of one root cause. Only the three final
-  expression-before-`}` cases are currently confirmed as the same candidate.
-  Template-member and top-level separator groups remain heterogeneous.
+  messages do not mean 10 instances of one root cause. The three errors
+  observed at `}` arise in different contexts; a minimal ordinary final
+  expression before `}` parses cleanly. Template-member and top-level
+  separator groups also remain heterogeneous.
 - Other individually observed forms include infix type-operator names and
   type/member parameter modifiers. Their low sample counts do not justify
   treating them as blockers; add targeted work only when a representative
@@ -68,8 +69,8 @@ Representative source locations and minimal examples:
 
 Proceed with incremental namer work on the documented supported parser subset.
 In parallel, prioritize the ordinary-syntax gaps with direct source evidence:
-case-lambda literals, match-case layout, correct block termination, and named
-`end` markers. Legacy import `=>` selectors and trailing parameter commas are
-useful source-compatibility follow-ups. Keep capture-checking syntax explicitly
-deferred. The remaining generic-diagnostic population needs targeted follow-up
-sampling rather than implementation based on histogram labels alone.
+case-lambda literals, match-case layout, and named `end` markers. Legacy import
+`=>` selectors and trailing parameter commas are useful source-compatibility
+follow-ups. Keep capture-checking syntax explicitly deferred. The remaining
+generic-diagnostic population needs targeted follow-up sampling rather than
+implementation based on histogram labels alone.
