@@ -4162,7 +4162,7 @@ mod tests {
     }
 
     #[test]
-    fn case_class_later_private_local_parameter_is_scoped_but_not_a_field() {
+    fn case_class_later_private_local_parameter_is_unscoped_and_not_a_field() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let first = value_parameter(
@@ -4179,7 +4179,7 @@ mod tests {
             vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
             None,
         );
-        let (class, _) = class_definition_with_header(
+        let (class, constructor_tree) = class_definition_with_header(
             &mut arena,
             &mut store,
             "Pair",
@@ -4197,8 +4197,15 @@ mod tests {
         let package = packages.get(&["cases"]).unwrap();
         let class_symbol = type_symbol(&mut store, package.scope, "Pair").unwrap();
         let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = index
+            .symbol_at(SourceId::from_index(22), constructor_tree)
+            .unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
         let first_symbol = index.symbol_at(SourceId::from_index(22), first).unwrap();
         let later_symbol = index.symbol_at(SourceId::from_index(22), later).unwrap();
+        let later_constructor_symbol = index
+            .derived_symbol_at(constructor_symbol, SourceId::from_index(22), later)
+            .unwrap();
 
         assert_eq!(store.symbols.get(first_symbol).kind, SymbolKind::Field);
         assert_eq!(
@@ -4207,8 +4214,21 @@ mod tests {
         );
         assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
         assert_eq!(
-            term_symbol(&mut store, class_scope, "y"),
-            Some(later_symbol)
+            store.symbols.get(later_symbol).visibility,
+            Visibility::Private
+        );
+        assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, constructor_scope, "y"),
+            Some(later_constructor_symbol)
         );
     }
 
@@ -4486,6 +4506,69 @@ mod tests {
                 .lookup_all(leaked_name.as_name())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_class_member_scan_rolls_back_constructor_parameter_copies() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let before = store.checkpoint();
+
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let malformed_parameter = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "broken",
+            vec![],
+            vec![vec![malformed_parameter]],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![method],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "rollback", vec![class]);
+        let source = SourceId::from_index(101);
+
+        assert_eq!(
+            name_compilation_unit(
+                &arena,
+                root,
+                source,
+                "Rollback.scala",
+                &mut store,
+                &mut packages,
+            )
+            .unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: malformed_parameter.index(),
+                expected: "ValDef method value parameter",
+            }
+        );
+
+        assert_eq!(store.checkpoint(), before);
+        assert!(packages.is_empty());
     }
 
     #[test]
