@@ -3,8 +3,44 @@ use dotty_core::{
     SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
     Visibility,
 };
-use dotty_namer::name_compilation_unit;
+use dotty_namer::{SourceSemanticIndex, name_compilation_unit};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+
+struct NamedSource {
+    parsed: dotty_parser::ParseResult,
+    source: SourceId,
+    store: SemanticStore,
+    index: SourceSemanticIndex,
+}
+
+fn named_source(source_text: &str, source_index: u32) -> NamedSource {
+    let source = SourceId::from_index(source_index);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Parameters.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("valid source should be named");
+    NamedSource {
+        parsed,
+        source,
+        store,
+        index,
+    }
+}
 
 struct VecTokenSource {
     tokens: Vec<Token>,
@@ -417,11 +453,7 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
         .unwrap();
     let class_scope = index.scope_of(class_symbol).unwrap();
     let type_parameter_name = TypeName::new(store.names.intern("A"));
-    let type_parameter_symbol = store
-        .scopes
-        .get(class_scope)
-        .lookup(type_parameter_name.as_name())
-        .unwrap();
+    let type_parameter_symbol = index.symbol_at(source, constructor.type_params[0]).unwrap();
     let x_name = TermName::new(store.names.intern("x"));
     let y_name = TermName::new(store.names.intern("y"));
     let z_name = TermName::new(store.names.intern("z"));
@@ -445,6 +477,19 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
         .get(class_scope)
         .lookup(constructor_name.as_name())
         .unwrap();
+    let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+    let derived_type_parameter = index
+        .derived_symbol_at(constructor_symbol, source, constructor.type_params[0])
+        .unwrap();
+    let derived_x = index
+        .derived_symbol_at(constructor_symbol, source, x_tree)
+        .unwrap();
+    let derived_y = index
+        .derived_symbol_at(constructor_symbol, source, y_tree)
+        .unwrap();
+    let derived_z = index
+        .derived_symbol_at(constructor_symbol, source, z_tree)
+        .unwrap();
 
     assert_eq!(
         store.symbols.get(type_parameter_symbol).kind,
@@ -455,13 +500,19 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
         Some(type_parameter_symbol)
     );
     assert_eq!(
+        store
+            .scopes
+            .get(class_scope)
+            .lookup(type_parameter_name.as_name()),
+        Some(type_parameter_symbol)
+    );
+    assert_eq!(
         store.symbols.get(x_symbol).kind,
         dotty_core::SymbolKind::Parameter
     );
-    assert_eq!(
-        store.scopes.get(class_scope).lookup(x_name.as_name()),
-        Some(x_symbol)
-    );
+    assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+    assert_eq!(store.symbols.get(x_symbol).visibility, Visibility::Private);
+    assert_eq!(store.symbols.get(x_symbol).owner, Some(class_symbol));
     assert_eq!(
         store.symbols.get(y_symbol).kind,
         dotty_core::SymbolKind::Field
@@ -472,6 +523,51 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
     );
     assert_eq!(index.symbol_at(source, y_tree), Some(y_symbol));
     assert_eq!(index.symbol_at(source, z_tree), Some(z_symbol));
+    for (canonical, derived) in [
+        (type_parameter_symbol, derived_type_parameter),
+        (x_symbol, derived_x),
+        (y_symbol, derived_y),
+        (z_symbol, derived_z),
+    ] {
+        assert_ne!(canonical, derived);
+        assert_eq!(store.symbols.get(derived).owner, Some(constructor_symbol));
+        assert_eq!(
+            store.symbols.get(derived).info,
+            dotty_core::SymbolInfo::Missing
+        );
+    }
+    assert_eq!(
+        store.symbols.get(derived_x).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(derived_y).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(derived_z).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(derived_z).flags,
+        dotty_core::SymbolFlags::EMPTY
+    );
+    assert_eq!(
+        store.scopes.get(constructor_scope).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(
+        store.scopes.get(constructor_scope).lookup(x_name.as_name()),
+        Some(derived_x)
+    );
+    assert_eq!(
+        store.scopes.get(constructor_scope).lookup(y_name.as_name()),
+        Some(derived_y)
+    );
+    assert_eq!(
+        store.scopes.get(constructor_scope).lookup(z_name.as_name()),
+        Some(derived_z)
+    );
     assert_eq!(
         store.symbols.get(constructor_symbol).kind,
         dotty_core::SymbolKind::Constructor
@@ -479,6 +575,192 @@ fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata
     assert_eq!(
         index.symbol_at(source, template.constructor),
         Some(constructor_symbol)
+    );
+}
+
+#[test]
+fn parsed_private_local_constructor_parameter_is_not_a_class_member() {
+    use dotty_core::{SymbolInfo, SymbolKind, TermName};
+
+    let mut named = named_source("class C(x: Int)", 95);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("source declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        panic!("primary constructor should be a DefDef");
+    };
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, template.constructor)
+        .unwrap();
+    let constructor_scope = named.index.scope_of(constructor_symbol).unwrap();
+    let canonical = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let derived = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let parameter_name = TermName::new(named.store.names.intern("x"));
+
+    assert_eq!(
+        named.store.symbols.get(canonical).kind,
+        SymbolKind::Parameter
+    );
+    assert_eq!(named.store.symbols.get(canonical).owner, Some(class_symbol));
+    assert_eq!(
+        named.store.symbols.get(canonical).visibility,
+        Visibility::Private
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(parameter_name.as_name()),
+        None
+    );
+    assert_eq!(named.store.symbols.get(derived).kind, SymbolKind::Parameter);
+    assert_eq!(
+        named.store.symbols.get(derived).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(named.store.symbols.get(derived).info, SymbolInfo::Missing);
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(constructor_scope)
+            .lookup(parameter_name.as_name()),
+        Some(derived)
+    );
+}
+
+#[test]
+fn parsed_val_constructor_parameter_is_a_field_and_a_constructor_parameter() {
+    use dotty_core::{SymbolInfo, SymbolKind, TermName};
+
+    let mut named = named_source("class C(val x: Int)", 96);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("source declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        panic!("primary constructor should be a DefDef");
+    };
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, template.constructor)
+        .unwrap();
+    let constructor_scope = named.index.scope_of(constructor_symbol).unwrap();
+    let canonical = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let derived = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let parameter_name = TermName::new(named.store.names.intern("x"));
+
+    assert_ne!(canonical, derived);
+    assert_eq!(named.store.symbols.get(canonical).kind, SymbolKind::Field);
+    assert_eq!(named.store.symbols.get(canonical).owner, Some(class_symbol));
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(parameter_name.as_name()),
+        Some(canonical)
+    );
+    assert_eq!(named.store.symbols.get(derived).kind, SymbolKind::Parameter);
+    assert_eq!(
+        named.store.symbols.get(derived).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(named.store.symbols.get(derived).info, SymbolInfo::Missing);
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(constructor_scope)
+            .lookup(parameter_name.as_name()),
+        Some(derived)
+    );
+}
+
+#[test]
+fn parsed_var_constructor_parameter_keeps_mutability_only_on_its_field() {
+    use dotty_core::{SymbolFlags, SymbolKind, TermName};
+
+    let mut named = named_source("class C(var x: Int)", 97);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("source declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        panic!("primary constructor should be a DefDef");
+    };
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, template.constructor)
+        .unwrap();
+    let canonical = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let derived = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let parameter_name = TermName::new(named.store.names.intern("x"));
+
+    assert_eq!(named.store.symbols.get(canonical).kind, SymbolKind::Field);
+    assert_eq!(named.store.symbols.get(canonical).owner, Some(class_symbol));
+    assert!(
+        named
+            .store
+            .symbols
+            .get(canonical)
+            .flags
+            .contains(SymbolFlags::MUTABLE)
+    );
+    assert_eq!(named.store.symbols.get(derived).kind, SymbolKind::Parameter);
+    assert!(
+        !named
+            .store
+            .symbols
+            .get(derived)
+            .flags
+            .contains(SymbolFlags::MUTABLE)
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(named.index.scope_of(constructor_symbol).unwrap())
+            .lookup(parameter_name.as_name()),
+        Some(derived)
     );
 }
 
