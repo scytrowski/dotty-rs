@@ -254,9 +254,11 @@ parsing and bracketed bodies use type parsing. A single expression in a quote
 is stored directly as its body; a multi-statement body remains a `Block`, and
 an empty quoted block preserves Dotty's zero-width empty `Block` shape. Braced
 `${...}` and `$name` splices inside expression quotes produce `Splice`; the
-braced form parses its contents as an expression block. Legacy `$` splices inside quoted types
-are consumed for recovery and diagnosed as unsupported, matching Scala 3.9's
-rejection. This implements syntax only, not staging or type-checking semantics.
+braced form parses its contents as an expression block. Legacy `$` splices
+inside quoted types are consumed for recovery and diagnosed as unsupported,
+matching Scala 3.9's rejection. This implements syntax only, not staging or
+type-checking semantics.
+
 ordinary function types (`A => B`, parenthesized and tuple parameter lists,
 and `() => R`), represented by the shared `Function` node. Ordinary
 parenthesized function types also support named typed parameters such as

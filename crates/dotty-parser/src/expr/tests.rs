@@ -319,6 +319,58 @@ fn recovers_a_quoted_expression_missing_its_closing_brace_at_eof() {
 }
 
 #[test]
+fn recovers_a_quoted_type_missing_its_closing_bracket_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[T",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Quote(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedToken
+    );
+}
+
+#[test]
+fn recovers_missing_splice_and_quote_braces_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ ${value",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+            token(TokenKind::Identifier, 5, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Quote(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 2);
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedToken })
+    );
+}
+
+#[test]
 fn rejects_a_legacy_braced_type_splice_inside_a_type_quote() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
