@@ -138,7 +138,6 @@ impl SourceSemanticIndex {
 
     /// Records one immutable source context node and returns its index-local
     /// identity.
-    #[allow(dead_code)] // The naming traversal starts allocating these next.
     pub(crate) fn alloc_source_context(&mut self, context: SourceContext) -> SourceContextId {
         let id = SourceContextId(
             u32::try_from(self.source_contexts.len())
@@ -153,7 +152,6 @@ impl SourceSemanticIndex {
     /// Repeating the same association is idempotent. Assigning a different
     /// context to the same symbol is an internal naming error and preserves
     /// the original association.
-    #[allow(dead_code)] // The naming traversal starts recording these next.
     pub(crate) fn record_declaration_context(
         &mut self,
         symbol: SymbolId,
