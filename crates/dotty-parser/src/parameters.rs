@@ -248,6 +248,12 @@ where
                 }
             }
         } else if is_class_parameter_owner(owner) {
+            if metadata.visibility.is_some() || metadata.modifiers.contains(&Modifier::Override) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "`val` or `var` expected",
+                );
+            }
             if owner == ParamOwner::CaseClass && first_ordinary_clause {
                 metadata.modifiers.push(Modifier::ParamAccessor);
             } else {
@@ -959,6 +965,36 @@ mod tests {
                 .contains(&Modifier::ParamAccessor)
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn requires_an_explicit_accessor_after_override_on_class_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(override x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Override), 1, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(parser.diagnostics()[0].message(), "`val` or `var` expected");
     }
 
     #[test]
