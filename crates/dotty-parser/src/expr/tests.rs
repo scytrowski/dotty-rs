@@ -171,6 +171,34 @@ fn parses_a_braced_case_lambda_as_an_application_argument() {
 }
 
 #[test]
+fn reports_a_missing_closing_brace_after_case_lambda_clauses() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ case x => x",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::Case), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 11),
+            token(TokenKind::Identifier, 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+    );
+}
+
+#[test]
 fn parses_a_quoted_expression_block() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
