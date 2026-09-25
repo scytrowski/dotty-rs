@@ -62,6 +62,54 @@ fn named_source_tree_name(
     named.store.names.resolve(name.text()).to_owned()
 }
 
+fn source_pattern_bindings(
+    named: &NamedSource,
+    patterns: &[dotty_core::TreeId<dotty_core::Untyped>],
+) -> Vec<(dotty_core::TreeId<dotty_core::Untyped>, String)> {
+    let mut bindings = Vec::new();
+    let mut pending = patterns.iter().rev().copied().collect::<Vec<_>>();
+    while let Some(tree) = pending.pop() {
+        match &named.parsed.ast.get(tree).kind {
+            TreeKind::Ident(ident) => bindings.push((
+                tree,
+                named.store.names.resolve(ident.name.text()).to_owned(),
+            )),
+            TreeKind::Bind(binding) => {
+                bindings.push((
+                    tree,
+                    named.store.names.resolve(binding.name.text()).to_owned(),
+                ));
+                pending.push(binding.body);
+            }
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Apply(application) => {
+                pending.extend(application.args.iter().rev().copied());
+            }
+            TreeKind::Alternative(alternative) => {
+                if let Some(first) = alternative.alternatives.first() {
+                    pending.push(*first);
+                }
+            }
+            TreeKind::UnApply(unapply) => {
+                pending.extend(unapply.patterns.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(parens)) => {
+                pending.push(parens.inner);
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.right);
+                pending.push(infix.left);
+            }
+            _ => {}
+        }
+    }
+    bindings.retain(|(_, name)| name != "_");
+    bindings
+}
+
 #[test]
 fn anonymous_given_alias_gets_a_deterministic_invented_name() {
     let named = named_source("given Config = makeConfig", 105);
@@ -1845,6 +1893,117 @@ fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
                 .get(wrapper_scope)
                 .lookup(TermName::new(store.names.intern(&name)).as_name()),
             Some(symbol)
+        );
+    }
+}
+
+#[test]
+fn parsed_class_pattern_val_binders_are_class_fields() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("class C:\n  val (left, right) = pair", 212);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let patdef_tree = template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(patdef_tree).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 2);
+    for (tree, name) in bindings {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        let field_symbol = named.store.symbols.get(field);
+        assert_eq!(field_symbol.kind, SymbolKind::Field);
+        assert_eq!(field_symbol.owner, Some(class_symbol));
+        assert_eq!(named.store.names.resolve(field_symbol.name.text()), name);
+        assert_eq!(
+            field_symbol.origin,
+            dotty_core::SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(field_symbol.position, named.parsed.ast.get(tree).position);
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup(&field_symbol.name),
+            Some(field)
+        );
+    }
+    assert_eq!(named.index.symbol_at(named.source, patdef_tree), None);
+}
+
+#[test]
+fn parsed_object_pattern_val_binders_are_module_class_fields() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("object O:\n  val (left, right) = pair", 213);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("object should be a ModuleDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(module.template).kind else {
+        panic!("object body should be a Template");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .expect("package should have a semantic symbol");
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let module_class_name = TypeName::new(named.store.names.get("O$").unwrap());
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(module_class_name.as_name())
+        .expect("object should have a module class");
+    let module_class_scope = named.index.scope_of(module_class).unwrap();
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 2);
+    for (tree, name) in bindings {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        let owner = named.store.symbols.get(field).owner.unwrap();
+        assert_eq!(named.store.symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(field).name.text()),
+            name
+        );
+        assert_eq!(named.store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(module_class_scope)
+                .lookup(&named.store.symbols.get(field).name),
+            Some(field)
         );
     }
 }
