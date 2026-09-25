@@ -220,7 +220,7 @@ where
     }
 
     fn parse_named_selector(&mut self, imported: dotty_core::Name) -> ImportSelector<Untyped> {
-        let renamed = if self.current_is_as() {
+        let renamed = if self.current_is_as() || self.current_is_arrow() {
             self.advance();
             if self.is_import_name() || self.current_is_legacy_wildcard() {
                 let mark = self.mark();
@@ -564,6 +564,120 @@ mod tests {
         assert!(import.selectors[0].renamed.is_some());
         assert!(import.selectors[1].renamed.is_some());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_legacy_arrow_rename_in_braced_import_selectors() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar => baz}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Operator, 16, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        let selector = import.selectors[0];
+        let renamed = selector.renamed.expect("expected renamed selector");
+        let TreeKind::Ident(rename) = parser.ast().get(renamed).kind else {
+            panic!("expected renamed identifier");
+        };
+
+        let imported = selector.imported;
+        let renamed = rename.name;
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "bar");
+        assert_eq!(names.resolve(renamed.text()), "baz");
+    }
+
+    #[test]
+    fn parses_a_legacy_arrow_rename_after_a_qualified_import_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.bar => baz",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Operator, 15, 17),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        let selector = import.selectors[0];
+        let renamed = selector.renamed.expect("expected renamed selector");
+        let TreeKind::Ident(rename) = parser.ast().get(renamed).kind else {
+            panic!("expected renamed identifier");
+        };
+
+        let imported = selector.imported;
+        let renamed = rename.name;
+        assert!(matches!(
+            parser.ast().get(import.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "bar");
+        assert_eq!(names.resolve(renamed.text()), "baz");
+    }
+
+    #[test]
+    fn parses_a_legacy_arrow_rename_to_wildcard_hiding() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar => _}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Operator, 16, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        let renamed = import.selectors[0]
+            .renamed
+            .expect("expected wildcard hiding identifier");
+        let TreeKind::Ident(rename) = parser.ast().get(renamed).kind else {
+            panic!("expected wildcard hiding identifier tree");
+        };
+
+        let renamed = rename.name;
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(renamed.text()), "_");
     }
 
     #[test]
