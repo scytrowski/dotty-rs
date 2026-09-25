@@ -179,7 +179,8 @@ integer, long, decimal, exponent, float, and double literals
 string literals and interpolated strings with simple or braced splices
 true, false, null, this
 (expr), (), and (a, b, ...)
-`'{ expr }` and `'[Type]` quotes with braced expression splices
+`'{ expr }` and `'[Type]` quotes with braced expression splices; quoted
+patterns use the same source-level `Quote` node and `SplicePattern` nodes
 simple selections such as foo.bar and foo.`bar`
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
@@ -254,7 +255,11 @@ parsing and bracketed bodies use type parsing. A single expression in a quote
 is stored directly as its body; a multi-statement body remains a `Block`, and
 an empty quoted block preserves Dotty's zero-width empty `Block` shape. Braced
 `${...}` and `$name` splices inside expression quotes produce `Splice`; the
-braced form parses its contents as an expression block. Legacy `$` splices
+braced form parses its contents as an expression block. In pattern context,
+Dotty's parser likewise represents the quote syntax as `Quote`, with `$name`
+and `${pattern}` represented by `SplicePattern`; its `QuotePattern` node is a
+later typed-tree representation and is not synthesized by this source parser.
+Legacy `$` splices
 inside quoted types are consumed for recovery and diagnosed as unsupported,
 matching Scala 3.9's rejection. This implements syntax only, not staging or
 type-checking semantics.
@@ -578,8 +583,10 @@ named extractor arguments. A trailing variable or wildcard followed by `*`
 inside extractor arguments is represented as `Typed(pattern, Ident(_*))`,
 matching Dotty's parser tree; sequence markers elsewhere remain invalid.
 Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
-semantic `UnApply` lowering belongs to later phases. `given`, quoted and XML
-patterns, remaining refined-type forms, remaining definition forms and full
+semantic `UnApply` lowering belongs to later phases. Quoted patterns preserve
+Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
+`QuotePattern` construction and staging semantics remain later-phase work.
+`given` and XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, legacy given syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
 

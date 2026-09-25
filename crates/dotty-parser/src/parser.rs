@@ -35,6 +35,10 @@ where
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
+    /// Active quote bodies parsed from pattern position. Braced splices in
+    /// these bodies contain patterns and must remain source-level pattern
+    /// nodes rather than expression splices.
+    pub(crate) quote_pattern_depth: u32,
     /// Active quoted type bodies; braced legacy type splices are diagnosed
     /// while this depth is nonzero.
     pub(crate) type_quote_depth: u32,
@@ -76,6 +80,7 @@ where
             last_advance_was_outdent: false,
             defer_template_outdent_feedback: false,
             expression_quote_depth: 0,
+            quote_pattern_depth: 0,
             type_quote_depth: 0,
         }
     }
