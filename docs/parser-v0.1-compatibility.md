@@ -101,3 +101,5 @@ source units in the supported subset. Do not treat this result as readiness to
 parse and name arbitrary Scala 3.9 library/compiler source without diagnostics;
 the 847 recoverable files and the follow-ups above remain a real compatibility
 boundary.
+
+Issue #222's deterministic sample-based root-cause investigation is documented in [parser-source-triage-3.9.0.md](parser-source-triage-3.9.0.md). It separates syntax families hidden by the generic first-diagnostic buckets and links the resulting implementation follow-ups.
