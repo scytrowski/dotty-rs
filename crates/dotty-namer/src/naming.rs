@@ -306,6 +306,7 @@ impl Namer<'_> {
                 *parameter.name.as_name(),
                 symbol,
                 SymbolKind::TypeParameter,
+                SymbolFlags::EMPTY,
                 Visibility::Public,
                 scope,
                 true,
@@ -325,6 +326,11 @@ impl Namer<'_> {
                 } else {
                     SymbolKind::Field
                 },
+                if !private_local && parameter.metadata.modifiers.contains(&Modifier::Var) {
+                    SymbolFlags::MUTABLE
+                } else {
+                    SymbolFlags::EMPTY
+                },
                 self.class_visibility(tree, &parameter.metadata.visibility)?,
                 scope,
                 true,
@@ -335,6 +341,7 @@ impl Namer<'_> {
             *constructor.name.as_name(),
             symbol,
             SymbolKind::Constructor,
+            SymbolFlags::EMPTY,
             Visibility::Public,
             scope,
             true,
@@ -370,6 +377,7 @@ impl Namer<'_> {
         name: dotty_core::Name,
         owner: SymbolId,
         kind: SymbolKind,
+        flags: SymbolFlags,
         visibility: Visibility,
         scope: ScopeId,
         enter_in_scope: bool,
@@ -378,7 +386,7 @@ impl Namer<'_> {
             name,
             owner: Some(owner),
             kind,
-            flags: SymbolFlags::EMPTY,
+            flags,
             visibility,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
@@ -1405,6 +1413,7 @@ mod tests {
 
         assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
         assert_eq!(store.symbols.get(field_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::EMPTY);
         assert_eq!(
             index.symbol_at(SourceId::from_index(20), parameter),
             Some(field_symbol)
@@ -1450,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn var_constructor_parameter_has_field_identity_without_mutable_flag_yet() {
+    fn var_constructor_parameter_is_a_mutable_field() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let parameter = value_parameter(
@@ -1481,7 +1490,7 @@ mod tests {
         let field_symbol = term_symbol(&mut store, class_scope, "count").unwrap();
 
         assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
-        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::MUTABLE);
     }
 
     #[test]
