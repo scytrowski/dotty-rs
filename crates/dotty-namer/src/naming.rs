@@ -87,6 +87,38 @@ struct SymbolSpec {
     visibility: Visibility,
 }
 
+/// A declaration identity entered before scanning its nested declarations.
+enum EnteredHeader {
+    Package {
+        tree: TreeId<Untyped>,
+        context: NamingContext,
+    },
+    ClassLike {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        scope: ScopeId,
+        package_path: Vec<String>,
+    },
+    Method {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        scope: ScopeId,
+    },
+    SecondaryConstructor {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        scope: ScopeId,
+    },
+    Field {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    },
+    TypeAlias {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    },
+}
+
 /// Runs the source naming pass for one parsed compilation unit.
 ///
 /// The pass enters or reuses package symbols and scopes, then enters symbols
@@ -168,13 +200,25 @@ impl Namer<'_> {
         enclosing_package: &[String],
         source_root: bool,
     ) -> Result<(), NamerError> {
+        let Some(header) = self.enter_package_header(tree, enclosing_package, source_root)? else {
+            return Ok(());
+        };
+        self.scan_entered_header(header)
+    }
+
+    fn enter_package_header(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enclosing_package: &[String],
+        source_root: bool,
+    ) -> Result<Option<EnteredHeader>, NamerError> {
         let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
             if tree == self.root {
                 return Err(NamerError::RootIsNotPackage {
                     tree_index: tree.index(),
                 });
             }
-            return Ok(());
+            return Ok(None);
         };
 
         let package = package.clone();
@@ -203,35 +247,26 @@ impl Namer<'_> {
             scope: leaf.scope,
             package_path,
         };
-        for stat in package.stats {
-            match self.arena.get(stat).kind {
-                TreeKind::PackageDef(_) => {
-                    self.expand(stat, &context.package_path, false)?;
-                }
-                TreeKind::TypeDef(_) => self.enter_class_or_trait(stat, &context)?,
-                _ => {}
-            }
-        }
-        Ok(())
+        Ok(Some(EnteredHeader::Package { tree, context }))
     }
 
-    fn enter_class_or_trait(
+    fn enter_class_or_trait_header(
         &mut self,
         tree: TreeId<Untyped>,
         owner_context: &NamingContext,
-    ) -> Result<(), NamerError> {
+    ) -> Result<Option<EnteredHeader>, NamerError> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
-            return Ok(());
+            return Ok(None);
         };
         let definition = definition.clone();
         let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
-            return Ok(());
+            return Ok(None);
         };
         let template = template.clone();
         // Enum identity has its own later naming step. Never misclassify it
         // as a class or require class-header constructor data from this pass.
         if definition.metadata.modifiers.contains(&Modifier::Enum) {
-            return Ok(());
+            return Ok(None);
         }
 
         let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
@@ -241,17 +276,14 @@ impl Namer<'_> {
             });
         };
         let constructor = constructor.clone();
-        let mut type_parameters = Vec::with_capacity(constructor.type_params.len());
         for parameter in &constructor.type_params {
-            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
+            let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter.index(),
                     expected: "TypeDef class type parameter",
                 });
             };
-            type_parameters.push(parameter.clone());
         }
-        let mut value_parameters = Vec::new();
         for clause in &constructor.value_param_clauses {
             for parameter in clause {
                 let TreeKind::ValDef(parameter_def) = &self.arena.get(*parameter).kind else {
@@ -270,7 +302,6 @@ impl Namer<'_> {
                         expected: "constructor ValDef with ParamAccessor metadata",
                     });
                 }
-                value_parameters.push((*parameter, parameter_def.clone()));
             }
         }
 
@@ -301,15 +332,93 @@ impl Namer<'_> {
 
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
         self.index.record_scope(symbol, scope)?;
+        Ok(Some(EnteredHeader::ClassLike {
+            tree,
+            symbol,
+            scope,
+            package_path: owner_context.package_path.clone(),
+        }))
+    }
+
+    fn scan_entered_header(&mut self, header: EnteredHeader) -> Result<(), NamerError> {
+        let (tree, symbol, scope, package_path) = match header {
+            EnteredHeader::Package { tree, context } => {
+                let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
+                    return Ok(());
+                };
+                let mut headers = Vec::new();
+                for stat in &package.stats {
+                    match self.arena.get(*stat).kind {
+                        TreeKind::PackageDef(_) => {
+                            if let Some(header) =
+                                self.enter_package_header(*stat, &context.package_path, false)?
+                            {
+                                headers.push(header);
+                            }
+                        }
+                        TreeKind::TypeDef(_) => {
+                            if let Some(header) =
+                                self.enter_class_or_trait_header(*stat, &context)?
+                            {
+                                headers.push(header);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                for header in headers {
+                    self.scan_entered_header(header)?;
+                }
+                return Ok(());
+            }
+            EnteredHeader::ClassLike {
+                tree,
+                symbol,
+                scope,
+                package_path,
+            } => (tree, symbol, scope, package_path),
+            EnteredHeader::Method {
+                tree,
+                symbol,
+                scope,
+            } => return self.scan_method_parameters(tree, symbol, scope),
+            EnteredHeader::SecondaryConstructor {
+                tree,
+                symbol,
+                scope,
+            } => return self.scan_constructor_parameters(tree, symbol, scope),
+            EnteredHeader::Field { tree, symbol } | EnteredHeader::TypeAlias { tree, symbol } => {
+                let _entered_identity = (tree, symbol);
+                return Ok(());
+            }
+        };
+        let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
+            return Ok(());
+        };
+        let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
+            return Ok(());
+        };
+        let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: template.constructor.index(),
+                expected: "DefDef primary constructor",
+            });
+        };
         let class_context = NamingContext {
             owner: symbol,
             scope,
-            package_path: owner_context.package_path.clone(),
+            package_path,
         };
-
-        for (tree, parameter) in constructor.type_params.iter().zip(type_parameters) {
+        let constructor = constructor.clone();
+        for parameter_tree in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef class type parameter",
+                });
+            };
             self.enter_symbol(
-                *tree,
+                *parameter_tree,
                 *parameter.name.as_name(),
                 symbol,
                 scope,
@@ -320,26 +429,45 @@ impl Namer<'_> {
                 },
             )?;
         }
-        for (tree, parameter) in value_parameters {
-            let private_local = parameter
-                .metadata
-                .modifiers
-                .contains(&Modifier::PrivateLocal);
-            self.enter_symbol(
-                tree,
-                *parameter.name.as_name(),
-                symbol,
-                scope,
-                SymbolSpec {
-                    kind: if private_local {
-                        SymbolKind::Parameter
-                    } else {
-                        SymbolKind::Field
+        for clause in &constructor.value_param_clauses {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ValDef constructor value parameter",
+                    });
+                };
+                if !parameter
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::ParamAccessor)
+                {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "constructor ValDef with ParamAccessor metadata",
+                    });
+                }
+                self.enter_symbol(
+                    *parameter_tree,
+                    *parameter.name.as_name(),
+                    symbol,
+                    scope,
+                    SymbolSpec {
+                        kind: if parameter
+                            .metadata
+                            .modifiers
+                            .contains(&Modifier::PrivateLocal)
+                        {
+                            SymbolKind::Parameter
+                        } else {
+                            SymbolKind::Field
+                        },
+                        flags: Self::source_flags(&parameter.metadata.modifiers),
+                        visibility: self
+                            .source_visibility(*parameter_tree, &parameter.metadata.visibility)?,
                     },
-                    flags: Self::source_flags(&parameter.metadata.modifiers),
-                    visibility: self.source_visibility(tree, &parameter.metadata.visibility)?,
-                },
-            )?;
+                )?;
+            }
         }
         self.enter_symbol(
             template.constructor,
@@ -353,18 +481,23 @@ impl Namer<'_> {
             },
         )?;
 
-        for member in template.body {
-            if member == template.constructor {
+        let mut nested_headers = Vec::new();
+        for member in &template.body {
+            if *member == template.constructor {
                 continue;
             }
-            match &self.arena.get(member).kind {
+            match &self.arena.get(*member).kind {
                 TreeKind::TypeDef(definition) => {
                     let definition = definition.clone();
                     if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
-                        self.enter_class_or_trait(member, &class_context)?;
+                        if let Some(header) =
+                            self.enter_class_or_trait_header(*member, &class_context)?
+                        {
+                            nested_headers.push(header);
+                        }
                     } else {
-                        self.enter_symbol(
-                            member,
+                        let alias = self.enter_symbol(
+                            *member,
                             *definition.name.as_name(),
                             symbol,
                             scope,
@@ -372,15 +505,19 @@ impl Namer<'_> {
                                 kind: SymbolKind::TypeAlias,
                                 flags: Self::source_flags(&definition.metadata.modifiers),
                                 visibility: self
-                                    .source_visibility(member, &definition.metadata.visibility)?,
+                                    .source_visibility(*member, &definition.metadata.visibility)?,
                             },
                         )?;
+                        nested_headers.push(EnteredHeader::TypeAlias {
+                            tree: *member,
+                            symbol: alias,
+                        });
                     }
                 }
                 TreeKind::ValDef(definition) => {
                     let definition = definition.clone();
-                    self.enter_symbol(
-                        member,
+                    let field = self.enter_symbol(
+                        *member,
                         *definition.name.as_name(),
                         symbol,
                         scope,
@@ -388,9 +525,13 @@ impl Namer<'_> {
                             kind: SymbolKind::Field,
                             flags: Self::source_flags(&definition.metadata.modifiers),
                             visibility: self
-                                .source_visibility(member, &definition.metadata.visibility)?,
+                                .source_visibility(*member, &definition.metadata.visibility)?,
                         },
                     )?;
+                    nested_headers.push(EnteredHeader::Field {
+                        tree: *member,
+                        symbol: field,
+                    });
                 }
                 TreeKind::DefDef(definition) => {
                     let definition = definition.clone();
@@ -401,36 +542,46 @@ impl Namer<'_> {
                             SymbolKind::Method
                         };
                     if kind == SymbolKind::Method {
-                        self.enter_method(member, &definition, symbol, scope)?;
+                        nested_headers.push(self.enter_method_header(
+                            *member,
+                            &definition,
+                            symbol,
+                            scope,
+                        )?);
                     } else {
-                        self.enter_secondary_constructor(member, &definition, symbol, scope)?;
+                        nested_headers.push(self.enter_secondary_constructor_header(
+                            *member,
+                            &definition,
+                            symbol,
+                            scope,
+                        )?);
                     }
                 }
                 _ => {}
             }
         }
+        for header in nested_headers {
+            self.scan_entered_header(header)?;
+        }
         Ok(())
     }
 
-    fn enter_method(
+    fn enter_method_header(
         &mut self,
         tree: TreeId<Untyped>,
         definition: &dotty_core::ast::DefDef<Untyped>,
         owner: SymbolId,
         class_scope: ScopeId,
-    ) -> Result<(), NamerError> {
-        let mut type_parameters = Vec::with_capacity(definition.type_params.len());
+    ) -> Result<EnteredHeader, NamerError> {
         for parameter in &definition.type_params {
-            let TreeKind::TypeDef(parameter_definition) = &self.arena.get(*parameter).kind else {
+            let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter.index(),
                     expected: "TypeDef method type parameter",
                 });
             };
-            type_parameters.push((*parameter, *parameter_definition.name.as_name()));
         }
 
-        let mut value_parameters = Vec::new();
         for clause in &definition.value_param_clauses {
             for parameter in clause {
                 let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
@@ -453,11 +604,6 @@ impl Namer<'_> {
                         expected: "ordinary method ValDef without constructor-role metadata",
                     });
                 }
-                value_parameters.push((
-                    *parameter,
-                    *parameter_definition.name.as_name(),
-                    Self::source_flags(&parameter_definition.metadata.modifiers),
-                ));
             }
         }
 
@@ -475,57 +621,28 @@ impl Namer<'_> {
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
         self.index.record_scope(method, method_scope)?;
 
-        for (parameter_tree, name) in type_parameters {
-            self.enter_symbol(
-                parameter_tree,
-                name,
-                method,
-                method_scope,
-                SymbolSpec {
-                    kind: SymbolKind::TypeParameter,
-                    flags: SymbolFlags::EMPTY,
-                    visibility: Visibility::Public,
-                },
-            )?;
-        }
-        for (parameter_tree, name, flags) in value_parameters {
-            self.enter_symbol(
-                parameter_tree,
-                name,
-                method,
-                method_scope,
-                SymbolSpec {
-                    kind: SymbolKind::Parameter,
-                    flags,
-                    visibility: Visibility::Public,
-                },
-            )?;
-        }
-        Ok(())
+        Ok(EnteredHeader::Method {
+            tree,
+            symbol: method,
+            scope: method_scope,
+        })
     }
 
-    fn enter_secondary_constructor(
+    fn enter_secondary_constructor_header(
         &mut self,
         tree: TreeId<Untyped>,
         definition: &dotty_core::ast::DefDef<Untyped>,
         owner: SymbolId,
         class_scope: ScopeId,
-    ) -> Result<(), NamerError> {
-        let mut value_parameters = Vec::new();
+    ) -> Result<EnteredHeader, NamerError> {
         for clause in &definition.value_param_clauses {
             for parameter in clause {
-                let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
-                else {
+                let TreeKind::ValDef(_) = &self.arena.get(*parameter).kind else {
                     return Err(NamerError::MalformedAstShape {
                         tree_index: parameter.index(),
                         expected: "ValDef secondary constructor value parameter",
                     });
                 };
-                value_parameters.push((
-                    *parameter,
-                    *parameter_definition.name.as_name(),
-                    Self::source_flags(&parameter_definition.metadata.modifiers),
-                ));
             }
         }
 
@@ -543,18 +660,102 @@ impl Namer<'_> {
         let constructor_scope = self.store.scopes.alloc(Scope::new(Some(constructor)));
         self.index.record_scope(constructor, constructor_scope)?;
 
-        for (parameter_tree, name, flags) in value_parameters {
+        Ok(EnteredHeader::SecondaryConstructor {
+            tree,
+            symbol: constructor,
+            scope: constructor_scope,
+        })
+    }
+
+    fn scan_method_parameters(
+        &mut self,
+        tree: TreeId<Untyped>,
+        method: SymbolId,
+        method_scope: ScopeId,
+    ) -> Result<(), NamerError> {
+        let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
+            return Ok(());
+        };
+        for parameter_tree in &definition.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef method type parameter",
+                });
+            };
             self.enter_symbol(
-                parameter_tree,
-                name,
-                constructor,
-                constructor_scope,
+                *parameter_tree,
+                *parameter.name.as_name(),
+                method,
+                method_scope,
                 SymbolSpec {
-                    kind: SymbolKind::Parameter,
-                    flags,
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
                     visibility: Visibility::Public,
                 },
             )?;
+        }
+        for clause in &definition.value_param_clauses {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ValDef method value parameter",
+                    });
+                };
+                if parameter.metadata.modifiers.iter().any(|modifier| {
+                    matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
+                }) {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ordinary method ValDef without constructor-role metadata",
+                    });
+                }
+                self.enter_symbol(
+                    *parameter_tree,
+                    *parameter.name.as_name(),
+                    method,
+                    method_scope,
+                    SymbolSpec {
+                        kind: SymbolKind::Parameter,
+                        flags: Self::source_flags(&parameter.metadata.modifiers),
+                        visibility: Visibility::Public,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn scan_constructor_parameters(
+        &mut self,
+        tree: TreeId<Untyped>,
+        constructor: SymbolId,
+        constructor_scope: ScopeId,
+    ) -> Result<(), NamerError> {
+        let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
+            return Ok(());
+        };
+        for clause in &definition.value_param_clauses {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ValDef secondary constructor value parameter",
+                    });
+                };
+                self.enter_symbol(
+                    *parameter_tree,
+                    *parameter.name.as_name(),
+                    constructor,
+                    constructor_scope,
+                    SymbolSpec {
+                        kind: SymbolKind::Parameter,
+                        flags: Self::source_flags(&parameter.metadata.modifiers),
+                        visibility: Visibility::Public,
+                    },
+                )?;
+            }
         }
         Ok(())
     }
@@ -1750,6 +1951,166 @@ mod tests {
         );
         assert_eq!(store.scopes.get(method_scope).owner, Some(method_symbol));
         assert_eq!(index.symbol_at(source, method), Some(method_symbol));
+    }
+
+    #[test]
+    fn direct_member_headers_precede_method_parameters() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(&mut arena, &mut store, "input", vec![], None);
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "first",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let field = value_parameter(&mut arena, &mut store, "second", vec![], None);
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![method, field],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "headers", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 71, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(71);
+        let method_symbol = index.symbol_at(source, method).unwrap();
+        let field_symbol = index.symbol_at(source, field).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert!(method_symbol.index() < field_symbol.index());
+        assert!(field_symbol.index() < parameter_symbol.index());
+        assert_eq!(
+            store.symbols.get(method_symbol).owner,
+            store.symbols.get(field_symbol).owner
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(method_symbol)
+        );
+    }
+
+    #[test]
+    fn sibling_nested_class_headers_precede_descendant_class_headers() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let deep = class_definition(&mut arena, &mut store, "Deep", vec![], vec![], None);
+        let first = class_definition(&mut arena, &mut store, "First", vec![], vec![deep], None);
+        let sibling = class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![first, sibling],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "nested_headers", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 72, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(72);
+        let first_symbol = index.symbol_at(source, first).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling).unwrap();
+        let deep_symbol = index.symbol_at(source, deep).unwrap();
+
+        assert!(first_symbol.index() < sibling_symbol.index());
+        assert_eq!(
+            store.symbols.get(first_symbol).owner,
+            store.symbols.get(sibling_symbol).owner
+        );
+        assert_eq!(
+            store.symbols.get(first_symbol).owner,
+            store.symbols.get(sibling_symbol).owner
+        );
+        assert_eq!(store.symbols.get(deep_symbol).owner, Some(first_symbol));
+    }
+
+    #[test]
+    fn package_class_headers_precede_class_header_parameters() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "value",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let first = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "First",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        )
+        .0;
+        let sibling = class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "package_headers",
+            vec![first, sibling],
+        );
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 73, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(73);
+        let first_symbol = index.symbol_at(source, first).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert!(first_symbol.index() < sibling_symbol.index());
+        assert!(sibling_symbol.index() < parameter_symbol.index());
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(first_symbol)
+        );
+    }
+
+    #[test]
+    fn sibling_package_headers_precede_descendant_class_headers() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let deep = class_definition(&mut arena, &mut store, "Deep", vec![], vec![], None);
+        let first_class =
+            class_definition(&mut arena, &mut store, "First", vec![], vec![deep], None);
+        let first_package = package_with_stat(&mut arena, &mut store, "first", vec![first_class]);
+        let sibling_class =
+            class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let sibling_package =
+            package_with_stat(&mut arena, &mut store, "sibling", vec![sibling_class]);
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "root",
+            vec![first_package, sibling_package],
+        );
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 74, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(74);
+        let deep_symbol = index.symbol_at(source, deep).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling_class).unwrap();
+        let first_package_symbol = index.symbol_at(source, first_package).unwrap();
+        let sibling_package_symbol = index.symbol_at(source, sibling_package).unwrap();
+
+        assert!(first_package_symbol.index() < sibling_package_symbol.index());
+        assert!(sibling_package_symbol.index() < deep_symbol.index());
+        assert_eq!(
+            store.symbols.get(sibling_symbol).owner,
+            Some(sibling_package_symbol)
+        );
     }
 
     #[test]
