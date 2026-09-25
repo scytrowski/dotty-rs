@@ -356,7 +356,7 @@ where
                 uses: Vec::new(),
             },
         };
-        let constructor_visibility = constructor_metadata.visibility.clone();
+        let constructor_visibility = constructor_metadata.visibility;
         let (constructor, constructor_start) = self.synthetic_primary_constructor(
             mark.start(),
             type_params,
