@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, New, Parens, Quote, Select, Super, This, Tuple, UntypedNode,
-    ValDef,
+    Apply, ApplyKind, Block, Ident, New, Parens, Quote, Select, SplicePattern, Super, This, Tuple,
+    UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -87,14 +87,17 @@ where
     }
 
     fn parse_quote(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let in_pattern = self.context.parse_kind == crate::ParseKind::Pattern;
         self.advance();
         match self.current().kind {
             TokenKind::Punctuation(Punctuation::LeftBrace) => {
                 self.advance();
                 let body_mark = self.mark();
                 self.expression_quote_depth += 1;
+                self.quote_pattern_depth += u32::from(in_pattern);
                 let (stats, expr) = self
                     .parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+                self.quote_pattern_depth -= u32::from(in_pattern);
                 self.expression_quote_depth -= 1;
                 let body = if stats.is_empty() {
                     if self.is_synthetic_unit(expr) {
@@ -260,11 +263,41 @@ where
                     backquoted: false,
                 }),
             );
+            if self.quote_pattern_depth > 0 {
+                return self.alloc_from(
+                    mark,
+                    TreeKind::SplicePattern(SplicePattern {
+                        body: expr,
+                        type_args: Vec::new(),
+                        args: Vec::new(),
+                    }),
+                );
+            }
             return self.alloc_from(mark, TreeKind::Splice(dotty_core::ast::Splice { expr }));
         }
 
         self.advance(); // `$`
         self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
+        if self.quote_pattern_depth > 0 {
+            let body = self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
+                parser.with_location(crate::Location::InPattern, |parser| parser.pattern())
+            });
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `}` to close pattern splice",
+                );
+            }
+            return self.alloc_from(
+                mark,
+                TreeKind::SplicePattern(SplicePattern {
+                    body,
+                    type_args: Vec::new(),
+                    args: Vec::new(),
+                }),
+            );
+        }
+
         let body_mark = self.mark();
         let (stats, expr) =
             self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));

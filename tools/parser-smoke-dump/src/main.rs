@@ -683,6 +683,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::NamedArg(_) => "NamedArg",
         TreeKind::Quote(_) => "Quote",
         TreeKind::Splice(_) => "Splice",
+        TreeKind::QuotePattern(_) => "QuotePattern",
+        TreeKind::SplicePattern(_) => "SplicePattern",
         TreeKind::PackageDef(_) => "PackageDef",
         TreeKind::Import(_) => "Import",
         TreeKind::Export(_) => "Export",
@@ -837,6 +839,20 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],
         TreeKind::Quote(quote) => vec![quote.body],
         TreeKind::Splice(splice) => vec![splice.expr],
+        TreeKind::QuotePattern(quote) => {
+            let mut children = Vec::with_capacity(quote.bindings.len() + 2);
+            children.extend(quote.bindings.iter().copied());
+            children.push(quote.body);
+            children.push(quote.quotes);
+            children
+        }
+        TreeKind::SplicePattern(splice) => {
+            let mut children = Vec::with_capacity(1 + splice.type_args.len() + splice.args.len());
+            children.push(splice.body);
+            children.extend(splice.type_args.iter().copied());
+            children.extend(splice.args.iter().copied());
+            children
+        }
         TreeKind::Typed(typed) => vec![typed.expr, typed.tpt],
         TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
         TreeKind::If(if_tree) => {

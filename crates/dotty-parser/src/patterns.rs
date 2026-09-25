@@ -313,7 +313,8 @@ where
                 self.alloc_from(mark, TreeKind::This(dotty_core::ast::This { qual: None }))
             }
             TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
-            TokenKind::Keyword(HardKeyword::Given) | TokenKind::Quote | TokenKind::XmlStart => {
+            TokenKind::Quote => self.simple_expr(),
+            TokenKind::Keyword(HardKeyword::Given) | TokenKind::XmlStart => {
                 self.unsupported_pattern()
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_pattern_parens(mark),
@@ -630,8 +631,86 @@ fn can_start_simple_pattern_at<S: TokenSource>(
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Alternative, Apply, Bind, Ident, Tuple, UntypedNode};
+    use dotty_core::ast::{Alternative, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode};
     use dotty_core::{NameInterner, Punctuation, TextRange};
+
+    #[test]
+    fn quoted_pattern_parses_simple_dollar_identifiers_as_splice_patterns() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'{ $x + $y }",
+            vec![
+                token(TokenKind::Quote, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(TokenKind::Identifier, 3, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Quote(quote) = &result.ast.get(result.root).kind else {
+            panic!("Dotty's parser-level quoted pattern is represented by Quote");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &result.ast.get(quote.body).kind
+        else {
+            panic!("expected the quoted infix pattern body");
+        };
+        assert!(matches!(
+            result.ast.get(infix.left).kind,
+            TreeKind::SplicePattern(SplicePattern { .. })
+        ));
+        assert!(matches!(
+            result.ast.get(infix.right).kind,
+            TreeKind::SplicePattern(SplicePattern { .. })
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 12).unwrap()
+        );
+    }
+
+    #[test]
+    fn quoted_pattern_braced_splice_parses_a_pattern_body() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'{ ${x | y} }",
+            vec![
+                token(TokenKind::Quote, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Quote(quote) = &result.ast.get(result.root).kind else {
+            panic!("expected a parser-level Quote node");
+        };
+        let TreeKind::SplicePattern(splice) = &result.ast.get(quote.body).kind else {
+            panic!("expected a pattern splice");
+        };
+        assert!(matches!(
+            result.ast.get(splice.body).kind,
+            TreeKind::Alternative(_)
+        ));
+        assert_eq!(
+            result.ast.get(quote.body).position.unwrap().span().range(),
+            TextRange::new(3, 11).unwrap()
+        );
+    }
 
     #[test]
     fn parses_an_identifier_pattern() {
