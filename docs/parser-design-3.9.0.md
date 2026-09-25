@@ -172,8 +172,11 @@ Value definitions are preserved as statements in this root: simple identifiers u
 `ValDef` (with `Modifier::Var` for `var`), while non-simple left-hand sides use
 the source-level `PatDef` form. A typed `ValDef` may omit its RHS as a
 declaration, as may a typed `PatDef` containing only simple identifiers. A
-`PatDef` with a complex pattern still requires `=` and receives an error
-placeholder when the source is malformed;
+symbolic operator token is also accepted as a simple value name when followed
+by a type annotation or assignment; it is kept in `ValDef`, matching Dotty's
+source tree rather than being reinterpreted as an operator expression or a
+general pattern. A `PatDef` with a complex pattern still requires `=` and
+receives an error placeholder when the source is malformed;
 the parser uses a zero-width synthetic `TypeTree` when no explicit type is
 written.
 

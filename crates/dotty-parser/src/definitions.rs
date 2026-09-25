@@ -177,7 +177,17 @@ where
         mut metadata: Modifiers,
     ) -> ParsedStatement {
         let name = match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+            TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Operator
+            | TokenKind::ColonOp => {
+                if self.current().kind == TokenKind::Operator && self.current_text_is("=") {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a value name after `val` or `var`",
+                    );
+                    return self.malformed_definition();
+                }
                 match self.intern_current_term_name() {
                     Ok(name) => {
                         self.advance();
@@ -355,10 +365,16 @@ fn is_definition_colon<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S
 fn starts_simple_value_definition<S: dotty_core::TokenSource>(
     parser: &mut Parser<'_, '_, S>,
 ) -> bool {
+    let kind = parser.current().kind;
+    let symbolic_name = matches!(kind, TokenKind::Operator | TokenKind::ColonOp);
     if !matches!(
-        parser.current().kind,
+        kind,
         TokenKind::Identifier | TokenKind::BackquotedIdentifier
-    ) {
+    ) && !symbolic_name
+    {
+        return false;
+    }
+    if symbolic_name && parser.current_text_is("=") {
         return false;
     }
 
@@ -478,6 +494,112 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(name_id), "x");
+    }
+
+    #[test]
+    fn parses_a_symbolic_operator_as_a_typed_value_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val * : N = \"*\"",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::StringLiteral, 12, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected Dotty's source-level ValDef shape");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser.ast().get(*definition.rhs.as_ref().unwrap()).kind,
+            TreeKind::Literal(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "*");
+    }
+
+    #[test]
+    fn parses_a_symbolic_operator_as_an_inferred_value_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val + = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::IntegerLiteral, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::TypeTree(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(*definition.rhs.as_ref().unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "+");
+    }
+
+    #[test]
+    fn parses_a_colon_ending_operator_as_a_value_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val :: = 2",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::ColonOp, 4, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::IntegerLiteral, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(matches!(
+            parser.ast().get(*definition.rhs.as_ref().unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "::");
     }
 
     #[test]
