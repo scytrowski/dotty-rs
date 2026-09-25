@@ -53,6 +53,20 @@ parsing and records both version and revision in the report. This keeps a
 checked-in baseline reproducible rather than silently measuring a newer
 compiler tree.
 
+`baseline-scala3-3.9.0.json` is the initial measurement from issue #185.
+`parser-v0.1-final-scala3-3.9.0.json` is the post-#186–#193 measurement used
+for the Parser v0.1 gate. Recreate the latter from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-v0.1-final-scala3-3.9.0.json
+```
+
+The checked-in final report was measured against dotty-rs commit
+`1562374` (the `main` tip after PR #217). Its `source_revision` identifies
+the Scala checkout, not the dotty-rs revision; the latter is recorded here so
+the two dimensions are not confused.
+
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact
 Scala/Rust differential gate for the checked-in fixture corpus. This report is
 the larger source-compatibility measurement and does not weaken that gate.
