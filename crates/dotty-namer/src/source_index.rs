@@ -214,6 +214,135 @@ mod tests {
     }
 
     #[test]
+    fn canonical_and_derived_source_identities_coexist() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let canonical = symbol(&mut store);
+        let derived = symbol(&mut store);
+        let source = SourceId::from_index(3);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index.record_symbol(source, tree, canonical).unwrap();
+        index
+            .record_derived_symbol(owner, source, tree, derived)
+            .unwrap();
+
+        assert_eq!(index.symbol_at(source, tree), Some(canonical));
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(derived));
+    }
+
+    #[test]
+    fn derived_identity_is_not_returned_by_canonical_lookup() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let derived = symbol(&mut store);
+        let source = SourceId::from_index(4);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(owner, source, tree, derived)
+            .unwrap();
+
+        assert_eq!(index.symbol_at(source, tree), None);
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(derived));
+    }
+
+    #[test]
+    fn one_source_tree_can_have_derived_identities_for_multiple_owners() {
+        let mut store = SemanticStore::new();
+        let first_owner = symbol(&mut store);
+        let second_owner = symbol(&mut store);
+        let first_derived = symbol(&mut store);
+        let second_derived = symbol(&mut store);
+        let source = SourceId::from_index(5);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(first_owner, source, tree, first_derived)
+            .unwrap();
+        index
+            .record_derived_symbol(second_owner, source, tree, second_derived)
+            .unwrap();
+
+        assert_eq!(
+            index.derived_symbol_at(first_owner, source, tree),
+            Some(first_derived)
+        );
+        assert_eq!(
+            index.derived_symbol_at(second_owner, source, tree),
+            Some(second_derived)
+        );
+    }
+
+    #[test]
+    fn derived_lookup_requires_the_exact_owner() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let other_owner = symbol(&mut store);
+        let derived = symbol(&mut store);
+        let source = SourceId::from_index(6);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(owner, source, tree, derived)
+            .unwrap();
+
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(derived));
+        assert_eq!(index.derived_symbol_at(other_owner, source, tree), None);
+    }
+
+    #[test]
+    fn derived_identity_distinguishes_sources_with_the_same_tree_id() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let first = symbol(&mut store);
+        let second = symbol(&mut store);
+        let tree = tree_id();
+        let first_source = SourceId::from_index(7);
+        let second_source = SourceId::from_index(8);
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(owner, first_source, tree, first)
+            .unwrap();
+        index
+            .record_derived_symbol(owner, second_source, tree, second)
+            .unwrap();
+
+        assert_eq!(
+            index.derived_symbol_at(owner, first_source, tree),
+            Some(first)
+        );
+        assert_eq!(
+            index.derived_symbol_at(owner, second_source, tree),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn registering_a_derived_identity_does_not_change_scope_lookup() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let derived = symbol(&mut store);
+        let scope = store.scopes.alloc(Scope::new(Some(owner)));
+        let source = SourceId::from_index(9);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index.record_scope(owner, scope).unwrap();
+        index
+            .record_derived_symbol(owner, source, tree, derived)
+            .unwrap();
+
+        assert_eq!(index.scope_of(owner), Some(scope));
+        assert_eq!(index.scope_of(derived), None);
+    }
+
+    #[test]
     fn registering_the_same_scope_for_a_symbol_is_idempotent() {
         let mut store = SemanticStore::new();
         let owner = symbol(&mut store);
