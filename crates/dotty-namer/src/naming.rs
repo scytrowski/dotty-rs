@@ -247,27 +247,9 @@ impl Namer<'_> {
     fn partition_package_stats(
         &self,
         stats: &[TreeId<Untyped>],
-    ) -> (Vec<TreeId<Untyped>>, Vec<TreeId<Untyped>>) {
-        let mut wrapped_type_names = HashSet::new();
-        for tree in stats {
-            if let TreeKind::TypeDef(definition) = &self.arena.get(*tree).kind {
-                let class_like =
-                    matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_));
-                let given_or_implicit = definition
-                    .metadata
-                    .modifiers
-                    .iter()
-                    .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit));
-                if !class_like || given_or_implicit {
-                    wrapped_type_names.insert(
-                        self.store
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            .to_owned(),
-                    );
-                }
-            }
-        }
+        package_path: &[String],
+    ) -> Result<(Vec<TreeId<Untyped>>, Vec<TreeId<Untyped>>), NamerError> {
+        let wrapped_type_names = self.wrapped_type_names_for_package_path(package_path)?;
 
         let mut top_stats = Vec::new();
         let mut wrapped_stats = Vec::new();
@@ -305,7 +287,65 @@ impl Namer<'_> {
                 top_stats.push(*tree);
             }
         }
-        (top_stats, wrapped_stats)
+        Ok((top_stats, wrapped_stats))
+    }
+
+    fn wrapped_type_names_for_package_path(
+        &self,
+        package_path: &[String],
+    ) -> Result<HashSet<String>, NamerError> {
+        fn collect(
+            namer: &Namer<'_>,
+            tree: TreeId<Untyped>,
+            enclosing_package: &[String],
+            source_root: bool,
+            package_path: &[String],
+            names: &mut HashSet<String>,
+        ) -> Result<(), NamerError> {
+            let TreeKind::PackageDef(package) = &namer.arena.get(tree).kind else {
+                return Ok(());
+            };
+            let segments = if source_root && namer.is_empty_package_sentinel(package.name) {
+                Vec::new()
+            } else {
+                namer.flatten_package_name(package.name)?
+            };
+            let mut current_path = enclosing_package.to_vec();
+            current_path.extend(segments);
+
+            if current_path == package_path {
+                for stat in &package.stats {
+                    if let TreeKind::TypeDef(definition) = &namer.arena.get(*stat).kind {
+                        let class_like =
+                            matches!(namer.arena.get(definition.rhs).kind, TreeKind::Template(_));
+                        let given_or_implicit =
+                            definition.metadata.modifiers.iter().any(|modifier| {
+                                matches!(modifier, Modifier::Given | Modifier::Implicit)
+                            });
+                        if !class_like || given_or_implicit {
+                            names.insert(
+                                namer
+                                    .store
+                                    .names
+                                    .resolve(definition.name.as_name().text())
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            for stat in &package.stats {
+                if matches!(namer.arena.get(*stat).kind, TreeKind::PackageDef(_)) {
+                    collect(namer, *stat, &current_path, false, package_path, names)?;
+                }
+            }
+            Ok(())
+        }
+
+        let mut names = HashSet::new();
+        collect(self, self.root, &[], true, package_path, &mut names)?;
+        Ok(names)
     }
 
     fn enter_source_package_wrapper(
@@ -800,7 +840,8 @@ impl Namer<'_> {
                 let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
                     return Ok(());
                 };
-                let (top_stats, wrapped_stats) = self.partition_package_stats(&package.stats);
+                let (top_stats, wrapped_stats) =
+                    self.partition_package_stats(&package.stats, &context.package_path)?;
                 let mut headers = Vec::new();
                 for stat in top_stats {
                     match self.arena.get(stat).kind {
@@ -2861,6 +2902,53 @@ mod tests {
                 .lookup_all(TypeName::new(store.names.intern("Repeated$package$")).as_name())
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn repeated_package_clauses_partition_companions_together() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let given_type = class_definition(
+            &mut arena,
+            &mut store,
+            "Shared",
+            vec![Modifier::Given],
+            vec![],
+            None,
+        );
+        let (companion, _, _) =
+            module_definition(&mut arena, &mut store, "Shared", vec![], None, vec![], None);
+        let first_package = package_with_stat(&mut arena, &mut store, "repeated", vec![given_type]);
+        let second_package = package_with_stat(&mut arena, &mut store, "repeated", vec![companion]);
+        let root_name = ident(&mut arena, &mut store, "<empty>");
+        let root = package(&mut arena, root_name, vec![first_package, second_package]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(92);
+        let index = name_compilation_unit(
+            &arena,
+            root,
+            source,
+            "Repeated.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let package = packages.get(&["repeated"]).unwrap();
+        let wrapper = type_symbol(&mut store, package.scope, "Repeated$package$").unwrap();
+        let given_symbol = index.symbol_at(source, given_type).unwrap();
+        let companion_symbol = index.symbol_at(source, companion).unwrap();
+
+        assert_eq!(store.symbols.get(given_symbol).owner, Some(wrapper));
+        assert_eq!(store.symbols.get(companion_symbol).owner, Some(wrapper));
+        assert_eq!(
+            store.symbols.get(given_symbol).links.companion,
+            Some(companion_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(companion_symbol).links.companion,
+            Some(given_symbol)
         );
     }
 
