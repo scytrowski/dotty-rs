@@ -17,7 +17,10 @@ where
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let tree = self.simple_expr_atom(mark);
-        let can_apply = !matches!(self.ast.get(tree).kind, TreeKind::Block(_));
+        let can_apply = !matches!(
+            self.ast.get(tree).kind,
+            TreeKind::Block(_) | TreeKind::Match(_)
+        );
 
         self.simple_expr_rest(mark, tree, can_apply)
     }
@@ -373,6 +376,20 @@ where
 
     fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+            let cases = self.case_clauses();
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `}` to close case-lambda clauses",
+                );
+            }
+            let selector = self.synthetic_unit_at(mark.start());
+            return self.alloc_from(
+                mark,
+                TreeKind::Match(dotty_core::ast::Match { selector, cases }),
+            );
+        }
         let (stats, expr) =
             self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
@@ -617,10 +634,10 @@ where
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
             {
                 if !can_apply {
-                    let message = if matches!(self.ast.get(qualifier).kind, TreeKind::Block(_)) {
-                        "a block expression cannot be applied as a function"
-                    } else {
-                        "a constructor application cannot be applied again"
+                    let message = match &self.ast.get(qualifier).kind {
+                        TreeKind::Block(_) => "a block expression cannot be applied as a function",
+                        TreeKind::Match(_) => "a case-lambda cannot be applied directly",
+                        _ => "a constructor application cannot be applied again",
                     };
                     self.report(crate::ParseDiagnosticKind::UnexpectedToken, message);
                     break;
@@ -631,6 +648,21 @@ where
                 if is_constructor_application {
                     can_apply = false;
                 }
+            } else if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBrace))
+                && can_apply
+                && !self.is_new_without_template_support(qualifier)
+            {
+                let argument = self.parse_block(self.mark());
+                qualifier = self.alloc_from(
+                    mark,
+                    TreeKind::Apply(Apply {
+                        function: qualifier,
+                        args: vec![argument],
+                        kind: ApplyKind::Regular,
+                    }),
+                );
             } else {
                 break;
             }
@@ -644,6 +676,16 @@ where
             }
         }
         qualifier
+    }
+
+    fn is_new_without_template_support(&self, tree: TreeId<Untyped>) -> bool {
+        let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
+            return matches!(self.ast.get(tree).kind, TreeKind::New(_));
+        };
+        let TreeKind::Select(selection) = &self.ast.get(application.function).kind else {
+            return false;
+        };
+        matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_))
     }
 
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {

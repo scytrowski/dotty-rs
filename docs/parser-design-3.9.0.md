@@ -203,6 +203,8 @@ the initial `if` and `while` expression forms
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
+braced partial-function literals (`{ case ... }`), including as a braced
+application argument
 for-comprehensions with generators, case generators, aliases, guards, and
 `yield`/`do` bodies
 simple `val`/`var` definitions with inferred or explicit types, declarations
@@ -661,6 +663,12 @@ clauses, for-comprehensions, ascriptions, and the initial using/colon argument
 forms are implemented above this layer. Full types, argument validation,
 remaining colon forms, and the rest of the higher-level expression grammar
 remain future work.
+
+Braced partial-function literals use the same source-level `Match` node and
+`CaseDef` clauses as Dotty 3.9. Dotty's selector is `EmptyTree`; the current
+shared Rust `Match` node requires a selector ID, so the parser uses a
+zero-width synthetic Unit literal, which the oracle omits from normalized
+children.
 
 ## For-comprehensions
 
