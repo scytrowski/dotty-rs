@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn case_class_first_clause_accessor_is_a_field_and_private_local_parameter_is_not() {
+    fn case_class_later_private_local_parameter_is_scoped_but_not_a_field() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let first = value_parameter(
@@ -1538,7 +1538,10 @@ mod tests {
             Some(first_symbol)
         );
         assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
-        assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "y"),
+            Some(later_symbol)
+        );
     }
 
     #[test]
