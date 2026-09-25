@@ -59,14 +59,11 @@ impl SourceSemanticIndex {
     /// Duplicate scope registration is an internal naming error and leaves
     /// the existing mapping intact.
     pub fn record_scope(&mut self, symbol: SymbolId, scope: ScopeId) -> Result<(), NamerError> {
-        match self.scopes_by_owner.get(&symbol) {
-            Some(existing) if *existing == scope => Ok(()),
-            Some(_) => Err(NamerError::DuplicateDeclarationScope { symbol }),
-            None => {
-                self.scopes_by_owner.insert(symbol, scope);
-                Ok(())
-            }
+        if self.scopes_by_owner.contains_key(&symbol) {
+            return Err(NamerError::DuplicateDeclarationScope { symbol });
         }
+        self.scopes_by_owner.insert(symbol, scope);
+        Ok(())
     }
 }
 
@@ -145,19 +142,6 @@ mod tests {
             }) if duplicate_source == source
         ));
         assert_eq!(index.symbol_at(source, tree), Some(first));
-    }
-
-    #[test]
-    fn registering_the_same_scope_for_a_symbol_is_idempotent() {
-        let mut store = SemanticStore::new();
-        let owner = symbol(&mut store);
-        let scope = store.scopes.alloc(Scope::new(Some(owner)));
-        let mut index = SourceSemanticIndex::new();
-
-        index.record_scope(owner, scope).unwrap();
-        index.record_scope(owner, scope).unwrap();
-
-        assert_eq!(index.scope_of(owner), Some(scope));
     }
 
     #[test]
