@@ -5,7 +5,7 @@
 //! constructors, givens, and extensions can reuse it without duplicating the
 //! delimiter and recovery logic.
 
-use dotty_core::ast::{Modifier, Modifiers, ValDef};
+use dotty_core::ast::{ByNameTypeTree, Modifier, Modifiers, ValDef};
 use dotty_core::{Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::names::synthetic_term_param_name;
@@ -266,7 +266,16 @@ where
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
             self.advance();
-            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
+            self.with_parse_kind(ParseKind::Type, |parser| {
+                if parser.current_is_arrow() {
+                    let mark = parser.mark();
+                    parser.advance();
+                    let result = parser.type_expr();
+                    parser.alloc_from(mark, TreeKind::ByNameTypeTree(ByNameTypeTree { result }))
+                } else {
+                    parser.type_expr()
+                }
+            })
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedType,
