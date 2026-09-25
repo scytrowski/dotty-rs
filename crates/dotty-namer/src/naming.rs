@@ -26,6 +26,8 @@ pub enum NamerError {
         source: SourceId,
         tree_index: u32,
     },
+    /// An extension method was assigned prefix-clause metadata more than once.
+    DuplicateExtensionPrefixClauses { method: SymbolId },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
     /// A tree did not have the shape required by a naming routine.
@@ -77,6 +79,11 @@ impl fmt::Display for NamerError {
                 "source {} tree {tree_index} already has a derived semantic symbol for owner {}",
                 source.index(),
                 owner.index()
+            ),
+            Self::DuplicateExtensionPrefixClauses { method } => write!(
+                f,
+                "method symbol {} already has extension prefix clauses",
+                method.index()
             ),
             Self::DuplicateDeclarationScope { symbol } => {
                 write!(
