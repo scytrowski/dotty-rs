@@ -233,7 +233,7 @@ fn a_parsed_implicit_class_sets_the_implicit_symbol_flag() {
     assert!(parsed.diagnostics.is_empty());
     let mut packages = Packages::new();
 
-    name_compilation_unit(
+    let index = name_compilation_unit(
         &parsed.ast,
         parsed.root,
         source,
@@ -243,10 +243,17 @@ fn a_parsed_implicit_class_sets_the_implicit_symbol_flag() {
     )
     .unwrap();
     let root_package = packages.get::<&str>(&[]).unwrap();
+    let wrapper_name = TypeName::new(store.names.intern("ImplicitClass$package$"));
+    let wrapper = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(wrapper_name.as_name())
+        .unwrap();
+    let wrapper_scope = index.scope_of(wrapper).unwrap();
     let class_name = TypeName::new(store.names.intern("C"));
     let class = store
         .scopes
-        .get(root_package.scope)
+        .get(wrapper_scope)
         .lookup(class_name.as_name())
         .unwrap();
 
@@ -549,6 +556,13 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
         .lookup(&class_name)
         .unwrap();
     let class_scope = index.scope_of(class_symbol).unwrap();
+    let wrapper_name = TypeName::new(store.names.intern("Members$package$"));
+    let wrapper_class = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(wrapper_name.as_name())
+        .unwrap();
+    let wrapper_scope = index.scope_of(wrapper_class).unwrap();
     let field_tree_name = match &parsed.ast.get(field_tree).kind {
         TreeKind::ValDef(field) => *field.name.as_name(),
         _ => unreachable!(),
@@ -656,8 +670,35 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     );
     assert_eq!(index.symbol_at(source, alias_tree), Some(alias_symbol));
     assert_eq!(index.symbol_at(source, method_body), None);
-    assert_eq!(index.symbol_at(source, top_level_value), None);
-    assert_eq!(index.symbol_at(source, top_level_method), None);
+    let top_value_symbol = index.symbol_at(source, top_level_value).unwrap();
+    let top_method_symbol = index.symbol_at(source, top_level_method).unwrap();
+    assert_eq!(
+        store.symbols.get(top_value_symbol).owner,
+        Some(wrapper_class)
+    );
+    assert_eq!(
+        store.symbols.get(top_method_symbol).owner,
+        Some(wrapper_class)
+    );
+    assert_eq!(
+        store.symbols.get(top_value_symbol).kind,
+        dotty_core::SymbolKind::Field
+    );
+    assert_eq!(
+        store.symbols.get(top_method_symbol).kind,
+        dotty_core::SymbolKind::Method
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(wrapper_scope)
+            .lookup(top_value_name.as_name()),
+        Some(top_value_symbol)
+    );
+    assert_eq!(
+        store.scopes.get(wrapper_scope).lookup(top_name.as_name()),
+        Some(top_method_symbol)
+    );
     assert_eq!(
         store
             .scopes

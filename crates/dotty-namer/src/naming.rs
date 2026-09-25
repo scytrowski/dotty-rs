@@ -1,5 +1,6 @@
 //! Compilation-unit naming entry point and traversal seam.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
@@ -112,6 +113,11 @@ enum EnteredHeader {
         tree: TreeId<Untyped>,
         context: NamingContext,
     },
+    SourcePackageWrapper {
+        stats: Vec<TreeId<Untyped>>,
+        context: NamingContext,
+        package_symbol: SymbolId,
+    },
     ClassLike {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
@@ -173,13 +179,14 @@ pub fn name_compilation_unit(
         let mut namer = Namer {
             arena,
             source,
-            _source_file_name: source_file_name,
+            source_file_name,
             store,
             packages,
             root,
             index: SourceSemanticIndex::new(),
             scope_insertions: Vec::new(),
             companion_links: Vec::new(),
+            package_private_boundary: None,
         };
         let result = namer.index(root).map(|()| namer.index);
         (result, namer.scope_insertions, namer.companion_links)
@@ -206,13 +213,14 @@ pub fn name_compilation_unit(
 struct Namer<'a> {
     arena: &'a AstArena<Untyped>,
     source: SourceId,
-    _source_file_name: &'a str,
+    source_file_name: &'a str,
     store: &'a mut SemanticStore,
     packages: &'a mut Packages,
     root: TreeId<Untyped>,
     index: SourceSemanticIndex,
     scope_insertions: Vec<(ScopeId, SymbolId)>,
     companion_links: Vec<(SymbolId, SymbolId)>,
+    package_private_boundary: Option<(SymbolId, SymbolId)>,
 }
 
 impl Namer<'_> {
@@ -228,6 +236,244 @@ impl Namer<'_> {
         source_root: bool,
     ) -> Result<(), NamerError> {
         self.index_expanded(tree, enclosing_package, source_root)
+    }
+
+    fn partition_package_stats(
+        &self,
+        stats: &[TreeId<Untyped>],
+    ) -> (Vec<TreeId<Untyped>>, Vec<TreeId<Untyped>>) {
+        let mut wrapped_type_names = HashSet::new();
+        for tree in stats {
+            if let TreeKind::TypeDef(definition) = &self.arena.get(*tree).kind {
+                let class_like =
+                    matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_));
+                let given_or_implicit = definition
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit));
+                if !class_like || given_or_implicit {
+                    wrapped_type_names.insert(
+                        self.store
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+
+        let mut top_stats = Vec::new();
+        let mut wrapped_stats = Vec::new();
+        for tree in stats {
+            let wrapped = match &self.arena.get(*tree).kind {
+                TreeKind::PackageDef(_) => false,
+                TreeKind::ValDef(_) | TreeKind::DefDef(_) | TreeKind::Export(_) => true,
+                TreeKind::TypeDef(definition) => {
+                    let class_like =
+                        matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_));
+                    let given_or_implicit =
+                        definition.metadata.modifiers.iter().any(|modifier| {
+                            matches!(modifier, Modifier::Given | Modifier::Implicit)
+                        });
+                    !class_like || given_or_implicit
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    let given_or_implicit =
+                        definition.metadata.modifiers.iter().any(|modifier| {
+                            matches!(modifier, Modifier::Given | Modifier::Implicit)
+                        });
+                    given_or_implicit
+                        || wrapped_type_names
+                            .contains(self.store.names.resolve(definition.name.as_name().text()))
+                }
+                TreeKind::PhaseSpecific(
+                    UntypedNode::PatDef(_) | UntypedNode::ExtensionMethods(_),
+                ) => true,
+                TreeKind::Import(_) => continue,
+                _ => continue,
+            };
+            if wrapped {
+                wrapped_stats.push(*tree);
+            } else {
+                top_stats.push(*tree);
+            }
+        }
+        (top_stats, wrapped_stats)
+    }
+
+    fn enter_source_package_wrapper(
+        &mut self,
+        package_context: &NamingContext,
+        stats: Vec<TreeId<Untyped>>,
+    ) -> Result<EnteredHeader, NamerError> {
+        let stem = self
+            .source_file_name
+            .rsplit_once('.')
+            .map_or(self.source_file_name, |(stem, _)| stem);
+        let object_text = format!("{stem}$package");
+        let module_class_text = format!("{object_text}$");
+        let object_name =
+            *dotty_core::TermName::new(self.store.names.intern(&object_text)).as_name();
+        let module_class_name =
+            *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+        let object_symbol = self.store.symbols.alloc(Symbol {
+            name: object_name,
+            owner: Some(package_context.owner),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(package_context.scope)
+            .enter(object_name, object_symbol);
+        self.scope_insertions
+            .push((package_context.scope, object_symbol));
+
+        let module_class = self.store.symbols.alloc(Symbol {
+            name: module_class_name,
+            owner: Some(package_context.owner),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(package_context.scope)
+            .enter(module_class_name, module_class);
+        self.scope_insertions
+            .push((package_context.scope, module_class));
+        let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
+        self.index.record_scope(module_class, scope)?;
+
+        Ok(EnteredHeader::SourcePackageWrapper {
+            stats,
+            context: NamingContext {
+                owner: module_class,
+                scope,
+                package_path: package_context.package_path.clone(),
+            },
+            package_symbol: package_context.owner,
+        })
+    }
+
+    fn scan_source_package_wrapper(
+        &mut self,
+        stats: &[TreeId<Untyped>],
+        context: &NamingContext,
+        package_symbol: SymbolId,
+    ) -> Result<(), NamerError> {
+        let previous_boundary = self.package_private_boundary;
+        self.package_private_boundary = Some((context.owner, package_symbol));
+        let mut headers = Vec::new();
+        for tree in stats {
+            match self.enter_wrapped_stat_headers(*tree, context) {
+                Ok(entered) => headers.extend(entered),
+                Err(error) => {
+                    self.package_private_boundary = previous_boundary;
+                    return Err(error);
+                }
+            }
+        }
+        for header in headers {
+            if let Err(error) = self.scan_entered_header(header) {
+                self.package_private_boundary = previous_boundary;
+                return Err(error);
+            }
+        }
+        self.package_private_boundary = previous_boundary;
+        Ok(())
+    }
+
+    fn enter_wrapped_stat_headers(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: &NamingContext,
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
+        match &self.arena.get(tree).kind {
+            TreeKind::TypeDef(definition) => {
+                if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
+                    Ok(self
+                        .enter_class_or_trait_header(tree, context)?
+                        .into_iter()
+                        .collect())
+                } else {
+                    let definition = definition.clone();
+                    let spec = self.source_symbol_spec(
+                        tree,
+                        &definition.metadata,
+                        context.owner,
+                        SymbolKind::TypeAlias,
+                    )?;
+                    let symbol = self.enter_symbol(
+                        tree,
+                        *definition.name.as_name(),
+                        context.owner,
+                        context.scope,
+                        spec,
+                    )?;
+                    Ok(vec![EnteredHeader::TypeAlias { tree, symbol }])
+                }
+            }
+            TreeKind::ValDef(definition) => {
+                let definition = definition.clone();
+                let spec = self.source_symbol_spec(
+                    tree,
+                    &definition.metadata,
+                    context.owner,
+                    SymbolKind::Field,
+                )?;
+                let symbol = self.enter_symbol(
+                    tree,
+                    *definition.name.as_name(),
+                    context.owner,
+                    context.scope,
+                    spec,
+                )?;
+                Ok(vec![EnteredHeader::Field { tree, symbol }])
+            }
+            TreeKind::DefDef(definition) => self
+                .enter_method_header(tree, definition, context.owner, context.scope)
+                .map(|header| vec![header]),
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => Ok(self
+                .enter_module_header(tree, context)?
+                .into_iter()
+                .collect()),
+            // These raw source forms are assigned to the package wrapper by
+            // partitioning. Their lowered declarations are handled by later
+            // naming work, so they do not introduce identities here.
+            TreeKind::Export(_) | TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => Ok(Vec::new()),
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                let mut headers = Vec::new();
+                for method in &extension.methods {
+                    let TreeKind::DefDef(definition) = &self.arena.get(*method).kind else {
+                        return Err(NamerError::MalformedAstShape {
+                            tree_index: method.index(),
+                            expected: "DefDef extension method",
+                        });
+                    };
+                    headers.push(self.enter_method_header(
+                        *method,
+                        definition,
+                        context.owner,
+                        context.scope,
+                    )?);
+                }
+                Ok(headers)
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 
     fn index_expanded(
@@ -461,31 +707,45 @@ impl Namer<'_> {
                 let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
                     return Ok(());
                 };
+                let (top_stats, wrapped_stats) = self.partition_package_stats(&package.stats);
                 let mut headers = Vec::new();
-                for stat in &package.stats {
-                    match self.arena.get(*stat).kind {
+                for stat in top_stats {
+                    match self.arena.get(stat).kind {
                         TreeKind::PackageDef(_) => {
                             if let Some(header) =
-                                self.enter_package_header(*stat, &context.package_path, false)?
+                                self.enter_package_header(stat, &context.package_path, false)?
                             {
                                 headers.push(header);
                             }
                         }
                         TreeKind::TypeDef(_) => {
                             if let Some(header) =
-                                self.enter_class_or_trait_header(*stat, &context)?
+                                self.enter_class_or_trait_header(stat, &context)?
                             {
+                                headers.push(header);
+                            }
+                        }
+                        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
+                            if let Some(header) = self.enter_module_header(stat, &context)? {
                                 headers.push(header);
                             }
                         }
                         _ => {}
                     }
                 }
+                if !wrapped_stats.is_empty() {
+                    headers.push(self.enter_source_package_wrapper(&context, wrapped_stats)?);
+                }
                 for header in headers {
                     self.scan_entered_header(header)?;
                 }
                 return Ok(());
             }
+            EnteredHeader::SourcePackageWrapper {
+                stats,
+                context,
+                package_symbol,
+            } => return self.scan_source_package_wrapper(&stats, &context, package_symbol),
             EnteredHeader::ClassLike {
                 tree,
                 symbol,
@@ -997,6 +1257,10 @@ impl Namer<'_> {
         let supported_this_qualifier = |qualifier: Option<dotty_core::Name>| {
             qualifier.is_some_and(|name| self.store.names.resolve(name.text()) == "this")
         };
+        let owner = self
+            .package_private_boundary
+            .filter(|(wrapper, _)| Some(*wrapper) == owner)
+            .map_or(owner, |(_, package)| Some(package));
         match visibility {
             None => Ok(Visibility::Public),
             Some(VisibilitySyntax::Private { qualifier: None }) => Ok(owner
@@ -1522,9 +1786,12 @@ mod tests {
         let root = package_with_stat(&mut arena, &mut store, "flags", vec![class]);
         let mut packages = Packages::new();
 
-        name_package(&arena, root, 23, &mut store, &mut packages).unwrap();
+        let index = name_package(&arena, root, 23, &mut store, &mut packages).unwrap();
         let owner = packages.get(&["flags"]).unwrap();
-        let symbol = type_symbol(&mut store, owner.scope, "Flagged").unwrap();
+        let lookup_scope = type_symbol(&mut store, owner.scope, "Example$package$")
+            .and_then(|wrapper| index.scope_of(wrapper))
+            .unwrap_or(owner.scope);
+        let symbol = type_symbol(&mut store, lookup_scope, "Flagged").unwrap();
         store.symbols.get(symbol).flags
     }
 
@@ -2239,7 +2506,7 @@ mod tests {
     }
 
     #[test]
-    fn package_level_objects_remain_deferred() {
+    fn ordinary_package_level_objects_are_owned_by_the_package() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let (object, _, _) = module_definition(
@@ -2257,9 +2524,90 @@ mod tests {
         let index = name_package(&arena, root, 80, &mut store, &mut packages).unwrap();
         let package = packages.get(&["objects"]).unwrap();
 
-        assert_eq!(index.symbol_at(SourceId::from_index(80), object), None);
-        assert_eq!(term_symbol(&mut store, package.scope, "TopLevel"), None);
-        assert_eq!(type_symbol(&mut store, package.scope, "TopLevel$"), None);
+        let object_symbol = index.symbol_at(SourceId::from_index(80), object).unwrap();
+        let module_class = type_symbol(&mut store, package.scope, "TopLevel$").unwrap();
+        assert_eq!(
+            term_symbol(&mut store, package.scope, "TopLevel"),
+            Some(object_symbol)
+        );
+        assert_eq!(store.symbols.get(object_symbol).owner, Some(package.symbol));
+        assert_eq!(store.symbols.get(module_class).owner, Some(package.symbol));
+        assert!(index.scope_of(module_class).is_some());
+    }
+
+    #[test]
+    fn top_level_method_is_owned_by_source_named_synthetic_wrapper() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let method = method_definition(&mut arena, &mut store, "f", vec![], vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "wrapped", vec![method]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(83);
+        let index =
+            name_compilation_unit(&arena, root, source, "Foo.scala", &mut store, &mut packages)
+                .unwrap();
+        let package = packages.get(&["wrapped"]).unwrap();
+        let wrapper = term_symbol(&mut store, package.scope, "Foo$package").unwrap();
+        let wrapper_class = type_symbol(&mut store, package.scope, "Foo$package$").unwrap();
+        let wrapper_scope = index.scope_of(wrapper_class).unwrap();
+        let method_symbol = index.symbol_at(source, method).unwrap();
+
+        assert_eq!(store.symbols.get(wrapper).kind, SymbolKind::Object);
+        assert_eq!(
+            store.symbols.get(wrapper_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(store.symbols.get(wrapper).owner, Some(package.symbol));
+        assert_eq!(store.symbols.get(wrapper_class).owner, Some(package.symbol));
+        assert_eq!(store.symbols.get(wrapper).origin, SymbolOrigin::Synthetic);
+        assert_eq!(
+            store.symbols.get(wrapper_class).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert_eq!(store.symbols.get(wrapper).position, None);
+        assert_eq!(store.symbols.get(wrapper_class).position, None);
+        assert_eq!(store.symbols.get(method_symbol).owner, Some(wrapper_class));
+        assert_eq!(
+            store.symbols.get(method_symbol).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(term_symbol(&mut store, package.scope, "f"), None);
+        assert_eq!(
+            term_symbol(&mut store, wrapper_scope, "f"),
+            Some(method_symbol)
+        );
+    }
+
+    #[test]
+    fn private_top_level_method_keeps_the_package_as_its_access_boundary() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let method = method_definition(&mut arena, &mut store, "secret", vec![], vec![], None);
+        let TreeKind::DefDef(definition) = &mut arena.get_mut(method).kind else {
+            unreachable!();
+        };
+        definition.metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+        let root = package_with_stat(&mut arena, &mut store, "privatewrapped", vec![method]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(84);
+        let index = name_compilation_unit(
+            &arena,
+            root,
+            source,
+            "Private.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let package = packages.get(&["privatewrapped"]).unwrap();
+        let method_symbol = index.symbol_at(source, method).unwrap();
+
+        assert_eq!(
+            store.symbols.get(method_symbol).visibility,
+            Visibility::PrivateWithin(package.symbol)
+        );
     }
 
     #[test]
