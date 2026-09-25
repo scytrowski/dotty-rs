@@ -306,6 +306,7 @@ impl Namer<'_> {
                 *parameter.name.as_name(),
                 symbol,
                 SymbolKind::TypeParameter,
+                Visibility::Public,
                 scope,
                 true,
             )?;
@@ -324,6 +325,7 @@ impl Namer<'_> {
                 } else {
                     SymbolKind::Field
                 },
+                self.class_visibility(tree, &parameter.metadata.visibility)?,
                 scope,
                 true,
             )?;
@@ -333,6 +335,7 @@ impl Namer<'_> {
             *constructor.name.as_name(),
             symbol,
             SymbolKind::Constructor,
+            Visibility::Public,
             scope,
             true,
         )?;
@@ -367,6 +370,7 @@ impl Namer<'_> {
         name: dotty_core::Name,
         owner: SymbolId,
         kind: SymbolKind,
+        visibility: Visibility,
         scope: ScopeId,
         enter_in_scope: bool,
     ) -> Result<SymbolId, NamerError> {
@@ -375,7 +379,7 @@ impl Namer<'_> {
             owner: Some(owner),
             kind,
             flags: SymbolFlags::EMPTY,
-            visibility: Visibility::Public,
+            visibility,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
             annotations: Vec::new(),
@@ -1405,6 +1409,44 @@ mod tests {
             index.symbol_at(SourceId::from_index(20), parameter),
             Some(field_symbol)
         );
+    }
+
+    #[test]
+    fn private_val_constructor_parameter_keeps_private_visibility() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "secret",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let TreeKind::ValDef(definition) = &mut arena.get_mut(parameter).kind else {
+            unreachable!("value_parameter constructs a ValDef");
+        };
+        definition.metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "vals", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 29, &mut store, &mut packages).unwrap();
+        let symbol = index
+            .symbol_at(SourceId::from_index(29), parameter)
+            .unwrap();
+
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Private);
     }
 
     #[test]
