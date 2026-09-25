@@ -325,7 +325,7 @@ impl Namer<'_> {
                     SymbolKind::Field
                 },
                 scope,
-                !private_local,
+                true,
             )?;
         }
         self.enter_symbol(
@@ -1314,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn constructor_only_parameter_is_not_entered_in_class_scope() {
+    fn constructor_only_parameter_is_available_in_class_scope() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let parameter = value_parameter(
@@ -1354,7 +1354,10 @@ mod tests {
             store.symbols.get(parameter_symbol).owner,
             Some(class_symbol)
         );
-        assert_eq!(term_symbol(&mut store, class_scope, "x"), None);
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "x"),
+            Some(parameter_symbol)
+        );
         assert_eq!(
             store.symbols.get(parameter_symbol).visibility,
             Visibility::Public
