@@ -2148,6 +2148,12 @@ fn extension_prefix_parameters_are_derived_for_each_top_level_method() {
         named.store.symbols.get(own_value_parameter).owner,
         Some(first)
     );
+    assert!(
+        !definition
+            .metadata
+            .modifiers
+            .contains(&dotty_core::ast::Modifier::Extension)
+    );
     let first_prefix = named
         .index
         .derived_symbol_at(first, named.source, prefix[0])
@@ -2203,6 +2209,74 @@ fn extension_methods_inside_class_templates_are_named_with_prefixes() {
             .contains(SymbolFlags::EXTENSION)
     );
     assert_eq!(named.store.symbols.get(parameter).owner, Some(method));
+}
+
+#[test]
+fn extension_methods_inside_module_class_templates_are_named_with_prefixes() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "object O:\n  extension (value: Int)\n    def twice = value",
+        210,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("object declaration should be a ModuleDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(module.template).kind else {
+        panic!("object body should be a Template");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("object extension should remain an ExtensionMethods node");
+    };
+    let method = named
+        .index
+        .symbol_at(named.source, extension.methods[0])
+        .unwrap();
+    let receiver = named
+        .index
+        .derived_symbol_at(method, named.source, extension.param_clauses[0][0])
+        .unwrap();
+    let module_class = named.store.symbols.get(method).owner.unwrap();
+
+    assert_eq!(
+        named.store.symbols.get(module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(named.store.symbols.get(receiver).owner, Some(method));
+}
+
+#[test]
+fn extension_method_source_modifiers_and_visibility_are_preserved() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("extension (value: Int)\n  private def hidden = value", 211);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let method = named
+        .index
+        .symbol_at(named.source, extension.methods[0])
+        .unwrap();
+    let method_symbol = named.store.symbols.get(method);
+
+    assert!(method_symbol.flags.contains(SymbolFlags::EXTENSION));
+    assert!(matches!(
+        method_symbol.visibility,
+        Visibility::PrivateWithin(_)
+    ));
 }
 
 #[test]
