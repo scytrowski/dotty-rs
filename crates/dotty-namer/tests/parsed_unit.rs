@@ -3,7 +3,7 @@ use dotty_core::{
     SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
     Visibility,
 };
-use dotty_namer::{SourceSemanticIndex, name_compilation_unit};
+use dotty_namer::{NamerError, SourceSemanticIndex, name_compilation_unit};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 
 struct NamedSource {
@@ -13,7 +13,10 @@ struct NamedSource {
     index: SourceSemanticIndex,
 }
 
-fn named_source(source_text: &str, source_index: u32) -> NamedSource {
+fn parsed_source(
+    source_text: &str,
+    source_index: u32,
+) -> (dotty_parser::ParseResult, SourceId, SemanticStore) {
     let source = SourceId::from_index(source_index);
     let mut store = SemanticStore::new();
     let scanner = dotty_lexer::ContextualScanner::new(source_text).expect("source should lex");
@@ -24,6 +27,11 @@ fn named_source(source_text: &str, source_index: u32) -> NamedSource {
         &mut store.names,
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    (parsed, source, store)
+}
+
+fn named_source(source_text: &str, source_index: u32) -> NamedSource {
+    let (parsed, source, mut store) = parsed_source(source_text, source_index);
     let mut packages = Packages::new();
     let index = name_compilation_unit(
         &parsed.ast,
@@ -2195,4 +2203,280 @@ fn extension_methods_inside_class_templates_are_named_with_prefixes() {
             .contains(SymbolFlags::EXTENSION)
     );
     assert_eq!(named.store.symbols.get(parameter).owner, Some(method));
+}
+
+#[test]
+fn extension_using_prefix_clauses_keep_given_flags_and_source_structure() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "extension [A](using before: Ctx[A])(value: A)(using after: End)\n  def use = value",
+        203,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let method = named
+        .index
+        .symbol_at(named.source, extension.methods[0])
+        .unwrap();
+
+    assert_eq!(extension.param_clauses.len(), 4);
+    assert_eq!(
+        named.index.extension_prefix_clauses(method),
+        Some(extension.param_clauses.as_slice())
+    );
+    for clause_index in [1, 3] {
+        let parameter_tree = extension.param_clauses[clause_index][0];
+        let parameter = named
+            .index
+            .derived_symbol_at(method, named.source, parameter_tree)
+            .unwrap();
+        assert!(
+            named
+                .store
+                .symbols
+                .get(parameter)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        );
+    }
+}
+
+#[test]
+fn erased_extension_prefix_parameter_keeps_the_erased_flag() {
+    use dotty_core::ast::UntypedNode;
+
+    let source_text = "extension (value: Int)\n  def use = value";
+    let source = SourceId::from_index(204);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(source_text).expect("source should lex");
+    let mut parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let prefix_tree = extension.param_clauses[0][0];
+    let method_tree = extension.methods[0];
+    let TreeKind::ValDef(parameter) = &mut parsed.ast.get_mut(prefix_tree).kind else {
+        panic!("extension prefix parameter should be a ValDef");
+    };
+    parameter
+        .metadata
+        .modifiers
+        .push(dotty_core::ast::Modifier::Erased);
+
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "ErasedExtension.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let method = index.symbol_at(source, method_tree).unwrap();
+    let parameter = index
+        .derived_symbol_at(method, source, prefix_tree)
+        .unwrap();
+
+    assert!(
+        store
+            .symbols
+            .get(parameter)
+            .flags
+            .contains(SymbolFlags::ERASED)
+    );
+}
+
+#[test]
+fn extension_export_children_are_deferred_without_method_symbols() {
+    use dotty_core::ast::UntypedNode;
+
+    let source_text = "extension (value: Box) { export value.* }";
+    let source = SourceId::from_index(205);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let [export] = extension.methods.as_slice() else {
+        panic!("extension should contain one export child");
+    };
+    assert!(matches!(parsed.ast.get(*export).kind, TreeKind::Export(_)));
+
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "ExtensionExport.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("extension exports are deferred by naming");
+
+    assert_eq!(index.symbol_at(source, *export), None);
+}
+
+#[test]
+fn ordinary_methods_have_no_extension_prefix_metadata() {
+    let named = named_source("def ordinary = 1", 206);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let method = named
+        .index
+        .symbol_at(named.source, package.stats[0])
+        .expect("top-level method should be named");
+
+    assert_eq!(named.index.extension_prefix_clauses(method), None);
+}
+
+#[test]
+fn implicit_extension_prefix_modifier_is_preserved() {
+    use dotty_core::ast::UntypedNode;
+
+    let (mut parsed, source, mut store) =
+        parsed_source("extension (value: Int)\n  def use = value", 207);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let prefix_tree = extension.param_clauses[0][0];
+    let method_tree = extension.methods[0];
+    let TreeKind::ValDef(parameter) = &mut parsed.ast.get_mut(prefix_tree).kind else {
+        panic!("extension prefix parameter should be a ValDef");
+    };
+    parameter
+        .metadata
+        .modifiers
+        .push(dotty_core::ast::Modifier::Implicit);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "ImplicitExtension.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let method = index.symbol_at(source, method_tree).unwrap();
+    let parameter = index
+        .derived_symbol_at(method, source, prefix_tree)
+        .unwrap();
+
+    assert!(
+        store
+            .symbols
+            .get(parameter)
+            .flags
+            .contains(SymbolFlags::IMPLICIT)
+    );
+}
+
+#[test]
+fn malformed_extension_child_is_a_structural_namer_error() {
+    use dotty_core::ast::UntypedNode;
+
+    let (mut parsed, source, mut store) =
+        parsed_source("extension (value: Int)\n  def use = value", 208);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let extension_tree = package.stats[0];
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &mut parsed.ast.get_mut(extension_tree).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let unexpected_tree = extension.param_clauses[0][0];
+    extension.methods.push(unexpected_tree);
+    let mut packages = Packages::new();
+
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "MalformedExtension.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: unexpected_tree.index(),
+            expected: "DefDef or Export extension method",
+        }
+    );
+    assert!(packages.get::<&str>(&[]).is_none());
+}
+
+#[test]
+fn malformed_extension_prefix_parameter_is_a_structural_namer_error() {
+    use dotty_core::ast::{This, UntypedNode};
+
+    let (mut parsed, source, mut store) =
+        parsed_source("extension (value: Int)\n  def use = value", 209);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let prefix_tree = extension.param_clauses[0][0];
+    parsed.ast.get_mut(prefix_tree).kind = TreeKind::This(This { qual: None });
+    let mut packages = Packages::new();
+
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "MalformedExtensionPrefix.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::MalformedAstShape {
+            tree_index: prefix_tree.index(),
+            expected: "TypeDef or ValDef extension prefix parameter",
+        }
+    );
+    assert!(packages.get::<&str>(&[]).is_none());
 }
