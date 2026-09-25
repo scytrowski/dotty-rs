@@ -53,10 +53,12 @@ where
         ) {
             next_offset += 1;
         }
-        let next_kind = self.cursor.lookahead(next_offset).kind;
+        let next_token = self.cursor.lookahead(next_offset).clone();
+        let next_kind = next_token.kind;
         let has_braced_cases = next_kind == TokenKind::Punctuation(Punctuation::LeftBrace);
         let has_inline_case = self.features().sub_cases
-            && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case);
+            && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
+            && !self.has_physical_line_break(self.current().span.end(), next_token.span.start());
         let has_scanner_indented_cases = next_kind == TokenKind::Indent;
         if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
             // Braced scopes suppress eager indentation in the scanner. Ask it
@@ -220,6 +222,55 @@ mod tests {
         assert!(
             parser.diagnostics().is_empty(),
             "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn sub_cases_does_not_treat_a_newline_case_as_inline_inside_braces() {
+        let source = "{\n  value match\n    case A => a\n    case B => b\n}";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Keyword(HardKeyword::Match), 10, 15),
+            // The scanner suppresses the physical newline and layout tokens
+            // inside braces until the parser requests indentation feedback.
+            token(TokenKind::Keyword(HardKeyword::Case), 20, 24),
+            token(TokenKind::Identifier, 25, 26),
+            token(TokenKind::Operator, 27, 29),
+            token(TokenKind::Identifier, 30, 31),
+            token(TokenKind::Keyword(HardKeyword::Case), 36, 40),
+            token(TokenKind::Identifier, 41, 42),
+            token(TokenKind::Operator, 43, 45),
+            token(TokenKind::Identifier, 46, 47),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 48, 49),
+            token(TokenKind::Eof, 49, 49),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource { tokens, index: 0 },
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            sub_cases: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let tree = parser.expr();
+
+        let TreeKind::Block(Block { expr, .. }) = parser.ast().get(tree).kind else {
+            panic!("expected the surrounding braced expression block");
+        };
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(expr).kind else {
+            panic!("expected an indented match case region");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
             parser.diagnostics()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);

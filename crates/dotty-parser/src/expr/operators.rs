@@ -276,7 +276,7 @@ where
         }
     }
 
-    fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
+    pub(super) fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
         self.source
             .as_str()
             .get(start as usize..end as usize)
