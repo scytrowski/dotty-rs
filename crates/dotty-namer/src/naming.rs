@@ -612,6 +612,7 @@ mod tests {
         .0
     }
 
+    #[allow(clippy::too_many_arguments)] // Test fixture exposes each AST component explicitly.
     fn class_definition_with_visibility_header(
         arena: &mut AstArena<Untyped>,
         store: &mut SemanticStore,
