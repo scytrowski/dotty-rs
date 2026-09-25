@@ -553,18 +553,15 @@ impl Namer<'_> {
         owner: SymbolId,
         class_scope: ScopeId,
     ) -> Result<EnteredHeader, NamerError> {
-        let mut type_parameters = Vec::with_capacity(definition.type_params.len());
         for parameter in &definition.type_params {
-            let TreeKind::TypeDef(parameter_definition) = &self.arena.get(*parameter).kind else {
+            let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter.index(),
                     expected: "TypeDef method type parameter",
                 });
             };
-            type_parameters.push((*parameter, *parameter_definition.name.as_name()));
         }
 
-        let mut value_parameters = Vec::new();
         for clause in &definition.value_param_clauses {
             for parameter in clause {
                 let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
@@ -587,11 +584,6 @@ impl Namer<'_> {
                         expected: "ordinary method ValDef without constructor-role metadata",
                     });
                 }
-                value_parameters.push((
-                    *parameter,
-                    *parameter_definition.name.as_name(),
-                    Self::source_flags(&parameter_definition.metadata.modifiers),
-                ));
             }
         }
 
@@ -623,21 +615,14 @@ impl Namer<'_> {
         owner: SymbolId,
         class_scope: ScopeId,
     ) -> Result<EnteredHeader, NamerError> {
-        let mut value_parameters = Vec::new();
         for clause in &definition.value_param_clauses {
             for parameter in clause {
-                let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
-                else {
+                let TreeKind::ValDef(_) = &self.arena.get(*parameter).kind else {
                     return Err(NamerError::MalformedAstShape {
                         tree_index: parameter.index(),
                         expected: "ValDef secondary constructor value parameter",
                     });
                 };
-                value_parameters.push((
-                    *parameter,
-                    *parameter_definition.name.as_name(),
-                    Self::source_flags(&parameter_definition.metadata.modifiers),
-                ));
             }
         }
 
