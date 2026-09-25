@@ -804,3 +804,11 @@ fn parsed_secondary_constructor_is_rejected_in_a_nested_object_inside_a_class() 
         SourceId::from_index(60),
     );
 }
+
+#[test]
+fn parsed_secondary_constructor_is_rejected_in_a_direct_block_member() {
+    assert_secondary_constructor_is_rejected(
+        "class C { { def this() = this() } }",
+        SourceId::from_index(61),
+    );
+}
