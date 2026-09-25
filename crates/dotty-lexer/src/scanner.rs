@@ -2474,6 +2474,36 @@ mod tests {
     }
 
     #[test]
+    fn arrow_indented_feedback_does_not_split_a_deeper_assignment_continuation() {
+        let source = "(case A =>\n  result =\n    value\n  next)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let assignment_end = source.rfind(" =").unwrap() as u32 + 2;
+        let value_start = source.find("value").unwrap() as u32;
+        let value_end = value_start + "value".len() as u32;
+        let next_start = source.find("next").unwrap() as u32;
+        assert!(!scanner.tokens().iter().any(|token| {
+            matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)
+                && token.span.start() == assignment_end
+                && token.span.end() == value_start
+        }));
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == value_end
+                && token.span.end() == next_start
+        }));
+    }
+
+    #[test]
     fn arrow_indented_feedback_ignores_a_non_arrow_operator() {
         let mut scanner = ContextualScanner::new("value +\n  next").expect("source scans");
         scanner.advance();
