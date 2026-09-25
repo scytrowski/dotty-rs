@@ -783,26 +783,7 @@ impl Namer<'_> {
             // partitioning. Their lowered declarations are handled by later
             // naming work, so they do not introduce identities here.
             TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
-                let definition = definition.clone();
-                let mut headers = Vec::new();
-                for (binding_tree, binding_name) in
-                    self.collect_pattern_bindings(&definition.patterns)
-                {
-                    let name = *dotty_core::TermName::new(binding_name.text()).as_name();
-                    let spec = self.source_symbol_spec(
-                        tree,
-                        &definition.modifiers,
-                        context.owner,
-                        SymbolKind::Field,
-                    )?;
-                    let symbol =
-                        self.enter_symbol(binding_tree, name, context.owner, context.scope, spec)?;
-                    headers.push(EnteredHeader::Field {
-                        tree: binding_tree,
-                        symbol,
-                    });
-                }
-                Ok(headers)
+                self.enter_pattern_binding_headers(tree, definition, context.owner, context.scope)
             }
             TreeKind::Export(_) => Ok(Vec::new()),
             TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
@@ -858,6 +839,36 @@ impl Namer<'_> {
             }
         }
         bindings
+    }
+
+    fn enter_pattern_binding_headers(
+        &mut self,
+        patdef_tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        owner: SymbolId,
+        scope: ScopeId,
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
+        if definition.modifiers.modifiers.contains(&Modifier::EnumCase) {
+            return Ok(Vec::new());
+        }
+
+        let bindings = self.collect_pattern_bindings(&definition.patterns);
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let spec =
+            self.source_symbol_spec(patdef_tree, &definition.modifiers, owner, SymbolKind::Field)?;
+        let mut headers = Vec::new();
+        for (binding_tree, binding_name) in bindings {
+            let name = *dotty_core::TermName::new(binding_name.text()).as_name();
+            let symbol = self.enter_symbol(binding_tree, name, owner, scope, spec)?;
+            headers.push(EnteredHeader::Field {
+                tree: binding_tree,
+                symbol,
+            });
+        }
+        Ok(headers)
     }
 
     fn index_expanded(
@@ -1435,6 +1446,15 @@ impl Namer<'_> {
                         tree: *member,
                         symbol: field,
                     });
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                    let definition = definition.clone();
+                    nested_headers.extend(self.enter_pattern_binding_headers(
+                        *member,
+                        &definition,
+                        symbol,
+                        scope,
+                    )?);
                 }
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
                     if let Some(header) = self.enter_module_header(*member, &class_context)? {

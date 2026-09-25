@@ -62,6 +62,54 @@ fn named_source_tree_name(
     named.store.names.resolve(name.text()).to_owned()
 }
 
+fn source_pattern_bindings(
+    named: &NamedSource,
+    patterns: &[dotty_core::TreeId<dotty_core::Untyped>],
+) -> Vec<(dotty_core::TreeId<dotty_core::Untyped>, String)> {
+    let mut bindings = Vec::new();
+    let mut pending = patterns.iter().rev().copied().collect::<Vec<_>>();
+    while let Some(tree) = pending.pop() {
+        match &named.parsed.ast.get(tree).kind {
+            TreeKind::Ident(ident) => bindings.push((
+                tree,
+                named.store.names.resolve(ident.name.text()).to_owned(),
+            )),
+            TreeKind::Bind(binding) => {
+                bindings.push((
+                    tree,
+                    named.store.names.resolve(binding.name.text()).to_owned(),
+                ));
+                pending.push(binding.body);
+            }
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Apply(application) => {
+                pending.extend(application.args.iter().rev().copied());
+            }
+            TreeKind::Alternative(alternative) => {
+                if let Some(first) = alternative.alternatives.first() {
+                    pending.push(*first);
+                }
+            }
+            TreeKind::UnApply(unapply) => {
+                pending.extend(unapply.patterns.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(parens)) => {
+                pending.push(parens.inner);
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.right);
+                pending.push(infix.left);
+            }
+            _ => {}
+        }
+    }
+    bindings.retain(|(_, name)| name != "_");
+    bindings
+}
+
 #[test]
 fn anonymous_given_alias_gets_a_deterministic_invented_name() {
     let named = named_source("given Config = makeConfig", 105);
@@ -1845,6 +1893,464 @@ fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
                 .get(wrapper_scope)
                 .lookup(TermName::new(store.names.intern(&name)).as_name()),
             Some(symbol)
+        );
+    }
+}
+
+#[test]
+fn parsed_class_pattern_val_binders_are_class_fields() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("class C:\n  val (left, right) = pair", 212);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let patdef_tree = template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(patdef_tree).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 2);
+    for (tree, name) in bindings {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        let field_symbol = named.store.symbols.get(field);
+        assert_eq!(field_symbol.kind, SymbolKind::Field);
+        assert_eq!(field_symbol.owner, Some(class_symbol));
+        assert_eq!(named.store.names.resolve(field_symbol.name.text()), name);
+        assert_eq!(
+            field_symbol.origin,
+            dotty_core::SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(field_symbol.position, named.parsed.ast.get(tree).position);
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup(&field_symbol.name),
+            Some(field)
+        );
+    }
+    assert_eq!(named.index.symbol_at(named.source, patdef_tree), None);
+    assert_eq!(
+        named.index.symbol_at(named.source, patdef.rhs.unwrap()),
+        None,
+        "naming must not traverse the PatDef RHS"
+    );
+}
+
+#[test]
+fn parsed_object_pattern_val_binders_are_module_class_fields() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("object O:\n  val (left, right) = pair", 213);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("object should be a ModuleDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(module.template).kind else {
+        panic!("object body should be a Template");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .expect("package should have a semantic symbol");
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let module_class_name = TypeName::new(named.store.names.get("O$").unwrap());
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(module_class_name.as_name())
+        .expect("object should have a module class");
+    let module_class_scope = named.index.scope_of(module_class).unwrap();
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 2);
+    for (tree, name) in bindings {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        let owner = named.store.symbols.get(field).owner.unwrap();
+        assert_eq!(named.store.symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(field).name.text()),
+            name
+        );
+        assert_eq!(named.store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(module_class_scope)
+                .lookup(&named.store.symbols.get(field).name),
+            Some(field)
+        );
+    }
+}
+
+#[test]
+fn class_pattern_bindings_follow_nested_bind_typed_and_unapply_patterns() {
+    let named = named_source("class C:\n  val Some(x @ Some(y: Int)) = value", 214);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("nested pattern should remain a PatDef");
+    };
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+    let names = bindings
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["x", "y"]);
+    for (tree, _) in bindings {
+        assert!(named.index.symbol_at(named.source, tree).is_some());
+    }
+}
+
+#[test]
+fn class_alternative_pattern_uses_only_its_first_alternative() {
+    let named = named_source("class C:\n  val (Some(left) | Some(right)) = value", 215);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("alternative member should remain a PatDef");
+    };
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].1, "left");
+    assert!(named.index.symbol_at(named.source, bindings[0].0).is_some());
+}
+
+#[test]
+fn duplicate_textual_bindings_in_one_class_pattern_create_one_field() {
+    let named = named_source("class C:\n  val (same, same) = value", 216);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert_eq!(bindings.len(), 2);
+    let fields = bindings
+        .iter()
+        .filter_map(|(tree, _)| named.index.symbol_at(named.source, *tree))
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 1);
+}
+
+#[test]
+fn wildcard_only_class_pattern_introduces_no_field() {
+    let named = named_source("class C:\n  val Some(_) = value", 217);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("wildcard member should remain a PatDef");
+    };
+
+    assert!(source_pattern_bindings(&named, &patdef.patterns).is_empty());
+    let class_symbol = named
+        .index
+        .symbol_at(named.source, package.stats[0])
+        .unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    assert!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(dotty_core::TermName::new(named.store.names.get("_").unwrap()).as_name())
+            .is_empty()
+    );
+}
+
+#[test]
+fn wildcard_only_pattern_does_not_resolve_unused_visibility_qualifier() {
+    let named = named_source("class C:\n  private[Missing] val Some(_) = value", 223);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("wildcard member should remain a PatDef");
+    };
+
+    assert!(source_pattern_bindings(&named, &patdef.patterns).is_empty());
+}
+
+#[test]
+fn var_pattern_bindings_inherit_mutability() {
+    let named = named_source("class C:\n  var (left, right) = pair", 218);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+
+    for (tree, _) in source_pattern_bindings(&named, &patdef.patterns) {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        assert!(
+            named
+                .store
+                .symbols
+                .get(field)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+    }
+}
+
+#[test]
+fn lazy_pattern_bindings_inherit_lazy_flag() {
+    let named = named_source("class C:\n  lazy val (left, right) = compute()", 219);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+
+    for (tree, _) in source_pattern_bindings(&named, &patdef.patterns) {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        assert!(
+            named
+                .store
+                .symbols
+                .get(field)
+                .flags
+                .contains(SymbolFlags::LAZY)
+        );
+    }
+}
+
+#[test]
+fn private_pattern_bindings_inherit_private_visibility() {
+    let named = named_source("class C:\n  private val (left, right) = pair", 220);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+
+    for (tree, _) in source_pattern_bindings(&named, &patdef.patterns) {
+        let field = named.index.symbol_at(named.source, tree).unwrap();
+        assert_eq!(
+            named.store.symbols.get(field).visibility,
+            Visibility::Private
+        );
+    }
+}
+
+#[test]
+fn pattern_bindings_and_sibling_headers_precede_nested_class_body() {
+    let named = named_source(
+        "class C:\n  val (left, right) = pair\n  class Nested:\n    val child = 1\n  def sibling = 1",
+        221,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let pattern = match &named.parsed.ast.get(template.body[0]).kind {
+        TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) => {
+            source_pattern_bindings(&named, &patdef.patterns)
+                .into_iter()
+                .map(|(tree, _)| named.index.symbol_at(named.source, tree).unwrap())
+                .collect::<Vec<_>>()
+        }
+        _ => panic!("tuple member should remain a PatDef"),
+    };
+    let nested = named
+        .index
+        .symbol_at(named.source, template.body[1])
+        .unwrap();
+    let sibling = named
+        .index
+        .symbol_at(named.source, template.body[2])
+        .unwrap();
+    let TreeKind::TypeDef(nested_def) = &named.parsed.ast.get(template.body[1]).kind else {
+        panic!("nested declaration should be a TypeDef");
+    };
+    let TreeKind::Template(nested_template) = &named.parsed.ast.get(nested_def.rhs).kind else {
+        panic!("nested class RHS should be a Template");
+    };
+    let child = named
+        .index
+        .symbol_at(named.source, nested_template.body[0])
+        .unwrap();
+
+    assert_eq!(pattern.len(), 2);
+    assert!(pattern.iter().all(|field| field.index() < nested.index()));
+    assert!(nested.index() < sibling.index());
+    assert!(sibling.index() < child.index());
+}
+
+#[test]
+fn enum_case_pattern_definition_is_deferred_instead_of_named_as_fields() {
+    use dotty_core::ast::{Modifier, UntypedNode};
+
+    let (mut parsed, source, mut store) =
+        parsed_source("class C:\n  val (left, right) = pair", 222);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let patdef_tree = template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &mut parsed.ast.get_mut(patdef_tree).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    patdef.modifiers.modifiers.push(Modifier::EnumCase);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "EnumCase.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("enum-case PatDef should be deferred without an error");
+    let named = NamedSource {
+        parsed,
+        source,
+        store,
+        index,
+    };
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_symbol = named.index.symbol_at(source, package.stats[0]).unwrap();
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(patdef_tree).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let bindings = source_pattern_bindings(&named, &patdef.patterns);
+
+    assert!(
+        bindings
+            .iter()
+            .all(|(tree, _)| named.index.symbol_at(source, *tree).is_none())
+    );
+    for name in ["left", "right"] {
+        assert!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup_all(
+                    dotty_core::TermName::new(named.store.names.get(name).unwrap()).as_name()
+                )
+                .is_empty()
         );
     }
 }
