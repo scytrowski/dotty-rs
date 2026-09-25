@@ -161,10 +161,9 @@ impl ContextualScanner {
                     current_index,
                 )
             {
-                let line_breaks = self.source
-                    [previous.span.end() as usize..current.span.start() as usize]
-                    .matches('\n')
-                    .count();
+                let line_breaks = count_line_breaks(
+                    &self.source[previous.span.end() as usize..current.span.start() as usize],
+                );
                 let kind = if line_breaks > 1 {
                     TokenKind::Newlines
                 } else {
@@ -849,9 +848,7 @@ fn is_leading_infix_tokens(
         current.kind,
         TokenKind::Operator | TokenKind::BackquotedIdentifier
     ) || !can_end_statement(Some(previous.kind))
-        || source[previous.span.end() as usize..current.span.start() as usize]
-            .matches('\n')
-            .count()
+        || count_line_breaks(&source[previous.span.end() as usize..current.span.start() as usize])
             > 1
     {
         return false;
@@ -862,7 +859,7 @@ fn is_leading_infix_tokens(
     if !can_start_statement_kind(next.kind) {
         return false;
     }
-    let previous_indent = line_indentation(source, previous.span.start());
+    let previous_indent = line_indentation(source, previous.span.end().saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
     previous_indent.is_prefix_of(&operator_indent)
 }

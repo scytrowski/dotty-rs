@@ -114,6 +114,8 @@ where
                 | TokenKind::Outdent
                 | TokenKind::Eof
         ) {
+            // Dotty accepts an empty case statement sequence; the shared AST
+            // represents it as an empty block with the usual synthetic Unit.
             let expr = self.synthetic_unit();
             return self.alloc_from(
                 mark,
