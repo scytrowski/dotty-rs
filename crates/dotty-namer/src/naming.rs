@@ -89,6 +89,10 @@ struct SymbolSpec {
 
 /// A declaration identity entered before scanning its nested declarations.
 enum EnteredHeader {
+    Package {
+        tree: TreeId<Untyped>,
+        context: NamingContext,
+    },
     ClassLike {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
@@ -188,13 +192,25 @@ impl Namer<'_> {
         enclosing_package: &[String],
         source_root: bool,
     ) -> Result<(), NamerError> {
+        let Some(header) = self.enter_package_header(tree, enclosing_package, source_root)? else {
+            return Ok(());
+        };
+        self.scan_entered_header(header)
+    }
+
+    fn enter_package_header(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enclosing_package: &[String],
+        source_root: bool,
+    ) -> Result<Option<EnteredHeader>, NamerError> {
         let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
             if tree == self.root {
                 return Err(NamerError::RootIsNotPackage {
                     tree_index: tree.index(),
                 });
             }
-            return Ok(());
+            return Ok(None);
         };
 
         let package = package.clone();
@@ -223,27 +239,7 @@ impl Namer<'_> {
             scope: leaf.scope,
             package_path,
         };
-        for stat in package.stats {
-            match self.arena.get(stat).kind {
-                TreeKind::PackageDef(_) => {
-                    self.expand(stat, &context.package_path, false)?;
-                }
-                TreeKind::TypeDef(_) => self.enter_class_or_trait(stat, &context)?,
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn enter_class_or_trait(
-        &mut self,
-        tree: TreeId<Untyped>,
-        owner_context: &NamingContext,
-    ) -> Result<(), NamerError> {
-        let Some(header) = self.enter_class_or_trait_header(tree, owner_context)? else {
-            return Ok(());
-        };
-        self.scan_entered_header(header)
+        Ok(Some(EnteredHeader::Package { tree, context }))
     }
 
     fn enter_class_or_trait_header(
@@ -338,6 +334,35 @@ impl Namer<'_> {
 
     fn scan_entered_header(&mut self, header: EnteredHeader) -> Result<(), NamerError> {
         let (tree, symbol, scope, package_path) = match header {
+            EnteredHeader::Package { tree, context } => {
+                let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
+                    return Ok(());
+                };
+                let mut headers = Vec::new();
+                for stat in &package.stats {
+                    match self.arena.get(*stat).kind {
+                        TreeKind::PackageDef(_) => {
+                            if let Some(header) =
+                                self.enter_package_header(*stat, &context.package_path, false)?
+                            {
+                                headers.push(header);
+                            }
+                        }
+                        TreeKind::TypeDef(_) => {
+                            if let Some(header) =
+                                self.enter_class_or_trait_header(*stat, &context)?
+                            {
+                                headers.push(header);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                for header in headers {
+                    self.scan_entered_header(header)?;
+                }
+                return Ok(());
+            }
             EnteredHeader::ClassLike {
                 tree,
                 symbol,
@@ -1991,12 +2016,96 @@ mod tests {
         let deep_symbol = index.symbol_at(source, deep).unwrap();
 
         assert!(first_symbol.index() < sibling_symbol.index());
-        assert!(sibling_symbol.index() < deep_symbol.index());
+        assert_eq!(
+            store.symbols.get(first_symbol).owner,
+            store.symbols.get(sibling_symbol).owner
+        );
         assert_eq!(
             store.symbols.get(first_symbol).owner,
             store.symbols.get(sibling_symbol).owner
         );
         assert_eq!(store.symbols.get(deep_symbol).owner, Some(first_symbol));
+    }
+
+    #[test]
+    fn package_class_headers_precede_class_header_parameters() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "value",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let first = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "First",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        )
+        .0;
+        let sibling = class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "package_headers",
+            vec![first, sibling],
+        );
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 73, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(73);
+        let first_symbol = index.symbol_at(source, first).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert!(first_symbol.index() < sibling_symbol.index());
+        assert!(sibling_symbol.index() < parameter_symbol.index());
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(first_symbol)
+        );
+    }
+
+    #[test]
+    fn sibling_package_headers_precede_descendant_class_headers() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let deep = class_definition(&mut arena, &mut store, "Deep", vec![], vec![], None);
+        let first_class =
+            class_definition(&mut arena, &mut store, "First", vec![], vec![deep], None);
+        let first_package = package_with_stat(&mut arena, &mut store, "first", vec![first_class]);
+        let sibling_class =
+            class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let sibling_package =
+            package_with_stat(&mut arena, &mut store, "sibling", vec![sibling_class]);
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "root",
+            vec![first_package, sibling_package],
+        );
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 74, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(74);
+        let deep_symbol = index.symbol_at(source, deep).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling_class).unwrap();
+        let first_package_symbol = index.symbol_at(source, first_package).unwrap();
+        let sibling_package_symbol = index.symbol_at(source, sibling_package).unwrap();
+
+        assert!(first_package_symbol.index() < sibling_package_symbol.index());
+        assert!(sibling_package_symbol.index() < deep_symbol.index());
+        assert_eq!(
+            store.symbols.get(sibling_symbol).owner,
+            Some(sibling_package_symbol)
+        );
     }
 
     #[test]
