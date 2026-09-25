@@ -620,6 +620,7 @@ fn render_definition_metadata(
             dotty_core::ast::Modifier::Infix => Some("infix"),
             dotty_core::ast::Modifier::Tracked => Some("tracked"),
             dotty_core::ast::Modifier::Into => Some("into"),
+            dotty_core::ast::Modifier::Extension => Some("extension"),
             dotty_core::ast::Modifier::Erased => Some("erased"),
         })
         .map(quote)
