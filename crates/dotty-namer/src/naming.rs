@@ -1003,12 +1003,19 @@ impl Namer<'_> {
                     expected: "TypeDef class type parameter",
                 });
             };
-            let spec = self.source_symbol_spec(
+            let mut spec = self.source_symbol_spec(
                 *parameter_tree,
                 &parameter.metadata,
                 symbol,
                 SymbolKind::TypeParameter,
             )?;
+            if parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::PrivateLocal)
+            {
+                spec.visibility = Visibility::Private;
+            }
             self.enter_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
@@ -1035,27 +1042,37 @@ impl Namer<'_> {
                         expected: "constructor ValDef with ParamAccessor metadata",
                     });
                 }
-                let spec = self.source_symbol_spec(
+                let private_local = parameter
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::PrivateLocal);
+                let mut spec = self.source_symbol_spec(
                     *parameter_tree,
                     &parameter.metadata,
                     symbol,
-                    if parameter
-                        .metadata
-                        .modifiers
-                        .contains(&Modifier::PrivateLocal)
-                    {
+                    if private_local {
                         SymbolKind::Parameter
                     } else {
                         SymbolKind::Field
                     },
                 )?;
-                self.enter_symbol(
-                    *parameter_tree,
-                    *parameter.name.as_name(),
-                    symbol,
-                    scope,
-                    spec,
-                )?;
+                if private_local {
+                    spec.visibility = Visibility::Private;
+                    self.record_unscoped_symbol(
+                        *parameter_tree,
+                        *parameter.name.as_name(),
+                        symbol,
+                        spec,
+                    )?;
+                } else {
+                    self.enter_symbol(
+                        *parameter_tree,
+                        *parameter.name.as_name(),
+                        symbol,
+                        scope,
+                        spec,
+                    )?;
+                }
             }
         }
         let constructor_spec = self.source_symbol_spec(
@@ -1064,13 +1081,69 @@ impl Namer<'_> {
             symbol,
             SymbolKind::Constructor,
         )?;
-        self.enter_symbol(
+        let constructor_symbol = self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
             symbol,
             scope,
             constructor_spec,
         )?;
+        let constructor_scope = self
+            .store
+            .scopes
+            .alloc(Scope::new(Some(constructor_symbol)));
+        self.index
+            .record_scope(constructor_symbol, constructor_scope)?;
+
+        for parameter_tree in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef class type parameter",
+                });
+            };
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                constructor_symbol,
+                SymbolKind::TypeParameter,
+            )?;
+            self.enter_derived_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                constructor_symbol,
+                constructor_scope,
+                spec,
+            )?;
+        }
+        for clause in &constructor.value_param_clauses {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ValDef constructor value parameter",
+                    });
+                };
+                let mapped = self.map_source_modifiers(
+                    *parameter_tree,
+                    &parameter.metadata,
+                    constructor_symbol,
+                )?;
+                let spec = SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags: mapped.flags
+                        & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED),
+                    visibility: mapped.visibility,
+                };
+                self.enter_derived_symbol(
+                    *parameter_tree,
+                    *parameter.name.as_name(),
+                    constructor_symbol,
+                    constructor_scope,
+                    spec,
+                )?;
+            }
+        }
 
         let mut nested_headers = Vec::new();
         for member in &template.body {
@@ -1397,6 +1470,55 @@ impl Namer<'_> {
         });
         self.store.scopes.get_mut(scope).enter(name, symbol);
         self.index.record_symbol(self.source, tree, symbol)?;
+        Ok(symbol)
+    }
+
+    fn record_unscoped_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.allocate_source_symbol(tree, name, owner, spec);
+        self.index.record_symbol(self.source, tree, symbol)?;
+        Ok(symbol)
+    }
+
+    fn allocate_source_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        spec: SymbolSpec,
+    ) -> SymbolId {
+        self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner),
+            kind: spec.kind,
+            flags: spec.flags,
+            visibility: spec.visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        })
+    }
+
+    fn enter_derived_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        scope: ScopeId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.allocate_source_symbol(tree, name, owner, spec);
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.scope_insertions.push((scope, symbol));
+        self.index
+            .record_derived_symbol(owner, self.source, tree, symbol)?;
         Ok(symbol)
     }
 
@@ -3085,7 +3207,7 @@ mod tests {
     }
 
     #[test]
-    fn constructor_only_parameter_is_available_in_class_scope() {
+    fn constructor_only_parameter_is_not_in_class_scope() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let parameter = value_parameter(
@@ -3095,7 +3217,7 @@ mod tests {
             vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
             None,
         );
-        let (class, _) = class_definition_with_header(
+        let (class, constructor_tree) = class_definition_with_header(
             &mut arena,
             &mut store,
             "C",
@@ -3116,6 +3238,13 @@ mod tests {
         let parameter_symbol = index
             .symbol_at(SourceId::from_index(19), parameter)
             .unwrap();
+        let constructor_symbol = index
+            .symbol_at(SourceId::from_index(19), constructor_tree)
+            .unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+        let derived_parameter = index
+            .derived_symbol_at(constructor_symbol, SourceId::from_index(19), parameter)
+            .unwrap();
 
         assert_eq!(
             store.symbols.get(parameter_symbol).kind,
@@ -3125,13 +3254,18 @@ mod tests {
             store.symbols.get(parameter_symbol).owner,
             Some(class_symbol)
         );
-        assert_eq!(
-            term_symbol(&mut store, class_scope, "x"),
-            Some(parameter_symbol)
-        );
+        assert_eq!(term_symbol(&mut store, class_scope, "x"), None);
         assert_eq!(
             store.symbols.get(parameter_symbol).visibility,
-            Visibility::Public
+            Visibility::Private
+        );
+        assert_eq!(
+            store.symbols.get(derived_parameter).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, constructor_scope, "x"),
+            Some(derived_parameter)
         );
         assert_eq!(
             store.symbols.get(parameter_symbol).info,
@@ -4028,7 +4162,7 @@ mod tests {
     }
 
     #[test]
-    fn case_class_later_private_local_parameter_is_scoped_but_not_a_field() {
+    fn case_class_later_private_local_parameter_is_unscoped_and_not_a_field() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let first = value_parameter(
@@ -4045,7 +4179,7 @@ mod tests {
             vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
             None,
         );
-        let (class, _) = class_definition_with_header(
+        let (class, constructor_tree) = class_definition_with_header(
             &mut arena,
             &mut store,
             "Pair",
@@ -4063,8 +4197,15 @@ mod tests {
         let package = packages.get(&["cases"]).unwrap();
         let class_symbol = type_symbol(&mut store, package.scope, "Pair").unwrap();
         let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = index
+            .symbol_at(SourceId::from_index(22), constructor_tree)
+            .unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
         let first_symbol = index.symbol_at(SourceId::from_index(22), first).unwrap();
         let later_symbol = index.symbol_at(SourceId::from_index(22), later).unwrap();
+        let later_constructor_symbol = index
+            .derived_symbol_at(constructor_symbol, SourceId::from_index(22), later)
+            .unwrap();
 
         assert_eq!(store.symbols.get(first_symbol).kind, SymbolKind::Field);
         assert_eq!(
@@ -4073,8 +4214,21 @@ mod tests {
         );
         assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
         assert_eq!(
-            term_symbol(&mut store, class_scope, "y"),
-            Some(later_symbol)
+            store.symbols.get(later_symbol).visibility,
+            Visibility::Private
+        );
+        assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, constructor_scope, "y"),
+            Some(later_constructor_symbol)
         );
     }
 
@@ -4352,6 +4506,69 @@ mod tests {
                 .lookup_all(leaked_name.as_name())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_class_member_scan_rolls_back_constructor_parameter_copies() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let before = store.checkpoint();
+
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let malformed_parameter = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "broken",
+            vec![],
+            vec![vec![malformed_parameter]],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![method],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "rollback", vec![class]);
+        let source = SourceId::from_index(101);
+
+        assert_eq!(
+            name_compilation_unit(
+                &arena,
+                root,
+                source,
+                "Rollback.scala",
+                &mut store,
+                &mut packages,
+            )
+            .unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: malformed_parameter.index(),
+                expected: "ValDef method value parameter",
+            }
+        );
+
+        assert_eq!(store.checkpoint(), before);
+        assert!(packages.is_empty());
     }
 
     #[test]
