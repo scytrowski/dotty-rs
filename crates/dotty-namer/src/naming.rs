@@ -33,11 +33,12 @@ pub enum NamerError {
         tree_index: u32,
         expected: &'static str,
     },
-    /// A source visibility form whose access boundary is not modeled yet.
-    UnsupportedVisibility {
+    /// A qualified source visibility does not name an enclosing access boundary.
+    InvalidVisibilityQualifier {
         tree_index: u32,
         position: Option<SourceSpan>,
-        syntax: VisibilitySyntax,
+        qualifier: dotty_core::Name,
+        protected: bool,
     },
 }
 
@@ -81,16 +82,15 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} does not have expected shape: {expected}"
                 )
             }
-            Self::UnsupportedVisibility {
-                tree_index, syntax, ..
+            Self::InvalidVisibilityQualifier {
+                tree_index,
+                protected,
+                ..
             } => {
-                let visibility = match syntax {
-                    VisibilitySyntax::Private { .. } => "private",
-                    VisibilitySyntax::Protected { .. } => "protected",
-                };
+                let visibility = if *protected { "protected" } else { "private" };
                 write!(
                     f,
-                    "tree {tree_index} has an unresolved qualified {visibility} visibility"
+                    "tree {tree_index} has an invalid qualified {visibility} visibility"
                 )
             }
         }
@@ -1003,12 +1003,19 @@ impl Namer<'_> {
                     expected: "TypeDef class type parameter",
                 });
             };
-            let spec = self.source_symbol_spec(
+            let mut spec = self.source_symbol_spec(
                 *parameter_tree,
                 &parameter.metadata,
                 symbol,
                 SymbolKind::TypeParameter,
             )?;
+            if parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::PrivateLocal)
+            {
+                spec.visibility = Visibility::Private;
+            }
             self.enter_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
@@ -1035,27 +1042,37 @@ impl Namer<'_> {
                         expected: "constructor ValDef with ParamAccessor metadata",
                     });
                 }
-                let spec = self.source_symbol_spec(
+                let private_local = parameter
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::PrivateLocal);
+                let mut spec = self.source_symbol_spec(
                     *parameter_tree,
                     &parameter.metadata,
                     symbol,
-                    if parameter
-                        .metadata
-                        .modifiers
-                        .contains(&Modifier::PrivateLocal)
-                    {
+                    if private_local {
                         SymbolKind::Parameter
                     } else {
                         SymbolKind::Field
                     },
                 )?;
-                self.enter_symbol(
-                    *parameter_tree,
-                    *parameter.name.as_name(),
-                    symbol,
-                    scope,
-                    spec,
-                )?;
+                if private_local {
+                    spec.visibility = Visibility::Private;
+                    self.record_unscoped_symbol(
+                        *parameter_tree,
+                        *parameter.name.as_name(),
+                        symbol,
+                        spec,
+                    )?;
+                } else {
+                    self.enter_symbol(
+                        *parameter_tree,
+                        *parameter.name.as_name(),
+                        symbol,
+                        scope,
+                        spec,
+                    )?;
+                }
             }
         }
         let constructor_spec = self.source_symbol_spec(
@@ -1064,13 +1081,69 @@ impl Namer<'_> {
             symbol,
             SymbolKind::Constructor,
         )?;
-        self.enter_symbol(
+        let constructor_symbol = self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
             symbol,
             scope,
             constructor_spec,
         )?;
+        let constructor_scope = self
+            .store
+            .scopes
+            .alloc(Scope::new(Some(constructor_symbol)));
+        self.index
+            .record_scope(constructor_symbol, constructor_scope)?;
+
+        for parameter_tree in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef class type parameter",
+                });
+            };
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                constructor_symbol,
+                SymbolKind::TypeParameter,
+            )?;
+            self.enter_derived_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                constructor_symbol,
+                constructor_scope,
+                spec,
+            )?;
+        }
+        for clause in &constructor.value_param_clauses {
+            for parameter_tree in clause {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter_tree.index(),
+                        expected: "ValDef constructor value parameter",
+                    });
+                };
+                let mapped = self.map_source_modifiers(
+                    *parameter_tree,
+                    &parameter.metadata,
+                    constructor_symbol,
+                )?;
+                let spec = SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags: mapped.flags
+                        & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED),
+                    visibility: mapped.visibility,
+                };
+                self.enter_derived_symbol(
+                    *parameter_tree,
+                    *parameter.name.as_name(),
+                    constructor_symbol,
+                    constructor_scope,
+                    spec,
+                )?;
+            }
+        }
 
         let mut nested_headers = Vec::new();
         for member in &template.body {
@@ -1400,6 +1473,55 @@ impl Namer<'_> {
         Ok(symbol)
     }
 
+    fn record_unscoped_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.allocate_source_symbol(tree, name, owner, spec);
+        self.index.record_symbol(self.source, tree, symbol)?;
+        Ok(symbol)
+    }
+
+    fn allocate_source_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        spec: SymbolSpec,
+    ) -> SymbolId {
+        self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner),
+            kind: spec.kind,
+            flags: spec.flags,
+            visibility: spec.visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        })
+    }
+
+    fn enter_derived_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        scope: ScopeId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.allocate_source_symbol(tree, name, owner, spec);
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.scope_insertions.push((scope, symbol));
+        self.index
+            .record_derived_symbol(owner, self.source, tree, symbol)?;
+        Ok(symbol)
+    }
+
     fn is_empty_package_sentinel(&self, name: TreeId<Untyped>) -> bool {
         matches!(
             &self.arena.get(name).kind,
@@ -1429,19 +1551,69 @@ impl Namer<'_> {
             Some(VisibilitySyntax::Private {
                 qualifier: Some(qualifier),
             }) if supported_this_qualifier(Some(*qualifier)) => Ok(Visibility::Private),
-            Some(VisibilitySyntax::Protected { qualifier })
-                if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
-            {
-                Ok(Visibility::Protected)
-            }
-            Some(
-                syntax @ (VisibilitySyntax::Private { .. } | VisibilitySyntax::Protected { .. }),
-            ) => Err(NamerError::UnsupportedVisibility {
-                tree_index: tree.index(),
-                position: self.arena.get(tree).position,
-                syntax: *syntax,
-            }),
+            Some(VisibilitySyntax::Protected { qualifier: None }) => Ok(Visibility::Protected),
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(qualifier),
+            }) if supported_this_qualifier(Some(*qualifier)) => Ok(Visibility::Protected),
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }) => self
+                .resolve_visibility_boundary(owner, *qualifier)
+                .map(Visibility::PrivateWithin)
+                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, false)),
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(qualifier),
+            }) => self
+                .resolve_visibility_boundary(owner, *qualifier)
+                .map(Visibility::ProtectedWithin)
+                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, true)),
         }
+    }
+
+    fn invalid_visibility_qualifier(
+        &self,
+        tree: TreeId<Untyped>,
+        qualifier: dotty_core::Name,
+        protected: bool,
+    ) -> NamerError {
+        NamerError::InvalidVisibilityQualifier {
+            tree_index: tree.index(),
+            position: self.arena.get(tree).position,
+            qualifier,
+            protected,
+        }
+    }
+
+    /// Finds a qualified visibility boundary by walking semantic owners only.
+    fn resolve_visibility_boundary(
+        &self,
+        mut owner: Option<SymbolId>,
+        qualifier: dotty_core::Name,
+    ) -> Option<SymbolId> {
+        let qualifier = self.store.names.resolve(qualifier.text());
+        while let Some(symbol) = owner {
+            let current = self.store.symbols.get(symbol);
+            let source_name = match current.kind {
+                SymbolKind::Package => {
+                    let name = self.store.names.resolve(current.name.text());
+                    (!name.is_empty()).then_some(name)
+                }
+                SymbolKind::Class | SymbolKind::Trait => {
+                    Some(self.store.names.resolve(current.name.text()))
+                }
+                SymbolKind::ModuleClass if current.origin != SymbolOrigin::Synthetic => self
+                    .store
+                    .names
+                    .resolve(current.name.text())
+                    .strip_suffix('$'),
+                _ => None,
+            };
+            if source_name == Some(qualifier) {
+                return Some(symbol);
+            }
+            owner = current.owner;
+        }
+        None
     }
 
     fn map_source_modifiers(
@@ -2252,7 +2424,32 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_qualified_class_visibility_is_rejected() {
+    fn protected_this_class_visibility_remains_protected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let this_name = *dotty_core::TermName::new(store.names.intern("this")).as_name();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "ThisProtectedClass",
+            vec![],
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(this_name),
+            }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 84, &mut store, &mut packages).unwrap();
+        let symbol = index.symbol_at(SourceId::from_index(84), class).unwrap();
+
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Protected);
+    }
+
+    #[test]
+    fn non_enclosing_qualified_class_visibility_is_rejected() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let source = SourceId::from_index(21);
@@ -2278,19 +2475,18 @@ mod tests {
 
         assert_eq!(
             name_package(&arena, root, 21, &mut store, &mut packages).unwrap_err(),
-            NamerError::UnsupportedVisibility {
+            NamerError::InvalidVisibilityQualifier {
                 tree_index: class.index(),
                 position,
-                syntax: VisibilitySyntax::Private {
-                    qualifier: Some(qualifier),
-                },
+                qualifier,
+                protected: false,
             }
         );
         assert!(packages.get(&["visibility"]).is_none());
     }
 
     #[test]
-    fn unsupported_qualified_protected_visibility_keeps_its_qualifier() {
+    fn non_enclosing_qualified_protected_visibility_is_rejected() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let qualifier = *dotty_core::TermName::new(store.names.intern("Owner")).as_name();
@@ -2310,13 +2506,323 @@ mod tests {
 
         assert_eq!(
             name_package(&arena, root, 76, &mut store, &mut packages).unwrap_err(),
-            NamerError::UnsupportedVisibility {
+            NamerError::InvalidVisibilityQualifier {
                 tree_index: class.index(),
                 position: None,
-                syntax: VisibilitySyntax::Protected {
-                    qualifier: Some(qualifier),
-                },
+                qualifier,
+                protected: true,
             }
+        );
+    }
+
+    #[test]
+    fn private_qualified_visibility_resolves_the_enclosing_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Outer")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let outer = class_definition(&mut arena, &mut store, "Outer", vec![], vec![member], None);
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 77, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(77);
+        let outer_symbol = index.symbol_at(source, outer).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(outer_symbol)
+        );
+    }
+
+    #[test]
+    fn private_qualified_visibility_walks_two_owners_outward() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Outer")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let middle = class_definition(&mut arena, &mut store, "Middle", vec![], vec![member], None);
+        let outer = class_definition(&mut arena, &mut store, "Outer", vec![], vec![middle], None);
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 78, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(78);
+        let outer_symbol = index.symbol_at(source, outer).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(outer_symbol)
+        );
+    }
+
+    #[test]
+    fn protected_qualified_visibility_resolves_the_enclosing_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Outer")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let outer = class_definition(&mut arena, &mut store, "Outer", vec![], vec![member], None);
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 79, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(79);
+        let outer_symbol = index.symbol_at(source, outer).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::ProtectedWithin(outer_symbol)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_selects_the_nearest_same_named_owner() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Repeat")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let inner = class_definition(&mut arena, &mut store, "Repeat", vec![], vec![member], None);
+        let outer = class_definition(&mut arena, &mut store, "Repeat", vec![], vec![inner], None);
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 80, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(80);
+        let inner_symbol = index.symbol_at(source, inner).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(inner_symbol)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_does_not_resolve_a_sibling_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Sibling")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let outer = class_definition(&mut arena, &mut store, "Outer", vec![], vec![member], None);
+        let sibling = class_definition(&mut arena, &mut store, "Sibling", vec![], vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![outer, sibling]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 81, &mut store, &mut packages).unwrap_err(),
+            NamerError::InvalidVisibilityQualifier {
+                tree_index: member.index(),
+                position: None,
+                qualifier,
+                protected: false,
+            }
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_maps_object_name_to_module_class_boundary() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Obj")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let (object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "Obj",
+            vec![],
+            None,
+            vec![member],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![object]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 82, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(82);
+        let package = packages.get(&["visibility"]).unwrap();
+        let module_class = type_symbol(&mut store, package.scope, "Obj$").unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(
+            store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(module_class)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_rejects_the_synthetic_source_package_wrapper() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Example$package")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let (given, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "exampleGiven",
+            vec![Modifier::Given],
+            None,
+            vec![member],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![given]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 86, &mut store, &mut packages).unwrap_err(),
+            NamerError::InvalidVisibilityQualifier {
+                tree_index: member.index(),
+                position: None,
+                qualifier,
+                protected: false,
+            }
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_resolves_an_enclosing_package_segment() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("example")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let nested_name = ident(&mut arena, &mut store, "example");
+        let nested_package = package(&mut arena, nested_name, vec![member]);
+        let root = package_with_stat(&mut arena, &mut store, "com", vec![nested_package]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 83, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["com", "example"]).unwrap();
+        let member_symbol = type_symbol(&mut store, package.scope, "Member").unwrap();
+
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(package.symbol)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_resolves_an_enclosing_trait() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Boundary")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let boundary = class_definition(
+            &mut arena,
+            &mut store,
+            "Boundary",
+            vec![Modifier::Trait],
+            vec![member],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![boundary]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 85, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(85);
+        let boundary_symbol = index.symbol_at(source, boundary).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(store.symbols.get(boundary_symbol).kind, SymbolKind::Trait);
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(boundary_symbol)
         );
     }
 
@@ -3085,7 +3591,7 @@ mod tests {
     }
 
     #[test]
-    fn constructor_only_parameter_is_available_in_class_scope() {
+    fn constructor_only_parameter_is_not_in_class_scope() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let parameter = value_parameter(
@@ -3095,7 +3601,7 @@ mod tests {
             vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
             None,
         );
-        let (class, _) = class_definition_with_header(
+        let (class, constructor_tree) = class_definition_with_header(
             &mut arena,
             &mut store,
             "C",
@@ -3116,6 +3622,13 @@ mod tests {
         let parameter_symbol = index
             .symbol_at(SourceId::from_index(19), parameter)
             .unwrap();
+        let constructor_symbol = index
+            .symbol_at(SourceId::from_index(19), constructor_tree)
+            .unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+        let derived_parameter = index
+            .derived_symbol_at(constructor_symbol, SourceId::from_index(19), parameter)
+            .unwrap();
 
         assert_eq!(
             store.symbols.get(parameter_symbol).kind,
@@ -3125,13 +3638,18 @@ mod tests {
             store.symbols.get(parameter_symbol).owner,
             Some(class_symbol)
         );
-        assert_eq!(
-            term_symbol(&mut store, class_scope, "x"),
-            Some(parameter_symbol)
-        );
+        assert_eq!(term_symbol(&mut store, class_scope, "x"), None);
         assert_eq!(
             store.symbols.get(parameter_symbol).visibility,
-            Visibility::Public
+            Visibility::Private
+        );
+        assert_eq!(
+            store.symbols.get(derived_parameter).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, constructor_scope, "x"),
+            Some(derived_parameter)
         );
         assert_eq!(
             store.symbols.get(parameter_symbol).info,
@@ -4028,7 +4546,7 @@ mod tests {
     }
 
     #[test]
-    fn case_class_later_private_local_parameter_is_scoped_but_not_a_field() {
+    fn case_class_later_private_local_parameter_is_unscoped_and_not_a_field() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let first = value_parameter(
@@ -4045,7 +4563,7 @@ mod tests {
             vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
             None,
         );
-        let (class, _) = class_definition_with_header(
+        let (class, constructor_tree) = class_definition_with_header(
             &mut arena,
             &mut store,
             "Pair",
@@ -4063,8 +4581,15 @@ mod tests {
         let package = packages.get(&["cases"]).unwrap();
         let class_symbol = type_symbol(&mut store, package.scope, "Pair").unwrap();
         let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = index
+            .symbol_at(SourceId::from_index(22), constructor_tree)
+            .unwrap();
+        let constructor_scope = index.scope_of(constructor_symbol).unwrap();
         let first_symbol = index.symbol_at(SourceId::from_index(22), first).unwrap();
         let later_symbol = index.symbol_at(SourceId::from_index(22), later).unwrap();
+        let later_constructor_symbol = index
+            .derived_symbol_at(constructor_symbol, SourceId::from_index(22), later)
+            .unwrap();
 
         assert_eq!(store.symbols.get(first_symbol).kind, SymbolKind::Field);
         assert_eq!(
@@ -4073,8 +4598,21 @@ mod tests {
         );
         assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
         assert_eq!(
-            term_symbol(&mut store, class_scope, "y"),
-            Some(later_symbol)
+            store.symbols.get(later_symbol).visibility,
+            Visibility::Private
+        );
+        assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(later_constructor_symbol).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, constructor_scope, "y"),
+            Some(later_constructor_symbol)
         );
     }
 
@@ -4352,6 +4890,69 @@ mod tests {
                 .lookup_all(leaked_name.as_name())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_class_member_scan_rolls_back_constructor_parameter_copies() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let before = store.checkpoint();
+
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let malformed_parameter = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "broken",
+            vec![],
+            vec![vec![malformed_parameter]],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![method],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "rollback", vec![class]);
+        let source = SourceId::from_index(101);
+
+        assert_eq!(
+            name_compilation_unit(
+                &arena,
+                root,
+                source,
+                "Rollback.scala",
+                &mut store,
+                &mut packages,
+            )
+            .unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: malformed_parameter.index(),
+                expected: "ValDef method value parameter",
+            }
+        );
+
+        assert_eq!(store.checkpoint(), before);
+        assert!(packages.is_empty());
     }
 
     #[test]
