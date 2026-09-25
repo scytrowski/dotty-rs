@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax};
+use dotty_core::ast::{
+    ExtensionMethods, Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax,
+};
 use dotty_core::{
     AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, SourceSpan, Symbol, SymbolFlags,
     SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName,
@@ -397,6 +399,7 @@ enum EnteredHeader {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
         scope: ScopeId,
+        extension_prefix_clauses: Option<Vec<Vec<TreeId<Untyped>>>>,
     },
     SecondaryConstructor {
         tree: TreeId<Untyped>,
@@ -770,7 +773,7 @@ impl Namer<'_> {
                 Ok(vec![EnteredHeader::Field { tree, symbol }])
             }
             TreeKind::DefDef(definition) => self
-                .enter_method_header(tree, definition, context.owner, context.scope)
+                .enter_method_header(tree, definition, context.owner, context.scope, None)
                 .map(|header| vec![header]),
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => Ok(self
                 .enter_module_header(tree, context)?
@@ -803,22 +806,7 @@ impl Namer<'_> {
             }
             TreeKind::Export(_) => Ok(Vec::new()),
             TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
-                let mut headers = Vec::new();
-                for method in &extension.methods {
-                    let TreeKind::DefDef(definition) = &self.arena.get(*method).kind else {
-                        return Err(NamerError::MalformedAstShape {
-                            tree_index: method.index(),
-                            expected: "DefDef extension method",
-                        });
-                    };
-                    headers.push(self.enter_method_header(
-                        *method,
-                        definition,
-                        context.owner,
-                        context.scope,
-                    )?);
-                }
-                Ok(headers)
+                self.enter_extension_method_headers(extension, context.owner, context.scope)
             }
             _ => Ok(Vec::new()),
         }
@@ -1178,7 +1166,13 @@ impl Namer<'_> {
                 tree,
                 symbol,
                 scope,
-            } => return self.scan_method_parameters(tree, symbol, scope),
+                extension_prefix_clauses,
+            } => {
+                if let Some(clauses) = extension_prefix_clauses {
+                    self.scan_extension_prefix_parameters(symbol, scope, &clauses)?;
+                }
+                return self.scan_method_parameters(tree, symbol, scope);
+            }
             EnteredHeader::SecondaryConstructor {
                 tree,
                 symbol,
@@ -1461,6 +1455,7 @@ impl Namer<'_> {
                             &definition,
                             symbol,
                             scope,
+                            None,
                         )?);
                     } else {
                         nested_headers.push(self.enter_secondary_constructor_header(
@@ -1470,6 +1465,11 @@ impl Namer<'_> {
                             scope,
                         )?);
                     }
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    let extension = extension.clone();
+                    nested_headers
+                        .extend(self.enter_extension_method_headers(&extension, symbol, scope)?);
                 }
                 _ => {}
             }
@@ -1486,6 +1486,7 @@ impl Namer<'_> {
         definition: &dotty_core::ast::DefDef<Untyped>,
         owner: SymbolId,
         class_scope: ScopeId,
+        extension_prefix_clauses: Option<&[Vec<TreeId<Untyped>>]>,
     ) -> Result<EnteredHeader, NamerError> {
         for parameter in &definition.type_params {
             let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
@@ -1527,17 +1528,112 @@ impl Namer<'_> {
             &definition.metadata,
             GivenNameInput::TypeTree(definition.tpt),
         )?;
-        let spec =
+        let mut spec =
             self.source_symbol_spec(tree, &definition.metadata, owner, SymbolKind::Method)?;
+        if extension_prefix_clauses.is_some() {
+            spec.flags = spec.flags | SymbolFlags::EXTENSION;
+        }
         let method = self.enter_symbol(tree, name, owner, class_scope, spec)?;
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
         self.index.record_scope(method, method_scope)?;
+        if let Some(clauses) = extension_prefix_clauses {
+            self.index
+                .record_extension_prefix_clauses(method, clauses)?;
+        }
 
         Ok(EnteredHeader::Method {
             tree,
             symbol: method,
             scope: method_scope,
+            extension_prefix_clauses: extension_prefix_clauses
+                .map(<[Vec<TreeId<Untyped>>]>::to_vec),
         })
+    }
+
+    fn enter_extension_method_headers(
+        &mut self,
+        extension: &ExtensionMethods,
+        owner: SymbolId,
+        scope: ScopeId,
+    ) -> Result<Vec<EnteredHeader>, NamerError> {
+        let mut headers = Vec::new();
+        for method in &extension.methods {
+            match &self.arena.get(*method).kind {
+                TreeKind::DefDef(definition) => headers.push(self.enter_method_header(
+                    *method,
+                    definition,
+                    owner,
+                    scope,
+                    Some(&extension.param_clauses),
+                )?),
+                TreeKind::Export(_) => {}
+                _ => {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: method.index(),
+                        expected: "DefDef or Export extension method",
+                    });
+                }
+            }
+        }
+        Ok(headers)
+    }
+
+    fn scan_extension_prefix_parameters(
+        &mut self,
+        method: SymbolId,
+        method_scope: ScopeId,
+        clauses: &[Vec<TreeId<Untyped>>],
+    ) -> Result<(), NamerError> {
+        for clause in clauses {
+            for parameter_tree in clause {
+                match &self.arena.get(*parameter_tree).kind {
+                    TreeKind::TypeDef(parameter) => {
+                        let spec = self.source_symbol_spec(
+                            *parameter_tree,
+                            &parameter.metadata,
+                            method,
+                            SymbolKind::TypeParameter,
+                        )?;
+                        self.enter_derived_symbol(
+                            *parameter_tree,
+                            *parameter.name.as_name(),
+                            method,
+                            method_scope,
+                            spec,
+                        )?;
+                    }
+                    TreeKind::ValDef(parameter) => {
+                        let mapped = self.map_source_modifiers(
+                            *parameter_tree,
+                            &parameter.metadata,
+                            method,
+                        )?;
+                        let spec = SymbolSpec {
+                            kind: SymbolKind::Parameter,
+                            flags: mapped.flags
+                                & (SymbolFlags::GIVEN
+                                    | SymbolFlags::IMPLICIT
+                                    | SymbolFlags::ERASED),
+                            visibility: mapped.visibility,
+                        };
+                        self.enter_derived_symbol(
+                            *parameter_tree,
+                            *parameter.name.as_name(),
+                            method,
+                            method_scope,
+                            spec,
+                        )?;
+                    }
+                    _ => {
+                        return Err(NamerError::MalformedAstShape {
+                            tree_index: parameter_tree.index(),
+                            expected: "TypeDef or ValDef extension prefix parameter",
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn enter_secondary_constructor_header(

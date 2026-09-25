@@ -2045,3 +2045,154 @@ fn parsed_top_level_extension_methods_are_entered_in_the_source_wrapper() {
     assert_eq!(store.symbols.get(method_symbol).kind, SymbolKind::Method);
     assert_eq!(store.symbols.get(method_symbol).owner, Some(wrapper));
 }
+
+#[test]
+fn extension_prefix_parameters_are_derived_for_each_top_level_method() {
+    use dotty_core::{SymbolKind, ast::UntypedNode};
+
+    let named = named_source(
+        "extension [A](x: A)\n  def id[B](value: B) = value\n  def discard = x",
+        201,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let prefix = extension
+        .param_clauses
+        .iter()
+        .flat_map(|clause| clause.iter().copied())
+        .collect::<Vec<_>>();
+
+    assert_eq!(extension.methods.len(), 2);
+    for method_tree in &extension.methods {
+        let method = named
+            .index
+            .symbol_at(named.source, *method_tree)
+            .expect("extension method keeps its canonical source identity");
+        let method_symbol = named.store.symbols.get(method);
+        assert!(method_symbol.flags.contains(SymbolFlags::EXTENSION));
+
+        for (parameter_tree, expected_kind) in [
+            (prefix[0], SymbolKind::TypeParameter),
+            (prefix[1], SymbolKind::Parameter),
+        ] {
+            assert_eq!(named.index.symbol_at(named.source, parameter_tree), None);
+            let derived = named
+                .index
+                .derived_symbol_at(method, named.source, parameter_tree)
+                .expect("each method gets a derived prefix identity");
+            let derived_symbol = named.store.symbols.get(derived);
+            assert_eq!(derived_symbol.kind, expected_kind);
+            assert_eq!(derived_symbol.owner, Some(method));
+            assert_eq!(
+                derived_symbol.position,
+                named.parsed.ast.get(parameter_tree).position
+            );
+        }
+    }
+
+    let first = named
+        .index
+        .symbol_at(named.source, extension.methods[0])
+        .unwrap();
+    let second = named
+        .index
+        .symbol_at(named.source, extension.methods[1])
+        .unwrap();
+    assert_ne!(
+        named
+            .index
+            .derived_symbol_at(first, named.source, prefix[0]),
+        named
+            .index
+            .derived_symbol_at(second, named.source, prefix[0])
+    );
+    assert_eq!(
+        named.index.extension_prefix_clauses(first),
+        Some(extension.param_clauses.as_slice())
+    );
+    assert_eq!(
+        named.index.extension_prefix_clauses(second),
+        Some(extension.param_clauses.as_slice())
+    );
+
+    let TreeKind::DefDef(definition) = &named.parsed.ast.get(extension.methods[0]).kind else {
+        panic!("extension child should be a DefDef");
+    };
+    let own_type_parameter = named
+        .index
+        .symbol_at(named.source, definition.type_params[0])
+        .expect("method type parameter keeps its canonical identity");
+    let own_value_parameter = named
+        .index
+        .symbol_at(named.source, definition.value_param_clauses[0][0])
+        .expect("method value parameter keeps its canonical identity");
+    assert_eq!(
+        named.store.symbols.get(own_type_parameter).owner,
+        Some(first)
+    );
+    assert_eq!(
+        named.store.symbols.get(own_value_parameter).owner,
+        Some(first)
+    );
+    let first_prefix = named
+        .index
+        .derived_symbol_at(first, named.source, prefix[0])
+        .unwrap();
+    let second_prefix = named
+        .index
+        .derived_symbol_at(first, named.source, prefix[1])
+        .unwrap();
+    assert!(first_prefix.index() < second_prefix.index());
+    assert!(second_prefix.index() < own_type_parameter.index());
+    assert!(own_type_parameter.index() < own_value_parameter.index());
+}
+
+#[test]
+fn extension_methods_inside_class_templates_are_named_with_prefixes() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "class C:\n  extension (value: Int)\n    def twice = value",
+        202,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("class extension should remain an ExtensionMethods node");
+    };
+    let method_tree = extension.methods[0];
+    let method = named
+        .index
+        .symbol_at(named.source, method_tree)
+        .expect("class extension method has a canonical symbol");
+    let prefix_tree = extension.param_clauses[0][0];
+    let parameter = named
+        .index
+        .derived_symbol_at(method, named.source, prefix_tree)
+        .expect("class extension receiver has a method-owned identity");
+
+    assert!(
+        named
+            .store
+            .symbols
+            .get(method)
+            .flags
+            .contains(SymbolFlags::EXTENSION)
+    );
+    assert_eq!(named.store.symbols.get(parameter).owner, Some(method));
+}
