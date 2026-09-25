@@ -67,6 +67,17 @@ The checked-in final report was measured against dotty-rs commit
 the Scala checkout, not the dotty-rs revision; the latter is recorded here so
 the two dimensions are not confused.
 
+`parser-post-issue-252-scala3-3.9.0.json` reruns the same measurement at
+dotty-rs commit `222dd59` (after PR #247). It uses the identical Scala
+revision and sorted 1,236-file manifest. The comparison and interpretation are
+recorded in [`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate the latest report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-252-scala3-3.9.0.json
+```
+
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact
 Scala/Rust differential gate for the checked-in fixture corpus. This report is
 the larger source-compatibility measurement and does not weaken that gate.

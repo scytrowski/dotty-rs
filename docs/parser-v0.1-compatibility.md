@@ -103,3 +103,53 @@ the 847 recoverable files and the follow-ups above remain a real compatibility
 boundary.
 
 Issue #222's deterministic sample-based root-cause investigation is documented in [parser-source-triage-3.9.0.md](parser-source-triage-3.9.0.md). It separates syntax families hidden by the generic first-diagnostic buckets and links the resulting implementation follow-ups.
+
+## Corpus rerun after PR #247
+
+Issue #252 reran the report at dotty-rs commit `222dd59` using the same
+Scala 3.9.0 checkout revision (`777528f19a58e794c9954a42f433373472ec57f8`)
+and the same sorted `library/src` + `compiler/src` manifest of 1,236 files.
+The full run took 22.6 seconds on the measurement host. The new machine-readable
+report is
+[`parser-post-issue-252-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-252-scala3-3.9.0.json).
+
+| Measure | v0.1 final (`1562374`) | After #247 (`222dd59`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 389 (31.47%) | 455 (36.81%) | +66 (+5.34 pp) |
+| Recoverable diagnostics | 847 (68.53%) | 781 (63.19%) | -66 (-5.34 pp) |
+| Hard parser failures | 0 | 0 | 0 |
+| Panics | 0 | 0 | 0 |
+| Hangs | 0 | 0 | 0 |
+| Scanner diagnostics | 17 | 17 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | v0.1 final | After #247 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 37,442 | 35,103 | -2,339 |
+| `ExpectedPattern` | 110 | 7 | -103 |
+| `ExpectedToken` | 8,582 | 7,858 | -724 |
+| `ExpectedType` | 2,423 | 2,529 | +106 |
+| `UnexpectedToken` | 21,012 | 18,294 | -2,718 |
+| `UnsupportedSyntax` | 6,114 | 4,189 | -1,925 |
+| **Total** | **75,683** | **67,980** | **-7,703 (-10.2%)** |
+
+The first-failure histogram also moved: `top-level expressions are not
+supported in a compilation unit` disappeared (18 files in v0.1), while the
+already-known Scala 2 wildcard-import `_` bucket grew from 44 to 61. Legacy
+`implicit` parameter clauses grew from 25 to 31, and package objects from 18
+to 19. The other named unsupported buckets were unchanged: compound template
+self types (7), interleaved type parameter clauses (1), and unsupported enum
+case syntax (5). These counts classify only each file's first parser
+diagnostic; as the parser accepts more of a file, a later unsupported construct
+can become its first reported failure. They are not per-feature regression
+counts. Generic first-failure counts changed from 243 to 291 for
+`ExpectedExpression`, 215 to 94 for `ExpectedToken`, 109 to 136 for
+`ExpectedType`, 159 to 136 for `UnexpectedToken`, and 3 to 0 for
+`ExpectedPattern`.
+
+Overall, clean parses rose and total diagnostics fell, with no reliability
+failures. This is an aggregate compatibility comparison, not proof that every
+grammar change is correct: `ExpectedType` diagnostic occurrences increased by
+106 and merit future targeted triage. The exact Scala/Rust fixture comparison
+remains separately enforced by `tools/scala-parser-oracle/compare.sh`.

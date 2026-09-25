@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 30,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 455,
+  "files_parsed_with_recoverable_diagnostics": 781,
+  "hard_parser_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 17,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 35103,
+    "ExpectedPattern": 7,
+    "ExpectedToken": 7858,
+    "ExpectedType": 2529,
+    "UnexpectedToken": 18294,
+    "UnsupportedSyntax": 4189
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 291,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 94,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+        "compiler/src/dotty/tools/debug/ExpressionCompilerBridge.scala",
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 136,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/PostProcessorFrontendAccess.scala",
+        "compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 136,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+        "compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala",
+        "compiler/src/dotty/tools/backend/jvm/PostProcessor.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/AsmAnalyzer.scala"
+      ]
+    },
+    "UnsupportedSyntax: _ is no longer supported for a wildcard import/export; use * instead": {
+      "count": 61,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/opt/CallGraph.scala",
+        "compiler/src/dotty/tools/dotc/core/Signature.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/AttributeUnpickler.scala",
+        "compiler/src/dotty/tools/dotc/printing/Printer.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala"
+      ]
+    },
+    "UnsupportedSyntax: compound template self types are not supported yet": {
+      "count": 7,
+      "examples": [
+        "library/src/scala/PartialFunction.scala",
+        "library/src/scala/collection/IndexedSeq.scala",
+        "library/src/scala/collection/IterableOnce.scala",
+        "library/src/scala/collection/Iterator.scala",
+        "library/src/scala/collection/Seq.scala"
+      ]
+    },
+    "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "UnsupportedSyntax: legacy implicit parameter clauses are not supported; use a named using clause": {
+      "count": 31,
+      "examples": [
+        "compiler/src/dotty/tools/backend/sjs/JSEncoding.scala",
+        "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
+        "compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala",
+        "compiler/src/dotty/tools/dotc/ast/Positioned.scala",
+        "compiler/src/dotty/tools/dotc/ast/Trees.scala"
+      ]
+    },
+    "UnsupportedSyntax: package objects are not supported yet": {
+      "count": 19,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/dotc/parsing/package.scala",
+        "compiler/src/dotty/tools/dotc/printing/package.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/package.scala",
+        "compiler/src/dotty/tools/io/package.scala"
+      ]
+    },
+    "UnsupportedSyntax: unsupported enum case syntax": {
+      "count": 5,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        "compiler/src/dotty/tools/dotc/reporting/ErrorMessageID.scala",
+        "compiler/src/dotty/tools/io/FileExtension.scala"
+      ]
+    }
+  }
+}
