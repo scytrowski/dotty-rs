@@ -166,13 +166,14 @@ where
         boundary: StatementSequenceBoundary,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut statements = Vec::new();
+        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
             if self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().and_then(last_statement_tree);
                 if self.end_marker_matches_next(last) {
-                    if !self.consume_end_marker(last) {
+                    if !self.consume_end_marker(last, end_marker_seen) {
                         return self.finish_statement_sequence(statements);
                     }
                 } else if matches!(
@@ -180,12 +181,14 @@ where
                     StatementSequenceBoundary::Block(TokenKind::Outdent)
                 ) {
                     return self.finish_statement_sequence(statements);
-                } else if !self.consume_end_marker(last) {
+                } else if !self.consume_end_marker(last, end_marker_seen) {
                     return self.finish_statement_sequence(statements);
                 }
+                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
+            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -235,7 +238,7 @@ where
             while self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().and_then(last_statement_tree);
                 if self.end_marker_matches_next(last) {
-                    if !self.consume_end_marker(last) {
+                    if !self.consume_end_marker(last, end_marker_seen) {
                         return self.finish_statement_sequence(statements);
                     }
                 } else if matches!(
@@ -243,9 +246,10 @@ where
                     StatementSequenceBoundary::Block(TokenKind::Outdent)
                 ) {
                     return self.finish_statement_sequence(statements);
-                } else if !self.consume_end_marker(last) {
+                } else if !self.consume_end_marker(last, end_marker_seen) {
                     return self.finish_statement_sequence(statements);
                 }
+                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -260,17 +264,20 @@ where
         boundary: StatementSequenceBoundary,
     ) -> Vec<TreeId<Untyped>> {
         let mut statements = Vec::new();
+        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
             if self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last) {
+                if !self.consume_end_marker(last, end_marker_seen) {
                     return statements;
                 }
+                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
+            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -310,9 +317,10 @@ where
 
             while self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last) {
+                if !self.consume_end_marker(last, end_marker_seen) {
                     return statements;
                 }
+                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -396,7 +404,11 @@ where
     /// expression parsing or recovery. Only the marker and its target are
     /// consumed, so an unrelated next statement remains available to the
     /// enclosing sequence.
-    pub(crate) fn consume_end_marker(&mut self, last: Option<TreeId<Untyped>>) -> bool {
+    pub(crate) fn consume_end_marker(
+        &mut self,
+        last: Option<TreeId<Untyped>>,
+        duplicate: bool,
+    ) -> bool {
         let checkpoint = self.cursor.checkpoint();
         let marker = self.current().span;
         self.advance();
@@ -431,6 +443,13 @@ where
         let matching_tree =
             last.filter(|tree| self.end_marker_matches(*tree, target_kind, &target_text));
         if let Some(tree) = matching_tree {
+            if duplicate {
+                self.report_at(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    SourceSpan::new(self.source_id, Span::without_point(marker)),
+                    "duplicate end marker",
+                );
+            }
             self.extend_tree_end(tree, target_end);
         } else {
             let range = TextRange::new(marker.start(), target_end).expect("marker span is ordered");
@@ -718,6 +737,41 @@ mod tests {
         );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the marker");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+    }
+
+    #[test]
+    fn duplicate_matching_end_marker_is_diagnosed_but_does_not_swallow_the_next_statement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then x\nend if\nend if\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::EndMarker, 12, 15),
+                token(TokenKind::Keyword(HardKeyword::If), 16, 18),
+                token(TokenKind::Newline, 18, 19),
+                token(TokenKind::EndMarker, 19, 22),
+                token(TokenKind::Keyword(HardKeyword::If), 23, 25),
+                token(TokenKind::Newline, 25, 26),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "duplicate end marker");
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the statement after the duplicate marker");
         };
         assert_eq!(parser.names.resolve(result.name.text()), "y");
     }
