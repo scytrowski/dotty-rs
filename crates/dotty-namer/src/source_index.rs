@@ -6,7 +6,8 @@ use dotty_core::{ScopeId, SourceId, SymbolId, TreeId, Untyped};
 
 use crate::NamerError;
 
-/// Semantic identities associated with trees in source compilation units.
+/// Canonical and owner-specific derived identities associated with source
+/// trees in compilation units.
 ///
 /// Tree IDs are arena-relative, so lookups use both the source identity and
 /// the tree ID. This index belongs to one naming result; persistent symbols
@@ -24,7 +25,9 @@ impl SourceSemanticIndex {
         Self::default()
     }
 
-    /// Returns the symbol assigned to a tree in the given source unit.
+    /// Returns the canonical symbol represented by a tree in the given source
+    /// unit. Derived symbols are available through [`Self::derived_symbol_at`]
+    /// and never replace this mapping.
     pub fn symbol_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<SymbolId> {
         self.symbols_by_tree.get(&(source, tree)).copied()
     }
