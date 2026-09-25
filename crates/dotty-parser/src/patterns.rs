@@ -769,6 +769,33 @@ mod tests {
     }
 
     #[test]
+    fn unterminated_quoted_pattern_splice_reports_errors_and_returns_a_tree() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'{ ${x",
+            vec![
+                token(TokenKind::Quote, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(!result.diagnostics.is_empty());
+        let TreeKind::Quote(quote) = &result.ast.get(result.root).kind else {
+            panic!("malformed quote-pattern input still returns its partial Quote");
+        };
+        assert!(matches!(
+            result.ast.get(quote.body).kind,
+            TreeKind::SplicePattern(SplicePattern { .. })
+        ));
+    }
+
+    #[test]
     fn parses_an_identifier_pattern() {
         let mut names = NameInterner::new();
         let parser = parser_for(

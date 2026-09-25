@@ -90,14 +90,17 @@ shared Rust representation.
 It intentionally does not claim coverage for the rest of Scala's expression,
 type, or argument grammar.
 
-Fixtures under `fixtures/patterns/` use the explicit `pattern` mode. Scala
-mode calls Dotty's real `Parser.pattern()` entry and Rust mode calls the
+Fixtures under `fixtures/patterns/` use the explicit `pattern` mode. This
+includes quote-pattern syntax and nested term splices. Scala mode calls
+Dotty's real `Parser.pattern()` entry and Rust mode calls the
 parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
 in synthetic `match` expressions. The normalized tree compares `Bind`,
 `Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
 arguments as they appear before semantic extractor lowering. Sequence-pattern
 fixtures cover trailing extractor arguments, nested extractors, wildcard and
 backquoted variables, while preserving ordinary infix operators such as `*:`.
+Quote syntax follows Dotty's parser-level tree (`Quote` containing
+`SplicePattern` nodes); `QuotePattern` is a later typed-tree representation.
 
 Fixtures under `fixtures/quotes/` use the normal expression mode and cover
 quoted expression/type bodies, empty quoted blocks, nested quotes, braced
