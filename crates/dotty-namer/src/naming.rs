@@ -82,10 +82,16 @@ struct NamingContext {
 
 /// Runs the source naming pass for one parsed compilation unit.
 ///
-/// The input keeps the source ID and file name alongside arena-relative tree
-/// IDs. The file name, including its extension, is retained by this API for
-/// later top-level wrapper naming. This foundation increment validates the
-/// package root but intentionally creates no symbols or scopes.
+/// The pass enters or reuses package symbols and scopes, then enters symbols
+/// and declaration scopes for supported class and trait definitions. The
+/// returned index maps the package and class/trait trees to their semantic
+/// symbols and scopes. These symbols remain incomplete until later compiler
+/// phases provide their semantic information.
+///
+/// If indexing fails, package registrations, allocated store entries, and
+/// scope insertions made by this call are rolled back. The input keeps the
+/// source ID and file name alongside arena-relative tree IDs. The file name,
+/// including its extension, is retained for later top-level wrapper naming.
 pub fn name_compilation_unit(
     arena: &AstArena<Untyped>,
     root: TreeId<Untyped>,
