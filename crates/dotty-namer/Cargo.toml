@@ -8,3 +8,4 @@ dotty-core = { path = "../dotty-core" }
 
 [dev-dependencies]
 dotty-parser = { path = "../dotty-parser" }
+dotty-lexer = { path = "../dotty-lexer" }

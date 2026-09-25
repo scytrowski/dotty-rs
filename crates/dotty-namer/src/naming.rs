@@ -80,6 +80,13 @@ struct NamingContext {
     package_path: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+struct SymbolSpec {
+    kind: SymbolKind,
+    flags: SymbolFlags,
+    visibility: Visibility,
+}
+
 /// Runs the source naming pass for one parsed compilation unit.
 ///
 /// The pass enters or reuses package symbols and scopes, then enters symbols
@@ -220,11 +227,51 @@ impl Namer<'_> {
         let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
             return Ok(());
         };
-        let body = template.body.clone();
+        let template = template.clone();
         // Enum identity has its own later naming step. Never misclassify it
-        // as a class while that step remains out of scope.
+        // as a class or require class-header constructor data from this pass.
         if definition.metadata.modifiers.contains(&Modifier::Enum) {
             return Ok(());
+        }
+
+        let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: template.constructor.index(),
+                expected: "DefDef primary constructor",
+            });
+        };
+        let constructor = constructor.clone();
+        let mut type_parameters = Vec::with_capacity(constructor.type_params.len());
+        for parameter in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter.index(),
+                    expected: "TypeDef class type parameter",
+                });
+            };
+            type_parameters.push(parameter.clone());
+        }
+        let mut value_parameters = Vec::new();
+        for clause in &constructor.value_param_clauses {
+            for parameter in clause {
+                let TreeKind::ValDef(parameter_def) = &self.arena.get(*parameter).kind else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter.index(),
+                        expected: "ValDef constructor value parameter",
+                    });
+                };
+                if !parameter_def
+                    .metadata
+                    .modifiers
+                    .contains(&Modifier::ParamAccessor)
+                {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter.index(),
+                        expected: "constructor ValDef with ParamAccessor metadata",
+                    });
+                }
+                value_parameters.push((*parameter, parameter_def.clone()));
+            }
         }
 
         let name = *definition.name.as_name();
@@ -259,7 +306,60 @@ impl Namer<'_> {
             scope,
             package_path: owner_context.package_path.clone(),
         };
-        for member in body {
+
+        for (tree, parameter) in constructor.type_params.iter().zip(type_parameters) {
+            self.enter_symbol(
+                *tree,
+                *parameter.name.as_name(),
+                symbol,
+                scope,
+                SymbolSpec {
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
+            )?;
+        }
+        for (tree, parameter) in value_parameters {
+            let private_local = parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::PrivateLocal);
+            self.enter_symbol(
+                tree,
+                *parameter.name.as_name(),
+                symbol,
+                scope,
+                SymbolSpec {
+                    kind: if private_local {
+                        SymbolKind::Parameter
+                    } else {
+                        SymbolKind::Field
+                    },
+                    flags: if !private_local
+                        && parameter.metadata.modifiers.contains(&Modifier::Var)
+                    {
+                        SymbolFlags::MUTABLE
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                    visibility: self.class_visibility(tree, &parameter.metadata.visibility)?,
+                },
+            )?;
+        }
+        self.enter_symbol(
+            template.constructor,
+            *constructor.name.as_name(),
+            symbol,
+            scope,
+            SymbolSpec {
+                kind: SymbolKind::Constructor,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+            },
+        )?;
+
+        for member in template.body {
             if matches!(self.arena.get(member).kind, TreeKind::TypeDef(_)) {
                 self.enter_class_or_trait(member, &class_context)?;
             }
@@ -281,6 +381,31 @@ impl Namer<'_> {
                 };
                 flags | flag
             })
+    }
+
+    fn enter_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        owner: SymbolId,
+        scope: ScopeId,
+        spec: SymbolSpec,
+    ) -> Result<SymbolId, NamerError> {
+        let symbol = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner),
+            kind: spec.kind,
+            flags: spec.flags,
+            visibility: spec.visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        });
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.index.record_symbol(self.source, tree, symbol)?;
+        Ok(symbol)
     }
 
     fn is_empty_package_sentinel(&self, name: TreeId<Untyped>) -> bool {
@@ -353,8 +478,8 @@ impl Namer<'_> {
 #[cfg(test)]
 mod tests {
     use dotty_core::ast::{
-        Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef,
-        UntypedTemplateMetadata, VisibilitySyntax,
+        DefDef, Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef, TypeTree,
+        UntypedTemplateMetadata, ValDef, VisibilitySyntax,
     };
     use dotty_core::{
         AstArena, Packages, SemanticStore, SourceId, SourceSpan, Span, SymbolFlags, SymbolInfo,
@@ -425,15 +550,61 @@ mod tests {
         })
     }
 
-    fn class_definition(
+    fn type_tree(arena: &mut AstArena<Untyped>) -> TreeId<Untyped> {
+        arena.alloc(Tree {
+            kind: TreeKind::TypeTree(TypeTree),
+            position: None,
+            ty: (),
+        })
+    }
+
+    fn constructor(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        let tpt = type_tree(arena);
+        let name = dotty_core::TermName::new(store.names.intern("<init>"));
+        arena.alloc(Tree {
+            kind: TreeKind::DefDef(DefDef {
+                name,
+                type_params,
+                value_param_clauses,
+                tpt,
+                rhs: None,
+                metadata: Modifiers::default(),
+            }),
+            position,
+            ty: (),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)] // Test fixture exposes each AST component explicitly.
+    fn class_definition_with_header(
         arena: &mut AstArena<Untyped>,
         store: &mut SemanticStore,
         name: &str,
         modifiers: Vec<Modifier>,
         body: Vec<TreeId<Untyped>>,
         position: Option<SourceSpan>,
-    ) -> TreeId<Untyped> {
-        class_definition_with_visibility(arena, store, name, modifiers, None, body, position)
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        constructor_position: Option<SourceSpan>,
+    ) -> (TreeId<Untyped>, TreeId<Untyped>) {
+        class_definition_with_visibility_header(
+            arena,
+            store,
+            name,
+            modifiers,
+            None,
+            body,
+            position,
+            type_params,
+            value_param_clauses,
+            constructor_position,
+        )
     }
 
     fn class_definition_with_visibility(
@@ -445,13 +616,41 @@ mod tests {
         body: Vec<TreeId<Untyped>>,
         position: Option<SourceSpan>,
     ) -> TreeId<Untyped> {
-        let constructor = arena.alloc(Tree {
-            kind: TreeKind::Literal(Literal {
-                value: dotty_core::Constant::Unit,
-            }),
-            position: None,
-            ty: (),
-        });
+        class_definition_with_visibility_header(
+            arena,
+            store,
+            name,
+            modifiers,
+            visibility,
+            body,
+            position,
+            vec![],
+            vec![],
+            None,
+        )
+        .0
+    }
+
+    #[allow(clippy::too_many_arguments)] // Test fixture exposes each AST component explicitly.
+    fn class_definition_with_visibility_header(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        visibility: Option<VisibilitySyntax>,
+        body: Vec<TreeId<Untyped>>,
+        position: Option<SourceSpan>,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        constructor_position: Option<SourceSpan>,
+    ) -> (TreeId<Untyped>, TreeId<Untyped>) {
+        let constructor = constructor(
+            arena,
+            store,
+            type_params,
+            value_param_clauses,
+            constructor_position,
+        );
         let template = arena.alloc(Tree {
             kind: TreeKind::Template(Template {
                 constructor,
@@ -464,7 +663,7 @@ mod tests {
             ty: (),
         });
         let name_id = store.names.intern(name);
-        arena.alloc(Tree {
+        let definition = arena.alloc(Tree {
             kind: TreeKind::TypeDef(TypeDef {
                 name: TypeName::new(name_id),
                 rhs: template,
@@ -474,6 +673,76 @@ mod tests {
                     ..Modifiers::default()
                 },
                 variance: None,
+            }),
+            position,
+            ty: (),
+        });
+        (definition, constructor)
+    }
+
+    fn class_definition(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        body: Vec<TreeId<Untyped>>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        class_definition_with_header(
+            arena,
+            store,
+            name,
+            modifiers,
+            body,
+            position,
+            vec![],
+            vec![],
+            None,
+        )
+        .0
+    }
+
+    fn type_parameter(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        let rhs = type_tree(arena);
+        let name = TypeName::new(store.names.intern(name));
+        arena.alloc(Tree {
+            kind: TreeKind::TypeDef(TypeDef {
+                name,
+                rhs,
+                metadata: Modifiers {
+                    modifiers: vec![Modifier::Param],
+                    ..Modifiers::default()
+                },
+                variance: None,
+            }),
+            position,
+            ty: (),
+        })
+    }
+
+    fn value_parameter(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        let tpt = type_tree(arena);
+        let name = dotty_core::TermName::new(store.names.intern(name));
+        arena.alloc(Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata: Modifiers {
+                    modifiers,
+                    ..Modifiers::default()
+                },
             }),
             position,
             ty: (),
@@ -496,6 +765,15 @@ mod tests {
         text: &str,
     ) -> Option<SymbolId> {
         let name = TypeName::new(store.names.intern(text));
+        store.scopes.get(scope).lookup(name.as_name())
+    }
+
+    fn term_symbol(
+        store: &mut SemanticStore,
+        scope: dotty_core::ScopeId,
+        text: &str,
+    ) -> Option<SymbolId> {
+        let name = dotty_core::TermName::new(store.names.intern(text));
         store.scopes.get(scope).lookup(name.as_name())
     }
 
@@ -1009,6 +1287,463 @@ mod tests {
 
         assert_eq!(type_symbol(&mut store, owner.scope, "Color"), None);
         assert_eq!(index.symbol_at(SourceId::from_index(17), enumeration), None);
+    }
+
+    #[test]
+    fn class_type_parameters_are_owned_and_entered_in_class_scope() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = type_parameter(&mut arena, &mut store, "A", None);
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "Generic",
+            vec![],
+            vec![],
+            None,
+            vec![parameter],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "generics", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 18, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["generics"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "Generic").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let parameter_symbol = type_symbol(&mut store, class_scope, "A").unwrap();
+
+        assert_eq!(
+            store.symbols.get(parameter_symbol).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(18), parameter),
+            Some(parameter_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).info,
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn constructor_only_parameter_is_available_in_class_scope() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "params", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 19, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["params"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let parameter_symbol = index
+            .symbol_at(SourceId::from_index(19), parameter)
+            .unwrap();
+
+        assert_eq!(
+            store.symbols.get(parameter_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "x"),
+            Some(parameter_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).info,
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn val_constructor_parameter_is_a_class_field() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "vals", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 20, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["vals"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let field_symbol = term_symbol(&mut store, class_scope, "x").unwrap();
+
+        assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(field_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(20), parameter),
+            Some(field_symbol)
+        );
+    }
+
+    #[test]
+    fn private_val_constructor_parameter_keeps_private_visibility() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "secret",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let TreeKind::ValDef(definition) = &mut arena.get_mut(parameter).kind else {
+            unreachable!("value_parameter constructs a ValDef");
+        };
+        definition.metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "vals", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 29, &mut store, &mut packages).unwrap();
+        let symbol = index
+            .symbol_at(SourceId::from_index(29), parameter)
+            .unwrap();
+
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn var_constructor_parameter_is_a_mutable_field() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "count",
+            vec![Modifier::ParamAccessor, Modifier::Var],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "Counter",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "vars", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 21, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["vars"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "Counter").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let field_symbol = term_symbol(&mut store, class_scope, "count").unwrap();
+
+        assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::MUTABLE);
+    }
+
+    #[test]
+    fn case_class_later_private_local_parameter_is_scoped_but_not_a_field() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let later = value_parameter(
+            &mut arena,
+            &mut store,
+            "y",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "Pair",
+            vec![Modifier::Case],
+            vec![],
+            None,
+            vec![],
+            vec![vec![first], vec![later]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "cases", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 22, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["cases"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "Pair").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let first_symbol = index.symbol_at(SourceId::from_index(22), first).unwrap();
+        let later_symbol = index.symbol_at(SourceId::from_index(22), later).unwrap();
+
+        assert_eq!(store.symbols.get(first_symbol).kind, SymbolKind::Field);
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "x"),
+            Some(first_symbol)
+        );
+        assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "y"),
+            Some(later_symbol)
+        );
+    }
+
+    #[test]
+    fn constructor_parameter_source_position_is_preserved() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(28);
+        let position = Some(SourceSpan::new(
+            source,
+            Span::without_point(TextRange::new(12, 20).unwrap()),
+        ));
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "located",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            position,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "LocatedParameter",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "positions", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 28, &mut store, &mut packages).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert_eq!(store.symbols.get(parameter_symbol).position, position);
+    }
+
+    #[test]
+    fn multiple_constructor_clauses_keep_every_parameter_identity() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = value_parameter(
+            &mut arena,
+            &mut store,
+            "a",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let second = value_parameter(
+            &mut arena,
+            &mut store,
+            "b",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            None,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "Many",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![first], vec![second]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "clauses", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 23, &mut store, &mut packages).unwrap();
+
+        assert!(index.symbol_at(SourceId::from_index(23), first).is_some());
+        assert!(index.symbol_at(SourceId::from_index(23), second).is_some());
+    }
+
+    #[test]
+    fn primary_constructor_is_owned_mapped_and_entered_under_init() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let constructor_position = Some(SourceSpan::new(
+            SourceId::from_index(24),
+            Span::without_point(TextRange::new(2, 10).unwrap()),
+        ));
+        let (class, constructor) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "WithConstructor",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+            constructor_position,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "constructors", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 24, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["constructors"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "WithConstructor").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = term_symbol(&mut store, class_scope, "<init>").unwrap();
+
+        assert_eq!(
+            store.symbols.get(constructor_symbol).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(
+            store.symbols.get(constructor_symbol).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(constructor_symbol).position,
+            constructor_position
+        );
+        assert_eq!(
+            store.symbols.get(constructor_symbol).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(24), constructor),
+            Some(constructor_symbol)
+        );
+    }
+
+    #[test]
+    fn malformed_primary_constructor_shape_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let invalid_constructor = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let template = arena.alloc(Tree {
+            kind: TreeKind::Template(Template {
+                constructor: invalid_constructor,
+                parents: vec![],
+                self_val: None,
+                body: vec![],
+                metadata: UntypedTemplateMetadata::default(),
+            }),
+            position: None,
+            ty: (),
+        });
+        let class_name = TypeName::new(store.names.intern("Broken"));
+        let class = arena.alloc(Tree {
+            kind: TreeKind::TypeDef(TypeDef {
+                name: class_name,
+                rhs: template,
+                metadata: Modifiers::default(),
+                variance: None,
+            }),
+            position: None,
+            ty: (),
+        });
+        let root = package_with_stat(&mut arena, &mut store, "malformed", vec![class]);
+
+        assert_eq!(
+            name_package(&arena, root, 25, &mut store, &mut Packages::new()).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: invalid_constructor.index(),
+                expected: "DefDef primary constructor",
+            }
+        );
+    }
+
+    #[test]
+    fn constructor_parameter_without_param_accessor_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(&mut arena, &mut store, "uncategorized", vec![], None);
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "MalformedParameter",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "malformedparams", vec![class]);
+
+        assert_eq!(
+            name_package(&arena, root, 26, &mut store, &mut Packages::new()).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: parameter.index(),
+                expected: "constructor ValDef with ParamAccessor metadata",
+            }
+        );
     }
 
     #[test]
