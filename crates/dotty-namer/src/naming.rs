@@ -360,6 +360,9 @@ impl Namer<'_> {
         )?;
 
         for member in template.body {
+            if member == template.constructor {
+                continue;
+            }
             match &self.arena.get(member).kind {
                 TreeKind::TypeDef(_) => self.enter_class_or_trait(member, &class_context)?,
                 TreeKind::ValDef(definition) => {
@@ -375,6 +378,30 @@ impl Namer<'_> {
                             visibility: Visibility::Public,
                         },
                     )?;
+                }
+                TreeKind::DefDef(definition) => {
+                    let definition = definition.clone();
+                    let kind =
+                        if self.store.names.resolve(definition.name.as_name().text()) == "<init>" {
+                            SymbolKind::Constructor
+                        } else {
+                            SymbolKind::Method
+                        };
+                    let method = self.enter_symbol(
+                        member,
+                        *definition.name.as_name(),
+                        symbol,
+                        scope,
+                        SymbolSpec {
+                            kind,
+                            flags: SymbolFlags::EMPTY,
+                            visibility: Visibility::Public,
+                        },
+                    )?;
+                    if kind == SymbolKind::Method {
+                        let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
+                        self.index.record_scope(method, method_scope)?;
+                    }
                 }
                 _ => {}
             }
@@ -582,6 +609,30 @@ mod tests {
     ) -> TreeId<Untyped> {
         let tpt = type_tree(arena);
         let name = dotty_core::TermName::new(store.names.intern("<init>"));
+        arena.alloc(Tree {
+            kind: TreeKind::DefDef(DefDef {
+                name,
+                type_params,
+                value_param_clauses,
+                tpt,
+                rhs: None,
+                metadata: Modifiers::default(),
+            }),
+            position,
+            ty: (),
+        })
+    }
+
+    fn method_definition(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        type_params: Vec<TreeId<Untyped>>,
+        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        let tpt = type_tree(arena);
+        let name = dotty_core::TermName::new(store.names.intern(name));
         arena.alloc(Tree {
             kind: TreeKind::DefDef(DefDef {
                 name,
@@ -1471,6 +1522,106 @@ mod tests {
             SymbolOrigin::Source(source)
         );
         assert_eq!(index.symbol_at(source, field), Some(field_symbol));
+    }
+
+    #[test]
+    fn direct_class_method_is_owned_mapped_and_has_a_scope() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(31);
+        let method = method_definition(&mut arena, &mut store, "compute", vec![], vec![], None);
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "members", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 31, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["members"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let method_symbol = term_symbol(&mut store, class_scope, "compute").unwrap();
+        let method_scope = index.scope_of(method_symbol).unwrap();
+
+        assert_eq!(store.symbols.get(method_symbol).kind, SymbolKind::Method);
+        assert_eq!(store.symbols.get(method_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(method_symbol).info, SymbolInfo::Missing);
+        assert_eq!(
+            store.symbols.get(method_symbol).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(store.scopes.get(method_scope).owner, Some(method_symbol));
+        assert_eq!(index.symbol_at(source, method), Some(method_symbol));
+    }
+
+    #[test]
+    fn overloaded_class_methods_keep_each_symbol_in_declaration_order() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = method_definition(&mut arena, &mut store, "lookup", vec![], vec![], None);
+        let second = method_definition(&mut arena, &mut store, "lookup", vec![], vec![], None);
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![first, second],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "overloads", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 32, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["overloads"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let name = dotty_core::TermName::new(store.names.intern("lookup"));
+        let overloads = store.scopes.get(class_scope).lookup_all(name.as_name());
+        let first_symbol = index.symbol_at(SourceId::from_index(32), first).unwrap();
+        let second_symbol = index.symbol_at(SourceId::from_index(32), second).unwrap();
+
+        assert_eq!(overloads, &[first_symbol, second_symbol]);
+        assert_ne!(first_symbol, second_symbol);
+    }
+
+    #[test]
+    fn primary_constructor_in_template_body_is_not_entered_twice() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let (class, primary) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "C",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+            None,
+        );
+        let TreeKind::TypeDef(definition) = &arena.get(class).kind else {
+            unreachable!("class_definition constructs a TypeDef");
+        };
+        let TreeKind::Template(template) = &mut arena.get_mut(definition.rhs).kind else {
+            unreachable!("class_definition constructs a Template");
+        };
+        template.body.push(primary);
+        let root = package_with_stat(&mut arena, &mut store, "constructors", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 33, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["constructors"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let init = dotty_core::TermName::new(store.names.intern("<init>"));
+
+        assert_eq!(
+            store
+                .scopes
+                .get(class_scope)
+                .lookup_all(init.as_name())
+                .len(),
+            1
+        );
+        assert!(index.symbol_at(SourceId::from_index(33), primary).is_some());
     }
 
     #[test]
