@@ -188,6 +188,12 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
+                    if is_using || owner == ParamOwner::Given {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedToken,
+                            "expected a parameter after `,`",
+                        );
+                    }
                     self.advance();
                     break;
                 }
@@ -353,6 +359,10 @@ where
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected a parameter type after `,`",
+                    );
                     self.advance();
                     break;
                 }
@@ -612,6 +622,36 @@ mod tests {
 
         let _clauses = parser.parse_term_param_clauses(ParamOwner::Def);
 
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_trailing_comma_in_a_named_using_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using context: A,)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 14),
+                token(TokenKind::ColonFollow, 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
         assert!(
             parser
                 .diagnostics()
@@ -999,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_trailing_comma_in_anonymous_using_clause() {
+    fn reports_a_trailing_comma_in_anonymous_using_clause() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(using Context, )",
@@ -1017,7 +1057,12 @@ mod tests {
         let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
 
         assert_eq!(clauses[0].len(), 1);
-        assert!(parser.diagnostics().is_empty());
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
