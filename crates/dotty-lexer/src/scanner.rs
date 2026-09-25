@@ -154,10 +154,12 @@ impl ContextualScanner {
             let has_separator = self.tokens[previous_index + 1..current_index]
                 .iter()
                 .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
+            let starts_unspaced_prefix_expr =
+                is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
             if has_line_break
                 && !has_separator
                 && can_end_statement(Some(previous.kind))
-                && can_start_statement_kind(current.kind)
+                && (can_start_statement_kind(current.kind) || starts_unspaced_prefix_expr)
                 && !suppresses_statement_separator_kind(current.kind)
                 && !is_leading_infix_tokens(
                     &self.source,
@@ -861,12 +863,38 @@ fn is_leading_infix_tokens(
     let Some(next) = next_real_token(tokens, current_index) else {
         return false;
     };
-    if !can_start_statement_kind(next.kind) {
+    // Dotty only treats a leading symbolic/backquoted name as an infix
+    // operator when whitespace follows it. Without this check, a line such
+    // as `!second` would be joined to the preceding expression instead of
+    // starting a new expression with the prefix operator `!`.
+    if !source[current.span.end() as usize..next.span.start() as usize]
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        || !can_start_statement_kind(next.kind)
+    {
         return false;
     }
     let previous_indent = line_indentation(source, previous.span.end().saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
     previous_indent.is_prefix_of(&operator_indent)
+}
+
+fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize) -> bool {
+    let operator = &tokens[operator_index];
+    if operator.kind != TokenKind::Operator
+        || !matches!(
+            &source[operator.span.start() as usize..operator.span.end() as usize],
+            "-" | "+" | "~" | "!"
+        )
+    {
+        return false;
+    }
+    let Some(operand) = next_real_token(tokens, operator_index) else {
+        return false;
+    };
+    source[operator.span.end() as usize..operand.span.start() as usize].is_empty()
+        && can_start_statement_kind(operand.kind)
 }
 
 fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
@@ -2494,11 +2522,15 @@ mod tests {
 
         let first_end = source.find("first").unwrap() as u32 + "first".len() as u32;
         let prefix_start = source.find("!second").unwrap() as u32;
-        assert!(scanner.tokens().iter().any(|token| {
-            token.kind == TokenKind::Newline
-                && token.span.start() == first_end
-                && token.span.end() == prefix_start
-        }));
+        assert!(
+            scanner.tokens().iter().any(|token| {
+                token.kind == TokenKind::Newline
+                    && token.span.start() == first_end
+                    && token.span.end() == prefix_start
+            }),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
     }
 
     #[test]
