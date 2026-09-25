@@ -812,3 +812,11 @@ fn parsed_secondary_constructor_is_rejected_in_a_direct_block_member() {
         SourceId::from_index(61),
     );
 }
+
+#[test]
+fn parsed_secondary_constructor_is_rejected_in_a_method_parameter_default() {
+    assert_secondary_constructor_is_rejected(
+        "class C { def f(x: Int = { def this() = this(); 1 }) = x }",
+        SourceId::from_index(62),
+    );
+}

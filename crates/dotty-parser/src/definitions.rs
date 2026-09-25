@@ -130,10 +130,12 @@ where
     }
 
     fn parse_method_name(&mut self) -> TermName {
+        let secondary_constructor_allowed = self.context.secondary_constructor_allowed;
+        self.context.secondary_constructor_allowed = false;
         match self.current().kind {
             TokenKind::Keyword(HardKeyword::This) => {
                 self.advance();
-                if self.context.secondary_constructor_allowed {
+                if secondary_constructor_allowed {
                     TermName::new(self.names.intern("<init>"))
                 } else {
                     self.report(
