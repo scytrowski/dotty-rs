@@ -1756,8 +1756,14 @@ mod tests {
         assert_eq!(store.symbols.get(type_symbol).owner, Some(method_symbol));
         assert_eq!(store.symbols.get(x_symbol).kind, SymbolKind::Parameter);
         assert_eq!(store.symbols.get(y_symbol).kind, SymbolKind::Parameter);
+        assert_eq!(store.symbols.get(type_symbol).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(x_symbol).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(y_symbol).info, SymbolInfo::Missing);
         assert_eq!(store.symbols.get(x_symbol).owner, Some(method_symbol));
         assert_eq!(store.symbols.get(y_symbol).owner, Some(method_symbol));
+        assert_eq!(store.symbols.get(type_symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(store.symbols.get(x_symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(store.symbols.get(y_symbol).flags, SymbolFlags::EMPTY);
         assert_eq!(term_symbol(&mut store, class_scope, "x"), None);
         assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
         assert_eq!(index.symbol_at(source, type_parameter), Some(type_symbol));

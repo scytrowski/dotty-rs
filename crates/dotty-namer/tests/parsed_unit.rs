@@ -477,7 +477,7 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     use dotty_core::TermName;
     use dotty_lexer::ContextualScanner;
 
-    let source_text = "class C { val member: Int; def convert[A](x: Int)(y: Int): Int = x; type Alias = Int }\ndef top = 0";
+    let source_text = "class C { val member: Int; def convert[A](x: Int)(y: Int): Int = x; type Alias = Int }\nval topValue: Int = 0\ndef top = 0";
     let source = SourceId::from_index(39);
     let mut store = SemanticStore::new();
     let scanner = ContextualScanner::new(source_text).expect("source should lex");
@@ -525,7 +525,8 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
         })
         .unwrap();
     let method_body = method.rhs.unwrap();
-    let top_level_method = package.stats[1];
+    let top_level_value = package.stats[1];
+    let top_level_method = package.stats[2];
     let mut packages = Packages::new();
 
     let index = name_compilation_unit(
@@ -582,6 +583,7 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
         _ => unreachable!(),
     };
     let alias_symbol = store.scopes.get(class_scope).lookup(&alias_name).unwrap();
+    let top_value_name = TermName::new(store.names.intern("topValue"));
     let top_name = TermName::new(store.names.intern("top"));
 
     assert_eq!(
@@ -651,7 +653,15 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     );
     assert_eq!(index.symbol_at(source, alias_tree), Some(alias_symbol));
     assert_eq!(index.symbol_at(source, method_body), None);
+    assert_eq!(index.symbol_at(source, top_level_value), None);
     assert_eq!(index.symbol_at(source, top_level_method), None);
+    assert_eq!(
+        store
+            .scopes
+            .get(root_package.scope)
+            .lookup(top_value_name.as_name()),
+        None
+    );
     assert_eq!(
         store
             .scopes
