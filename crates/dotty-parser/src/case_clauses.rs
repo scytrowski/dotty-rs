@@ -109,7 +109,8 @@ where
         self.consume_case_newlines();
         let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
-            let result = self.parse_expression_block_body(TokenKind::Outdent);
+            let result = self
+                .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
             if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }
