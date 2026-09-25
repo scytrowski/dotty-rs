@@ -284,8 +284,8 @@ impl Namer<'_> {
             name,
             owner: Some(owner_context.owner),
             kind,
-            flags: Self::class_flags(&definition.metadata.modifiers),
-            visibility: self.class_visibility(tree, &definition.metadata.visibility)?,
+            flags: Self::source_flags(&definition.metadata.modifiers),
+            visibility: self.source_visibility(tree, &definition.metadata.visibility)?,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
             annotations: Vec::new(),
@@ -336,14 +336,8 @@ impl Namer<'_> {
                     } else {
                         SymbolKind::Field
                     },
-                    flags: if !private_local
-                        && parameter.metadata.modifiers.contains(&Modifier::Var)
-                    {
-                        SymbolFlags::MUTABLE
-                    } else {
-                        SymbolFlags::EMPTY
-                    },
-                    visibility: self.class_visibility(tree, &parameter.metadata.visibility)?,
+                    flags: Self::source_flags(&parameter.metadata.modifiers),
+                    visibility: self.source_visibility(tree, &parameter.metadata.visibility)?,
                 },
             )?;
         }
@@ -376,8 +370,9 @@ impl Namer<'_> {
                             scope,
                             SymbolSpec {
                                 kind: SymbolKind::TypeAlias,
-                                flags: SymbolFlags::EMPTY,
-                                visibility: Visibility::Public,
+                                flags: Self::source_flags(&definition.metadata.modifiers),
+                                visibility: self
+                                    .source_visibility(member, &definition.metadata.visibility)?,
                             },
                         )?;
                     }
@@ -391,8 +386,9 @@ impl Namer<'_> {
                         scope,
                         SymbolSpec {
                             kind: SymbolKind::Field,
-                            flags: SymbolFlags::EMPTY,
-                            visibility: Visibility::Public,
+                            flags: Self::source_flags(&definition.metadata.modifiers),
+                            visibility: self
+                                .source_visibility(member, &definition.metadata.visibility)?,
                         },
                     )?;
                 }
@@ -414,8 +410,9 @@ impl Namer<'_> {
                             scope,
                             SymbolSpec {
                                 kind,
-                                flags: SymbolFlags::EMPTY,
-                                visibility: Visibility::Public,
+                                flags: Self::source_flags(&definition.metadata.modifiers),
+                                visibility: self
+                                    .source_visibility(member, &definition.metadata.visibility)?,
                             },
                         )?;
                     }
@@ -478,8 +475,8 @@ impl Namer<'_> {
             class_scope,
             SymbolSpec {
                 kind: SymbolKind::Method,
-                flags: SymbolFlags::EMPTY,
-                visibility: Visibility::Public,
+                flags: Self::source_flags(&definition.metadata.modifiers),
+                visibility: self.source_visibility(tree, &definition.metadata.visibility)?,
             },
         )?;
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
@@ -514,7 +511,7 @@ impl Namer<'_> {
         Ok(())
     }
 
-    fn class_flags(modifiers: &[Modifier]) -> SymbolFlags {
+    fn source_flags(modifiers: &[Modifier]) -> SymbolFlags {
         modifiers
             .iter()
             .fold(SymbolFlags::EMPTY, |flags, modifier| {
@@ -524,6 +521,14 @@ impl Namer<'_> {
                     Modifier::Sealed => SymbolFlags::SEALED,
                     Modifier::Case => SymbolFlags::CASE,
                     Modifier::Implicit => SymbolFlags::IMPLICIT,
+                    Modifier::Given => SymbolFlags::GIVEN,
+                    Modifier::Lazy => SymbolFlags::LAZY,
+                    Modifier::Var => SymbolFlags::MUTABLE,
+                    Modifier::Override => SymbolFlags::OVERRIDE,
+                    Modifier::Inline => SymbolFlags::INLINE,
+                    Modifier::Transparent => SymbolFlags::TRANSPARENT,
+                    Modifier::Opaque => SymbolFlags::OPAQUE,
+                    Modifier::Erased => SymbolFlags::ERASED,
                     _ => SymbolFlags::EMPTY,
                 };
                 flags | flag
@@ -563,7 +568,7 @@ impl Namer<'_> {
         )
     }
 
-    fn class_visibility(
+    fn source_visibility(
         &self,
         tree: TreeId<Untyped>,
         visibility: &Option<VisibilitySyntax>,
@@ -1630,6 +1635,48 @@ mod tests {
     }
 
     #[test]
+    fn direct_class_val_preserves_var_flag_and_private_visibility() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let field = value_parameter(&mut arena, &mut store, "count", vec![Modifier::Var], None);
+        let TreeKind::ValDef(definition) = &mut arena.get_mut(field).kind else {
+            unreachable!("value_parameter constructs a ValDef");
+        };
+        definition.metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![field], None);
+        let root = package_with_stat(&mut arena, &mut store, "members", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 42, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["members"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let field_symbol = index.symbol_at(SourceId::from_index(42), field).unwrap();
+
+        assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::MUTABLE);
+        assert_eq!(
+            store.symbols.get(field_symbol).visibility,
+            Visibility::Private
+        );
+        assert_eq!(store.symbols.get(field_symbol).owner, Some(class_symbol));
+    }
+
+    #[test]
+    fn direct_class_lazy_val_preserves_lazy_flag() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let field = value_parameter(&mut arena, &mut store, "cached", vec![Modifier::Lazy], None);
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![field], None);
+        let root = package_with_stat(&mut arena, &mut store, "members", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 43, &mut store, &mut packages).unwrap();
+        let field_symbol = index.symbol_at(SourceId::from_index(43), field).unwrap();
+
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::LAZY);
+    }
+
+    #[test]
     fn direct_class_method_is_owned_mapped_and_has_a_scope() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
@@ -1655,6 +1702,33 @@ mod tests {
         );
         assert_eq!(store.scopes.get(method_scope).owner, Some(method_symbol));
         assert_eq!(index.symbol_at(source, method), Some(method_symbol));
+    }
+
+    #[test]
+    fn direct_class_method_preserves_visibility_and_modifier_flags() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let method = method_definition(&mut arena, &mut store, "run", vec![], vec![], None);
+        let TreeKind::DefDef(definition) = &mut arena.get_mut(method).kind else {
+            unreachable!("method_definition constructs a DefDef");
+        };
+        definition.metadata.modifiers = vec![Modifier::Final, Modifier::Override, Modifier::Inline];
+        definition.metadata.visibility = Some(VisibilitySyntax::Private { qualifier: None });
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "members", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 44, &mut store, &mut packages).unwrap();
+        let method_symbol = index.symbol_at(SourceId::from_index(44), method).unwrap();
+
+        assert_eq!(
+            store.symbols.get(method_symbol).flags,
+            SymbolFlags::FINAL | SymbolFlags::OVERRIDE | SymbolFlags::INLINE
+        );
+        assert_eq!(
+            store.symbols.get(method_symbol).visibility,
+            Visibility::Private
+        );
     }
 
     #[test]
@@ -1717,6 +1791,40 @@ mod tests {
         assert_eq!(store.symbols.get(alias_symbol).owner, Some(class_symbol));
         assert_eq!(store.symbols.get(alias_symbol).info, SymbolInfo::Missing);
         assert_eq!(index.symbol_at(source, alias), Some(alias_symbol));
+    }
+
+    #[test]
+    fn opaque_type_alias_preserves_opaque_flag_and_private_visibility() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let rhs = type_tree(&mut arena);
+        let alias = arena.alloc(Tree {
+            kind: TreeKind::TypeDef(TypeDef {
+                name: TypeName::new(store.names.intern("OpaqueAlias")),
+                rhs,
+                metadata: Modifiers {
+                    visibility: Some(VisibilitySyntax::Private { qualifier: None }),
+                    modifiers: vec![Modifier::Opaque],
+                    ..Modifiers::default()
+                },
+                variance: None,
+            }),
+            position: None,
+            ty: (),
+        });
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![alias], None);
+        let root = package_with_stat(&mut arena, &mut store, "aliases", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 45, &mut store, &mut packages).unwrap();
+        let alias_symbol = index.symbol_at(SourceId::from_index(45), alias).unwrap();
+
+        assert_eq!(store.symbols.get(alias_symbol).kind, SymbolKind::TypeAlias);
+        assert_eq!(store.symbols.get(alias_symbol).flags, SymbolFlags::OPAQUE);
+        assert_eq!(
+            store.symbols.get(alias_symbol).visibility,
+            Visibility::Private
+        );
     }
 
     #[test]
