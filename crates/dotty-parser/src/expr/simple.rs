@@ -23,7 +23,9 @@ where
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
-        if self.expression_quote_depth > 0 && self.current_starts_braced_splice() {
+        if self.expression_quote_depth > 0
+            && (self.current_starts_braced_splice() || self.current_starts_simple_splice())
+        {
             return self.parse_expression_splice(mark);
         }
 
@@ -168,6 +170,30 @@ where
     }
 
     fn parse_expression_splice(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        if self.current_starts_simple_splice() {
+            let token = self.current().clone();
+            let spelling = self
+                .token_text(&token)
+                .ok()
+                .and_then(|text| text.strip_prefix('$'))
+                .map(str::to_owned);
+            let Some(spelling) = spelling else {
+                return self.unexpected_expression();
+            };
+            let name = self.names.intern(&spelling);
+            self.advance();
+            let expr = self.alloc_from(
+                crate::Mark {
+                    start: token.span.start() + 1,
+                },
+                TreeKind::Ident(Ident {
+                    name: *dotty_core::TermName::new(name).as_name(),
+                    backquoted: false,
+                }),
+            );
+            return self.alloc_from(mark, TreeKind::Splice(dotty_core::ast::Splice { expr }));
+        }
+
         self.advance(); // `$`
         self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
         let body_mark = self.mark();

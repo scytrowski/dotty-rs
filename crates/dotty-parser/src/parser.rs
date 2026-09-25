@@ -133,6 +133,14 @@ where
                 == TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace)
     }
 
+    pub(crate) fn current_starts_simple_splice(&self) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self
+                .source
+                .slice(self.current().span)
+                .is_ok_and(|spelling| spelling.starts_with('$') && spelling.len() > 1)
+    }
+
     /// Consumes the diagnostics accumulated by this parser.
     pub fn take_diagnostics(&mut self) -> Vec<ParseDiagnostic> {
         std::mem::take(&mut self.diagnostics)

@@ -1685,7 +1685,9 @@ where
     /// positions whose suffixes have a distinct meaning (for example the
     /// current `derives` production) use this shared type entry point.
     pub(crate) fn simple_type_reference(&mut self) -> TreeId<Untyped> {
-        if self.type_quote_depth > 0 && self.current_starts_braced_splice() {
+        if self.type_quote_depth > 0
+            && (self.current_starts_braced_splice() || self.current_starts_simple_splice())
+        {
             return self.parse_legacy_type_splice();
         }
 
@@ -1758,19 +1760,23 @@ where
 
     fn parse_legacy_type_splice(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        self.advance(); // `$`
-        self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
-        let (_stats, _expr) =
-            self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
-        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close legacy type splice",
-            );
+        if self.current_starts_simple_splice() {
+            self.advance();
+        } else {
+            self.advance(); // `$`
+            self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
+            let (_stats, _expr) =
+                self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `}` to close legacy type splice",
+                );
+            }
         }
         self.report(
             ParseDiagnosticKind::UnsupportedSyntax,
-            "type splicing with `${...}` inside a quoted type is no longer supported",
+            "type splicing with `$` inside a quoted type is no longer supported",
         );
         self.error_type(self.span_from(mark))
     }

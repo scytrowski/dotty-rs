@@ -99,6 +99,12 @@ arguments as they appear before semantic extractor lowering. Sequence-pattern
 fixtures cover trailing extractor arguments, nested extractors, wildcard and
 backquoted variables, while preserving ordinary infix operators such as `*:`.
 
+Fixtures under `fixtures/quotes/` use the normal expression mode and cover
+quoted expression/type bodies, empty quoted blocks, nested quotes, braced
+expression splices, and simple `$name` splices. The Rust and Scala renderers
+compare quote/splice child trees and source spans; staging semantics are not
+part of this parser oracle.
+
 Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, object, and enum nodes; primary
 constructor clauses; simple parent applications, including parameterized enum
