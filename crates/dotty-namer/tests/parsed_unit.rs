@@ -823,3 +823,78 @@ fn parsed_secondary_constructor_is_rejected_in_a_method_parameter_default() {
         SourceId::from_index(62),
     );
 }
+
+#[test]
+fn parsed_nested_object_creates_module_class_and_links_its_companion() {
+    use dotty_core::SymbolKind;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "class Outer { class Foo; object Foo { def run = 1 } }";
+    let source = SourceId::from_index(63);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let outer_tree = package.stats[0];
+    let TreeKind::TypeDef(outer_def) = &parsed.ast.get(outer_tree).kind else {
+        panic!("package member should be a class");
+    };
+    let TreeKind::Template(outer_template) = &parsed.ast.get(outer_def.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let class_tree = outer_template.body[0];
+    let object_tree = outer_template.body[1];
+    let TreeKind::Template(module_template) = (match &parsed.ast.get(object_tree).kind {
+        TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(module)) => {
+            &parsed.ast.get(module.template).kind
+        }
+        _ => panic!("nested object should be a ModuleDef"),
+    }) else {
+        panic!("object RHS should be a Template");
+    };
+    let method_tree = module_template.body[0];
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Companions.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let class_symbol = index.symbol_at(source, class_tree).unwrap();
+    let object_symbol = index.symbol_at(source, object_tree).unwrap();
+    let method_symbol = index.symbol_at(source, method_tree).unwrap();
+    let outer_symbol = store.symbols.get(class_symbol).owner.unwrap();
+    let outer_scope = index.scope_of(outer_symbol).unwrap();
+    let module_class = store
+        .scopes
+        .get(outer_scope)
+        .lookup(TypeName::new(store.names.intern("Foo$")).as_name())
+        .unwrap();
+
+    assert_eq!(store.symbols.get(object_symbol).kind, SymbolKind::Object);
+    assert_eq!(
+        store.symbols.get(module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        store.symbols.get(class_symbol).links.companion,
+        Some(object_symbol)
+    );
+    assert_eq!(
+        store.symbols.get(object_symbol).links.companion,
+        Some(class_symbol)
+    );
+    assert_eq!(store.symbols.get(method_symbol).owner, Some(module_class));
+}
