@@ -132,7 +132,9 @@ where
         name: TermName,
         metadata: Modifiers,
     ) -> ParsedStatement {
-        let tail = self.with_enum_body(false, |parser| parser.parse_template_tail(false));
+        let tail = self.with_secondary_constructor_allowed(false, |parser| {
+            parser.with_enum_body(false, |parser| parser.parse_template_tail(false))
+        });
         self.build_module_definition(mark, name, metadata, tail)
     }
 

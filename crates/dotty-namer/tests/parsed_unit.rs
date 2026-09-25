@@ -796,3 +796,11 @@ fn parsed_secondary_constructor_is_rejected_in_an_object() {
         SourceId::from_index(59),
     );
 }
+
+#[test]
+fn parsed_secondary_constructor_is_rejected_in_a_nested_object_inside_a_class() {
+    assert_secondary_constructor_is_rejected(
+        "class C { object O { def this(x: Int) = this() } }",
+        SourceId::from_index(60),
+    );
+}

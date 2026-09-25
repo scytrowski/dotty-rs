@@ -120,11 +120,13 @@ where
 
     fn parse_method_rhs(&mut self, location: Location) -> TreeId<Untyped> {
         self.consume_control_newlines();
-        if self.current().kind == TokenKind::Indent {
-            self.parse_indented_block()
-        } else {
-            self.with_location(location, |parser| parser.expr())
-        }
+        self.with_secondary_constructor_allowed(false, |parser| {
+            if parser.current().kind == TokenKind::Indent {
+                parser.parse_indented_block()
+            } else {
+                parser.with_location(location, |parser| parser.expr())
+            }
+        })
     }
 
     fn parse_method_name(&mut self) -> TermName {
@@ -204,7 +206,9 @@ where
 
         let rhs = if is_bare_assignment(self) {
             self.advance();
-            Some(self.with_location(location, |parser| parser.expr()))
+            Some(self.with_secondary_constructor_allowed(false, |parser| {
+                parser.with_location(location, |parser| parser.expr())
+            }))
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
                 self.report(
@@ -296,7 +300,9 @@ where
 
         let rhs = if is_bare_assignment(self) {
             self.advance();
-            Some(self.with_location(location, |parser| parser.expr()))
+            Some(self.with_secondary_constructor_allowed(false, |parser| {
+                parser.with_location(location, |parser| parser.expr())
+            }))
         } else if has_explicit_type
             && all_simple_identifiers
             && is_definition_boundary(self.current().kind)
