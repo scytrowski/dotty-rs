@@ -94,6 +94,11 @@ struct NamingContext {
     package_path: Vec<String>,
 }
 
+struct PackageStatPartition {
+    top_stats: Vec<TreeId<Untyped>>,
+    wrapped_stats: Vec<TreeId<Untyped>>,
+}
+
 #[derive(Clone, Copy)]
 struct SymbolSpec {
     kind: SymbolKind,
@@ -248,7 +253,7 @@ impl Namer<'_> {
         &self,
         stats: &[TreeId<Untyped>],
         package_path: &[String],
-    ) -> Result<(Vec<TreeId<Untyped>>, Vec<TreeId<Untyped>>), NamerError> {
+    ) -> Result<PackageStatPartition, NamerError> {
         let wrapped_type_names = self.wrapped_type_names_for_package_path(package_path)?;
 
         let mut top_stats = Vec::new();
@@ -287,7 +292,10 @@ impl Namer<'_> {
                 top_stats.push(*tree);
             }
         }
-        Ok((top_stats, wrapped_stats))
+        Ok(PackageStatPartition {
+            top_stats,
+            wrapped_stats,
+        })
     }
 
     fn wrapped_type_names_for_package_path(
@@ -840,10 +848,10 @@ impl Namer<'_> {
                 let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
                     return Ok(());
                 };
-                let (top_stats, wrapped_stats) =
+                let partition =
                     self.partition_package_stats(&package.stats, &context.package_path)?;
                 let mut headers = Vec::new();
-                for stat in top_stats {
+                for stat in partition.top_stats {
                     match self.arena.get(stat).kind {
                         TreeKind::PackageDef(_) => {
                             if let Some(header) =
@@ -867,8 +875,10 @@ impl Namer<'_> {
                         _ => {}
                     }
                 }
-                if !wrapped_stats.is_empty() {
-                    headers.push(self.enter_source_package_wrapper(&context, wrapped_stats)?);
+                if !partition.wrapped_stats.is_empty() {
+                    headers.push(
+                        self.enter_source_package_wrapper(&context, partition.wrapped_stats)?,
+                    );
                 }
                 for header in headers {
                     self.scan_entered_header(header)?;
