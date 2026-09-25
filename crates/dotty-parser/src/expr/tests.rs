@@ -1403,6 +1403,77 @@ fn parses_an_ascription_on_an_application() {
 }
 
 #[test]
+fn parses_an_annotation_ascription_as_annotated_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "value: @unchecked",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Identifier, 8, 17),
+            token(TokenKind::Eof, 17, 17),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+        panic!("expected an annotated expression");
+    };
+    assert!(matches!(
+        parser.ast().get(annotated.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(annotated.annotation).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 17).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn parses_repeated_annotation_ascriptions_in_source_order() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "value: @unchecked @switch",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Identifier, 8, 17),
+            token(TokenKind::Operator, 18, 19),
+            token(TokenKind::Identifier, 19, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Annotated(outer) = parser.ast().get(tree).kind else {
+        panic!("expected the second annotation to wrap the first");
+    };
+    let TreeKind::Annotated(inner) = parser.ast().get(outer.expr).kind else {
+        panic!("expected the first annotation to wrap the expression");
+    };
+    assert!(matches!(
+        parser.ast().get(inner.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 25).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn ascription_updates_the_placeholder_parameter_type() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
