@@ -171,6 +171,74 @@ fn parses_a_braced_case_lambda_as_an_application_argument() {
 }
 
 #[test]
+fn a_bare_case_lambda_does_not_take_an_application_suffix() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ case x => x }(1)",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::Case), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 11),
+            token(TokenKind::Identifier, 12, 13),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 15, 16),
+            token(TokenKind::IntegerLiteral, 16, 17),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+    assert_eq!(
+        parser.current().kind,
+        TokenKind::Punctuation(Punctuation::LeftParen)
+    );
+    assert_eq!(
+        parser.diagnostics()[0].message(),
+        "a case-lambda cannot be applied directly"
+    );
+}
+
+#[test]
+fn a_parenthesized_case_lambda_can_take_an_application_suffix() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "({ case x => x })(1)",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Case), 3, 7),
+            token(TokenKind::Identifier, 8, 9),
+            token(TokenKind::Operator, 10, 12),
+            token(TokenKind::Identifier, 13, 14),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 15, 16),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 17, 18),
+            token(TokenKind::IntegerLiteral, 18, 19),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+            token(TokenKind::Eof, 20, 20),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(Apply { function, args, .. }) = &parser.ast().get(tree).kind else {
+        panic!("expected an application of the parenthesized case-lambda");
+    };
+    assert!(matches!(
+        parser.ast().get(*function).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+    ));
+    assert_eq!(args.len(), 1);
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn does_not_treat_a_new_template_body_as_a_braced_argument() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

@@ -17,7 +17,10 @@ where
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let tree = self.simple_expr_atom(mark);
-        let can_apply = !matches!(self.ast.get(tree).kind, TreeKind::Block(_));
+        let can_apply = !matches!(
+            self.ast.get(tree).kind,
+            TreeKind::Block(_) | TreeKind::Match(_)
+        );
 
         self.simple_expr_rest(mark, tree, can_apply)
     }
@@ -631,10 +634,10 @@ where
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
             {
                 if !can_apply {
-                    let message = if matches!(self.ast.get(qualifier).kind, TreeKind::Block(_)) {
-                        "a block expression cannot be applied as a function"
-                    } else {
-                        "a constructor application cannot be applied again"
+                    let message = match &self.ast.get(qualifier).kind {
+                        TreeKind::Block(_) => "a block expression cannot be applied as a function",
+                        TreeKind::Match(_) => "a case-lambda cannot be applied directly",
+                        _ => "a constructor application cannot be applied again",
                     };
                     self.report(crate::ParseDiagnosticKind::UnexpectedToken, message);
                     break;
