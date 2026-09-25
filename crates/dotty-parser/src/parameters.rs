@@ -828,6 +828,102 @@ mod tests {
     }
 
     #[test]
+    fn preserves_annotations_on_method_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(@Marker x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+
+        assert_eq!(parameter.metadata.annotations.len(), 1);
+        assert_eq!(parser.diagnostics().len(), 0);
+    }
+
+    #[test]
+    fn preserves_visibility_on_class_accessor_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(private val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 1, 8),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 9, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::ColonFollow, 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a constructor parameter");
+        };
+
+        assert_eq!(
+            parameter.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_override_on_class_accessor_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(override val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Override), 1, 9),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::ColonFollow, 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a constructor parameter");
+        };
+
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Override));
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn later_case_class_clauses_keep_accessor_and_private_local_roles() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
