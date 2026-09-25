@@ -229,8 +229,9 @@ policy, including accessor/private-local metadata. Type-only cases such as
 `case Empty[T]` have no value-parameter clauses.
 Parameterized case templates populate `Template.parents` through the same
 parent/constr-app parser used by classes; parent order and constructor
-applications are preserved. Enum-case bodies and enum-case `derives`/`uses`
-remain deferred. Direct enum cases accept source annotations and
+applications are preserved. Scala 3.9 does not allow per-case template bodies
+or per-case `derives`/`uses`; `caseTemplate` only parses optional `extends`
+parents. `derives` and ordered `uses` are parsed at enum/template level. Direct enum cases accept source annotations and
 `private`/`protected` visibility, including qualified visibility; the metadata
 is attached to the existing `ModuleDef`, `PatDef`, or `TypeDef` shape without
 introducing a new enum-case node. Annotations or modifiers after the case name,
@@ -454,10 +455,12 @@ Sequence capture references, `.only[...]`/`.rd` forms, auxiliary constructors,
 and semantic template processing remain future work. Direct enum-case
 annotations, access modifiers, and qualified visibility are preserved as
 definition metadata; constructor-level annotations/modifiers after the case
-name and enum-case `derives`/`uses` remain deferred. Per-case template bodies
-are not Scala 3.9 syntax: the parser reports them as unexpected and recovers
-past the rejected braced or indented body so following enum cases remain
-available.
+name remain deferred. Scala 3.9's `enumCase` delegates post-name annotations
+and access modifiers to the primary-constructor grammar for individual cases;
+they belong on the constructor node. Per-case `derives`/`uses` and per-case
+template bodies are not Scala 3.9 syntax. The parser reports bodies as
+unexpected and recovers past rejected braced or indented bodies so following
+enum cases remain available.
 
 ### Contextual definitions
 
