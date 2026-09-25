@@ -373,6 +373,20 @@ where
 
     fn parse_block(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+            let cases = self.case_clauses();
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `}` to close case-lambda clauses",
+                );
+            }
+            let selector = self.synthetic_unit_at(mark.start());
+            return self.alloc_from(
+                mark,
+                TreeKind::Match(dotty_core::ast::Match { selector, cases }),
+            );
+        }
         let (stats, expr) =
             self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
@@ -631,6 +645,20 @@ where
                 if is_constructor_application {
                     can_apply = false;
                 }
+            } else if self
+                .cursor
+                .at(TokenKind::Punctuation(Punctuation::LeftBrace))
+                && can_apply
+            {
+                let argument = self.parse_block(self.mark());
+                qualifier = self.alloc_from(
+                    mark,
+                    TreeKind::Apply(Apply {
+                        function: qualifier,
+                        args: vec![argument],
+                        kind: ApplyKind::Regular,
+                    }),
+                );
             } else {
                 break;
             }

@@ -2,7 +2,8 @@ use super::*;
 use crate::ParseDiagnosticKind;
 use crate::compilation_unit::tests::{parser_for, token};
 use dotty_core::ast::{
-    ApplyKind, Block, Literal, New, NumberKind, Parens, Super, This, Tuple, UntypedNode,
+    Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select, Super, This,
+    Tuple, UntypedNode,
 };
 use dotty_core::{
     Constant, HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
@@ -75,6 +76,96 @@ fn expression_entry_preserves_operator_expression_behavior() {
         parser.ast().get(id).kind,
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
     ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_braced_case_lambda_as_a_match_with_an_empty_selector() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ case x => x }",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::Case), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 11),
+            token(TokenKind::Identifier, 12, 13),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+            token(TokenKind::Eof, 15, 15),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Match(Match {
+        selector,
+        ref cases,
+    }) = parser.ast().get(tree).kind
+    else {
+        panic!("expected a partial-function Match tree");
+    };
+    assert_eq!(cases.len(), 1);
+    assert!(matches!(
+        parser.ast().get(cases[0]).kind,
+        TreeKind::CaseDef(CaseDef { .. })
+    ));
+    assert_eq!(
+        parser.ast().get(selector).position.unwrap().span().range(),
+        TextRange::new(0, 0).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 15).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_braced_case_lambda_as_an_application_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "List(1).map { case x => x }",
+        vec![
+            token(TokenKind::Identifier, 0, 4),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+            token(TokenKind::IntegerLiteral, 5, 6),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+            token(TokenKind::Punctuation(Punctuation::Dot), 7, 8),
+            token(TokenKind::Identifier, 8, 11),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+            token(TokenKind::Keyword(HardKeyword::Case), 14, 18),
+            token(TokenKind::Identifier, 19, 20),
+            token(TokenKind::Operator, 21, 23),
+            token(TokenKind::Identifier, 24, 25),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 26, 27),
+            token(TokenKind::Eof, 27, 27),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(Apply {
+        function, ref args, ..
+    }) = parser.ast().get(tree).kind
+    else {
+        panic!("expected the brace argument to form an application");
+    };
+    assert!(matches!(
+        parser.ast().get(function).kind,
+        TreeKind::Select(Select { .. })
+    ));
+    assert_eq!(args.len(), 1);
+    assert!(matches!(parser.ast().get(args[0]).kind, TreeKind::Match(_)));
+    assert_eq!(
+        parser.ast().get(args[0]).position.unwrap().span().range(),
+        TextRange::new(12, 27).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 27).unwrap()
+    );
     assert_eq!(parser.current().kind, TokenKind::Eof);
     assert!(parser.diagnostics().is_empty());
 }
