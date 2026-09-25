@@ -464,7 +464,11 @@ impl Namer<'_> {
                         expected: "ordinary method ValDef without constructor-role metadata",
                     });
                 }
-                value_parameters.push((*parameter, *parameter_definition.name.as_name()));
+                value_parameters.push((
+                    *parameter,
+                    *parameter_definition.name.as_name(),
+                    Self::source_flags(&parameter_definition.metadata.modifiers),
+                ));
             }
         }
 
@@ -495,7 +499,7 @@ impl Namer<'_> {
                 },
             )?;
         }
-        for (parameter_tree, name) in value_parameters {
+        for (parameter_tree, name, flags) in value_parameters {
             self.enter_symbol(
                 parameter_tree,
                 name,
@@ -503,7 +507,7 @@ impl Namer<'_> {
                 method_scope,
                 SymbolSpec {
                     kind: SymbolKind::Parameter,
-                    flags: SymbolFlags::EMPTY,
+                    flags,
                     visibility: Visibility::Public,
                 },
             )?;
@@ -1877,6 +1881,88 @@ mod tests {
         assert_eq!(index.symbol_at(source, type_parameter), Some(type_symbol));
         assert_eq!(index.symbol_at(source, first_value), Some(x_symbol));
         assert_eq!(index.symbol_at(source, second_value), Some(y_symbol));
+    }
+
+    #[test]
+    fn contextual_method_parameter_preserves_implicit_flag() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "evidence",
+            vec![Modifier::Implicit],
+            None,
+        );
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "show",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "contextual", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 54, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["contextual"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let method_symbol = term_symbol(&mut store, class_scope, "show").unwrap();
+        let method_scope = index.scope_of(method_symbol).unwrap();
+        let parameter_symbol = term_symbol(&mut store, method_scope, "evidence").unwrap();
+
+        assert_eq!(
+            store.symbols.get(parameter_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).flags,
+            SymbolFlags::IMPLICIT
+        );
+    }
+
+    #[test]
+    fn erased_method_parameter_preserves_erased_flag() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "token",
+            vec![Modifier::Erased],
+            None,
+        );
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "run",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "erased", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 55, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["erased"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let method_symbol = term_symbol(&mut store, class_scope, "run").unwrap();
+        let method_scope = index.scope_of(method_symbol).unwrap();
+        let parameter_symbol = term_symbol(&mut store, method_scope, "token").unwrap();
+
+        assert_eq!(
+            store.symbols.get(parameter_symbol).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            store.symbols.get(parameter_symbol).flags,
+            SymbolFlags::ERASED
+        );
     }
 
     #[test]
