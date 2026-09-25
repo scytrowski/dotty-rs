@@ -172,16 +172,16 @@ where
         while !self.sequence_ended(boundary) {
             if self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().and_then(last_statement_tree);
-                if self.end_marker_matches_next(last) {
-                    if !self.consume_end_marker(last, end_marker_seen) {
-                        return self.finish_statement_sequence(statements);
-                    }
-                } else if matches!(
-                    boundary,
-                    StatementSequenceBoundary::Block(TokenKind::Outdent)
-                ) {
+                let matches_local = self.end_marker_matches_next(last);
+                if !matches_local
+                    && matches!(
+                        boundary,
+                        StatementSequenceBoundary::Block(TokenKind::Outdent)
+                    )
+                {
                     return self.finish_statement_sequence(statements);
-                } else if !self.consume_end_marker(last, end_marker_seen) {
+                }
+                if !self.consume_end_marker(last, end_marker_seen) {
                     return self.finish_statement_sequence(statements);
                 }
                 end_marker_seen = true;
@@ -237,16 +237,16 @@ where
 
             while self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().and_then(last_statement_tree);
-                if self.end_marker_matches_next(last) {
-                    if !self.consume_end_marker(last, end_marker_seen) {
-                        return self.finish_statement_sequence(statements);
-                    }
-                } else if matches!(
-                    boundary,
-                    StatementSequenceBoundary::Block(TokenKind::Outdent)
-                ) {
+                let matches_local = self.end_marker_matches_next(last);
+                if !matches_local
+                    && matches!(
+                        boundary,
+                        StatementSequenceBoundary::Block(TokenKind::Outdent)
+                    )
+                {
                     return self.finish_statement_sequence(statements);
-                } else if !self.consume_end_marker(last, end_marker_seen) {
+                }
+                if !self.consume_end_marker(last, end_marker_seen) {
                     return self.finish_statement_sequence(statements);
                 }
                 end_marker_seen = true;
