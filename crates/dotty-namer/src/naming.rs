@@ -3,10 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Modifier, Select, VisibilitySyntax};
+use dotty_core::ast::{Modifier, Modifiers, Select, VisibilitySyntax};
 use dotty_core::{
-    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, Symbol, SymbolFlags, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, Untyped, Visibility,
+    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, SourceSpan, Symbol, SymbolFlags,
+    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, Untyped,
+    Visibility,
 };
 
 use crate::SourceSemanticIndex;
@@ -26,7 +27,11 @@ pub enum NamerError {
         expected: &'static str,
     },
     /// A source visibility form whose access boundary is not modeled yet.
-    UnsupportedVisibility { tree_index: u32 },
+    UnsupportedVisibility {
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        syntax: VisibilitySyntax,
+    },
 }
 
 impl fmt::Display for NamerError {
@@ -59,10 +64,18 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} does not have expected shape: {expected}"
                 )
             }
-            Self::UnsupportedVisibility { tree_index } => write!(
-                f,
-                "tree {tree_index} has a qualified visibility the namer does not support"
-            ),
+            Self::UnsupportedVisibility {
+                tree_index, syntax, ..
+            } => {
+                let visibility = match syntax {
+                    VisibilitySyntax::Private { .. } => "private",
+                    VisibilitySyntax::Protected { .. } => "protected",
+                };
+                write!(
+                    f,
+                    "tree {tree_index} has an unresolved qualified {visibility} visibility"
+                )
+            }
         }
     }
 }
@@ -83,6 +96,12 @@ struct NamingContext {
 #[derive(Clone, Copy)]
 struct SymbolSpec {
     kind: SymbolKind,
+    flags: SymbolFlags,
+    visibility: Visibility,
+}
+
+#[derive(Clone, Copy)]
+struct SourceModifierMapping {
     flags: SymbolFlags,
     visibility: Visibility,
 }
@@ -311,12 +330,13 @@ impl Namer<'_> {
         } else {
             SymbolKind::Class
         };
+        let mapped = self.map_source_modifiers(tree, &definition.metadata, owner_context.owner)?;
         let symbol = self.store.symbols.alloc(Symbol {
             name,
             owner: Some(owner_context.owner),
             kind,
-            flags: Self::source_flags(&definition.metadata.modifiers),
-            visibility: self.source_visibility(tree, &definition.metadata.visibility)?,
+            flags: mapped.flags,
+            visibility: mapped.visibility,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
             annotations: Vec::new(),
@@ -777,6 +797,7 @@ impl Namer<'_> {
                     Modifier::Inline => SymbolFlags::INLINE,
                     Modifier::Transparent => SymbolFlags::TRANSPARENT,
                     Modifier::Opaque => SymbolFlags::OPAQUE,
+                    Modifier::Extension => SymbolFlags::EXTENSION,
                     Modifier::Erased => SymbolFlags::ERASED,
                     _ => SymbolFlags::EMPTY,
                 };
@@ -822,27 +843,55 @@ impl Namer<'_> {
         tree: TreeId<Untyped>,
         visibility: &Option<VisibilitySyntax>,
     ) -> Result<Visibility, NamerError> {
+        self.source_visibility_for_owner(tree, visibility, None)
+    }
+
+    fn source_visibility_for_owner(
+        &self,
+        tree: TreeId<Untyped>,
+        visibility: &Option<VisibilitySyntax>,
+        owner: Option<SymbolId>,
+    ) -> Result<Visibility, NamerError> {
         let supported_this_qualifier = |qualifier: Option<dotty_core::Name>| {
             qualifier.is_some_and(|name| self.store.names.resolve(name.text()) == "this")
         };
         match visibility {
             None => Ok(Visibility::Public),
-            Some(VisibilitySyntax::Private { qualifier })
-                if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
-            {
-                Ok(Visibility::Private)
-            }
+            Some(VisibilitySyntax::Private { qualifier: None }) => Ok(owner
+                .filter(|owner| self.store.symbols.get(*owner).kind == SymbolKind::Package)
+                .map_or(Visibility::Private, Visibility::PrivateWithin)),
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }) if supported_this_qualifier(Some(*qualifier)) => Ok(Visibility::Private),
             Some(VisibilitySyntax::Protected { qualifier })
                 if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
             {
                 Ok(Visibility::Protected)
             }
-            Some(VisibilitySyntax::Private { .. } | VisibilitySyntax::Protected { .. }) => {
-                Err(NamerError::UnsupportedVisibility {
-                    tree_index: tree.index(),
-                })
-            }
+            Some(
+                syntax @ (VisibilitySyntax::Private { .. } | VisibilitySyntax::Protected { .. }),
+            ) => Err(NamerError::UnsupportedVisibility {
+                tree_index: tree.index(),
+                position: self.arena.get(tree).position,
+                syntax: *syntax,
+            }),
         }
+    }
+
+    fn map_source_modifiers(
+        &self,
+        tree: TreeId<Untyped>,
+        metadata: &Modifiers,
+        owner: SymbolId,
+    ) -> Result<SourceModifierMapping, NamerError> {
+        Ok(SourceModifierMapping {
+            flags: Self::source_flags(&metadata.modifiers),
+            visibility: self.source_visibility_for_owner(
+                tree,
+                &metadata.visibility,
+                Some(owner),
+            )?,
+        })
     }
 
     fn flatten_package_name(&self, tree: TreeId<Untyped>) -> Result<Vec<String>, NamerError> {
@@ -888,6 +937,58 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn each_source_flag_modifier_maps_to_its_semantic_flag() {
+        let cases = [
+            (Modifier::Abstract, SymbolFlags::ABSTRACT),
+            (Modifier::Final, SymbolFlags::FINAL),
+            (Modifier::Sealed, SymbolFlags::SEALED),
+            (Modifier::Case, SymbolFlags::CASE),
+            (Modifier::Implicit, SymbolFlags::IMPLICIT),
+            (Modifier::Given, SymbolFlags::GIVEN),
+            (Modifier::Lazy, SymbolFlags::LAZY),
+            (Modifier::Var, SymbolFlags::MUTABLE),
+            (Modifier::Override, SymbolFlags::OVERRIDE),
+            (Modifier::Inline, SymbolFlags::INLINE),
+            (Modifier::Transparent, SymbolFlags::TRANSPARENT),
+            (Modifier::Opaque, SymbolFlags::OPAQUE),
+            (Modifier::Extension, SymbolFlags::EXTENSION),
+            (Modifier::Erased, SymbolFlags::ERASED),
+        ];
+
+        for (modifier, expected) in cases {
+            assert_eq!(Namer::source_flags(&[modifier]), expected, "{modifier:?}");
+        }
+    }
+
+    #[test]
+    fn source_flag_mapping_uses_order_independent_union_semantics() {
+        let forward = [Modifier::Abstract, Modifier::Inline, Modifier::Extension];
+        let reverse = [Modifier::Extension, Modifier::Inline, Modifier::Abstract];
+
+        assert_eq!(Namer::source_flags(&forward), Namer::source_flags(&reverse));
+        assert_eq!(
+            Namer::source_flags(&forward),
+            SymbolFlags::ABSTRACT | SymbolFlags::INLINE | SymbolFlags::EXTENSION
+        );
+    }
+
+    #[test]
+    fn parser_role_markers_do_not_become_semantic_flags() {
+        let role_markers = [
+            Modifier::Trait,
+            Modifier::Enum,
+            Modifier::EnumCase,
+            Modifier::ParamAccessor,
+            Modifier::Param,
+            Modifier::PrivateLocal,
+        ];
+
+        for marker in role_markers {
+            assert!(Namer::source_flags(&[marker]).is_empty(), "{marker:?}");
+        }
+    }
 
     fn ident(
         arena: &mut AstArena<Untyped>,
@@ -1465,7 +1566,44 @@ mod tests {
         let owner = packages.get(&["visibility"]).unwrap();
         let symbol = type_symbol(&mut store, owner.scope, "PrivateClass").unwrap();
 
-        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Private);
+        assert_eq!(
+            store.symbols.get(symbol).visibility,
+            Visibility::PrivateWithin(owner.symbol)
+        );
+    }
+
+    #[test]
+    fn private_this_class_visibility_is_private_without_a_this_symbol() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let this_name = *dotty_core::TermName::new(store.names.intern("this")).as_name();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "ThisPrivateClass",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(this_name),
+            }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 75, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["visibility"]).unwrap();
+        let class_symbol = index.symbol_at(SourceId::from_index(75), class).unwrap();
+
+        assert_eq!(
+            store.symbols.get(class_symbol).visibility,
+            Visibility::Private
+        );
+        assert_eq!(
+            term_symbol(&mut store, package.scope, "this"),
+            None,
+            "the special qualifier is not resolved as a scope member"
+        );
     }
 
     #[test]
@@ -1514,7 +1652,11 @@ mod tests {
         assert_eq!(
             name_package(&arena, root, 21, &mut store, &mut packages).unwrap_err(),
             NamerError::UnsupportedVisibility {
-                tree_index: class.index()
+                tree_index: class.index(),
+                position: None,
+                syntax: VisibilitySyntax::Private {
+                    qualifier: Some(qualifier),
+                },
             }
         );
         assert!(packages.get(&["visibility"]).is_none());

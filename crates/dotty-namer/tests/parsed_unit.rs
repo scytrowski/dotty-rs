@@ -158,7 +158,10 @@ fn a_parsed_private_class_keeps_its_source_visibility() {
         .lookup(class_name.as_name())
         .unwrap();
 
-    assert_eq!(store.symbols.get(class).visibility, Visibility::Private);
+    assert_eq!(
+        store.symbols.get(class).visibility,
+        Visibility::PrivateWithin(root_package.symbol)
+    );
 }
 
 #[test]

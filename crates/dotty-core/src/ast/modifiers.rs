@@ -52,6 +52,8 @@ pub enum Modifier {
     /// Parser-level role for a plain constructor parameter that is not an
     /// accessor. This must not be represented as written `private` visibility.
     PrivateLocal,
+    /// Source definition produced by extension-method syntax.
+    Extension,
     Abstract,
     Final,
     Sealed,
@@ -144,6 +146,12 @@ mod tests {
     #[test]
     fn into_is_a_distinct_source_modifier() {
         assert_ne!(Modifier::Into, Modifier::Given);
+    }
+
+    #[test]
+    fn extension_is_a_distinct_source_modifier() {
+        assert_ne!(Modifier::Extension, Modifier::Implicit);
+        assert_ne!(Modifier::Extension, Modifier::Given);
     }
 
     #[test]
