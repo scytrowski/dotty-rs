@@ -562,6 +562,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // Test fixture exposes each AST component explicitly.
     fn class_definition_with_header(
         arena: &mut AstArena<Untyped>,
         store: &mut SemanticStore,
@@ -1483,6 +1484,42 @@ mod tests {
         );
         assert_eq!(store.symbols.get(later_symbol).kind, SymbolKind::Parameter);
         assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+    }
+
+    #[test]
+    fn constructor_parameter_source_position_is_preserved() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(28);
+        let position = Some(SourceSpan::new(
+            source,
+            Span::without_point(TextRange::new(12, 20).unwrap()),
+        ));
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "located",
+            vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+            position,
+        );
+        let (class, _) = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "LocatedParameter",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "positions", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 28, &mut store, &mut packages).unwrap();
+        let parameter_symbol = index.symbol_at(source, parameter).unwrap();
+
+        assert_eq!(store.symbols.get(parameter_symbol).position, position);
     }
 
     #[test]

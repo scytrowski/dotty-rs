@@ -354,3 +354,117 @@ fn parsed_nested_package_clauses_extend_the_enclosing_package() {
         "bar"
     );
 }
+
+#[test]
+fn parsed_class_header_parameters_and_constructor_are_named_from_parser_metadata() {
+    use dotty_core::{TermName, TypeName};
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "class C[A](x: Int, val y: Int)(var z: Int)";
+    let source = SourceId::from_index(27);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let dotty_core::TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let dotty_core::TreeKind::TypeDef(class_def) = &parsed.ast.get(class_tree).kind else {
+        panic!("parser should preserve the class TypeDef");
+    };
+    let dotty_core::TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let dotty_core::TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind
+    else {
+        panic!("template constructor should be a DefDef");
+    };
+    assert_eq!(constructor.type_params.len(), 1);
+    assert_eq!(constructor.value_param_clauses.len(), 2);
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Header.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = *class_def.name.as_name();
+    let class_symbol = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(&class_name)
+        .unwrap();
+    let class_scope = index.scope_of(class_symbol).unwrap();
+    let type_parameter_name = TypeName::new(store.names.intern("A"));
+    let type_parameter_symbol = store
+        .scopes
+        .get(class_scope)
+        .lookup(type_parameter_name.as_name())
+        .unwrap();
+    let x_name = TermName::new(store.names.intern("x"));
+    let y_name = TermName::new(store.names.intern("y"));
+    let z_name = TermName::new(store.names.intern("z"));
+    let constructor_name = TermName::new(store.names.intern("<init>"));
+    let x_tree = constructor.value_param_clauses[0][0];
+    let y_tree = constructor.value_param_clauses[0][1];
+    let z_tree = constructor.value_param_clauses[1][0];
+    let x_symbol = index.symbol_at(source, x_tree).unwrap();
+    let y_symbol = store
+        .scopes
+        .get(class_scope)
+        .lookup(y_name.as_name())
+        .unwrap();
+    let z_symbol = store
+        .scopes
+        .get(class_scope)
+        .lookup(z_name.as_name())
+        .unwrap();
+    let constructor_symbol = store
+        .scopes
+        .get(class_scope)
+        .lookup(constructor_name.as_name())
+        .unwrap();
+
+    assert_eq!(
+        store.symbols.get(type_parameter_symbol).kind,
+        dotty_core::SymbolKind::TypeParameter
+    );
+    assert_eq!(
+        index.symbol_at(source, constructor.type_params[0]),
+        Some(type_parameter_symbol)
+    );
+    assert_eq!(
+        store.symbols.get(x_symbol).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+    assert_eq!(
+        store.symbols.get(y_symbol).kind,
+        dotty_core::SymbolKind::Field
+    );
+    assert_eq!(
+        store.symbols.get(z_symbol).kind,
+        dotty_core::SymbolKind::Field
+    );
+    assert_eq!(index.symbol_at(source, y_tree), Some(y_symbol));
+    assert_eq!(index.symbol_at(source, z_tree), Some(z_symbol));
+    assert_eq!(
+        store.symbols.get(constructor_symbol).kind,
+        dotty_core::SymbolKind::Constructor
+    );
+    assert_eq!(
+        index.symbol_at(source, template.constructor),
+        Some(constructor_symbol)
+    );
+}
