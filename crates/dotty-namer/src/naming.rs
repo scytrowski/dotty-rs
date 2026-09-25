@@ -2424,6 +2424,31 @@ mod tests {
     }
 
     #[test]
+    fn protected_this_class_visibility_remains_protected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let this_name = *dotty_core::TermName::new(store.names.intern("this")).as_name();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "ThisProtectedClass",
+            vec![],
+            Some(VisibilitySyntax::Protected {
+                qualifier: Some(this_name),
+            }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 84, &mut store, &mut packages).unwrap();
+        let symbol = index.symbol_at(SourceId::from_index(84), class).unwrap();
+
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Protected);
+    }
+
+    #[test]
     fn non_enclosing_qualified_class_visibility_is_rejected() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
@@ -2720,6 +2745,45 @@ mod tests {
         assert_eq!(
             store.symbols.get(member_symbol).visibility,
             Visibility::PrivateWithin(package.symbol)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_resolves_an_enclosing_trait() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Boundary")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let boundary = class_definition(
+            &mut arena,
+            &mut store,
+            "Boundary",
+            vec![Modifier::Trait],
+            vec![member],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![boundary]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 85, &mut store, &mut packages).unwrap();
+        let source = SourceId::from_index(85);
+        let boundary_symbol = index.symbol_at(source, boundary).unwrap();
+        let member_symbol = index.symbol_at(source, member).unwrap();
+
+        assert_eq!(store.symbols.get(boundary_symbol).kind, SymbolKind::Trait);
+        assert_eq!(
+            store.symbols.get(member_symbol).visibility,
+            Visibility::PrivateWithin(boundary_symbol)
         );
     }
 
