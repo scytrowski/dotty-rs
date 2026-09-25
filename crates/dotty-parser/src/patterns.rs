@@ -713,6 +713,62 @@ mod tests {
     }
 
     #[test]
+    fn quoted_pattern_splice_keeps_type_and_term_suffixes_as_source_nodes() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'{ $f[Int](x, y) }",
+            vec![
+                token(TokenKind::Quote, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(TokenKind::Identifier, 3, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::Comma), 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty());
+        let TreeKind::Quote(quote) = &result.ast.get(result.root).kind else {
+            panic!("expected a parser-level Quote node");
+        };
+        let TreeKind::Apply(application) = &result.ast.get(quote.body).kind else {
+            panic!("the splice's application suffix remains an Apply node");
+        };
+        let TreeKind::TypeApply(type_application) = &result.ast.get(application.function).kind
+        else {
+            panic!("the splice's type-application suffix remains a TypeApply node");
+        };
+        assert!(matches!(
+            result.ast.get(type_application.function).kind,
+            TreeKind::SplicePattern(SplicePattern { .. })
+        ));
+        assert_eq!(application.args.len(), 2);
+        assert_eq!(
+            result
+                .ast
+                .get(application.function)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(3, 10).unwrap()
+        );
+        assert_eq!(
+            result.ast.get(quote.body).position.unwrap().span().range(),
+            TextRange::new(3, 16).unwrap()
+        );
+    }
+
+    #[test]
     fn parses_an_identifier_pattern() {
         let mut names = NameInterner::new();
         let parser = parser_for(
