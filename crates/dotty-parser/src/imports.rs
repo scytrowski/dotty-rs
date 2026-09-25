@@ -681,6 +681,38 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_legacy_arrow_rename_without_a_target() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar =>}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Operator, 16, 18),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+
+        assert!(import.selectors[0].renamed.is_none());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_typed_given_selector() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
