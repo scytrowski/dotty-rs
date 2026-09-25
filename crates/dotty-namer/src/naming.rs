@@ -14,6 +14,7 @@ use dotty_core::{
 };
 
 use crate::SourceSemanticIndex;
+use crate::source_index::SourceContextId;
 
 /// Internal structural error encountered while indexing a source tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +33,12 @@ pub enum NamerError {
     DuplicateExtensionPrefixClauses { method: SymbolId },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
+    /// A declaration symbol was assigned two different source contexts.
+    DuplicateDeclarationContext {
+        symbol: SymbolId,
+        existing: SourceContextId,
+        attempted: SourceContextId,
+    },
     /// A tree did not have the shape required by a naming routine.
     MalformedAstShape {
         tree_index: u32,
@@ -94,6 +101,17 @@ impl fmt::Display for NamerError {
                     symbol.index()
                 )
             }
+            Self::DuplicateDeclarationContext {
+                symbol,
+                existing,
+                attempted,
+            } => write!(
+                f,
+                "symbol {} already has source context {}, cannot assign context {}",
+                symbol.index(),
+                existing.index(),
+                attempted.index()
+            ),
             Self::MalformedAstShape {
                 tree_index,
                 expected,
