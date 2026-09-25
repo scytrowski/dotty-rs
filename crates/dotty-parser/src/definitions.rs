@@ -571,6 +571,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_colon_ending_operator_as_a_value_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val :: = 2",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::ColonOp, 4, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::IntegerLiteral, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(matches!(
+            parser.ast().get(*definition.rhs.as_ref().unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "::");
+    }
+
+    #[test]
     fn parses_a_var_definition_with_the_var_modifier() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
