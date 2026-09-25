@@ -13,7 +13,6 @@ members = [
     "crates/dotty-classloader",
     "crates/dotty-tasty-unpickler",
     "crates/dotty-parser",
-    "crates/dotty-namer",
     "tools/parser-smoke-dump",
     "tools/parser-corpus-report",
 ]

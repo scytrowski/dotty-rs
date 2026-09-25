@@ -41,14 +41,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotty-namer"
-version = "0.1.0"
-dependencies = [
- "dotty-core",
- "dotty-parser",
-]
-
-[[package]]
 name = "dotty-parser"
 version = "0.1.0"
 dependencies = [
