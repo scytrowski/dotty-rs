@@ -1774,6 +1774,52 @@ fn parsed_private_top_level_value_uses_package_visibility() {
 }
 
 #[test]
+fn parsed_private_package_qualified_top_level_method_uses_package_boundary() {
+    use dotty_core::TermName;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "package p\nprivate[p] def hidden = 1";
+    let source = SourceId::from_index(104);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "QualifiedPrivate.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let package = packages.get(&["p"]).unwrap();
+    let wrapper = store
+        .scopes
+        .get(package.scope)
+        .lookup(TypeName::new(store.names.intern("QualifiedPrivate$package$")).as_name())
+        .unwrap();
+    let wrapper_scope = index.scope_of(wrapper).unwrap();
+    let method = store
+        .scopes
+        .get(wrapper_scope)
+        .lookup(TermName::new(store.names.intern("hidden")).as_name())
+        .unwrap();
+
+    assert_eq!(
+        store.symbols.get(method).visibility,
+        Visibility::PrivateWithin(package.symbol)
+    );
+}
+
+#[test]
 fn parsed_top_level_extension_methods_are_entered_in_the_source_wrapper() {
     use dotty_core::SymbolKind;
     use dotty_lexer::ContextualScanner;
