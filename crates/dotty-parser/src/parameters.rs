@@ -880,6 +880,16 @@ mod tests {
 
         assert_eq!(parameter.metadata.annotations.len(), 1);
         assert_eq!(parser.diagnostics().len(), 0);
+        assert_eq!(
+            parser
+                .ast()
+                .get(clauses[0][0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(1, 13).unwrap()
+        );
     }
 
     #[test]
@@ -949,6 +959,37 @@ mod tests {
                 .contains(&Modifier::ParamAccessor)
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reports_duplicate_class_parameter_visibility_and_recovers() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(private private val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 1, 8),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 9, 16),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 17, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::ColonFollow, 22, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
     }
 
     #[test]
