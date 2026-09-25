@@ -1,6 +1,6 @@
 //! Compilation-unit naming entry point and traversal seam.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -187,6 +187,7 @@ pub fn name_compilation_unit(
             scope_insertions: Vec::new(),
             companion_links: Vec::new(),
             package_private_boundary: None,
+            source_package_wrappers: HashMap::new(),
         };
         let result = namer.index(root).map(|()| namer.index);
         (result, namer.scope_insertions, namer.companion_links)
@@ -221,6 +222,7 @@ struct Namer<'a> {
     scope_insertions: Vec<(ScopeId, SymbolId)>,
     companion_links: Vec<(SymbolId, SymbolId)>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
+    source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
 }
 
 impl Namer<'_> {
@@ -307,6 +309,21 @@ impl Namer<'_> {
         package_context: &NamingContext,
         stats: Vec<TreeId<Untyped>>,
     ) -> Result<EnteredHeader, NamerError> {
+        if let Some((module_class, scope)) = self
+            .source_package_wrappers
+            .get(&package_context.owner)
+            .copied()
+        {
+            return Ok(EnteredHeader::SourcePackageWrapper {
+                stats,
+                context: NamingContext {
+                    owner: module_class,
+                    scope,
+                    package_path: package_context.package_path.clone(),
+                },
+                package_symbol: package_context.owner,
+            });
+        }
         let stem = self
             .source_file_name
             .rsplit_once('.')
@@ -356,6 +373,8 @@ impl Namer<'_> {
             .push((package_context.scope, module_class));
         let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
         self.index.record_scope(module_class, scope)?;
+        self.source_package_wrappers
+            .insert(package_context.owner, (module_class, scope));
 
         Ok(EnteredHeader::SourcePackageWrapper {
             stats,
@@ -453,7 +472,29 @@ impl Namer<'_> {
             // These raw source forms are assigned to the package wrapper by
             // partitioning. Their lowered declarations are handled by later
             // naming work, so they do not introduce identities here.
-            TreeKind::Export(_) | TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => Ok(Vec::new()),
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                let definition = definition.clone();
+                let mut headers = Vec::new();
+                for (binding_tree, binding_name) in
+                    self.collect_pattern_bindings(&definition.patterns)
+                {
+                    let name = *dotty_core::TermName::new(binding_name.text()).as_name();
+                    let spec = self.source_symbol_spec(
+                        tree,
+                        &definition.modifiers,
+                        context.owner,
+                        SymbolKind::Field,
+                    )?;
+                    let symbol =
+                        self.enter_symbol(binding_tree, name, context.owner, context.scope, spec)?;
+                    headers.push(EnteredHeader::Field {
+                        tree: binding_tree,
+                        symbol,
+                    });
+                }
+                Ok(headers)
+            }
+            TreeKind::Export(_) => Ok(Vec::new()),
             TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
                 let mut headers = Vec::new();
                 for method in &extension.methods {
@@ -474,6 +515,54 @@ impl Namer<'_> {
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn collect_pattern_bindings(
+        &self,
+        patterns: &[TreeId<Untyped>],
+    ) -> Vec<(TreeId<Untyped>, dotty_core::Name)> {
+        let mut bindings = Vec::new();
+        let mut names = HashSet::new();
+        let mut pending = patterns.iter().rev().copied().collect::<Vec<_>>();
+        while let Some(tree) = pending.pop() {
+            match &self.arena.get(tree).kind {
+                TreeKind::Ident(ident) => {
+                    let text = self.store.names.resolve(ident.name.text());
+                    if text != "_" && names.insert(text.to_owned()) {
+                        bindings.push((tree, ident.name));
+                    }
+                }
+                TreeKind::Bind(binding) => {
+                    let text = self.store.names.resolve(binding.name.text());
+                    if text != "_" && names.insert(text.to_owned()) {
+                        bindings.push((tree, binding.name));
+                    }
+                    pending.push(binding.body);
+                }
+                TreeKind::Typed(typed) => pending.push(typed.expr),
+                TreeKind::Apply(application) => {
+                    pending.extend(application.args.iter().rev().copied());
+                }
+                TreeKind::Alternative(alternative) => {
+                    if let Some(first) = alternative.alternatives.first() {
+                        pending.push(*first);
+                    }
+                }
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+                TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                    pending.extend(tuple.elements.iter().rev().copied());
+                }
+                TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                    pending.push(infix.right);
+                    pending.push(infix.left);
+                }
+                TreeKind::UnApply(unapply) => {
+                    pending.extend(unapply.patterns.iter().rev().copied());
+                }
+                _ => {}
+            }
+        }
+        bindings
     }
 
     fn index_expanded(
@@ -1349,8 +1438,8 @@ impl Namer<'_> {
 #[cfg(test)]
 mod tests {
     use dotty_core::ast::{
-        DefDef, Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef, TypeTree,
-        UntypedTemplateMetadata, ValDef, VisibilitySyntax,
+        DefDef, Export, Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef,
+        TypeTree, UntypedTemplateMetadata, ValDef, VisibilitySyntax,
     };
     use dotty_core::{
         AstArena, Packages, SemanticStore, SourceId, SourceSpan, Span, SymbolFlags, SymbolInfo,
@@ -2536,6 +2625,125 @@ mod tests {
     }
 
     #[test]
+    fn no_source_package_wrapper_is_created_without_wrapped_stats() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Direct", vec![], vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "direct", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 92, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["direct"]).unwrap();
+
+        assert_eq!(
+            type_symbol(&mut store, package.scope, "Example$package$"),
+            None
+        );
+        assert!(type_symbol(&mut store, package.scope, "Direct").is_some());
+    }
+
+    #[test]
+    fn top_level_export_stat_causes_source_package_wrapper_creation() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let expr = ident(&mut arena, &mut store, "Api");
+        let export = arena.alloc(Tree {
+            kind: TreeKind::Export(Export {
+                expr,
+                selectors: vec![],
+            }),
+            position: None,
+            ty: (),
+        });
+        let root = package_with_stat(&mut arena, &mut store, "exports", vec![export]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 93, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["exports"]).unwrap();
+
+        assert!(type_symbol(&mut store, package.scope, "Example$package$").is_some());
+    }
+
+    #[test]
+    fn given_class_companion_and_given_object_are_wrapped_with_top_level_members() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "Foo",
+            vec![Modifier::Given],
+            vec![],
+            None,
+        );
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Foo", vec![], None, vec![], None);
+        let (given_object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "GivenOnly",
+            vec![Modifier::Given],
+            None,
+            vec![],
+            None,
+        );
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "givens",
+            vec![class, object, given_object],
+        );
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(85);
+        let index = name_compilation_unit(
+            &arena,
+            root,
+            source,
+            "Givens.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let package = packages.get(&["givens"]).unwrap();
+        let wrapper = type_symbol(&mut store, package.scope, "Givens$package$").unwrap();
+        let wrapper_scope = index.scope_of(wrapper).unwrap();
+        let class_symbol = index.symbol_at(source, class).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let given_object_symbol = index.symbol_at(source, given_object).unwrap();
+        let given_module_class = type_symbol(&mut store, wrapper_scope, "GivenOnly$").unwrap();
+
+        assert_eq!(store.symbols.get(class_symbol).owner, Some(wrapper));
+        assert_eq!(store.symbols.get(object_symbol).owner, Some(wrapper));
+        assert_eq!(store.symbols.get(given_object_symbol).owner, Some(wrapper));
+        assert_eq!(store.symbols.get(given_module_class).owner, Some(wrapper));
+        assert_eq!(
+            store.symbols.get(class_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(class_symbol)
+        );
+        assert!(
+            store
+                .symbols
+                .get(class_symbol)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        );
+        assert!(
+            store
+                .symbols
+                .get(given_object_symbol)
+                .flags
+                .contains(SymbolFlags::GIVEN)
+        );
+        assert_eq!(type_symbol(&mut store, package.scope, "Foo"), None);
+        assert_eq!(term_symbol(&mut store, package.scope, "GivenOnly"), None);
+    }
+
+    #[test]
     fn top_level_method_is_owned_by_source_named_synthetic_wrapper() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
@@ -2607,6 +2815,48 @@ mod tests {
         assert_eq!(
             store.symbols.get(method_symbol).visibility,
             Visibility::PrivateWithin(package.symbol)
+        );
+    }
+
+    #[test]
+    fn repeated_package_clauses_in_one_source_share_the_source_wrapper() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first_method = method_definition(&mut arena, &mut store, "first", vec![], vec![], None);
+        let second_method =
+            method_definition(&mut arena, &mut store, "second", vec![], vec![], None);
+        let first_package =
+            package_with_stat(&mut arena, &mut store, "repeated", vec![first_method]);
+        let second_package =
+            package_with_stat(&mut arena, &mut store, "repeated", vec![second_method]);
+        let root_name = ident(&mut arena, &mut store, "<empty>");
+        let root = package(&mut arena, root_name, vec![first_package, second_package]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(91);
+        let index = name_compilation_unit(
+            &arena,
+            root,
+            source,
+            "Repeated.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let package = packages.get(&["repeated"]).unwrap();
+        let wrapper = type_symbol(&mut store, package.scope, "Repeated$package$").unwrap();
+        let first = index.symbol_at(source, first_method).unwrap();
+        let second = index.symbol_at(source, second_method).unwrap();
+
+        assert_eq!(store.symbols.get(first).owner, Some(wrapper));
+        assert_eq!(store.symbols.get(second).owner, Some(wrapper));
+        assert_eq!(
+            store
+                .scopes
+                .get(package.scope)
+                .lookup_all(TypeName::new(store.names.intern("Repeated$package$")).as_name())
+                .len(),
+            1
         );
     }
 
@@ -3984,5 +4234,73 @@ mod tests {
                 .lookup_all(leaked_name.as_name())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_wrapped_stat_indexing_rolls_back_synthetic_wrapper_symbols() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        packages.enter(&mut store, SymbolOrigin::Builtin, &["existing"]);
+        let before = store.checkpoint();
+
+        let mut arena = AstArena::<Untyped>::new();
+        let method = method_definition(&mut arena, &mut store, "f", vec![], vec![], None);
+        let malformed_class = class_definition(
+            &mut arena,
+            &mut store,
+            "GivenClass",
+            vec![Modifier::Given],
+            vec![],
+            None,
+        );
+        let TreeKind::TypeDef(definition) = &arena.get(malformed_class).kind else {
+            unreachable!();
+        };
+        let template = definition.rhs;
+        let malformed_constructor = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let TreeKind::Template(template) = &mut arena.get_mut(template).kind else {
+            unreachable!();
+        };
+        template.constructor = malformed_constructor;
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "existing",
+            vec![method, malformed_class],
+        );
+        let existing = packages.get(&["existing"]).unwrap();
+
+        assert!(matches!(
+            name_compilation_unit(
+                &arena,
+                root,
+                SourceId::from_index(94),
+                "Rollback.scala",
+                &mut store,
+                &mut packages,
+            ),
+            Err(NamerError::MalformedAstShape {
+                expected: "DefDef primary constructor",
+                ..
+            })
+        ));
+
+        assert_eq!(store.checkpoint(), before);
+        assert_eq!(packages.get(&["existing"]).unwrap(), existing);
+        assert_eq!(
+            term_symbol(&mut store, existing.scope, "Rollback$package"),
+            None
+        );
+        assert_eq!(
+            type_symbol(&mut store, existing.scope, "Rollback$package$"),
+            None
+        );
+        assert_eq!(term_symbol(&mut store, existing.scope, "f"), None);
     }
 }

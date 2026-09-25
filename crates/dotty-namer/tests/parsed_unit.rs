@@ -487,7 +487,7 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     use dotty_core::TermName;
     use dotty_lexer::ContextualScanner;
 
-    let source_text = "class C { val member: Int; def convert[A](x: Int)(y: Int): Int = x; type Alias = Int }\nval topValue: Int = 0\ndef top = 0";
+    let source_text = "class C { val member: Int; def convert[A](x: Int)(y: Int): Int = x; type Alias = Int }\nval topValue: Int = 0\ndef top = 0\ntype TopAlias = Int";
     let source = SourceId::from_index(39);
     let mut store = SemanticStore::new();
     let scanner = ContextualScanner::new(source_text).expect("source should lex");
@@ -537,6 +537,7 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     let method_body = method.rhs.unwrap();
     let top_level_value = package.stats[1];
     let top_level_method = package.stats[2];
+    let top_level_alias = package.stats[3];
     let mut packages = Packages::new();
 
     let index = name_compilation_unit(
@@ -672,6 +673,7 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     assert_eq!(index.symbol_at(source, method_body), None);
     let top_value_symbol = index.symbol_at(source, top_level_value).unwrap();
     let top_method_symbol = index.symbol_at(source, top_level_method).unwrap();
+    let top_alias_symbol = index.symbol_at(source, top_level_alias).unwrap();
     assert_eq!(
         store.symbols.get(top_value_symbol).owner,
         Some(wrapper_class)
@@ -687,6 +689,14 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
     assert_eq!(
         store.symbols.get(top_method_symbol).kind,
         dotty_core::SymbolKind::Method
+    );
+    assert_eq!(
+        store.symbols.get(top_alias_symbol).kind,
+        dotty_core::SymbolKind::TypeAlias
+    );
+    assert_eq!(
+        store.symbols.get(top_alias_symbol).owner,
+        Some(wrapper_class)
     );
     assert_eq!(
         store
@@ -938,4 +948,255 @@ fn parsed_nested_object_creates_module_class_and_links_its_companion() {
         Some(class_symbol)
     );
     assert_eq!(store.symbols.get(method_symbol).owner, Some(module_class));
+}
+
+#[test]
+fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, TermName};
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "val (left, right) = pair";
+    let source = SourceId::from_index(86);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let TreeKind::PackageDef(package_def) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let patdef_tree = package_def.stats[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(patdef)) = &parsed.ast.get(patdef_tree).kind
+    else {
+        panic!("tuple value declaration should remain a PatDef");
+    };
+    let mut names = Vec::new();
+    fn collect_idents(
+        arena: &dotty_core::AstArena<dotty_core::Untyped>,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+        names: &mut Vec<(dotty_core::TreeId<dotty_core::Untyped>, String)>,
+        interner: &dotty_core::NameInterner,
+    ) {
+        match &arena.get(tree).kind {
+            TreeKind::Ident(ident) => {
+                let name = interner.resolve(ident.name.text());
+                if name != "_" {
+                    names.push((tree, name.to_owned()));
+                }
+            }
+            TreeKind::Bind(binding) => {
+                names.push((tree, interner.resolve(binding.name.text()).to_owned()));
+                collect_idents(arena, binding.body, names, interner);
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                for element in &tuple.elements {
+                    collect_idents(arena, *element, names, interner);
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                collect_idents(arena, parens.inner, names, interner);
+            }
+            TreeKind::Typed(typed) => collect_idents(arena, typed.expr, names, interner),
+            _ => {}
+        }
+    }
+    for pattern in &patdef.patterns {
+        collect_idents(&parsed.ast, *pattern, &mut names, &store.names);
+    }
+
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Pattern.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let wrapper = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(TypeName::new(store.names.intern("Pattern$package$")).as_name())
+        .unwrap();
+    let wrapper_scope = index.scope_of(wrapper).unwrap();
+
+    assert_eq!(names.len(), 2);
+    for (tree, name) in names {
+        let symbol = index.symbol_at(source, tree).unwrap();
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(symbol).owner, Some(wrapper));
+        assert_eq!(
+            store
+                .scopes
+                .get(wrapper_scope)
+                .lookup(TermName::new(store.names.intern(&name)).as_name()),
+            Some(symbol)
+        );
+    }
+}
+
+#[test]
+fn source_wrappers_keep_distinct_file_stems_in_a_shared_package() {
+    use dotty_core::TermName;
+    use dotty_lexer::ContextualScanner;
+
+    let mut store = SemanticStore::new();
+    let mut packages = Packages::new();
+    let mut named = Vec::new();
+    for (source_id, file, method_name) in
+        [(87, "Foo.scala", "fromFoo"), (88, "Bar.scala", "fromBar")]
+    {
+        let source_text = format!("def {method_name} = 1");
+        let source = SourceId::from_index(source_id);
+        let scanner = ContextualScanner::new(&source_text).expect("source should lex");
+        let parsed = parse_compilation_unit(
+            SourceText::new(&source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty());
+        let TreeKind::PackageDef(package_def) = &parsed.ast.get(parsed.root).kind else {
+            panic!("parser should return a package root");
+        };
+        let method = package_def.stats[0];
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            file,
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        named.push((source, method, method_name, index));
+    }
+
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let mut owner_symbols = Vec::new();
+    for (source, method, method_name, index) in named {
+        let wrapper = store
+            .scopes
+            .get(root_package.scope)
+            .lookup(
+                TypeName::new(store.names.intern(&format!(
+                    "{}$package$",
+                    if source.index() == 87 { "Foo" } else { "Bar" }
+                )))
+                .as_name(),
+            )
+            .unwrap();
+        let symbol = index.symbol_at(source, method).unwrap();
+        assert_eq!(store.symbols.get(symbol).owner, Some(wrapper));
+        assert_eq!(
+            store
+                .scopes
+                .get(index.scope_of(wrapper).unwrap())
+                .lookup(TermName::new(store.names.intern(method_name)).as_name()),
+            Some(symbol)
+        );
+        owner_symbols.push(wrapper);
+    }
+    assert_ne!(owner_symbols[0], owner_symbols[1]);
+}
+
+#[test]
+fn parsed_private_top_level_value_uses_package_visibility() {
+    use dotty_core::TermName;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "private val hidden = 1";
+    let source = SourceId::from_index(89);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "PrivateValue.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let package = packages.get::<&str>(&[]).unwrap();
+    let wrapper = store
+        .scopes
+        .get(package.scope)
+        .lookup(TypeName::new(store.names.intern("PrivateValue$package$")).as_name())
+        .unwrap();
+    let wrapper_scope = index.scope_of(wrapper).unwrap();
+    let value = store
+        .scopes
+        .get(wrapper_scope)
+        .lookup(TermName::new(store.names.intern("hidden")).as_name())
+        .unwrap();
+
+    assert_eq!(
+        store.symbols.get(value).visibility,
+        dotty_core::Visibility::PrivateWithin(package.symbol)
+    );
+}
+
+#[test]
+fn parsed_top_level_extension_methods_are_entered_in_the_source_wrapper() {
+    use dotty_core::SymbolKind;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "extension (value: Int) { def twice = value * 2 }";
+    let source = SourceId::from_index(90);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let TreeKind::PackageDef(package_def) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ExtensionMethods(extension)) =
+        &parsed.ast.get(package_def.stats[0]).kind
+    else {
+        panic!("extension should remain an ExtensionMethods node");
+    };
+    let method = extension.methods[0];
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Extension.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let package = packages.get::<&str>(&[]).unwrap();
+    let wrapper = store
+        .scopes
+        .get(package.scope)
+        .lookup(TypeName::new(store.names.intern("Extension$package$")).as_name())
+        .unwrap();
+    let method_symbol = index.symbol_at(source, method).unwrap();
+
+    assert_eq!(store.symbols.get(method_symbol).kind, SymbolKind::Method);
+    assert_eq!(store.symbols.get(method_symbol).owner, Some(wrapper));
 }
