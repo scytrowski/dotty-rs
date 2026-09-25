@@ -1,4 +1,4 @@
-use dotty_core::ast::{Assign, Function, TypedExpr, UntypedNode};
+use dotty_core::ast::{Annotated, Assign, Function, TypedExpr, UntypedNode};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::{ParseKind, Parser};
@@ -148,6 +148,22 @@ where
             .position
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start());
+
+        if self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            let mut tree = expr;
+            while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+                let annotation = self.parse_annotation();
+                tree = self.alloc_from(
+                    crate::Mark { start },
+                    TreeKind::Annotated(Annotated {
+                        expr: tree,
+                        annotation,
+                    }),
+                );
+            }
+            return tree;
+        }
+
         let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr());
         self.update_active_placeholder_type(expr, tpt);
         self.alloc_from(

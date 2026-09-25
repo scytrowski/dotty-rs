@@ -209,7 +209,9 @@ match types with braced type cases, including wildcard cases
 opaque type aliases, including parameterized and bounded aliases
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
-expression type ascriptions with the supported simple/infix type parser
+expression type ascriptions with the supported simple/infix type parser,
+including annotation-only forms such as `value: @unchecked` and
+`(tree: @unchecked)`
 parenthesized `using` argument lists, including nested application clauses
 indented colon arguments, including block, lambda, and case bodies
 prefix operators `-`, `+`, `~`, and `!` on the same physical line
@@ -394,7 +396,11 @@ these ascriptions, type applications, and type-definition bounds, plus
 Scala 3.9 `InfixType` expressions with generic symbolic and identifier
 operators, match types with ordered `CaseDef` children, ordinary/context
 function arrows, and wildcard type arguments with optional lower and upper
-bounds. Match-type patterns use `InfixType`, while results use the full
+bounds. A type annotation such as `T @unchecked` is an `Annotated` type tree;
+the distinct ascription form `expr: @unchecked` follows Dotty's parser shape
+and wraps the expression in `Annotated(expr, annotation)` rather than creating
+a `Typed` node. Repeated annotations wrap in source order. Match-type patterns
+use `InfixType`, while results use the full
 `type_expr()` entry. Match types support braced case regions, applied and
 tuple case patterns, infix case patterns, wildcard cases, and bounded aliases
 with an upper bound. For a bounded alias, the upper bound is stored in the
