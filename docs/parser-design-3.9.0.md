@@ -241,6 +241,11 @@ Primary-constructor parameters preserve source annotations and the supported
 contexts; explicit `val`/`var` accessor metadata remains context-sensitive.
 Annotations on ordinary method parameters are also preserved. These prefixes
 are not treated as a blanket set of modifiers valid for every parameter kind.
+Ordinary named method and non-accessor class-constructor parameters also
+support by-name types (`x: => T`). The parser represents these with the shared
+`ByNameTypeTree`, wrapping the supported type grammar after `=>`; this is
+source syntax only and does not lower the parameter to a thunk. By-name
+arguments in ordinary function types remain a separate grammar production.
 class, trait, object, case class, case object, and enum definitions with type
 parameters, primary constructor clauses, simple `extends` parent applications
 including parameterized enum-case parents, comma/`with` parent lists, `derives`
