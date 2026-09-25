@@ -306,6 +306,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "SourceContextId must belong to this SourceSemanticIndex")]
+    fn looking_up_a_context_from_another_index_is_an_internal_invariant_violation() {
+        let index = SourceSemanticIndex::new();
+        let _ = index.source_context(SourceContextId(0));
+    }
+
+    #[test]
     fn a_symbol_gets_one_declaration_context_and_repeated_same_context_is_idempotent() {
         let mut store = SemanticStore::new();
         let declaration = symbol(&mut store);

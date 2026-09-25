@@ -2252,7 +2252,7 @@ fn package_import_context_is_captured_by_following_direct_class_and_object() {
 #[test]
 fn class_imports_affect_following_members_and_nested_contexts_inherit_them() {
     let named = named_source(
-        "class C:\n  val before = 1\n  import alpha.*\n  val after = 2\n  class Nested:\n    val inside = 3",
+        "class C:\n  val before = 1\n  import alpha.*\n  val after_alpha = 2\n  import beta.*\n  val after_beta = 3\n  class Nested:\n    val inside = 4",
         226,
     );
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
@@ -2266,16 +2266,21 @@ fn class_imports_affect_following_members_and_nested_contexts_inherit_them() {
         panic!("class RHS should be a Template");
     };
     let (_, before_context) = declaration_context(&named, template.body[0]);
-    let (_, after_context) = declaration_context(&named, template.body[2]);
-    let (_, nested_context) = declaration_context(&named, template.body[3]);
+    let (_, after_alpha_context) = declaration_context(&named, template.body[2]);
+    let (_, after_beta_context) = declaration_context(&named, template.body[4]);
+    let (_, nested_context) = declaration_context(&named, template.body[5]);
     let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
     let before = named.index.source_context(before_context);
-    let after = named.index.source_context(after_context);
+    let after_alpha = named.index.source_context(after_alpha_context);
+    let after_beta = named.index.source_context(after_beta_context);
     let nested = named.index.source_context(nested_context);
     let TreeKind::Import(_) = &named.parsed.ast.get(template.body[1]).kind else {
         panic!("template statement should be an import");
     };
-    let TreeKind::TypeDef(nested_def) = &named.parsed.ast.get(template.body[3]).kind else {
+    let TreeKind::Import(_) = &named.parsed.ast.get(template.body[3]).kind else {
+        panic!("template statement should be an import");
+    };
+    let TreeKind::TypeDef(nested_def) = &named.parsed.ast.get(template.body[5]).kind else {
         panic!("nested declaration should be a TypeDef");
     };
     let TreeKind::Template(nested_template) = &named.parsed.ast.get(nested_def.rhs).kind else {
@@ -2284,17 +2289,19 @@ fn class_imports_affect_following_members_and_nested_contexts_inherit_them() {
     let (_, inside_context) = declaration_context(&named, nested_template.body[0]);
     let inside = named.index.source_context(inside_context);
 
-    assert_ne!(before_context, after_context);
+    assert_ne!(before_context, after_alpha_context);
     assert_eq!(before.owner, class_symbol);
-    assert_eq!(after.parent, Some(before_context));
-    assert_eq!(after.import, Some(template.body[1]));
-    assert_eq!(nested_context, after_context);
+    assert_eq!(after_alpha.parent, Some(before_context));
+    assert_eq!(after_alpha.import, Some(template.body[1]));
+    assert_eq!(after_beta.parent, Some(after_alpha_context));
+    assert_eq!(after_beta.import, Some(template.body[3]));
+    assert_eq!(nested_context, after_beta_context);
     assert_eq!(nested.owner, class_symbol);
     assert_eq!(
         inside.owner,
         named
             .index
-            .symbol_at(named.source, template.body[3])
+            .symbol_at(named.source, template.body[5])
             .unwrap()
     );
     assert_eq!(inside.parent, Some(nested_context));
@@ -2311,6 +2318,69 @@ fn class_imports_affect_following_members_and_nested_contexts_inherit_them() {
             )
             .is_empty()
     );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(dotty_core::TermName::new(named.store.names.get("beta").unwrap()).as_name())
+            .is_empty()
+    );
+}
+
+#[test]
+fn module_class_imports_follow_source_order_without_resolving_imports() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "object O:\n  import alpha.*\n  val before = 1\n  import beta.*\n  val after = 2",
+        231,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("object should be a ModuleDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(module.template).kind else {
+        panic!("object body should be a Template");
+    };
+    let (_, before_context) = declaration_context(&named, template.body[1]);
+    let (_, after_context) = declaration_context(&named, template.body[3]);
+    let before = named.index.source_context(before_context);
+    let after = named.index.source_context(after_context);
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .unwrap();
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(dotty_core::TypeName::new(named.store.names.get("O$").unwrap()).as_name())
+        .unwrap();
+    let module_scope = named.index.scope_of(module_class).unwrap();
+
+    assert_eq!(before.owner, module_class);
+    assert_eq!(before.lexical_scope, module_scope);
+    assert_eq!(after.parent, Some(before_context));
+    assert_eq!(after.import, Some(template.body[2]));
+    for import_name in ["alpha", "beta"] {
+        assert!(
+            named
+                .store
+                .scopes
+                .get(module_scope)
+                .lookup_all(
+                    dotty_core::TermName::new(named.store.names.get(import_name).unwrap())
+                        .as_name()
+                )
+                .is_empty()
+        );
+    }
 }
 
 #[test]
@@ -2382,6 +2452,10 @@ fn constructor_parameters_use_the_constructor_lexical_child_context() {
         .derived_symbol_at(constructor_symbol, named.source, class_type_parameter)
         .unwrap();
     let field_parameter = constructor.value_param_clauses[0][0];
+    let canonical_field_parameter = named
+        .index
+        .symbol_at(named.source, field_parameter)
+        .unwrap();
     let derived_field_parameter = named
         .index
         .derived_symbol_at(constructor_symbol, named.source, field_parameter)
@@ -2404,6 +2478,12 @@ fn constructor_parameters_use_the_constructor_lexical_child_context() {
     assert_eq!(
         named.index.declaration_context_of(derived_field_parameter),
         Some(constructor_env_id)
+    );
+    assert_eq!(
+        named
+            .index
+            .declaration_context_of(canonical_field_parameter),
+        Some(constructor_context)
     );
     assert_eq!(
         named.index.declaration_context_of(
