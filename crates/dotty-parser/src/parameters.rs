@@ -254,6 +254,8 @@ where
                 metadata.modifiers.push(Modifier::ParamAccessor);
                 metadata.modifiers.push(Modifier::PrivateLocal);
             }
+        } else {
+            metadata.modifiers.push(Modifier::Param);
         }
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
@@ -389,6 +391,9 @@ where
 
             let mut parameter_metadata = metadata.clone();
             add_class_parameter_metadata(owner, first_ordinary_clause, &mut parameter_metadata);
+            if !is_class_parameter_owner(owner) {
+                parameter_metadata.modifiers.push(Modifier::Param);
+            }
             let parameter =
                 self.alloc_synthetic_context_parameter(mark, tpt, next_index, parameter_metadata);
             next_index = next_index.saturating_add(1);
@@ -1071,7 +1076,7 @@ mod tests {
         else {
             panic!("expected a parameter ValDef");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -1104,12 +1109,12 @@ mod tests {
         else {
             panic!("expected ordinary parameter ValDef");
         };
-        assert!(metadata.modifiers.is_empty());
+        assert_eq!(metadata.modifiers, vec![Modifier::Param]);
         let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[1][0]).kind
         else {
             panic!("expected using parameter ValDef");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -1193,7 +1198,7 @@ mod tests {
             panic!("expected an anonymous using parameter");
         };
         assert_eq!(parser.names.resolve(name.as_name().text()), "x$1");
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
