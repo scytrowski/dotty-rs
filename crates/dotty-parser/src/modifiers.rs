@@ -127,6 +127,30 @@ where
         prefix
     }
 
+    /// Parses the restricted constructor prefix accepted by Dotty:
+    /// annotations followed by an optional access modifier.
+    pub(crate) fn parse_constructor_modifiers(&mut self) -> Modifiers {
+        let mut metadata = Modifiers::default();
+        while is_annotation_start(self) {
+            metadata.annotations.push(self.parse_annotation());
+        }
+        while !metadata.annotations.is_empty()
+            && matches!(
+                self.current().kind,
+                TokenKind::Newline | TokenKind::Newlines
+            )
+        {
+            self.advance();
+        }
+        if matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Private | HardKeyword::Protected)
+        ) {
+            self.parse_visibility(&mut metadata);
+        }
+        metadata
+    }
+
     fn add_modifier(&mut self, metadata: &mut Modifiers, modifier: Modifier) {
         if metadata.modifiers.contains(&modifier) {
             self.report(

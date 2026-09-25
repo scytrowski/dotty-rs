@@ -3,7 +3,7 @@ package dotty.parser.oracle
 import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.core.Contexts.ContextBase
-import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, PrivateLocal, Sealed, Trait, Transparent}
+import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.util.SourceFile
 import scala.util.control.NonFatal
@@ -256,8 +256,13 @@ object Main:
     val prefixText = sourceText.take(keywordIndex)
     val prefixWords = prefixText.split("[^A-Za-z]+").toSet
     val modifiers = ordered.map(name => quote(name)).mkString("[", ",", "]")
+    val hasQualifiedVisibility = !mods.privateWithin.isEmpty
     val visibility =
-      if prefixWords.contains("private") then "private"
+      if mods.flags.isAllOf(EnumCase) then
+        if mods.is(Private) || (hasQualifiedVisibility && prefixWords.contains("private")) then "private"
+        else if mods.is(Protected) || (hasQualifiedVisibility && prefixWords.contains("protected")) then "protected"
+        else ""
+      else if prefixWords.contains("private") then "private"
       else if prefixWords.contains("protected") then "protected"
       else ""
     val sourceQualifier =

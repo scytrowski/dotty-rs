@@ -229,8 +229,9 @@ policy, including accessor/private-local metadata. Type-only cases such as
 `case Empty[T]` have no value-parameter clauses.
 Parameterized case templates populate `Template.parents` through the same
 parent/constr-app parser used by classes; parent order and constructor
-applications are preserved. Enum-case bodies and enum-case `derives`/`uses`
-remain deferred. Direct enum cases accept source annotations and
+applications are preserved. Scala 3.9 does not allow per-case template bodies
+or per-case `derives`/`uses`; `caseTemplate` only parses optional `extends`
+parents. `derives` and ordered `uses` are parsed at enum/template level. Direct enum cases accept source annotations and
 `private`/`protected` visibility, including qualified visibility; the metadata
 is attached to the existing `ModuleDef`, `PatDef`, or `TypeDef` shape without
 introducing a new enum-case node. Annotations or modifiers after the case name,
@@ -454,10 +455,12 @@ Sequence capture references, `.only[...]`/`.rd` forms, auxiliary constructors,
 and semantic template processing remain future work. Direct enum-case
 annotations, access modifiers, and qualified visibility are preserved as
 definition metadata; constructor-level annotations/modifiers after the case
-name and enum-case `derives`/`uses` remain deferred. Per-case template bodies
-are not Scala 3.9 syntax: the parser reports them as unexpected and recovers
-past the rejected braced or indented body so following enum cases remain
-available.
+name remain deferred. Scala 3.9's `enumCase` delegates post-name annotations
+and access modifiers to the primary-constructor grammar for individual cases;
+they belong on the constructor node. Per-case `derives`/`uses` and per-case
+template bodies are not Scala 3.9 syntax. The parser reports bodies as
+unexpected and recovers past rejected braced or indented bodies so following
+enum cases remain available.
 
 ### Contextual definitions
 
@@ -529,9 +532,14 @@ set. It is attached to the existing definition nodes, including
 semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
-`Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-annotations, constructor-level enum-case annotations/modifiers, enum-case
-bodies, and feature-dependent
+`Apply(Select(New(type), <init>), args)` shape. Enum-case constructors preserve
+post-name annotations and optional `private`/`protected` access in the
+synthetic constructor's `Modifiers`. Visibility written before `case` remains
+on the case definition and is independent of constructor visibility. This
+constructor prefix is
+intentionally limited to annotations followed by an optional access modifier;
+other post-name modifiers are rejected. Parameter and type-parameter
+annotations, enum-case bodies, and feature-dependent
 `erased`/`tracked`/`into`/`update` modifiers remain deferred. `opaque` is
 recognized only before a type definition; it remains an ordinary identifier in
 other positions.
