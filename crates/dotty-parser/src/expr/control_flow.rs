@@ -1,5 +1,5 @@
 use dotty_core::ast::{Block, If, Match, ParsedTry, Return, Throw, UntypedNode, While};
-use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
 use crate::Parser;
@@ -65,16 +65,6 @@ where
         }
         self.advance();
         Some(separator_end)
-    }
-
-    fn extend_tree_end(&mut self, tree: TreeId<Untyped>, end: u32) {
-        let Some(position) = self.ast.get(tree).position else {
-            return;
-        };
-        let range = position.span().range();
-        let range = TextRange::new(range.start(), end).expect("tree span endpoints are ordered");
-        self.ast.get_mut(tree).position =
-            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
     }
 
     pub(super) fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {

@@ -101,6 +101,16 @@ the template-specific `SelfArrow` event through readable helpers. A self arrow
 suppresses a pending nested indentation region; layout classification remains
 owned by the scanner while grammar decisions remain in the parser.
 
+The scanner classifies line-final `end name` forms as `EndMarker` tokens. At
+statement-sequence boundaries the parser consumes the marker and its target
+only when the target matches the last parsed construct (`end if`, `end while`,
+or a named definition, for example), and extends that construct's source span
+through the marker. A marker for an enclosing construct is left for the outer
+sequence; a marker that reaches the outermost sequence without a matching
+construct produces a `misaligned end marker` diagnostic. The parser does not
+infer layout from source indentation; it uses the scanner's existing
+Outdent-feedback contract when an enclosing template ends at an `end` marker.
+
 ## Diagnostics and recovery
 
 Parser diagnostics use the small categories `ExpectedToken`,

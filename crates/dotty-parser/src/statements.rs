@@ -1,4 +1,6 @@
-use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, Untyped};
+use dotty_core::{
+    HardKeyword, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+};
 
 use crate::modifiers::DefinitionPrefix;
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
@@ -164,9 +166,29 @@ where
         boundary: StatementSequenceBoundary,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut statements = Vec::new();
+        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
+            if self.current().kind == TokenKind::EndMarker {
+                let last = statements.last().and_then(last_statement_tree);
+                let matches_local = self.end_marker_matches_next(last);
+                if !matches_local
+                    && matches!(
+                        boundary,
+                        StatementSequenceBoundary::Block(TokenKind::Outdent)
+                    )
+                {
+                    return self.finish_statement_sequence(statements);
+                }
+                if !self.consume_end_marker(last, end_marker_seen) {
+                    return self.finish_statement_sequence(statements);
+                }
+                end_marker_seen = true;
+                self.consume_sequence_separators(boundary);
+                continue;
+            }
+            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -212,6 +234,24 @@ where
                 self.recover_until(RecoverySet::Statement);
                 self.consume_sequence_separators(boundary);
             }
+
+            while self.current().kind == TokenKind::EndMarker {
+                let last = statements.last().and_then(last_statement_tree);
+                let matches_local = self.end_marker_matches_next(last);
+                if !matches_local
+                    && matches!(
+                        boundary,
+                        StatementSequenceBoundary::Block(TokenKind::Outdent)
+                    )
+                {
+                    return self.finish_statement_sequence(statements);
+                }
+                if !self.consume_end_marker(last, end_marker_seen) {
+                    return self.finish_statement_sequence(statements);
+                }
+                end_marker_seen = true;
+                self.consume_sequence_separators(boundary);
+            }
         }
 
         self.finish_statement_sequence(statements)
@@ -224,9 +264,20 @@ where
         boundary: StatementSequenceBoundary,
     ) -> Vec<TreeId<Untyped>> {
         let mut statements = Vec::new();
+        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
+            if self.current().kind == TokenKind::EndMarker {
+                let last = statements.last().copied();
+                if !self.consume_end_marker(last, end_marker_seen) {
+                    return statements;
+                }
+                end_marker_seen = true;
+                self.consume_sequence_separators(boundary);
+                continue;
+            }
+            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -261,6 +312,15 @@ where
                     "expected a top-level statement separator",
                 );
                 self.recover_until(RecoverySet::Statement);
+                self.consume_sequence_separators(boundary);
+            }
+
+            while self.current().kind == TokenKind::EndMarker {
+                let last = statements.last().copied();
+                if !self.consume_end_marker(last, end_marker_seen) {
+                    return statements;
+                }
+                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -340,6 +400,169 @@ where
         }
     }
 
+    /// Consumes a scanner-classified Scala end marker without letting it enter
+    /// expression parsing or recovery. Only the marker and its target are
+    /// consumed, so an unrelated next statement remains available to the
+    /// enclosing sequence.
+    pub(crate) fn consume_end_marker(
+        &mut self,
+        last: Option<TreeId<Untyped>>,
+        duplicate: bool,
+    ) -> bool {
+        let checkpoint = self.cursor.checkpoint();
+        let marker = self.current().span;
+        self.advance();
+        let target_kind = self.current().kind;
+        let target_end = self.current().span.end();
+        let target_is_name = matches!(
+            target_kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Keyword(
+                    HardKeyword::If
+                        | HardKeyword::For
+                        | HardKeyword::While
+                        | HardKeyword::Match
+                        | HardKeyword::Try
+                        | HardKeyword::New
+                        | HardKeyword::This
+                        | HardKeyword::Given
+                        | HardKeyword::Val
+                        | HardKeyword::Throw
+                )
+        );
+        if !target_is_name {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected a name after `end`",
+            );
+            return self.cursor.progressed_since(checkpoint);
+        }
+
+        let target_text = self.marker_target_text(target_kind, self.current().span);
+        let matching_tree =
+            last.filter(|tree| self.end_marker_matches(*tree, target_kind, &target_text));
+        if let Some(tree) = matching_tree {
+            if duplicate {
+                self.report_at(
+                    ParseDiagnosticKind::UnexpectedToken,
+                    SourceSpan::new(self.source_id, Span::without_point(marker)),
+                    "duplicate end marker",
+                );
+            }
+            self.extend_tree_end(tree, target_end);
+        } else {
+            let range = TextRange::new(marker.start(), target_end).expect("marker span is ordered");
+            self.report_at(
+                ParseDiagnosticKind::UnexpectedToken,
+                SourceSpan::new(self.source_id, Span::without_point(range)),
+                "misaligned end marker",
+            );
+        }
+        self.advance();
+        self.cursor.progressed_since(checkpoint)
+    }
+
+    pub(crate) fn end_marker_matches_next(&mut self, tree: Option<TreeId<Untyped>>) -> bool {
+        let Some(tree) = tree else {
+            return false;
+        };
+        if self.current().kind != TokenKind::EndMarker {
+            return false;
+        }
+        let target = self.cursor.lookahead(1);
+        let target_kind = target.kind;
+        let target_span = target.span;
+        let target_text = self.marker_target_text(target_kind, target_span);
+        self.end_marker_matches(tree, target_kind, &target_text)
+    }
+
+    fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
+        let text = self.source.slice(span).unwrap_or_default();
+        if kind == TokenKind::BackquotedIdentifier {
+            text.strip_prefix('`')
+                .and_then(|text| text.strip_suffix('`'))
+                .unwrap_or(text)
+                .to_owned()
+        } else {
+            text.to_owned()
+        }
+    }
+
+    fn end_marker_matches(
+        &self,
+        tree: TreeId<Untyped>,
+        target_kind: TokenKind,
+        target_text: &str,
+    ) -> bool {
+        use dotty_core::ast::{Modifier, UntypedNode};
+
+        let kind = &self.ast.get(tree).kind;
+        match target_kind {
+            TokenKind::Keyword(HardKeyword::If) => matches!(kind, TreeKind::If(_)),
+            TokenKind::Keyword(HardKeyword::While) => matches!(kind, TreeKind::While(_)),
+            TokenKind::Keyword(HardKeyword::Match) => matches!(kind, TreeKind::Match(_)),
+            TokenKind::Keyword(HardKeyword::Try) => matches!(kind, TreeKind::Try(_)),
+            TokenKind::Keyword(HardKeyword::New) => matches!(kind, TreeKind::New(_)),
+            TokenKind::Keyword(HardKeyword::For) => matches!(
+                kind,
+                TreeKind::PhaseSpecific(UntypedNode::ForDo(_) | UntypedNode::ForYield(_))
+            ),
+            TokenKind::Keyword(HardKeyword::Val) => matches!(
+                kind,
+                TreeKind::ValDef(_) | TreeKind::PhaseSpecific(UntypedNode::PatDef(_))
+            ),
+            TokenKind::Keyword(HardKeyword::This) => matches!(
+                kind,
+                TreeKind::DefDef(definition)
+                    if self.names.resolve(definition.name.as_name().text()) == "<init>"
+            ),
+            TokenKind::Keyword(HardKeyword::Given) => match kind {
+                TreeKind::ValDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::Given)
+                }
+                TreeKind::DefDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::Given)
+                }
+                TreeKind::TypeDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::Given)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    definition.metadata.modifiers.contains(&Modifier::Given)
+                }
+                _ => false,
+            },
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let Some(target) = self.names.get(target_text) else {
+                    return false;
+                };
+                let named_id = match kind {
+                    TreeKind::ValDef(definition) => Some(definition.name.as_name().text()),
+                    TreeKind::DefDef(definition) => Some(definition.name.as_name().text()),
+                    TreeKind::TypeDef(definition) => Some(definition.name.as_name().text()),
+                    TreeKind::PackageDef(package) => self.last_reference_name(package.name),
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                        Some(definition.name.as_name().text())
+                    }
+                    TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => {
+                        return target_text == "extension";
+                    }
+                    _ => None,
+                };
+                named_id == Some(target)
+            }
+            _ => false,
+        }
+    }
+
+    fn last_reference_name(&self, tree: TreeId<Untyped>) -> Option<dotty_core::NameId> {
+        match &self.ast.get(tree).kind {
+            TreeKind::Ident(ident) => Some(ident.name.text()),
+            TreeKind::Select(select) => Some(select.name.text()),
+            _ => None,
+        }
+    }
+
     fn is_case_body_terminator(&self) -> bool {
         matches!(
             self.current().kind,
@@ -372,6 +595,13 @@ where
         self.advance();
         self.recover_until(RecoverySet::Statement);
         ParsedStatement::Expression(self.error_expr(position))
+    }
+}
+
+fn last_statement_tree(statement: &ParsedStatement) -> Option<TreeId<Untyped>> {
+    match statement {
+        ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => Some(*tree),
+        ParsedStatement::Many(trees) => trees.last().copied(),
     }
 }
 
@@ -436,7 +666,146 @@ const fn is_top_level_statement_start(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{NameInterner, Punctuation, TextRange, TokenKind, TreeKind};
+    use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TokenKind, TreeKind};
+
+    #[test]
+    fn matching_if_end_marker_is_consumed_and_extends_the_if_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then x\nend if\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::EndMarker, 12, 15),
+                token(TokenKind::Keyword(HardKeyword::If), 16, 18),
+                token(TokenKind::Newline, 18, 19),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(
+            parser.ast.get(stats[0]).position.unwrap().span().range(),
+            TextRange::new(0, 18).unwrap()
+        );
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the following statement to remain available");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+        assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn misaligned_end_marker_reports_an_error_without_consuming_the_next_statement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then x\nend while\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::EndMarker, 12, 15),
+                token(TokenKind::Keyword(HardKeyword::While), 16, 21),
+                token(TokenKind::Newline, 21, 22),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(
+            parser.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the statement after the marker");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+    }
+
+    #[test]
+    fn throw_end_marker_is_misaligned_and_does_not_extend_the_throw_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "throw x\nend throw\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Throw), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::EndMarker, 8, 11),
+                token(TokenKind::Keyword(HardKeyword::Throw), 12, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(
+            parser.ast.get(stats[0]).position.unwrap().span().range(),
+            TextRange::new(0, 7).unwrap()
+        );
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "misaligned end marker");
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the statement after the misaligned marker");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+    }
+
+    #[test]
+    fn duplicate_matching_end_marker_is_diagnosed_but_does_not_swallow_the_next_statement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if c then x\nend if\nend if\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::EndMarker, 12, 15),
+                token(TokenKind::Keyword(HardKeyword::If), 16, 18),
+                token(TokenKind::Newline, 18, 19),
+                token(TokenKind::EndMarker, 19, 22),
+                token(TokenKind::Keyword(HardKeyword::If), 23, 25),
+                token(TokenKind::Newline, 25, 26),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "duplicate end marker");
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the statement after the duplicate marker");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+    }
 
     #[test]
     fn recognizes_extension_only_when_a_parameter_clause_follows() {
