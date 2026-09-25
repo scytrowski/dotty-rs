@@ -17,6 +17,7 @@ pub struct SourceSemanticIndex {
     symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     derived_symbols_by_owner_and_tree: HashMap<(SymbolId, SourceId, TreeId<Untyped>), SymbolId>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
+    extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
 }
 
 impl SourceSemanticIndex {
@@ -76,6 +77,37 @@ impl SourceSemanticIndex {
     /// Returns the declaration scope owned by `symbol`, if one was indexed.
     pub fn scope_of(&self, symbol: SymbolId) -> Option<ScopeId> {
         self.scopes_by_owner.get(&symbol).copied()
+    }
+
+    /// Returns the original source prefix clauses for an extension method.
+    ///
+    /// The returned clauses preserve their source order and point to the
+    /// original parameter trees. Ordinary methods return `None`.
+    pub fn extension_prefix_clauses(&self, method: SymbolId) -> Option<&[Vec<TreeId<Untyped>>]> {
+        self.extension_prefix_clauses_by_method
+            .get(&method)
+            .map(Vec::as_slice)
+    }
+
+    /// Records the original extension prefix clauses for one method.
+    ///
+    /// Metadata is source structure, not a semantic parameter list. A method
+    /// can only be registered once; duplicate registration leaves the first
+    /// value intact.
+    pub fn record_extension_prefix_clauses(
+        &mut self,
+        method: SymbolId,
+        clauses: &[Vec<TreeId<Untyped>>],
+    ) -> Result<(), NamerError> {
+        if self
+            .extension_prefix_clauses_by_method
+            .contains_key(&method)
+        {
+            return Err(NamerError::DuplicateExtensionPrefixClauses { method });
+        }
+        self.extension_prefix_clauses_by_method
+            .insert(method, clauses.to_vec());
+        Ok(())
     }
 
     /// Associates a definition tree with its symbol.
@@ -372,5 +404,74 @@ mod tests {
             Err(NamerError::DuplicateDeclarationScope { symbol }) if symbol == owner
         ));
         assert_eq!(index.scope_of(owner), Some(first_scope));
+    }
+
+    #[test]
+    fn extension_prefix_clauses_preserve_the_original_clause_and_tree_order() {
+        let mut store = SemanticStore::new();
+        let method = symbol(&mut store);
+        let mut arena = dotty_core::AstArena::<Untyped>::new();
+        let first = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })),
+            position: None,
+            ty: (),
+        });
+        let second = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })),
+            position: None,
+            ty: (),
+        });
+        let clauses = vec![vec![first], vec![second, first]];
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_extension_prefix_clauses(method, &clauses)
+            .unwrap();
+
+        assert_eq!(
+            index.extension_prefix_clauses(method),
+            Some(clauses.as_slice())
+        );
+        assert_eq!(index.extension_prefix_clauses(symbol(&mut store)), None);
+    }
+
+    #[test]
+    fn duplicate_extension_prefix_clause_registration_is_rejected_without_replacement() {
+        let mut store = SemanticStore::new();
+        let method = symbol(&mut store);
+        let mut arena = dotty_core::AstArena::<Untyped>::new();
+        let first = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })),
+            position: None,
+            ty: (),
+        });
+        let second = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+                kind: ErrorNodeKind::UnexpectedToken,
+            })),
+            position: None,
+            ty: (),
+        });
+        let first_clauses = vec![vec![first]];
+        let second_clauses = vec![vec![second]];
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_extension_prefix_clauses(method, &first_clauses)
+            .unwrap();
+        assert_eq!(
+            index.record_extension_prefix_clauses(method, &second_clauses),
+            Err(NamerError::DuplicateExtensionPrefixClauses { method })
+        );
+        assert_eq!(
+            index.extension_prefix_clauses(method),
+            Some(first_clauses.as_slice())
+        );
     }
 }
