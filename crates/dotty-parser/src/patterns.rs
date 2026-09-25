@@ -610,6 +610,7 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
                 | TokenKind::Keyword(HardKeyword::Null)
                 | TokenKind::Keyword(HardKeyword::This)
                 | TokenKind::Keyword(HardKeyword::Super)
+                | TokenKind::Quote
                 | TokenKind::Punctuation(Punctuation::LeftParen)
         )
 }
@@ -647,6 +648,24 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Alternative, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode};
     use dotty_core::{NameInterner, Punctuation, TextRange};
+
+    #[test]
+    fn quoted_pattern_can_start_an_alternative_after_a_newline() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "|\n'{ $x }",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Quote, 2, 3),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+        parser.advance();
+
+        assert_eq!(pattern_alternative_operand_offset(&mut parser), Some(1));
+    }
 
     #[test]
     fn quoted_pattern_parses_simple_dollar_identifiers_as_splice_patterns() {
