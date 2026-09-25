@@ -14,6 +14,7 @@ use crate::NamerError;
 #[derive(Debug, Default)]
 pub struct SourceSemanticIndex {
     symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    derived_symbols_by_owner_and_tree: HashMap<(SymbolId, SourceId, TreeId<Untyped>), SymbolId>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
 }
 
@@ -26,6 +27,47 @@ impl SourceSemanticIndex {
     /// Returns the symbol assigned to a tree in the given source unit.
     pub fn symbol_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<SymbolId> {
         self.symbols_by_tree.get(&(source, tree)).copied()
+    }
+
+    /// Returns the derived symbol assigned to `tree` for the given `owner`.
+    ///
+    /// Derived identities are kept separate from [`Self::symbol_at`], which
+    /// continues to return only the canonical identity represented by a
+    /// source tree.
+    pub fn derived_symbol_at(
+        &self,
+        owner: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.derived_symbols_by_owner_and_tree
+            .get(&(owner, source, tree))
+            .copied()
+    }
+
+    /// Associates a derived declaration identity with its semantic owner.
+    ///
+    /// The same source tree may have derived identities for different owners,
+    /// but a given `(owner, source, tree)` key can only be recorded once.
+    /// Duplicate insertion is an internal naming error and leaves the
+    /// existing mapping intact.
+    pub fn record_derived_symbol(
+        &mut self,
+        owner: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    ) -> Result<(), NamerError> {
+        let key = (owner, source, tree);
+        if self.derived_symbols_by_owner_and_tree.contains_key(&key) {
+            return Err(NamerError::DuplicateDerivedSourceTreeSymbol {
+                owner,
+                source,
+                tree_index: tree.index(),
+            });
+        }
+        self.derived_symbols_by_owner_and_tree.insert(key, symbol);
+        Ok(())
     }
 
     /// Returns the declaration scope owned by `symbol`, if one was indexed.
@@ -145,6 +187,30 @@ mod tests {
             }) if duplicate_source == source
         ));
         assert_eq!(index.symbol_at(source, tree), Some(first));
+    }
+
+    #[test]
+    fn duplicate_derived_source_tree_symbol_is_rejected_without_replacement() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let first = symbol(&mut store);
+        let second = symbol(&mut store);
+        let source = SourceId::from_index(1);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(owner, source, tree, first)
+            .unwrap();
+        assert!(matches!(
+            index.record_derived_symbol(owner, source, tree, second),
+            Err(NamerError::DuplicateDerivedSourceTreeSymbol {
+                owner: duplicate_owner,
+                source: duplicate_source,
+                tree_index: 0
+            }) if duplicate_owner == owner && duplicate_source == source
+        ));
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(first));
     }
 
     #[test]
