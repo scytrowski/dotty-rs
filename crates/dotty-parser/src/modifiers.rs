@@ -151,7 +151,7 @@ where
         metadata
     }
 
-    fn add_modifier(&mut self, metadata: &mut Modifiers, modifier: Modifier) {
+    pub(crate) fn add_modifier(&mut self, metadata: &mut Modifiers, modifier: Modifier) {
         if metadata.modifiers.contains(&modifier) {
             self.report(
                 ParseDiagnosticKind::UnexpectedToken,
@@ -161,7 +161,7 @@ where
         metadata.modifiers.push(modifier);
     }
 
-    fn parse_visibility(&mut self, metadata: &mut Modifiers) {
+    pub(crate) fn parse_visibility(&mut self, metadata: &mut Modifiers) {
         let visibility_span = self.current_span();
         let visibility = match self.current().kind {
             TokenKind::Keyword(HardKeyword::Private) => {

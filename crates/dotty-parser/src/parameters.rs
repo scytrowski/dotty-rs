@@ -216,6 +216,14 @@ where
         mut metadata: Modifiers,
     ) -> TreeId<Untyped> {
         let mark = self.mark();
+        while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            metadata.annotations.push(self.parse_annotation());
+        }
+
+        if is_class_parameter_owner(owner) {
+            self.parse_class_parameter_modifiers(&mut metadata);
+        }
+
         let explicit_accessor = match self.current().kind {
             TokenKind::Keyword(dotty_core::HardKeyword::Val) => {
                 self.advance();
@@ -274,6 +282,21 @@ where
                 metadata,
             }),
         )
+    }
+
+    fn parse_class_parameter_modifiers(&mut self, metadata: &mut Modifiers) {
+        loop {
+            match self.current().kind {
+                TokenKind::Keyword(
+                    dotty_core::HardKeyword::Private | dotty_core::HardKeyword::Protected,
+                ) => self.parse_visibility(metadata),
+                TokenKind::Keyword(dotty_core::HardKeyword::Override) => {
+                    self.add_modifier(metadata, Modifier::Override);
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
     }
 
     fn comma_is_followed_by_line_break_before_right_paren(&self, comma_end: u32) -> bool {
