@@ -140,8 +140,13 @@ impl ContextualScanner {
             }
 
             let current_indent = line_indentation(&self.source, current.span.start());
-            if current_indent.ordering(&body_indent) == IndentOrdering::Less {
-                break;
+            match current_indent.ordering(&body_indent) {
+                IndentOrdering::Less => break,
+                IndentOrdering::Equal => {}
+                IndentOrdering::Greater | IndentOrdering::Incomparable => {
+                    previous_index = current_index;
+                    continue;
+                }
             }
 
             let has_line_break =
