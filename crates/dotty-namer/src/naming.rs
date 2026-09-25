@@ -40,6 +40,18 @@ pub enum NamerError {
         qualifier: dotty_core::Name,
         protected: bool,
     },
+    /// An anonymous given's type could not be reduced to a stable source name.
+    UnsupportedGivenNameShape {
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        unsupported_tree_index: u32,
+        unsupported_kind: &'static str,
+    },
+    /// A structural anonymous given has no parent type from which to invent a name.
+    AnonymousGivenWithoutParents {
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    },
 }
 
 impl fmt::Display for NamerError {
@@ -93,11 +105,226 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} has an invalid qualified {visibility} visibility"
                 )
             }
+            Self::UnsupportedGivenNameShape {
+                tree_index,
+                unsupported_kind,
+                ..
+            } => write!(
+                f,
+                "tree {tree_index} has an anonymous given with unsupported {unsupported_kind} name shape"
+            ),
+            Self::AnonymousGivenWithoutParents { tree_index, .. } => write!(
+                f,
+                "structural anonymous given tree {tree_index} has no parent types for name invention"
+            ),
         }
     }
 }
 
 impl Error for NamerError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UnsupportedGivenNameTree {
+    tree: TreeId<Untyped>,
+    kind: &'static str,
+}
+
+fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
+    match tree {
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::Select(_) => "Select",
+        TreeKind::TypeTree(_) => "TypeTree",
+        TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
+        TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
+        TreeKind::MatchTypeTree(_) => "MatchTypeTree",
+        TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
+        TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
+        TreeKind::This(_) => "This",
+        TreeKind::Super(_) => "Super",
+        TreeKind::Literal(_) => "Literal",
+        TreeKind::Apply(_) => "Apply",
+        TreeKind::TypeApply(_) => "TypeApply",
+        TreeKind::New(_) => "New",
+        TreeKind::Typed(_) => "Typed",
+        TreeKind::AppliedTypeTree(_) => "AppliedTypeTree",
+        TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
+        TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Assign(_) => "Assign",
+        TreeKind::Block(_) => "Block",
+        TreeKind::If(_) => "If",
+        TreeKind::Match(_) => "Match",
+        TreeKind::CaseDef(_) => "CaseDef",
+        TreeKind::Return(_) => "Return",
+        TreeKind::While(_) => "While",
+        TreeKind::Try(_) => "Try",
+        TreeKind::Closure(_) => "Closure",
+        TreeKind::ValDef(_) => "ValDef",
+        TreeKind::DefDef(_) => "DefDef",
+        TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::Template(_) => "Template",
+        TreeKind::PackageDef(_) => "PackageDef",
+        TreeKind::Import(_) => "Import",
+        TreeKind::Export(_) => "Export",
+        TreeKind::PhaseSpecific(UntypedNode::Error(_)) => "Error",
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
+        TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
+        TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_)) => "PrefixOp",
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => "PostfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
+        TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
+        TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
+        TreeKind::PhaseSpecific(UntypedNode::GenAlias(_)) => "GenAlias",
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => "ExtensionMethods",
+        TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => "InterpolatedString",
+        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
+        TreeKind::PhaseSpecific(UntypedNode::Number(_)) => "Number",
+        TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
+        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
+        TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens",
+        TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "Tuple",
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
+        TreeKind::Bind(_) => "Bind",
+        TreeKind::Alternative(_) => "Alternative",
+        TreeKind::UnApply(_) => "UnApply",
+        TreeKind::Annotated(_) => "Annotated",
+        TreeKind::Quote(_) => "Quote",
+        TreeKind::Splice(_) => "Splice",
+        TreeKind::QuotePattern(_) => "QuotePattern",
+        TreeKind::SplicePattern(_) => "SplicePattern",
+        TreeKind::Inlined(_) => "Inlined",
+    }
+}
+
+fn extract_given_type_name(
+    arena: &AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    tree: TreeId<Untyped>,
+    follow_args: bool,
+) -> Result<String, UnsupportedGivenNameTree> {
+    fn reference_name(name: dotty_core::Name, names: &dotty_core::NameInterner) -> String {
+        let text = names.resolve(name.text());
+        if name.is_type() {
+            text.to_owned()
+        } else {
+            format!("{text}_type")
+        }
+    }
+
+    fn argument_names(
+        arena: &AstArena<Untyped>,
+        names: &dotty_core::NameInterner,
+        args: &[TreeId<Untyped>],
+    ) -> Result<String, UnsupportedGivenNameTree> {
+        args.iter()
+            .map(|arg| extract_given_type_name(arena, names, *arg, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|parts| parts.join("_"))
+    }
+
+    let node = &arena.get(tree).kind;
+    let extracted = match node {
+        TreeKind::Ident(ident) => reference_name(ident.name, names),
+        TreeKind::Select(select) if names.resolve(select.name.text()) == "<init>" => {
+            extract_given_type_name(arena, names, select.qualifier, follow_args)?
+        }
+        TreeKind::Select(select) => reference_name(select.name, names),
+        TreeKind::TypeDef(definition) => names.resolve(definition.name.as_name().text()).to_owned(),
+        TreeKind::AppliedTypeTree(applied) if follow_args && !applied.args.is_empty() => {
+            let constructor = extract_given_type_name(arena, names, applied.tpt, true)?;
+            let args = argument_names(arena, names, &applied.args)?;
+            format!("{constructor}_{args}")
+        }
+        TreeKind::AppliedTypeTree(applied) => {
+            extract_given_type_name(arena, names, applied.tpt, follow_args)?
+        }
+        // The source parser currently represents applied parent types in
+        // structural givens with `Apply`; other type contexts use the
+        // dedicated `AppliedTypeTree` node.
+        TreeKind::Apply(applied) if follow_args && !applied.args.is_empty() => {
+            let constructor = extract_given_type_name(arena, names, applied.function, true)?;
+            let args = argument_names(arena, names, &applied.args)?;
+            format!("{constructor}_{args}")
+        }
+        TreeKind::Apply(applied) => {
+            extract_given_type_name(arena, names, applied.function, follow_args)?
+        }
+        TreeKind::LambdaTypeTree(lambda) => {
+            extract_given_type_name(arena, names, lambda.body, follow_args)?
+        }
+        TreeKind::RefinedTypeTree(refined) if refined.refinements.is_empty() => {
+            extract_given_type_name(arena, names, refined.tpt, follow_args)?
+        }
+        TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+            extract_given_type_name(arena, names, parens.inner, follow_args)?
+        }
+        TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+            argument_names(arena, names, &tuple.elements)?
+        }
+        TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
+            if function.params.is_empty() {
+                return Err(UnsupportedGivenNameTree {
+                    tree,
+                    kind: given_type_tree_kind(node),
+                });
+            }
+            if !follow_args {
+                "Function".to_owned()
+            } else {
+                let params = argument_names(arena, names, &function.params)?;
+                let result = extract_given_type_name(arena, names, function.body, true)?;
+                format!("{params}_to_{result}")
+            }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
+            if function.params.is_empty() {
+                return Err(UnsupportedGivenNameTree {
+                    tree,
+                    kind: given_type_tree_kind(node),
+                });
+            }
+            if !follow_args {
+                "Function".to_owned()
+            } else {
+                let params = argument_names(arena, names, &function.params)?;
+                let result = extract_given_type_name(arena, names, function.result, true)?;
+                format!("{params}_to_{result}")
+            }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+            let operator = names.resolve(infix.op.text());
+            if follow_args {
+                let operands = argument_names(arena, names, &[infix.left, infix.right])?;
+                format!("{operator}_{operands}")
+            } else {
+                operator.to_owned()
+            }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) => {
+            let constructor = extract_given_type_name(arena, names, bound.bound, true)?;
+            let parameter = names.resolve(bound.parameter.as_name().text());
+            format!("{constructor}_{parameter}")
+        }
+        _ => {
+            return Err(UnsupportedGivenNameTree {
+                tree,
+                kind: given_type_tree_kind(node),
+            });
+        }
+    };
+
+    if extracted.is_empty() {
+        Err(UnsupportedGivenNameTree {
+            tree,
+            kind: given_type_tree_kind(node),
+        })
+    } else {
+        Ok(extracted)
+    }
+}
 
 /// Dynamic traversal state for naming declarations.
 ///
@@ -120,6 +347,12 @@ struct SymbolSpec {
     kind: SymbolKind,
     flags: SymbolFlags,
     visibility: Visibility,
+}
+
+#[derive(Clone, Copy)]
+enum GivenNameInput {
+    TypeTree(TreeId<Untyped>),
+    Template(TreeId<Untyped>),
 }
 
 #[derive(Clone, Copy)]
@@ -146,7 +379,6 @@ enum EnteredHeader {
         package_path: Vec<String>,
     },
     ModuleClass {
-        tree: TreeId<Untyped>,
         template: TreeId<Untyped>,
         object_symbol: SymbolId,
         enclosing_scope: ScopeId,
@@ -515,19 +747,19 @@ impl Namer<'_> {
             }
             TreeKind::ValDef(definition) => {
                 let definition = definition.clone();
+                let name = self.normalize_given_name(
+                    tree,
+                    *definition.name.as_name(),
+                    &definition.metadata,
+                    GivenNameInput::TypeTree(definition.tpt),
+                )?;
                 let spec = self.source_symbol_spec(
                     tree,
                     &definition.metadata,
                     context.owner,
                     SymbolKind::Field,
                 )?;
-                let symbol = self.enter_symbol(
-                    tree,
-                    *definition.name.as_name(),
-                    context.owner,
-                    context.scope,
-                    spec,
-                )?;
+                let symbol = self.enter_symbol(tree, name, context.owner, context.scope, spec)?;
                 Ok(vec![EnteredHeader::Field { tree, symbol }])
             }
             TreeKind::DefDef(definition) => self
@@ -744,7 +976,12 @@ impl Namer<'_> {
             }
         }
 
-        let name = *definition.name.as_name();
+        let name = self.normalize_given_name(
+            tree,
+            *definition.name.as_name(),
+            &definition.metadata,
+            GivenNameInput::Template(definition.rhs),
+        )?;
         let kind = if definition.metadata.modifiers.contains(&Modifier::Trait) {
             SymbolKind::Trait
         } else {
@@ -801,7 +1038,12 @@ impl Namer<'_> {
             });
         }
 
-        let object_name = *definition.name.as_name();
+        let object_name = self.normalize_given_name(
+            tree,
+            *definition.name.as_name(),
+            &definition.metadata,
+            GivenNameInput::Template(definition.template),
+        )?;
         let module_class_text = format!("{}$", self.store.names.resolve(object_name.text()));
         let module_class_name =
             *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
@@ -848,7 +1090,6 @@ impl Namer<'_> {
         self.index.record_scope(symbol, scope)?;
 
         Ok(Some(EnteredHeader::ModuleClass {
-            tree,
             template: definition.template,
             object_symbol,
             enclosing_scope: owner_context.scope,
@@ -913,7 +1154,6 @@ impl Namer<'_> {
                 package_path,
             } => (tree, symbol, scope, package_path),
             EnteredHeader::ModuleClass {
-                tree,
                 template,
                 object_symbol,
                 enclosing_scope,
@@ -921,7 +1161,8 @@ impl Namer<'_> {
                 scope,
                 package_path,
             } => {
-                if let Some(class) = self.source_companion_class(tree, enclosing_scope) {
+                let object_name = self.store.symbols.get(object_symbol).name;
+                if let Some(class) = self.source_companion_class(object_name, enclosing_scope) {
                     self.companion_links.push((class, object_symbol));
                 }
                 return self.scan_template_body(template, symbol, scope, package_path);
@@ -949,15 +1190,10 @@ impl Namer<'_> {
 
     fn source_companion_class(
         &self,
-        object_tree: TreeId<Untyped>,
+        object_name: dotty_core::Name,
         enclosing_scope: ScopeId,
     ) -> Option<SymbolId> {
-        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
-            &self.arena.get(object_tree).kind
-        else {
-            return None;
-        };
-        let name = *TypeName::new(module.name.as_name().text()).as_name();
+        let name = *TypeName::new(object_name.text()).as_name();
         let mut candidates = self
             .store
             .scopes
@@ -1181,19 +1417,19 @@ impl Namer<'_> {
                 }
                 TreeKind::ValDef(definition) => {
                     let definition = definition.clone();
+                    let name = self.normalize_given_name(
+                        *member,
+                        *definition.name.as_name(),
+                        &definition.metadata,
+                        GivenNameInput::TypeTree(definition.tpt),
+                    )?;
                     let spec = self.source_symbol_spec(
                         *member,
                         &definition.metadata,
                         symbol,
                         SymbolKind::Field,
                     )?;
-                    let field = self.enter_symbol(
-                        *member,
-                        *definition.name.as_name(),
-                        symbol,
-                        scope,
-                        spec,
-                    )?;
+                    let field = self.enter_symbol(*member, name, symbol, scope, spec)?;
                     nested_headers.push(EnteredHeader::Field {
                         tree: *member,
                         symbol: field,
@@ -1278,10 +1514,15 @@ impl Namer<'_> {
             }
         }
 
+        let name = self.normalize_given_name(
+            tree,
+            *definition.name.as_name(),
+            &definition.metadata,
+            GivenNameInput::TypeTree(definition.tpt),
+        )?;
         let spec =
             self.source_symbol_spec(tree, &definition.metadata, owner, SymbolKind::Method)?;
-        let method =
-            self.enter_symbol(tree, *definition.name.as_name(), owner, class_scope, spec)?;
+        let method = self.enter_symbol(tree, name, owner, class_scope, spec)?;
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
         self.index.record_scope(method, method_scope)?;
 
@@ -1528,6 +1769,78 @@ impl Namer<'_> {
             TreeKind::Ident(ident)
                 if !ident.backquoted && self.store.names.resolve(ident.name.text()) == "<empty>"
         )
+    }
+
+    fn normalize_given_name(
+        &mut self,
+        tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        metadata: &Modifiers,
+        input: GivenNameInput,
+    ) -> Result<dotty_core::Name, NamerError> {
+        if !metadata.modifiers.contains(&Modifier::Given)
+            || !self.store.names.resolve(name.text()).is_empty()
+        {
+            return Ok(name);
+        }
+
+        let suffix = match input {
+            GivenNameInput::TypeTree(type_tree) => {
+                extract_given_type_name(self.arena, &self.store.names, type_tree, true)
+                    .map_err(|unsupported| self.unsupported_given_name_shape(tree, unsupported))?
+            }
+            GivenNameInput::Template(template_tree) => {
+                let TreeKind::Template(template) = &self.arena.get(template_tree).kind else {
+                    let unsupported = UnsupportedGivenNameTree {
+                        tree: template_tree,
+                        kind: given_type_tree_kind(&self.arena.get(template_tree).kind),
+                    };
+                    return Err(self.unsupported_given_name_shape(tree, unsupported));
+                };
+                if template.parents.is_empty() {
+                    return Err(NamerError::AnonymousGivenWithoutParents {
+                        tree_index: tree.index(),
+                        position: self.arena.get(tree).position,
+                    });
+                }
+                template
+                    .parents
+                    .iter()
+                    .map(|parent| {
+                        extract_given_type_name(self.arena, &self.store.names, *parent, true)
+                            .map_err(|unsupported| {
+                                self.unsupported_given_name_shape(tree, unsupported)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("_")
+            }
+        };
+        if suffix.is_empty() {
+            return Err(NamerError::UnsupportedGivenNameShape {
+                tree_index: tree.index(),
+                position: self.arena.get(tree).position,
+                unsupported_tree_index: tree.index(),
+                unsupported_kind: "empty extracted type",
+            });
+        }
+
+        let invented = format!("given_{suffix}");
+        let name_id = self.store.names.intern(&invented);
+        Ok(dotty_core::Name::new(name_id, name.namespace()))
+    }
+
+    fn unsupported_given_name_shape(
+        &self,
+        definition: TreeId<Untyped>,
+        unsupported: UnsupportedGivenNameTree,
+    ) -> NamerError {
+        NamerError::UnsupportedGivenNameShape {
+            tree_index: definition.index(),
+            position: self.arena.get(definition).position,
+            unsupported_tree_index: unsupported.tree.index(),
+            unsupported_kind: unsupported.kind,
+        }
     }
 
     fn source_visibility_for_owner(
@@ -2109,6 +2422,394 @@ mod tests {
             store,
             packages,
         )
+    }
+
+    fn type_ident(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        text: &str,
+    ) -> TreeId<Untyped> {
+        let name = TypeName::new(store.names.intern(text));
+        arena.alloc(Tree {
+            kind: TreeKind::Ident(Ident {
+                name: *name.as_name(),
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        })
+    }
+
+    fn type_tree_name(
+        arena: &AstArena<Untyped>,
+        store: &SemanticStore,
+        tree: TreeId<Untyped>,
+        follow_args: bool,
+    ) -> Result<String, UnsupportedGivenNameTree> {
+        extract_given_type_name(arena, &store.names, tree, follow_args)
+    }
+
+    #[test]
+    fn given_type_name_extractor_uses_type_identifiers_without_suffixes() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = type_ident(&mut arena, &mut store, "Config");
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Config"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_marks_term_identifiers_as_types() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = ident(&mut arena, &mut store, "Config");
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Config_type"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_uses_the_selected_name() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = type_ident(&mut arena, &mut store, "config");
+        let selected = TypeName::new(store.names.intern("Config"));
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier,
+                name: *selected.as_name(),
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Config"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_skips_constructor_selection_names() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = type_ident(&mut arena, &mut store, "Config");
+        let constructor = dotty_core::TermName::new(store.names.intern("<init>"));
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier,
+                name: *constructor.as_name(),
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Config"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_includes_applied_type_arguments() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let constructor = type_ident(&mut arena, &mut store, "F");
+        let first = type_ident(&mut arena, &mut store, "A");
+        let second = type_ident(&mut arena, &mut store, "B");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: constructor,
+                args: vec![first, second],
+            }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(type_tree_name(&arena, &store, tree, true).unwrap(), "F_A_B");
+    }
+
+    #[test]
+    fn given_type_name_extractor_joins_tuple_elements_in_source_order() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = type_ident(&mut arena, &mut store, "A");
+        let second = type_ident(&mut arena, &mut store, "B");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Tuple(dotty_core::ast::Tuple {
+                elements: vec![first, second],
+            })),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(type_tree_name(&arena, &store, tree, true).unwrap(), "A_B");
+    }
+
+    #[test]
+    fn given_type_name_extractor_formats_function_types() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = type_ident(&mut arena, &mut store, "A");
+        let result = type_ident(&mut arena, &mut store, "B");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Function(dotty_core::ast::Function {
+                params: vec![parameter],
+                body: result,
+            })),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "A_to_B"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_formats_function_types_with_modifiers() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = type_ident(&mut arena, &mut store, "A");
+        let result = type_ident(&mut arena, &mut store, "B");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(
+                dotty_core::ast::FunctionWithMods {
+                    params: vec![parameter],
+                    result,
+                    modifiers: Modifiers::default(),
+                    erased_params: vec![false],
+                },
+            )),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "A_to_B"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_centers_infix_names_on_the_operator() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let left = type_ident(&mut arena, &mut store, "A");
+        let right = type_ident(&mut arena, &mut store, "B");
+        let operator = dotty_core::Name::new(store.names.intern("op"), dotty_core::Namespace::Term);
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::InfixOp(dotty_core::ast::InfixOp {
+                left,
+                op: operator,
+                right,
+            })),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "op_A_B"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_follows_lambda_type_bodies() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let body = type_ident(&mut arena, &mut store, "Result");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::LambdaTypeTree(dotty_core::ast::LambdaTypeTree {
+                type_params: vec![],
+                body,
+            }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Result"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_includes_context_bound_parameter_names() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let constructor = type_ident(&mut arena, &mut store, "Show");
+        let bound = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(
+                dotty_core::ast::ContextBoundTypeTree {
+                    bound: constructor,
+                    parameter: TypeName::new(store.names.intern("A")),
+                    name: None,
+                },
+            )),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, bound, true).unwrap(),
+            "Show_A"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_strips_parenthesized_wrappers() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let inner = type_ident(&mut arena, &mut store, "Config");
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Parens(dotty_core::ast::Parens { inner })),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap(),
+            "Config"
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_rejects_an_empty_tuple_with_its_tree_kind() {
+        let store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Tuple(dotty_core::ast::Tuple {
+                elements: vec![],
+            })),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap_err(),
+            UnsupportedGivenNameTree {
+                tree,
+                kind: "Tuple",
+            }
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_reports_the_exact_unsupported_tree_kind() {
+        let store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::This(dotty_core::ast::This { qual: None }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap_err(),
+            UnsupportedGivenNameTree { tree, kind: "This" }
+        );
+    }
+
+    #[test]
+    fn unsupported_anonymous_given_type_reports_exact_tree_and_rolls_back() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(113);
+        let position = Some(SourceSpan::new(
+            source,
+            Span::without_point(TextRange::new(0, 18).unwrap()),
+        ));
+        let tpt = type_tree(&mut arena);
+        let given = arena.alloc(Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name: dotty_core::TermName::new(store.names.intern("")),
+                tpt,
+                rhs: None,
+                metadata: Modifiers {
+                    modifiers: vec![Modifier::Given],
+                    ..Modifiers::default()
+                },
+            }),
+            position,
+            ty: (),
+        });
+        let root = package_with_stat(&mut arena, &mut store, "unsupported", vec![given]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 113, &mut store, &mut packages).unwrap_err(),
+            NamerError::UnsupportedGivenNameShape {
+                tree_index: given.index(),
+                position,
+                unsupported_tree_index: tpt.index(),
+                unsupported_kind: "TypeTree",
+            }
+        );
+        assert!(packages.get(&["unsupported"]).is_none());
+    }
+
+    #[test]
+    fn anonymous_structural_given_without_parents_has_a_dedicated_error() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let (given, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "",
+            vec![Modifier::Given],
+            None,
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "unsupported", vec![given]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 114, &mut store, &mut packages).unwrap_err(),
+            NamerError::AnonymousGivenWithoutParents {
+                tree_index: given.index(),
+                position: None,
+            }
+        );
+        assert!(packages.get(&["unsupported"]).is_none());
+    }
+
+    #[test]
+    fn empty_non_given_recovery_names_are_not_invented() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tpt = type_ident(&mut arena, &mut store, "Config");
+        let recovery_tree = arena.alloc(Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name: dotty_core::TermName::new(store.names.intern("")),
+                tpt,
+                rhs: None,
+                metadata: Modifiers::default(),
+            }),
+            position: None,
+            ty: (),
+        });
+        let root = package_with_stat(&mut arena, &mut store, "recovery", vec![recovery_tree]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 116, &mut store, &mut packages).unwrap();
+        let symbol = index
+            .symbol_at(SourceId::from_index(116), recovery_tree)
+            .unwrap();
+
+        assert_eq!(
+            store.names.resolve(store.symbols.get(symbol).name.text()),
+            ""
+        );
     }
 
     fn entered_class_flags(modifiers: Vec<Modifier>) -> SymbolFlags {
