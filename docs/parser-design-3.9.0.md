@@ -532,9 +532,13 @@ set. It is attached to the existing definition nodes, including
 semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
-`Apply(Select(New(type), <init>), args)` shape. Parameter and type-parameter
-annotations, constructor-level enum-case annotations/modifiers, enum-case
-bodies, and feature-dependent
+`Apply(Select(New(type), <init>), args)` shape. Enum-case constructors preserve
+post-name annotations and optional `private`/`protected` access in the
+synthetic constructor's `Modifiers`; access is also retained on the case's
+`TypeDef`, matching Scala 3.9's parser tree. This constructor prefix is
+intentionally limited to annotations followed by an optional access modifier;
+other post-name modifiers are rejected. Parameter and type-parameter
+annotations, enum-case bodies, and feature-dependent
 `erased`/`tracked`/`into`/`update` modifiers remain deferred. `opaque` is
 recognized only before a type definition; it remains an ordinary identifier in
 other positions.
