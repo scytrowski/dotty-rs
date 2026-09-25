@@ -300,6 +300,7 @@ where
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
+            TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
                 self.parse_literal(mark, Constant::Boolean(true))
@@ -600,6 +601,7 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
         || matches!(
             kind,
             TokenKind::StringLiteral
+                | TokenKind::CharLiteral
                 | TokenKind::Keyword(HardKeyword::True)
                 | TokenKind::Keyword(HardKeyword::False)
                 | TokenKind::Keyword(HardKeyword::Null)
@@ -860,6 +862,32 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Tuple(Tuple { ref elements }))
                 if elements.len() == 2
         ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_character_literal_pattern_through_the_shared_literal_decoder() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'B'",
+            vec![
+                token(TokenKind::CharLiteral, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Char(66)
+            })
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 3).unwrap()
+        );
         assert!(result.diagnostics.is_empty());
     }
 
