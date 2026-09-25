@@ -69,6 +69,8 @@ pub struct ParseContext {
     pub case_body: bool,
     /// Whether the current template body belongs to an enum definition.
     pub enum_body: bool,
+    /// Whether the parser is currently reading members of a class-like template.
+    pub template_body: bool,
 }
 
 impl Default for ParseContext {
@@ -81,6 +83,7 @@ impl Default for ParseContext {
             block_end: None,
             case_body: false,
             enum_body: false,
+            template_body: false,
         }
     }
 }
@@ -101,6 +104,7 @@ mod tests {
                 block_end: None,
                 case_body: false,
                 enum_body: false,
+                template_body: false,
             }
         );
     }

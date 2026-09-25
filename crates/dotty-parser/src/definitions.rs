@@ -131,7 +131,15 @@ where
         match self.current().kind {
             TokenKind::Keyword(HardKeyword::This) => {
                 self.advance();
-                TermName::new(self.names.intern("<init>"))
+                if self.context.template_body {
+                    TermName::new(self.names.intern("<init>"))
+                } else {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        "secondary constructors are only allowed in a class template",
+                    );
+                    self.missing_method_name()
+                }
             }
             TokenKind::Identifier
             | TokenKind::BackquotedIdentifier
@@ -626,7 +634,8 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        let ParsedStatement::Definition(id) =
+            parser.with_template_body(|parser| parser.parse_method_definition(Location::InBlock))
         else {
             panic!("expected a secondary constructor definition");
         };
@@ -646,6 +655,34 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_secondary_constructor_outside_a_template() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "def this(x: Int) = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Keyword(HardKeyword::This), 4, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::IntegerLiteral, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
     }
 
     #[test]

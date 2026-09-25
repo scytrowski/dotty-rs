@@ -245,6 +245,15 @@ where
         result
     }
 
+    /// Runs a nested parse with class-like template member syntax enabled.
+    pub(crate) fn with_template_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.context.template_body;
+        self.context.template_body = true;
+        let result = parse(self);
+        self.context.template_body = previous;
+        result
+    }
+
     /// Forwards a scanner feedback event.
     pub fn observe(&mut self, event: ScannerEvent) {
         self.cursor.observe(event);
