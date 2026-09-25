@@ -2479,6 +2479,29 @@ mod tests {
     }
 
     #[test]
+    fn arrow_indented_feedback_splits_a_leading_prefix_operator_without_spacing() {
+        let source = "(case A =>\n  first\n  !second\n  finish)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let first_end = source.find("first").unwrap() as u32 + "first".len() as u32;
+        let prefix_start = source.find("!second").unwrap() as u32;
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == first_end
+                && token.span.end() == prefix_start
+        }));
+    }
+
+    #[test]
     fn arrow_indented_feedback_does_not_split_a_deeper_assignment_continuation() {
         let source = "(case A =>\n  result =\n    value\n  next)";
         let mut scanner = ContextualScanner::new(source).expect("source scans");
