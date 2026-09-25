@@ -508,9 +508,6 @@ where
                 kind,
                 TreeKind::PhaseSpecific(UntypedNode::ForDo(_) | UntypedNode::ForYield(_))
             ),
-            TokenKind::Keyword(HardKeyword::Throw) => {
-                matches!(kind, TreeKind::PhaseSpecific(UntypedNode::Throw(_)))
-            }
             TokenKind::Keyword(HardKeyword::Val) => matches!(
                 kind,
                 TreeKind::ValDef(_) | TreeKind::PhaseSpecific(UntypedNode::PatDef(_))
@@ -737,6 +734,40 @@ mod tests {
         );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the marker");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+    }
+
+    #[test]
+    fn throw_end_marker_is_misaligned_and_does_not_extend_the_throw_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "throw x\nend throw\ny",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Throw), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::EndMarker, 8, 11),
+                token(TokenKind::Keyword(HardKeyword::Throw), 12, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let (stats, result) =
+            parser.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
+
+        assert_eq!(stats.len(), 1);
+        assert_eq!(
+            parser.ast.get(stats[0]).position.unwrap().span().range(),
+            TextRange::new(0, 7).unwrap()
+        );
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "misaligned end marker");
+        let TreeKind::Ident(result) = parser.ast.get(result).kind else {
+            panic!("expected the statement after the misaligned marker");
         };
         assert_eq!(parser.names.resolve(result.name.text()), "y");
     }
