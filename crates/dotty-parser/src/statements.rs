@@ -396,6 +396,22 @@ where
 
     fn consume_sequence_separators(&mut self, boundary: StatementSequenceBoundary) {
         while self.is_sequence_separator(boundary) && !self.sequence_ended(boundary) {
+            if self.context.case_body
+                && boundary == StatementSequenceBoundary::Block(TokenKind::Outdent)
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                )
+            {
+                // Inside braces the scanner suppresses eager layout tokens. Let
+                // it close a feedback-opened case body at a physical dedent
+                // before consuming the separator that precedes the next
+                // expression (or case clause).
+                self.observe_outdented();
+                if self.sequence_ended(boundary) {
+                    break;
+                }
+            }
             self.advance();
         }
     }

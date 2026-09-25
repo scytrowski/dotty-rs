@@ -107,9 +107,29 @@ where
 
     fn parse_case_body(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.consume_case_newlines();
+        if matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+                | TokenKind::Eof
+        ) {
+            // Dotty accepts an empty case statement sequence; the shared AST
+            // represents it as an empty block with the usual synthetic Unit.
+            let expr = self.synthetic_unit();
+            return self.alloc_from(
+                mark,
+                TreeKind::Block(Block {
+                    stats: Vec::new(),
+                    expr,
+                }),
+            );
+        }
+
         let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
-            let result = self.parse_expression_block_body(TokenKind::Outdent);
+            let result = self
+                .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
             if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }
@@ -377,6 +397,44 @@ mod tests {
         let cases = parser.case_clauses();
 
         assert_eq!(cases.len(), 2);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_empty_case_body_before_the_next_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case A => case B => b",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let cases = parser.case_clauses();
+
+        assert_eq!(cases.len(), 2);
+        let TreeKind::CaseDef(first) = parser.ast().get(cases[0]).kind else {
+            panic!("expected first case definition");
+        };
+        let TreeKind::Block(ref block) = parser.ast().get(first.body).kind else {
+            panic!("expected empty case body block");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Unit
+            })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 

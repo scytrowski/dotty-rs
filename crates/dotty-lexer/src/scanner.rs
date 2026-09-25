@@ -118,6 +118,76 @@ impl ContextualScanner {
         true
     }
 
+    /// Restores statement separators inside an arrow body when the ordinary
+    /// layout pass suppressed them because the body is nested in parentheses
+    /// or brackets. Only peer statements at the body indentation are split;
+    /// nested layout and the body-closing outdent remain parser feedback.
+    fn insert_arrow_body_separators(&mut self) {
+        let arrow_index = self.current_index();
+        let body_index = arrow_index.saturating_add(2);
+        let Some(first_body_token) = self.tokens.get(body_index) else {
+            return;
+        };
+        let body_indent = line_indentation(&self.source, first_body_token.span.start());
+        let mut previous_index = body_index;
+        let mut separators = Vec::new();
+
+        for current_index in body_index.saturating_add(1)..self.tokens.len() {
+            let previous = &self.tokens[previous_index];
+            let current = &self.tokens[current_index];
+            if is_layout_token(current.kind) {
+                continue;
+            }
+
+            let current_indent = line_indentation(&self.source, current.span.start());
+            match current_indent.ordering(&body_indent) {
+                IndentOrdering::Less => break,
+                IndentOrdering::Equal => {}
+                IndentOrdering::Greater | IndentOrdering::Incomparable => {
+                    previous_index = current_index;
+                    continue;
+                }
+            }
+
+            let has_line_break =
+                has_source_line_break(&self.source, previous.span.end(), current.span.start());
+            let has_separator = self.tokens[previous_index + 1..current_index]
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
+            let starts_unspaced_prefix_expr =
+                is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
+            if has_line_break
+                && !has_separator
+                && can_end_statement(Some(previous.kind))
+                && (can_start_statement_kind(current.kind) || starts_unspaced_prefix_expr)
+                && !suppresses_statement_separator_kind(current.kind)
+                && !is_leading_infix_tokens(
+                    &self.source,
+                    &self.tokens,
+                    previous_index,
+                    current_index,
+                )
+            {
+                let line_breaks = count_line_breaks(
+                    &self.source[previous.span.end() as usize..current.span.start() as usize],
+                );
+                let kind = if line_breaks > 1 {
+                    TokenKind::Newlines
+                } else {
+                    TokenKind::Newline
+                };
+                if let Ok(span) = TextRange::new(previous.span.end(), current.span.start()) {
+                    separators.push((current_index, Token::new(kind, span)));
+                }
+            }
+            previous_index = current_index;
+        }
+
+        for (index, separator) in separators.into_iter().rev() {
+            self.tokens.insert(index, separator);
+        }
+    }
+
     fn insert_outdent_before_current(&mut self) -> bool {
         let index = self.current_index();
         if self
@@ -264,6 +334,7 @@ impl TokenSource for ContextualScanner {
             ScannerEvent::ArrowIndented => {
                 if self.current_is_arrow() && self.insert_indent_after_current() {
                     self.feedback_regions += 1;
+                    self.insert_arrow_body_separators();
                 }
             }
             ScannerEvent::SelfArrow => {
@@ -738,6 +809,92 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
                     | Punctuation::RightBrace
             )
     )
+}
+
+fn can_start_statement_kind(kind: TokenKind) -> bool {
+    !matches!(
+        kind,
+        TokenKind::Eof
+            | TokenKind::Error
+            | TokenKind::Operator
+            | TokenKind::Keyword(HardKeyword::Do)
+            | TokenKind::Punctuation(
+                Punctuation::Comma
+                    | Punctuation::Semicolon
+                    | Punctuation::Dot
+                    | Punctuation::RightParen
+                    | Punctuation::RightBracket
+                    | Punctuation::RightBrace
+            )
+    )
+}
+
+fn suppresses_statement_separator_kind(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Then
+                | HardKeyword::With
+                | HardKeyword::Else
+                | HardKeyword::Catch
+                | HardKeyword::Finally
+                | HardKeyword::Yield
+        )
+    )
+}
+
+fn is_leading_infix_tokens(
+    source: &str,
+    tokens: &[Token],
+    previous_index: usize,
+    current_index: usize,
+) -> bool {
+    let previous = &tokens[previous_index];
+    let current = &tokens[current_index];
+    if !matches!(
+        current.kind,
+        TokenKind::Operator | TokenKind::BackquotedIdentifier
+    ) || !can_end_statement(Some(previous.kind))
+        || count_line_breaks(&source[previous.span.end() as usize..current.span.start() as usize])
+            > 1
+    {
+        return false;
+    }
+    let Some(next) = next_real_token(tokens, current_index) else {
+        return false;
+    };
+    // Dotty only treats a leading symbolic/backquoted name as an infix
+    // operator when whitespace follows it. Without this check, a line such
+    // as `!second` would be joined to the preceding expression instead of
+    // starting a new expression with the prefix operator `!`.
+    if !source[current.span.end() as usize..next.span.start() as usize]
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        || !can_start_statement_kind(next.kind)
+    {
+        return false;
+    }
+    let previous_indent = line_indentation(source, previous.span.end().saturating_sub(1));
+    let operator_indent = line_indentation(source, current.span.start());
+    previous_indent.is_prefix_of(&operator_indent)
+}
+
+fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize) -> bool {
+    let operator = &tokens[operator_index];
+    if operator.kind != TokenKind::Operator
+        || !matches!(
+            &source[operator.span.start() as usize..operator.span.end() as usize],
+            "-" | "+" | "~" | "!"
+        )
+    {
+        return false;
+    }
+    let Some(operand) = next_real_token(tokens, operator_index) else {
+        return false;
+    };
+    source[operator.span.end() as usize..operand.span.start() as usize].is_empty()
+        && can_start_statement_kind(operand.kind)
 }
 
 fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
@@ -2293,6 +2450,117 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn arrow_indented_feedback_restores_peer_separators_inside_parentheses() {
+        let source = "(\n  value match {\n    case A =>\n      first()\n      second()\n    case B => done()\n  }\n)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let first_end = source.find("first()").unwrap() as u32 + "first()".len() as u32;
+        let second_start = source.find("second()").unwrap() as u32;
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == first_end
+                && token.span.end() == second_start
+        }));
+    }
+
+    #[test]
+    fn arrow_indented_feedback_keeps_a_leading_infix_line_in_the_expression() {
+        let source = "(case A =>\n  start\n    + continuation\n  finish)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let start_end = source.find("start").unwrap() as u32 + "start".len() as u32;
+        let operator_start = source.find('+').unwrap() as u32;
+        let continuation_end =
+            source.find("continuation").unwrap() as u32 + "continuation".len() as u32;
+        let finish_start = source.find("finish").unwrap() as u32;
+        assert!(!scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == start_end
+                && token.span.end() == operator_start
+        }));
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == continuation_end
+                && token.span.end() == finish_start
+        }));
+    }
+
+    #[test]
+    fn arrow_indented_feedback_splits_a_leading_prefix_operator_without_spacing() {
+        let source = "(case A =>\n  first\n  !second\n  finish)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let first_end = source.find("first").unwrap() as u32 + "first".len() as u32;
+        let prefix_start = source.find("!second").unwrap() as u32;
+        assert!(
+            scanner.tokens().iter().any(|token| {
+                token.kind == TokenKind::Newline
+                    && token.span.start() == first_end
+                    && token.span.end() == prefix_start
+            }),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
+    }
+
+    #[test]
+    fn arrow_indented_feedback_does_not_split_a_deeper_assignment_continuation() {
+        let source = "(case A =>\n  result =\n    value\n  next)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let assignment_end = source.rfind(" =").unwrap() as u32 + 2;
+        let value_start = source.find("value").unwrap() as u32;
+        let value_end = value_start + "value".len() as u32;
+        let next_start = source.find("next").unwrap() as u32;
+        assert!(!scanner.tokens().iter().any(|token| {
+            matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)
+                && token.span.start() == assignment_end
+                && token.span.end() == value_start
+        }));
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == value_end
+                && token.span.end() == next_start
+        }));
     }
 
     #[test]

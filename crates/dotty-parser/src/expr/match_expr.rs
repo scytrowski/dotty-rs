@@ -167,6 +167,13 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
+                (ScannerEvent::ArrowIndented, TokenKind::Operator) => {
+                    let offset = self.current().span.end();
+                    self.tokens.insert(
+                        self.index + 1,
+                        Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
+                    );
+                }
                 (ScannerEvent::Outdented, _) => {
                     let offset = self.current().span.start();
                     self.tokens.insert(
@@ -214,6 +221,58 @@ mod tests {
             panic!("expected the surrounding braced expression block");
         };
         assert_eq!(stats.len(), 1);
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
+            panic!("expected the match expression");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn separates_indented_case_bodies_from_later_cases_and_following_expressions() {
+        let source = "{ value match\n    case A =>\n      a\n    case B =>\n      b\n  after }";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Identifier, 2, 7),
+            token(TokenKind::Keyword(HardKeyword::Match), 8, 13),
+            token(TokenKind::Keyword(HardKeyword::Case), 18, 22),
+            token(TokenKind::Identifier, 23, 24),
+            token(TokenKind::Operator, 25, 27),
+            token(TokenKind::Identifier, 34, 35),
+            token(TokenKind::Keyword(HardKeyword::Case), 40, 44),
+            token(TokenKind::Identifier, 45, 46),
+            token(TokenKind::Operator, 47, 49),
+            token(TokenKind::Identifier, 56, 57),
+            token(TokenKind::Newline, 57, 58),
+            token(TokenKind::Identifier, 60, 65),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 66, 67),
+            token(TokenKind::Eof, 67, 67),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource { tokens, index: 0 },
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(tree).kind else {
+            panic!("expected the surrounding braced expression block");
+        };
+        assert_eq!(
+            stats.len(),
+            1,
+            "expected match stat and following expression, diagnostics: {:?}",
+            parser.diagnostics()
+        );
         let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
             panic!("expected the match expression");
         };
