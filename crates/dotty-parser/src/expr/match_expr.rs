@@ -46,6 +46,23 @@ where
             .unwrap_or_else(|| self.mark().start());
         let mark = Mark { start };
 
+        let mut next_offset = 1;
+        while matches!(
+            self.cursor.lookahead(next_offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            next_offset += 1;
+        }
+        let next_kind = self.cursor.lookahead(next_offset).kind;
+        let has_braced_cases = next_kind == TokenKind::Punctuation(Punctuation::LeftBrace);
+        let has_inline_case = self.features().sub_cases
+            && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case);
+        let has_scanner_indented_cases = next_kind == TokenKind::Indent;
+        if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
+            // Braced scopes suppress eager indentation in the scanner. Ask it
+            // to open a case region when the cases are laid out after `match`.
+            self.observe_indented();
+        }
         self.advance();
         let cases = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
             let cases = self.case_clauses();
@@ -64,6 +81,9 @@ where
             self.consume_match_newlines();
             if self.accept(TokenKind::Indent) {
                 let cases = self.case_clauses();
+                if !self.cursor.at(TokenKind::Outdent) {
+                    self.observe_outdented();
+                }
                 if !self.accept(TokenKind::Outdent) {
                     self.report(
                         crate::ParseDiagnosticKind::ExpectedToken,
@@ -108,8 +128,98 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{CaseDef, InfixOp, Match as MatchTree, UntypedNode};
-    use dotty_core::{HardKeyword, NameInterner, TextRange};
+    use dotty_core::ast::{Block, CaseDef, InfixOp, Match as MatchTree, UntypedNode};
+    use dotty_core::{
+        HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
+        TokenSource,
+    };
+
+    struct FeedbackTokenSource {
+        tokens: Vec<Token>,
+        index: usize,
+    }
+
+    impl TokenSource for FeedbackTokenSource {
+        fn current(&self) -> &Token {
+            &self.tokens[self.index.min(self.tokens.len() - 1)]
+        }
+
+        fn position(&self) -> usize {
+            self.index
+        }
+
+        fn advance(&mut self) {
+            self.index = (self.index + 1).min(self.tokens.len() - 1);
+        }
+
+        fn lookahead(&mut self, offset: usize) -> &Token {
+            &self.tokens[(self.index + offset).min(self.tokens.len() - 1)]
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            match (event, self.current().kind) {
+                (ScannerEvent::Indented, TokenKind::Keyword(HardKeyword::Match)) => {
+                    let offset = self.current().span.end();
+                    self.tokens.insert(
+                        self.index + 1,
+                        Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
+                    );
+                }
+                (ScannerEvent::Outdented, TokenKind::Punctuation(Punctuation::RightBrace)) => {
+                    let offset = self.current().span.start();
+                    self.tokens.insert(
+                        self.index,
+                        Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn requests_layout_feedback_for_match_cases_inside_braces() {
+        let source = "{\n  value match\n    case A => a\n    case B => b\n}";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Identifier, 4, 9),
+            token(TokenKind::Keyword(HardKeyword::Match), 10, 15),
+            token(TokenKind::Keyword(HardKeyword::Case), 20, 24),
+            token(TokenKind::Identifier, 25, 26),
+            token(TokenKind::Operator, 27, 29),
+            token(TokenKind::Identifier, 30, 31),
+            token(TokenKind::Newline, 31, 32),
+            token(TokenKind::Keyword(HardKeyword::Case), 36, 40),
+            token(TokenKind::Identifier, 41, 42),
+            token(TokenKind::Operator, 43, 45),
+            token(TokenKind::Identifier, 46, 47),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 48, 49),
+            token(TokenKind::Eof, 49, 49),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource { tokens, index: 0 },
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::Block(Block { expr, .. }) = parser.ast().get(tree).kind else {
+            panic!("expected the surrounding braced expression block");
+        };
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(expr).kind else {
+            panic!("expected the match expression");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
 
     #[test]
     fn parses_a_braced_match_with_a_case() {
