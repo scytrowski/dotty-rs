@@ -120,15 +120,31 @@ where
 
     fn parse_method_rhs(&mut self, location: Location) -> TreeId<Untyped> {
         self.consume_control_newlines();
-        if self.current().kind == TokenKind::Indent {
-            self.parse_indented_block()
-        } else {
-            self.with_location(location, |parser| parser.expr())
-        }
+        self.with_secondary_constructor_allowed(false, |parser| {
+            if parser.current().kind == TokenKind::Indent {
+                parser.parse_indented_block()
+            } else {
+                parser.with_location(location, |parser| parser.expr())
+            }
+        })
     }
 
     fn parse_method_name(&mut self) -> TermName {
+        let secondary_constructor_allowed = self.context.secondary_constructor_allowed;
+        self.context.secondary_constructor_allowed = false;
         match self.current().kind {
+            TokenKind::Keyword(HardKeyword::This) => {
+                self.advance();
+                if secondary_constructor_allowed {
+                    TermName::new(self.names.intern("<init>"))
+                } else {
+                    self.report(
+                        ParseDiagnosticKind::UnexpectedToken,
+                        "secondary constructors are only allowed in a class template",
+                    );
+                    self.missing_method_name()
+                }
+            }
             TokenKind::Identifier
             | TokenKind::BackquotedIdentifier
             | TokenKind::Operator
@@ -192,7 +208,9 @@ where
 
         let rhs = if is_bare_assignment(self) {
             self.advance();
-            Some(self.with_location(location, |parser| parser.expr()))
+            Some(self.with_secondary_constructor_allowed(false, |parser| {
+                parser.with_location(location, |parser| parser.expr())
+            }))
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
                 self.report(
@@ -284,7 +302,9 @@ where
 
         let rhs = if is_bare_assignment(self) {
             self.advance();
-            Some(self.with_location(location, |parser| parser.expr()))
+            Some(self.with_secondary_constructor_allowed(false, |parser| {
+                parser.with_location(location, |parser| parser.expr())
+            }))
         } else if has_explicit_type
             && all_simple_identifiers
             && is_definition_boundary(self.current().kind)
@@ -421,7 +441,7 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
-    use dotty_core::{NameInterner, TokenKind, TreeKind};
+    use dotty_core::{NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
     fn parses_a_val_definition_with_an_inferred_type() {
@@ -600,6 +620,79 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Number(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_secondary_constructor_with_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def this(x: Int) = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Keyword(HardKeyword::This), 4, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::IntegerLiteral, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser
+            .with_secondary_constructor_allowed(true, |parser| {
+                parser.parse_method_definition(Location::InBlock)
+            })
+        else {
+            panic!("expected a secondary constructor definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "<init>"
+        );
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert_eq!(definition.value_param_clauses[0].len(), 1);
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(definition.value_param_clauses[0][0]).kind
+        else {
+            panic!("secondary constructor parameter should be ValDef");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_a_secondary_constructor_outside_a_template() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "def this(x: Int) = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Keyword(HardKeyword::This), 4, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::IntegerLiteral, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
     }
 
     #[test]

@@ -245,6 +245,19 @@ where
         result
     }
 
+    /// Runs a nested parse with the requested secondary-constructor policy.
+    pub(crate) fn with_secondary_constructor_allowed<T>(
+        &mut self,
+        allowed: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.secondary_constructor_allowed;
+        self.context.secondary_constructor_allowed = allowed;
+        let result = parse(self);
+        self.context.secondary_constructor_allowed = previous;
+        result
+    }
+
     /// Forwards a scanner feedback event.
     pub fn observe(&mut self, event: ScannerEvent) {
         self.cursor.observe(event);

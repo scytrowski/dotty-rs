@@ -217,7 +217,9 @@ where
         }
 
         let body = self
-            .with_enum_body(false, |parser| parser.parse_optional_template_body())
+            .with_secondary_constructor_allowed(false, |parser| {
+                parser.with_enum_body(false, |parser| parser.parse_optional_template_body())
+            })
             .members;
         let template = self.allocate_given_template(
             mark.start(),

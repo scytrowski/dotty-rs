@@ -118,26 +118,26 @@ where
         self.consume_newlines_before_extension_body();
 
         let kind = self.current().kind;
-        let methods = match kind {
-            TokenKind::Punctuation(Punctuation::LeftBrace) => self
+        let methods = self.with_secondary_constructor_allowed(false, |parser| match kind {
+            TokenKind::Punctuation(Punctuation::LeftBrace) => parser
                 .with_enum_body(false, |parser| {
                     parser.parse_template_body(TemplateBody::Braced).members
                 }),
-            TokenKind::Indent => self.with_enum_body(false, |parser| {
+            TokenKind::Indent => parser.with_enum_body(false, |parser| {
                 parser.parse_template_body(TemplateBody::Indented).members
             }),
             TokenKind::Keyword(HardKeyword::Def) | TokenKind::Keyword(HardKeyword::Export) => {
-                self.parse_one_extension_method()
+                parser.parse_one_extension_method()
             }
-            _ if self.starts_definition_prefix() => self.parse_one_extension_method(),
+            _ if parser.starts_definition_prefix() => parser.parse_one_extension_method(),
             _ => {
-                self.report(
+                parser.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected extension methods after the extension receiver",
                 );
                 Vec::new()
             }
-        };
+        });
 
         for method in &methods {
             if !matches!(

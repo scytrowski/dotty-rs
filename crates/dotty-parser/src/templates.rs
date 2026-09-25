@@ -110,7 +110,13 @@ where
             let checkpoint = self.cursor.checkpoint();
             end_marker_seen = false;
             self.last_advance_was_outdent = false;
-            let statement = self.parse_statement(Location::InBlock);
+            let allow_secondary_constructor = self.context.secondary_constructor_allowed
+                && (self.current().kind == TokenKind::Keyword(HardKeyword::Def)
+                    || self.starts_definition_prefix());
+            let statement = self
+                .with_secondary_constructor_allowed(allow_secondary_constructor, |parser| {
+                    parser.parse_statement(Location::InBlock)
+                });
             let ended_nested_indented_body = self.last_advance_was_outdent;
             if ended_nested_indented_body {
                 self.defer_template_outdent_feedback = true;
