@@ -360,8 +360,23 @@ impl Namer<'_> {
         )?;
 
         for member in template.body {
-            if matches!(self.arena.get(member).kind, TreeKind::TypeDef(_)) {
-                self.enter_class_or_trait(member, &class_context)?;
+            match &self.arena.get(member).kind {
+                TreeKind::TypeDef(_) => self.enter_class_or_trait(member, &class_context)?,
+                TreeKind::ValDef(definition) => {
+                    let definition = definition.clone();
+                    self.enter_symbol(
+                        member,
+                        *definition.name.as_name(),
+                        symbol,
+                        scope,
+                        SymbolSpec {
+                            kind: SymbolKind::Field,
+                            flags: SymbolFlags::EMPTY,
+                            visibility: Visibility::Public,
+                        },
+                    )?;
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -1425,6 +1440,37 @@ mod tests {
             index.symbol_at(SourceId::from_index(20), parameter),
             Some(field_symbol)
         );
+    }
+
+    #[test]
+    fn direct_class_val_is_entered_as_an_incomplete_field() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(30);
+        let field = value_parameter(&mut arena, &mut store, "member", vec![], None);
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![field], None);
+        let root = package_with_stat(&mut arena, &mut store, "members", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 30, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["members"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let field_symbol = term_symbol(&mut store, class_scope, "member").unwrap();
+
+        assert_eq!(store.symbols.get(field_symbol).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(field_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(field_symbol).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(field_symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(
+            store.symbols.get(field_symbol).visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            store.symbols.get(field_symbol).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(index.symbol_at(source, field), Some(field_symbol));
     }
 
     #[test]
