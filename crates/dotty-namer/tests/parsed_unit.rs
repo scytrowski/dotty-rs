@@ -42,14 +42,14 @@ fn named_source(source_text: &str, source_index: u32) -> NamedSource {
     }
 }
 
-fn primary_constructor_parts(
-    named: &NamedSource,
-) -> (
-    dotty_core::TreeId<dotty_core::Untyped>,
-    dotty_core::TreeId<dotty_core::Untyped>,
-    Vec<dotty_core::TreeId<dotty_core::Untyped>>,
-    Vec<Vec<dotty_core::TreeId<dotty_core::Untyped>>>,
-) {
+struct PrimaryConstructorParts {
+    class_tree: dotty_core::TreeId<dotty_core::Untyped>,
+    constructor_tree: dotty_core::TreeId<dotty_core::Untyped>,
+    type_params: Vec<dotty_core::TreeId<dotty_core::Untyped>>,
+    value_param_clauses: Vec<Vec<dotty_core::TreeId<dotty_core::Untyped>>>,
+}
+
+fn primary_constructor_parts(named: &NamedSource) -> PrimaryConstructorParts {
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
         panic!("parser should return a package root");
     };
@@ -64,12 +64,12 @@ fn primary_constructor_parts(
     let TreeKind::DefDef(constructor) = &named.parsed.ast.get(constructor_tree).kind else {
         panic!("primary constructor should be a DefDef");
     };
-    (
+    PrimaryConstructorParts {
         class_tree,
         constructor_tree,
-        constructor.type_params.clone(),
-        constructor.value_param_clauses.clone(),
-    )
+        type_params: constructor.type_params.clone(),
+        value_param_clauses: constructor.value_param_clauses.clone(),
+    }
 }
 
 struct VecTokenSource {
@@ -799,13 +799,16 @@ fn parsed_case_class_first_clause_parameter_is_a_field_and_constructor_copy() {
     use dotty_core::{SymbolInfo, SymbolKind, TermName};
 
     let mut named = named_source("case class C(x: Int)", 98);
-    let (class_tree, constructor_tree, _, value_clauses) = primary_constructor_parts(&named);
-    let parameter_tree = value_clauses[0][0];
-    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let parts = primary_constructor_parts(&named);
+    let parameter_tree = parts.value_param_clauses[0][0];
+    let class_symbol = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
     let class_scope = named.index.scope_of(class_symbol).unwrap();
     let constructor_symbol = named
         .index
-        .symbol_at(named.source, constructor_tree)
+        .symbol_at(named.source, parts.constructor_tree)
         .unwrap();
     let constructor_scope = named.index.scope_of(constructor_symbol).unwrap();
     let canonical = named.index.symbol_at(named.source, parameter_tree).unwrap();
@@ -846,11 +849,11 @@ fn parsed_using_constructor_parameter_preserves_contextual_flag_on_its_copy() {
     use dotty_core::{SymbolFlags, SymbolKind};
 
     let named = named_source("class C(using x: Int)", 99);
-    let (_, constructor_tree, _, value_clauses) = primary_constructor_parts(&named);
-    let parameter_tree = value_clauses[0][0];
+    let parts = primary_constructor_parts(&named);
+    let parameter_tree = parts.value_param_clauses[0][0];
     let constructor_symbol = named
         .index
-        .symbol_at(named.source, constructor_tree)
+        .symbol_at(named.source, parts.constructor_tree)
         .unwrap();
     let canonical = named.index.symbol_at(named.source, parameter_tree).unwrap();
     let derived = named
@@ -896,27 +899,36 @@ fn parsed_constructor_identity_graph_matches_tasty_parameter_ownership() {
     // Mirrors the class/constructor identity expectations covered by
     // dotty-tasty-unpickler/tests/enter_symbols.rs and scopes_and_identity.rs.
     let mut named = named_source("class C[A](val x: Int)", 100);
-    let (class_tree, constructor_tree, type_params, value_clauses) =
-        primary_constructor_parts(&named);
-    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let parts = primary_constructor_parts(&named);
+    let class_symbol = named
+        .index
+        .symbol_at(named.source, parts.class_tree)
+        .unwrap();
     let class_scope = named.index.scope_of(class_symbol).unwrap();
     let constructor_symbol = named
         .index
-        .symbol_at(named.source, constructor_tree)
+        .symbol_at(named.source, parts.constructor_tree)
         .unwrap();
     let constructor_scope = named.index.scope_of(constructor_symbol).unwrap();
-    let class_parameter = named.index.symbol_at(named.source, type_params[0]).unwrap();
+    let class_parameter = named
+        .index
+        .symbol_at(named.source, parts.type_params[0])
+        .unwrap();
     let constructor_type_parameter = named
         .index
-        .derived_symbol_at(constructor_symbol, named.source, type_params[0])
+        .derived_symbol_at(constructor_symbol, named.source, parts.type_params[0])
         .unwrap();
     let class_field = named
         .index
-        .symbol_at(named.source, value_clauses[0][0])
+        .symbol_at(named.source, parts.value_param_clauses[0][0])
         .unwrap();
     let constructor_parameter = named
         .index
-        .derived_symbol_at(constructor_symbol, named.source, value_clauses[0][0])
+        .derived_symbol_at(
+            constructor_symbol,
+            named.source,
+            parts.value_param_clauses[0][0],
+        )
         .unwrap();
     let type_name = TypeName::new(named.store.names.intern("A"));
     let term_name = TermName::new(named.store.names.intern("x"));
@@ -970,11 +982,15 @@ fn parsed_constructor_identity_graph_matches_tasty_parameter_ownership() {
     );
     assert_eq!(
         named.store.symbols.get(constructor_type_parameter).position,
-        named.parsed.ast.get(type_params[0]).position
+        named.parsed.ast.get(parts.type_params[0]).position
     );
     assert_eq!(
         named.store.symbols.get(constructor_parameter).position,
-        named.parsed.ast.get(value_clauses[0][0]).position
+        named
+            .parsed
+            .ast
+            .get(parts.value_param_clauses[0][0])
+            .position
     );
     assert_eq!(
         named
