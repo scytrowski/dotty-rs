@@ -138,8 +138,7 @@ object Main:
           fields += field("private_local", "true")
         if vdef.mods.is(Mutable) && (vdef.mods.is(ParamAccessor) || vdef.mods.isAllOf(PrivateLocal)) then
           fields += field("mutable", "true")
-        if isValueDefinitionSource(slice(vdef, source)) then
-          fields ++= renderDefinitionMetadata(vdef.mods, vdef, source, placeholderBase)
+        fields ++= renderDefinitionMetadata(vdef.mods, vdef, source, placeholderBase)
       case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] =>
         fields += field("name", quote(ddef.name.toString))
         val clauses = ddef.paramss
@@ -237,17 +236,25 @@ object Main:
     val sourceWords = sourceText.split("[^A-Za-z]+").toSet
     val enabledWithSource =
       enabled ++ (if includeMutable && sourceWords.contains("var") then Set("var") else Set.empty)
-    val keywordIndex =
-      if isValueDefinitionSource(sourceText) then
+    val keywordIndex = tree match
+      case _: dotty.tools.dotc.ast.Trees.ValDef[?] if isValueDefinitionSource(sourceText) =>
         List(sourceText.indexOf('='), sourceText.indexOf(':'))
           .filter(_ >= 0)
           .minOption
           .getOrElse(sourceText.length)
-      else
-        List("def", "type", "class", "trait", "object", "enum")
+      case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] if ddef.name.toString == "<init>" =>
+        val parameterClause = sourceText.indexOf('(')
+        if parameterClause < 0 then sourceText.length else parameterClause
+      case _: dotty.tools.dotc.ast.Trees.DefDef[?] =>
+        indexOfWord(sourceText, "def").getOrElse(sourceText.length)
+      case _: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
+        List("type", "class", "trait", "enum")
           .flatMap(indexOfWord(sourceText, _))
           .minOption
           .getOrElse(sourceText.length)
+      case _: dotty.tools.dotc.ast.untpd.ModuleDef =>
+        indexOfWord(sourceText, "object").getOrElse(sourceText.length)
+      case _ => sourceText.length
     val ordered = sourceText
       .take(keywordIndex)
       .split("[^A-Za-z]+")

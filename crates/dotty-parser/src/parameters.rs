@@ -216,6 +216,14 @@ where
         mut metadata: Modifiers,
     ) -> TreeId<Untyped> {
         let mark = self.mark();
+        while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
+            metadata.annotations.push(self.parse_annotation());
+        }
+
+        if is_class_parameter_owner(owner) {
+            self.parse_class_parameter_modifiers(&mut metadata);
+        }
+
         let explicit_accessor = match self.current().kind {
             TokenKind::Keyword(dotty_core::HardKeyword::Val) => {
                 self.advance();
@@ -240,12 +248,20 @@ where
                 }
             }
         } else if is_class_parameter_owner(owner) {
+            if metadata.visibility.is_some() || metadata.modifiers.contains(&Modifier::Override) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "`val` or `var` expected",
+                );
+            }
             if owner == ParamOwner::CaseClass && first_ordinary_clause {
                 metadata.modifiers.push(Modifier::ParamAccessor);
             } else {
                 metadata.modifiers.push(Modifier::ParamAccessor);
                 metadata.modifiers.push(Modifier::PrivateLocal);
             }
+        } else {
+            metadata.modifiers.push(Modifier::Param);
         }
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
@@ -274,6 +290,21 @@ where
                 metadata,
             }),
         )
+    }
+
+    fn parse_class_parameter_modifiers(&mut self, metadata: &mut Modifiers) {
+        loop {
+            match self.current().kind {
+                TokenKind::Keyword(
+                    dotty_core::HardKeyword::Private | dotty_core::HardKeyword::Protected,
+                ) => self.parse_visibility(metadata),
+                TokenKind::Keyword(dotty_core::HardKeyword::Override) => {
+                    self.add_modifier(metadata, Modifier::Override);
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
     }
 
     fn comma_is_followed_by_line_break_before_right_paren(&self, comma_end: u32) -> bool {
@@ -366,6 +397,9 @@ where
 
             let mut parameter_metadata = metadata.clone();
             add_class_parameter_metadata(owner, first_ordinary_clause, &mut parameter_metadata);
+            if !is_class_parameter_owner(owner) {
+                parameter_metadata.modifiers.push(Modifier::Param);
+            }
             let parameter =
                 self.alloc_synthetic_context_parameter(mark, tpt, next_index, parameter_metadata);
             next_index = next_index.saturating_add(1);
@@ -828,6 +862,173 @@ mod tests {
     }
 
     #[test]
+    fn preserves_annotations_on_method_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(@Marker x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Identifier, 2, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+
+        assert_eq!(parameter.metadata.annotations.len(), 1);
+        assert_eq!(parser.diagnostics().len(), 0);
+        assert_eq!(
+            parser
+                .ast()
+                .get(clauses[0][0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(1, 13).unwrap()
+        );
+    }
+
+    #[test]
+    fn preserves_visibility_on_class_accessor_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(private val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 1, 8),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 9, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::ColonFollow, 14, 15),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a constructor parameter");
+        };
+
+        assert_eq!(
+            parameter.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_override_on_class_accessor_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(override val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Override), 1, 9),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::ColonFollow, 15, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a constructor parameter");
+        };
+
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Override));
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn requires_an_explicit_accessor_after_override_on_class_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(override x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Override), 1, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(parser.diagnostics()[0].message(), "`val` or `var` expected");
+    }
+
+    #[test]
+    fn reports_duplicate_class_parameter_visibility_and_recovers() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(private private val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 1, 8),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Private), 9, 16),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 17, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::ColonFollow, 22, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 25, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+    }
+
+    #[test]
     fn later_case_class_clauses_keep_accessor_and_private_local_roles() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -952,7 +1153,7 @@ mod tests {
         else {
             panic!("expected a parameter ValDef");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -985,12 +1186,12 @@ mod tests {
         else {
             panic!("expected ordinary parameter ValDef");
         };
-        assert!(metadata.modifiers.is_empty());
+        assert_eq!(metadata.modifiers, vec![Modifier::Param]);
         let TreeKind::ValDef(ValDef { ref metadata, .. }) = parser.ast().get(clauses[1][0]).kind
         else {
             panic!("expected using parameter ValDef");
         };
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
     }
 
@@ -1074,7 +1275,7 @@ mod tests {
             panic!("expected an anonymous using parameter");
         };
         assert_eq!(parser.names.resolve(name.as_name().text()), "x$1");
-        assert_eq!(metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }

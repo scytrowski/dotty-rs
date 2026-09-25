@@ -1325,7 +1325,10 @@ mod tests {
         else {
             panic!("expected parameter ValDef");
         };
-        assert_eq!(parameter.metadata.modifiers, vec![Modifier::Given]);
+        assert_eq!(
+            parameter.metadata.modifiers,
+            vec![Modifier::Given, Modifier::Param]
+        );
         assert!(matches!(
             parser.ast().get(definition.rhs.unwrap()).kind,
             TreeKind::Ident(_)

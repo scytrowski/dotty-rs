@@ -87,7 +87,7 @@ where
                         missing_type,
                         num_lead_params.saturating_add(1),
                         Modifiers {
-                            modifiers: vec![Modifier::Given],
+                            modifiers: vec![Modifier::Given, Modifier::Param],
                             ..Modifiers::default()
                         },
                     );
@@ -107,7 +107,7 @@ where
                 self.advance();
                 let parameter_position = self.ast.get(candidate).position;
                 let metadata = Modifiers {
-                    modifiers: vec![Modifier::Given],
+                    modifiers: vec![Modifier::Given, Modifier::Param],
                     ..Modifiers::default()
                 };
                 let parameter = self.alloc_synthetic_context_parameter(
