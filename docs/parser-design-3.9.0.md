@@ -736,8 +736,9 @@ while the oracle remains an opt-in, comparatively expensive parser gate.
 ## Real-source compatibility report
 
 `tools/parser-corpus-report/run` measures parser coverage over the pinned
-Scala 3.9.0 checkout. It discovers `library/src` and `compiler/src`, parses
-all Scala files in one Rust process, and writes a deterministic JSON report:
+Scala 3.9.0 checkout. It discovers `library/src` and `compiler/src`, submits
+the Scala files as one batch, and parses each file in an isolated Rust worker
+process with a timeout. The runner writes a deterministic JSON report:
 
 ```text
 tools/parser-corpus-report/run /path/to/scala3-3.9.0 \
