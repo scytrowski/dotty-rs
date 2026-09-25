@@ -189,6 +189,10 @@ where
                 break;
             }
 
+            let definition_end = stats
+                .last()
+                .and_then(|definition| self.ast.get(*definition).position)
+                .map(|position| position.span().range().end());
             let mut consumed_separator = false;
             while matches!(
                 self.current().kind,
@@ -200,6 +204,19 @@ where
             ) {
                 consumed_separator = true;
                 self.advance();
+            }
+
+            if !consumed_separator
+                && self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)
+                && let Some(definition_end) = definition_end
+            {
+                let separator_range =
+                    TextRange::new(definition_end, self.current().span.start()).ok();
+                consumed_separator = separator_range
+                    .and_then(|range| self.source.slice(range).ok())
+                    .is_some_and(|trivia| {
+                        trivia.contains('\n') || trivia.contains('\r') || trivia.contains(';')
+                    });
             }
 
             if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)

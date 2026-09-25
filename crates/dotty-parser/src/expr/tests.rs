@@ -192,6 +192,63 @@ fn parses_local_type_definitions_in_a_quoted_type_block() {
 }
 
 #[test]
+fn parses_newline_separated_type_definitions_in_a_quoted_type_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[type A = Int\ntype B = String\nB]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 10),
+            token(TokenKind::Identifier, 11, 14),
+            token(TokenKind::Newline, 14, 15),
+            token(TokenKind::Keyword(HardKeyword::Type), 15, 19),
+            token(TokenKind::Identifier, 20, 21),
+            token(TokenKind::Operator, 22, 23),
+            token(TokenKind::Identifier, 24, 30),
+            token(TokenKind::Newline, 30, 31),
+            token(TokenKind::Identifier, 31, 32),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 32, 33),
+            token(TokenKind::Eof, 33, 33),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(quote.body).kind else {
+        panic!("expected a TypeBlock represented as Block");
+    };
+    assert_eq!(block.stats.len(), 2);
+    assert!(
+        block
+            .stats
+            .iter()
+            .all(|stat| matches!(parser.ast().get(*stat).kind, TreeKind::TypeDef(_)))
+    );
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(2, 32).unwrap()
+    );
+}
+
+#[test]
 fn parses_a_braced_expression_splice_inside_a_quote() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
