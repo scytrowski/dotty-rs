@@ -5,7 +5,7 @@
 //! constructors, givens, and extensions can reuse it without duplicating the
 //! delimiter and recovery logic.
 
-use dotty_core::ast::{Modifier, Modifiers, ValDef};
+use dotty_core::ast::{ByNameTypeTree, Modifier, Modifiers, ValDef};
 use dotty_core::{Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::names::synthetic_term_param_name;
@@ -266,7 +266,27 @@ where
         let name = self.parse_param_name();
         let tpt = if is_parameter_colon(self) {
             self.advance();
-            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
+            self.with_parse_kind(ParseKind::Type, |parser| {
+                if parser.current_is_arrow() {
+                    let mark = parser.mark();
+                    if is_class_parameter_owner(owner)
+                        && !metadata.modifiers.contains(&Modifier::PrivateLocal)
+                    {
+                        let mutable = metadata.modifiers.contains(&Modifier::Var);
+                        let modifier = if mutable { "var" } else { "val" };
+                        parser.report_at(
+                            ParseDiagnosticKind::UnexpectedToken,
+                            parser.current_span(),
+                            format!("`{modifier}` parameters may not be call-by-name"),
+                        );
+                    }
+                    parser.advance();
+                    let result = parser.type_expr();
+                    parser.alloc_from(mark, TreeKind::ByNameTypeTree(ByNameTypeTree { result }))
+                } else {
+                    parser.type_expr()
+                }
+            })
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedType,
@@ -896,6 +916,303 @@ mod tests {
                 .range(),
             dotty_core::TextRange::new(1, 13).unwrap()
         );
+    }
+
+    #[test]
+    fn parses_a_by_name_type_on_a_named_method_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(action: => Unit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(parameter.tpt).kind else {
+            panic!("expected a by-name parameter type");
+        };
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(parameter.tpt)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(9, 16).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_qualified_applied_types_after_a_by_name_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(value: => pkg.Type[Arg])",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Punctuation(Punctuation::Dot), 14, 15),
+                token(TokenKind::Identifier, 15, 19),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 19, 20),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 23, 24),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(parameter.tpt).kind else {
+            panic!("expected a by-name parameter type");
+        };
+
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(parameter.tpt)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(8, 24).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_by_name_type_on_a_class_constructor_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(action: => Unit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a constructor parameter");
+        };
+
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::ByNameTypeTree(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_a_by_name_type_on_a_val_constructor_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(val action: => Unit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 1, 4),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "`val` parameters may not be call-by-name"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(13, 15).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_a_by_name_type_on_a_var_constructor_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(var action: => Unit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Var), 1, 4),
+                token(TokenKind::Identifier, 5, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Operator, 13, 15),
+                token(TokenKind::Identifier, 16, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "`var` parameters may not be call-by-name"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(13, 15).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_a_by_name_type_on_an_implicit_case_class_accessor() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(action: => Unit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::CaseClass);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "`val` parameters may not be call-by-name"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn a_missing_by_name_result_preserves_the_next_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(first: =>, second: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Punctuation(Punctuation::Comma), 10, 11),
+                token(TokenKind::Identifier, 12, 18),
+                token(TokenKind::ColonFollow, 18, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 2);
+        let TreeKind::ValDef(first) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected the first parameter");
+        };
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(first.tpt).kind else {
+            panic!("expected a partial by-name parameter type");
+        };
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        let TreeKind::ValDef(second) = &parser.ast().get(clauses[0][1]).kind else {
+            panic!("expected the next parameter to survive recovery");
+        };
+        assert_eq!(parser.names.resolve(second.name.as_name().text()), "second");
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn a_missing_by_name_result_does_not_consume_the_parameter_closer() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(action: =>)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
