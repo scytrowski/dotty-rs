@@ -107,6 +107,23 @@ where
 
     fn parse_case_body(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.consume_case_newlines();
+        if matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+                | TokenKind::Eof
+        ) {
+            let expr = self.synthetic_unit();
+            return self.alloc_from(
+                mark,
+                TreeKind::Block(Block {
+                    stats: Vec::new(),
+                    expr,
+                }),
+            );
+        }
+
         let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
             let result = self
