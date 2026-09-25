@@ -852,10 +852,15 @@ impl Namer<'_> {
             return Ok(Vec::new());
         }
 
+        let bindings = self.collect_pattern_bindings(&definition.patterns);
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let spec =
             self.source_symbol_spec(patdef_tree, &definition.modifiers, owner, SymbolKind::Field)?;
         let mut headers = Vec::new();
-        for (binding_tree, binding_name) in self.collect_pattern_bindings(&definition.patterns) {
+        for (binding_tree, binding_name) in bindings {
             let name = *dotty_core::TermName::new(binding_name.text()).as_name();
             let symbol = self.enter_symbol(binding_tree, name, owner, scope, spec)?;
             headers.push(EnteredHeader::Field {

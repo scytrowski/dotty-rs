@@ -2128,6 +2128,27 @@ fn wildcard_only_class_pattern_introduces_no_field() {
 }
 
 #[test]
+fn wildcard_only_pattern_does_not_resolve_unused_visibility_qualifier() {
+    let named = named_source("class C:\n  private[Missing] val Some(_) = value", 223);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[0]).kind
+    else {
+        panic!("wildcard member should remain a PatDef");
+    };
+
+    assert!(source_pattern_bindings(&named, &patdef.patterns).is_empty());
+}
+
+#[test]
 fn var_pattern_bindings_inherit_mutability() {
     let named = named_source("class C:\n  var (left, right) = pair", 218);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
