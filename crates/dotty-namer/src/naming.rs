@@ -3,11 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Modifier, Modifiers, Select, VisibilitySyntax};
+use dotty_core::ast::{Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax};
 use dotty_core::{
     AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, SourceSpan, Symbol, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, Untyped,
-    Visibility,
+    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName,
+    Untyped, Visibility,
 };
 
 use crate::SourceSemanticIndex;
@@ -118,6 +118,15 @@ enum EnteredHeader {
         scope: ScopeId,
         package_path: Vec<String>,
     },
+    ModuleClass {
+        tree: TreeId<Untyped>,
+        template: TreeId<Untyped>,
+        object_symbol: SymbolId,
+        enclosing_scope: ScopeId,
+        symbol: SymbolId,
+        scope: ScopeId,
+        package_path: Vec<String>,
+    },
     Method {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
@@ -160,7 +169,7 @@ pub fn name_compilation_unit(
 ) -> Result<SourceSemanticIndex, NamerError> {
     let checkpoint = store.checkpoint();
     let package_mark = packages.mark();
-    let (result, scope_insertions) = {
+    let (result, scope_insertions, companion_links) = {
         let mut namer = Namer {
             arena,
             source,
@@ -170,12 +179,19 @@ pub fn name_compilation_unit(
             root,
             index: SourceSemanticIndex::new(),
             scope_insertions: Vec::new(),
+            companion_links: Vec::new(),
         };
         let result = namer.index(root).map(|()| namer.index);
-        (result, namer.scope_insertions)
+        (result, namer.scope_insertions, namer.companion_links)
     };
     match result {
-        Ok(index) => Ok(index),
+        Ok(index) => {
+            for (class, object) in companion_links {
+                store.symbols.get_mut(class).links.companion = Some(object);
+                store.symbols.get_mut(object).links.companion = Some(class);
+            }
+            Ok(index)
+        }
         Err(error) => {
             for (scope, symbol) in scope_insertions.into_iter().rev() {
                 store.scopes.get_mut(scope).remove(symbol);
@@ -196,6 +212,7 @@ struct Namer<'a> {
     root: TreeId<Untyped>,
     index: SourceSemanticIndex,
     scope_insertions: Vec<(ScopeId, SymbolId)>,
+    companion_links: Vec<(SymbolId, SymbolId)>,
 }
 
 impl Namer<'_> {
@@ -360,6 +377,84 @@ impl Namer<'_> {
         }))
     }
 
+    fn enter_module_header(
+        &mut self,
+        tree: TreeId<Untyped>,
+        owner_context: &NamingContext,
+    ) -> Result<Option<EnteredHeader>, NamerError> {
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) =
+            &self.arena.get(tree).kind
+        else {
+            return Ok(None);
+        };
+        let definition = definition.clone();
+        if !matches!(
+            self.arena.get(definition.template).kind,
+            TreeKind::Template(_)
+        ) {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: definition.template.index(),
+                expected: "Template object body",
+            });
+        }
+
+        let object_name = *definition.name.as_name();
+        let module_class_text = format!("{}$", self.store.names.resolve(object_name.text()));
+        let module_class_name =
+            *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+        let object_spec = self.source_symbol_spec(
+            tree,
+            &definition.metadata,
+            owner_context.owner,
+            SymbolKind::Object,
+        )?;
+        let module_class_spec = self.source_symbol_spec(
+            tree,
+            &definition.metadata,
+            owner_context.owner,
+            SymbolKind::ModuleClass,
+        )?;
+
+        let object_symbol = self.enter_symbol(
+            tree,
+            object_name,
+            owner_context.owner,
+            owner_context.scope,
+            object_spec,
+        )?;
+        self.scope_insertions
+            .push((owner_context.scope, object_symbol));
+        let symbol = self.store.symbols.alloc(Symbol {
+            name: module_class_name,
+            owner: Some(owner_context.owner),
+            kind: module_class_spec.kind,
+            flags: module_class_spec.flags,
+            visibility: module_class_spec.visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_context.scope)
+            .enter(module_class_name, symbol);
+        self.scope_insertions.push((owner_context.scope, symbol));
+        let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
+        self.index.record_scope(symbol, scope)?;
+
+        Ok(Some(EnteredHeader::ModuleClass {
+            tree,
+            template: definition.template,
+            object_symbol,
+            enclosing_scope: owner_context.scope,
+            symbol,
+            scope,
+            package_path: owner_context.package_path.clone(),
+        }))
+    }
+
     fn scan_entered_header(&mut self, header: EnteredHeader) -> Result<(), NamerError> {
         let (tree, symbol, scope, package_path) = match header {
             EnteredHeader::Package { tree, context } => {
@@ -397,6 +492,20 @@ impl Namer<'_> {
                 scope,
                 package_path,
             } => (tree, symbol, scope, package_path),
+            EnteredHeader::ModuleClass {
+                tree,
+                template,
+                object_symbol,
+                enclosing_scope,
+                symbol,
+                scope,
+                package_path,
+            } => {
+                if let Some(class) = self.source_companion_class(tree, enclosing_scope) {
+                    self.companion_links.push((class, object_symbol));
+                }
+                return self.scan_template_body(template, symbol, scope, package_path);
+            }
             EnteredHeader::Method {
                 tree,
                 symbol,
@@ -415,7 +524,44 @@ impl Namer<'_> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
-        let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
+        self.scan_template_body(definition.rhs, symbol, scope, package_path)
+    }
+
+    fn source_companion_class(
+        &self,
+        object_tree: TreeId<Untyped>,
+        enclosing_scope: ScopeId,
+    ) -> Option<SymbolId> {
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &self.arena.get(object_tree).kind
+        else {
+            return None;
+        };
+        let name = *TypeName::new(module.name.as_name().text()).as_name();
+        let mut candidates = self
+            .store
+            .scopes
+            .get(enclosing_scope)
+            .lookup_all(&name)
+            .iter()
+            .copied()
+            .filter(|symbol| {
+                let symbol = self.store.symbols.get(*symbol);
+                matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+                    && matches!(symbol.origin, SymbolOrigin::Source(_))
+            });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
+    }
+
+    fn scan_template_body(
+        &mut self,
+        template_tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        scope: ScopeId,
+        package_path: Vec<String>,
+    ) -> Result<(), NamerError> {
+        let TreeKind::Template(template) = &self.arena.get(template_tree).kind else {
             return Ok(());
         };
         let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
@@ -559,6 +705,11 @@ impl Namer<'_> {
                         tree: *member,
                         symbol: field,
                     });
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
+                    if let Some(header) = self.enter_module_header(*member, &class_context)? {
+                        nested_headers.push(header);
+                    }
                 }
                 TreeKind::DefDef(definition) => {
                     let definition = definition.clone();
@@ -1234,6 +1385,44 @@ mod tests {
         .0
     }
 
+    fn module_definition(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        visibility: Option<VisibilitySyntax>,
+        body: Vec<TreeId<Untyped>>,
+        position: Option<SourceSpan>,
+    ) -> (TreeId<Untyped>, TreeId<Untyped>, TreeId<Untyped>) {
+        let constructor = constructor(arena, store, vec![], vec![], None);
+        let template = arena.alloc(Tree {
+            kind: TreeKind::Template(Template {
+                constructor,
+                parents: vec![],
+                self_val: None,
+                body,
+                metadata: UntypedTemplateMetadata::default(),
+            }),
+            position: None,
+            ty: (),
+        });
+        let name_id = store.names.intern(name);
+        let module = arena.alloc(Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::ModuleDef(dotty_core::ast::ModuleDef {
+                name: dotty_core::TermName::new(name_id),
+                template,
+                metadata: Modifiers {
+                    visibility,
+                    modifiers,
+                    ..Modifiers::default()
+                },
+            })),
+            position,
+            ty: (),
+        });
+        (module, template, constructor)
+    }
+
     fn type_parameter(
         arena: &mut AstArena<Untyped>,
         store: &mut SemanticStore,
@@ -1833,6 +2022,244 @@ mod tests {
             index.symbol_at(SourceId::from_index(14), nested_trait),
             Some(nested_trait_symbol)
         );
+    }
+
+    #[test]
+    fn nested_object_creates_object_and_module_class_identities() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let position = Some(SourceSpan::new(
+            SourceId::from_index(77),
+            Span::without_point(TextRange::new(10, 28).unwrap()),
+        ));
+        let (object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "Foo",
+            vec![Modifier::Final],
+            None,
+            vec![],
+            position,
+        );
+        let class = class_definition(&mut arena, &mut store, "Outer", vec![], vec![object], None);
+        let root = package_with_stat(&mut arena, &mut store, "objects", vec![class]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(77);
+        let index = name_package(&arena, root, 77, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["objects"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "Outer").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let module_class = type_symbol(&mut store, class_scope, "Foo$").unwrap();
+        let object_name = dotty_core::TermName::new(store.names.intern("Foo"));
+
+        assert_eq!(
+            term_symbol(&mut store, class_scope, "Foo"),
+            Some(object_symbol)
+        );
+        assert_eq!(store.symbols.get(object_symbol).kind, SymbolKind::Object);
+        assert_eq!(
+            store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).name,
+            *object_name.as_name()
+        );
+        assert_eq!(store.symbols.get(object_symbol).owner, Some(class_symbol));
+        assert_eq!(store.symbols.get(module_class).owner, Some(class_symbol));
+        assert_eq!(
+            store.symbols.get(object_symbol).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(
+            store.symbols.get(module_class).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(store.symbols.get(module_class).flags, SymbolFlags::FINAL);
+        assert_eq!(store.symbols.get(object_symbol).position, position);
+        assert_eq!(store.symbols.get(module_class).position, position);
+        assert_eq!(store.symbols.get(object_symbol).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert_eq!(index.scope_of(object_symbol), None);
+        assert!(index.scope_of(module_class).is_some());
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            None,
+            "the object term is not linked to its module class"
+        );
+        assert_eq!(store.symbols.get(module_class).links.companion, None);
+    }
+
+    #[test]
+    fn nested_object_links_to_its_unique_source_class_companion() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Foo", vec![], None, vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![class, object],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "companions", vec![outer]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(81);
+        let index = name_package(&arena, root, 81, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let class_symbol = index.symbol_at(source, class).unwrap();
+        let outer = store.symbols.get(class_symbol).owner.unwrap();
+        let outer_scope = index.scope_of(outer).unwrap();
+        let module_class = type_symbol(&mut store, outer_scope, "Foo$").unwrap();
+
+        assert_eq!(
+            store.symbols.get(class_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(class_symbol)
+        );
+        assert_eq!(store.symbols.get(module_class).links.companion, None);
+    }
+
+    #[test]
+    fn nested_object_does_not_link_when_source_class_companion_is_ambiguous() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let first = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let second = class_definition(&mut arena, &mut store, "Foo", vec![], vec![], None);
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "Foo", vec![], None, vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![first, second, object],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "ambiguouscompanions", vec![outer]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(82);
+        let index = name_package(&arena, root, 82, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let first_symbol = index.symbol_at(source, first).unwrap();
+        let second_symbol = index.symbol_at(source, second).unwrap();
+
+        assert_eq!(store.symbols.get(first_symbol).links.companion, None);
+        assert_eq!(store.symbols.get(second_symbol).links.companion, None);
+        assert_eq!(store.symbols.get(object_symbol).links.companion, None);
+    }
+
+    #[test]
+    fn nested_object_template_members_belong_to_the_module_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let method = method_definition(&mut arena, &mut store, "run", vec![], vec![], None);
+        let (object, _, constructor) = module_definition(
+            &mut arena,
+            &mut store,
+            "Worker",
+            vec![],
+            None,
+            vec![method],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "Outer", vec![], vec![object], None);
+        let root = package_with_stat(&mut arena, &mut store, "objects", vec![class]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(78);
+        let index = name_package(&arena, root, 78, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let module_class = store
+            .symbols
+            .get(object_symbol)
+            .owner
+            .and_then(|outer| {
+                let class_scope = index.scope_of(outer)?;
+                type_symbol(&mut store, class_scope, "Worker$")
+            })
+            .unwrap();
+        let module_scope = index.scope_of(module_class).unwrap();
+        let method_symbol = index.symbol_at(source, method).unwrap();
+        let constructor_symbol = index.symbol_at(source, constructor).unwrap();
+
+        assert_eq!(store.symbols.get(method_symbol).owner, Some(module_class));
+        assert_eq!(
+            store.symbols.get(constructor_symbol).owner,
+            Some(module_class)
+        );
+        assert_eq!(
+            term_symbol(&mut store, module_scope, "run"),
+            Some(method_symbol)
+        );
+        assert_eq!(store.scopes.get(module_scope).owner, Some(module_class));
+    }
+
+    #[test]
+    fn nested_object_headers_precede_object_template_descendants() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let deep = class_definition(&mut arena, &mut store, "Deep", vec![], vec![], None);
+        let (object, _, _) =
+            module_definition(&mut arena, &mut store, "A", vec![], None, vec![deep], None);
+        let sibling = class_definition(&mut arena, &mut store, "B", vec![], vec![], None);
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![object, sibling],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "objects", vec![outer]);
+        let mut packages = Packages::new();
+
+        let source = SourceId::from_index(79);
+        let index = name_package(&arena, root, 79, &mut store, &mut packages).unwrap();
+        let object_symbol = index.symbol_at(source, object).unwrap();
+        let sibling_symbol = index.symbol_at(source, sibling).unwrap();
+        let deep_symbol = index.symbol_at(source, deep).unwrap();
+        let outer_symbol = store.symbols.get(object_symbol).owner.unwrap();
+        let outer_scope = index.scope_of(outer_symbol).unwrap();
+        let module_class = type_symbol(&mut store, outer_scope, "A$").unwrap();
+
+        assert!(object_symbol.index() < sibling_symbol.index());
+        assert!(module_class.index() < sibling_symbol.index());
+        assert!(sibling_symbol.index() < deep_symbol.index());
+    }
+
+    #[test]
+    fn package_level_objects_remain_deferred() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let (object, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "TopLevel",
+            vec![],
+            None,
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "objects", vec![object]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 80, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["objects"]).unwrap();
+
+        assert_eq!(index.symbol_at(SourceId::from_index(80), object), None);
+        assert_eq!(term_symbol(&mut store, package.scope, "TopLevel"), None);
+        assert_eq!(type_symbol(&mut store, package.scope, "TopLevel$"), None);
     }
 
     #[test]
