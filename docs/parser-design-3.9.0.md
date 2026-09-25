@@ -100,6 +100,10 @@ The parser forwards `ColonEol`, `Indented`, `Outdented`, `ArrowIndented`, and
 the template-specific `SelfArrow` event through readable helpers. A self arrow
 suppresses a pending nested indentation region; layout classification remains
 owned by the scanner while grammar decisions remain in the parser.
+Match-case regions use the same feedback contract: when braced scopes prevent
+eager indentation, the parser requests the case-region indent after `match`
+and requests its outdent before parsing the following sibling statement or
+closing delimiter.
 
 The scanner classifies line-final `end name` forms as `EndMarker` tokens. At
 statement-sequence boundaries the parser consumes the marker and its target
