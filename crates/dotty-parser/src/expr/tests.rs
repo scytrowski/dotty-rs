@@ -1474,6 +1474,34 @@ fn parses_repeated_annotation_ascriptions_in_source_order() {
 }
 
 #[test]
+fn recovers_from_an_annotation_ascription_without_an_annotation_type() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "value: @",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    assert!(matches!(
+        parser.ast().get(tree).kind,
+        TreeKind::Annotated(_)
+    ));
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn ascription_updates_the_placeholder_parameter_type() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
