@@ -752,7 +752,12 @@ baseline is checked in at
 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`. The baseline is a
 measurement of the current parser, not a claim that the full Scala grammar is
 implemented; its highest-frequency buckets are backlog input for later parser
-issues.
+issues. The post-#186–#193 Parser v0.1 measurement is recorded in
+`tools/parser-corpus-report/parser-v0.1-final-scala3-3.9.0.json`; it attempted
+1,236 files, parsed 389 without diagnostics (31.47%), and had zero hard
+failures, panics, or hangs. The comparison, remaining syntax dispositions,
+and evidence-based exit criteria are documented in
+[`parser-v0.1-compatibility.md`](parser-v0.1-compatibility.md).
 
 ## Extension rule
 
