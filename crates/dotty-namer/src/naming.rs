@@ -131,6 +131,8 @@ struct UnsupportedGivenNameTree {
 
 fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
     match tree {
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::Select(_) => "Select",
         TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
         TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
@@ -144,6 +146,25 @@ fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
         TreeKind::TypeApply(_) => "TypeApply",
         TreeKind::New(_) => "New",
         TreeKind::Typed(_) => "Typed",
+        TreeKind::AppliedTypeTree(_) => "AppliedTypeTree",
+        TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
+        TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Assign(_) => "Assign",
+        TreeKind::Block(_) => "Block",
+        TreeKind::If(_) => "If",
+        TreeKind::Match(_) => "Match",
+        TreeKind::CaseDef(_) => "CaseDef",
+        TreeKind::Return(_) => "Return",
+        TreeKind::While(_) => "While",
+        TreeKind::Try(_) => "Try",
+        TreeKind::Closure(_) => "Closure",
+        TreeKind::ValDef(_) => "ValDef",
+        TreeKind::DefDef(_) => "DefDef",
+        TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::Template(_) => "Template",
+        TreeKind::PackageDef(_) => "PackageDef",
+        TreeKind::Import(_) => "Import",
+        TreeKind::Export(_) => "Export",
         TreeKind::PhaseSpecific(UntypedNode::Error(_)) => "Error",
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => "ModuleDef",
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
@@ -166,7 +187,15 @@ fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "Tuple",
         TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
-        _ => "non-type syntax",
+        TreeKind::Bind(_) => "Bind",
+        TreeKind::Alternative(_) => "Alternative",
+        TreeKind::UnApply(_) => "UnApply",
+        TreeKind::Annotated(_) => "Annotated",
+        TreeKind::Quote(_) => "Quote",
+        TreeKind::Splice(_) => "Splice",
+        TreeKind::QuotePattern(_) => "QuotePattern",
+        TreeKind::SplicePattern(_) => "SplicePattern",
+        TreeKind::Inlined(_) => "Inlined",
     }
 }
 
@@ -2671,6 +2700,22 @@ mod tests {
                 tree,
                 kind: "Tuple",
             }
+        );
+    }
+
+    #[test]
+    fn given_type_name_extractor_reports_the_exact_unsupported_tree_kind() {
+        let store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = arena.alloc(Tree {
+            kind: TreeKind::This(dotty_core::ast::This { qual: None }),
+            position: None,
+            ty: (),
+        });
+
+        assert_eq!(
+            type_tree_name(&arena, &store, tree, true).unwrap_err(),
+            UnsupportedGivenNameTree { tree, kind: "This" }
         );
     }
 
