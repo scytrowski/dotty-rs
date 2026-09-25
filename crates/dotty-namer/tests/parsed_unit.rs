@@ -670,3 +670,91 @@ fn parsed_class_members_and_method_parameters_get_their_own_scopes() {
         None
     );
 }
+
+#[test]
+fn parsed_secondary_constructor_parameters_belong_to_the_constructor_scope() {
+    use dotty_core::TermName;
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "class C { def this(x: Int) = this() }";
+    let source = SourceId::from_index(57);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+        panic!("package statement should be the class");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let secondary_tree = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::DefDef(_)))
+        .expect("parser should represent the secondary constructor as a DefDef");
+    let TreeKind::DefDef(secondary) = &parsed.ast.get(secondary_tree).kind else {
+        unreachable!("secondary constructor tree was found above");
+    };
+    assert_eq!(secondary.value_param_clauses.len(), 1);
+    assert_eq!(secondary.value_param_clauses[0].len(), 1);
+    let parameter_tree = secondary.value_param_clauses[0][0];
+    let TreeKind::ValDef(_) = &parsed.ast.get(parameter_tree).kind else {
+        panic!("secondary constructor parameter should be a ValDef");
+    };
+    assert_eq!(
+        store.names.resolve(secondary.name.as_name().text()),
+        "<init>"
+    );
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "SecondaryConstructor.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = *class_definition.name.as_name();
+    let class_symbol = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(&class_name)
+        .unwrap();
+    let class_scope = index.scope_of(class_symbol).unwrap();
+    let constructor_symbol = index.symbol_at(source, secondary_tree).unwrap();
+    let constructor_scope = index.scope_of(constructor_symbol).unwrap();
+    let parameter_symbol = index.symbol_at(source, parameter_tree).unwrap();
+    let x_name = TermName::new(store.names.intern("x"));
+
+    assert_eq!(
+        store.symbols.get(constructor_symbol).kind,
+        dotty_core::SymbolKind::Constructor
+    );
+    assert_eq!(
+        store.symbols.get(parameter_symbol).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert_eq!(
+        store.symbols.get(parameter_symbol).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(
+        store.scopes.get(constructor_scope).lookup(x_name.as_name()),
+        Some(parameter_symbol)
+    );
+    assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+}

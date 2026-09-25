@@ -129,6 +129,10 @@ where
 
     fn parse_method_name(&mut self) -> TermName {
         match self.current().kind {
+            TokenKind::Keyword(HardKeyword::This) => {
+                self.advance();
+                TermName::new(self.names.intern("<init>"))
+            }
             TokenKind::Identifier
             | TokenKind::BackquotedIdentifier
             | TokenKind::Operator
@@ -421,7 +425,7 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
-    use dotty_core::{NameInterner, TokenKind, TreeKind};
+    use dotty_core::{NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
     fn parses_a_val_definition_with_an_inferred_type() {
@@ -599,6 +603,48 @@ mod tests {
             parser.ast().get(definition.rhs.unwrap()).kind,
             TreeKind::PhaseSpecific(UntypedNode::Number(_))
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_secondary_constructor_with_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def this(x: Int) = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Keyword(HardKeyword::This), 4, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::IntegerLiteral, 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a secondary constructor definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "<init>"
+        );
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert_eq!(definition.value_param_clauses[0].len(), 1);
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(definition.value_param_clauses[0][0]).kind
+        else {
+            panic!("secondary constructor parameter should be ValDef");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x");
         assert!(parser.diagnostics().is_empty());
     }
 
