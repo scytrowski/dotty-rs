@@ -1601,7 +1601,7 @@ impl Namer<'_> {
                 SymbolKind::Class | SymbolKind::Trait => {
                     Some(self.store.names.resolve(current.name.text()))
                 }
-                SymbolKind::ModuleClass => self
+                SymbolKind::ModuleClass if current.origin != SymbolOrigin::Synthetic => self
                     .store
                     .names
                     .resolve(current.name.text())
@@ -2714,6 +2714,45 @@ mod tests {
         assert_eq!(
             store.symbols.get(member_symbol).visibility,
             Visibility::PrivateWithin(module_class)
+        );
+    }
+
+    #[test]
+    fn qualified_visibility_rejects_the_synthetic_source_package_wrapper() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier = *TypeName::new(store.names.intern("Example$package")).as_name();
+        let member = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "Member",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let (given, _, _) = module_definition(
+            &mut arena,
+            &mut store,
+            "exampleGiven",
+            vec![Modifier::Given],
+            None,
+            vec![member],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![given]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 86, &mut store, &mut packages).unwrap_err(),
+            NamerError::InvalidVisibilityQualifier {
+                tree_index: member.index(),
+                position: None,
+                qualifier,
+                protected: false,
+            }
         );
     }
 
