@@ -1,2 +1,0 @@
-Left(x) |
-Right(x)
