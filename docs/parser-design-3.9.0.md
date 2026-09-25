@@ -179,7 +179,7 @@ integer, long, decimal, exponent, float, and double literals
 string literals and interpolated strings with simple or braced splices
 true, false, null, this
 (expr), (), and (a, b, ...)
-'{ expr } and '[Type] quotes
+`'{ expr }` and `'[Type]` quotes with braced expression splices
 simple selections such as foo.bar and foo.`bar`
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
@@ -248,6 +248,15 @@ bounds
 parenthesized type grouping and tuple types, represented by the shared
 `Parens` and `Tuple` source nodes; tuple elements use the supported full type
 expression subset and compose with applied types
+
+Quotes reuse the shared `Quote` tree: braced bodies use expression/block
+parsing and bracketed bodies use type parsing. A single expression in a quote
+is stored directly as its body; a multi-statement body remains a `Block`, and
+an empty quoted block preserves Dotty's zero-width empty `Block` shape. Braced
+`${...}` splices inside expression quotes produce `Splice` and parse their
+contents as expression blocks. Legacy `${...}` splices inside quoted types
+are consumed for recovery and diagnosed as unsupported, matching Scala 3.9's
+rejection. This implements syntax only, not staging or type-checking semantics.
 ordinary function types (`A => B`, parenthesized and tuple parameter lists,
 and `() => R`), represented by the shared `Function` node. Ordinary
 parenthesized function types also support named typed parameters such as
@@ -567,10 +576,10 @@ named extractor arguments. A trailing variable or wildcard followed by `*`
 inside extractor arguments is represented as `Typed(pattern, Ident(_*))`,
 matching Dotty's parser tree; sequence markers elsewhere remain invalid.
 Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
-semantic `UnApply` lowering belongs to later phases. `given`, quoted and XML patterns, remaining
-refined-type forms, remaining definition forms and full template semantics, legacy
-given syntax, remaining control flow (`do`/`while`),
-quotes, and macros remain follow-up increments.
+semantic `UnApply` lowering belongs to later phases. `given`, quoted and XML
+patterns, remaining refined-type forms, remaining definition forms and full
+template semantics, legacy given syntax, remaining control flow (`do`/`while`),
+macros, and staging semantics remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards, and expression bodies. Case bodies are represented
