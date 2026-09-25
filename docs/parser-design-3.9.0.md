@@ -164,7 +164,12 @@ order and expand comma-separated expressions into separate `Import` or
 `Export` statement trees. Their selectors retain aliases, wildcard selectors,
 and the narrow `given T` type-bound form. Named selectors accept both modern
 `as` renames and Scala 3.9's deprecated `=>` compatibility spelling, including
-renaming to `_` to hide a name. Arbitrary top-level expressions and
+renaming to `_` to hide a name. Wildcard selectors accept both `*` and the
+legacy `_` spelling and preserve the same wildcard selector in the source AST.
+In default Scala 3.9 mode `_` has no parser diagnostic; Dotty's
+`ImportWildcard` migration warning/error is gated on `future-migration`/`future`
+source versions, which the current parser does not configure. Arbitrary
+top-level expressions and
 package objects remain unsupported; imports and exports are also retained as
 statements inside supported blocks and templates.
 
