@@ -85,6 +85,16 @@ where
         self.consume_template_separators(closing);
 
         loop {
+            if self.current().kind == TokenKind::EndMarker {
+                if !self.end_marker_matches_next(members.last().copied()) {
+                    break;
+                }
+                if !self.consume_end_marker(members.last().copied()) {
+                    break;
+                }
+                self.consume_template_separators(closing);
+                continue;
+            }
             if !members.is_empty()
                 && closing == TokenKind::Outdent
                 && !self.last_advance_was_outdent
@@ -138,6 +148,16 @@ where
                     "expected a template member separator",
                 );
                 self.recover_until(RecoverySet::Statement);
+                self.consume_template_separators(closing);
+            }
+
+            while self.current().kind == TokenKind::EndMarker {
+                if !self.end_marker_matches_next(members.last().copied()) {
+                    break;
+                }
+                if !self.consume_end_marker(members.last().copied()) {
+                    return TemplateBodyResult { self_val, members };
+                }
                 self.consume_template_separators(closing);
             }
         }

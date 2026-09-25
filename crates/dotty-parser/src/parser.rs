@@ -386,6 +386,17 @@ where
         SourceSpan::new(self.source_id, Span::without_point(range))
     }
 
+    /// Extends a parsed construct through a trailing layout marker.
+    pub(crate) fn extend_tree_end(&mut self, tree: TreeId<Untyped>, end: u32) {
+        let Some(position) = self.ast.get(tree).position else {
+            return;
+        };
+        let range = position.span().range();
+        let range = TextRange::new(range.start(), end).expect("tree span endpoints are ordered");
+        self.ast.get_mut(tree).position =
+            Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+    }
+
     /// Returns the source spelling of `token` without allocating.
     pub fn token_text(&self, token: &Token) -> Result<&'src str, SourceTextError> {
         self.source.slice(token.span)
