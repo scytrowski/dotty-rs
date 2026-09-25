@@ -237,7 +237,7 @@ impl Namer<'_> {
             name,
             owner: Some(owner_context.owner),
             kind,
-            flags: SymbolFlags::EMPTY,
+            flags: Self::class_flags(&definition.metadata.modifiers),
             visibility: self.class_visibility(tree, &definition.metadata.visibility)?,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
@@ -265,6 +265,21 @@ impl Namer<'_> {
             }
         }
         Ok(())
+    }
+
+    fn class_flags(modifiers: &[Modifier]) -> SymbolFlags {
+        modifiers
+            .iter()
+            .fold(SymbolFlags::EMPTY, |flags, modifier| {
+                let flag = match modifier {
+                    Modifier::Abstract => SymbolFlags::ABSTRACT,
+                    Modifier::Final => SymbolFlags::FINAL,
+                    Modifier::Sealed => SymbolFlags::SEALED,
+                    Modifier::Case => SymbolFlags::CASE,
+                    _ => SymbolFlags::EMPTY,
+                };
+                flags | flag
+            })
     }
 
     fn is_empty_package_sentinel(&self, name: TreeId<Untyped>) -> bool {
@@ -498,6 +513,19 @@ mod tests {
             store,
             packages,
         )
+    }
+
+    fn entered_class_flags(modifiers: Vec<Modifier>) -> SymbolFlags {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Flagged", modifiers, vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "flags", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 23, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["flags"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Flagged").unwrap();
+        store.symbols.get(symbol).flags
     }
 
     #[test]
@@ -830,6 +858,35 @@ mod tests {
         let symbol = type_symbol(&mut store, owner.scope, "Point").unwrap();
 
         assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn final_class_sets_the_final_symbol_flag() {
+        assert_eq!(
+            entered_class_flags(vec![Modifier::Final]),
+            SymbolFlags::FINAL
+        );
+    }
+
+    #[test]
+    fn sealed_class_sets_the_sealed_symbol_flag() {
+        assert_eq!(
+            entered_class_flags(vec![Modifier::Sealed]),
+            SymbolFlags::SEALED
+        );
+    }
+
+    #[test]
+    fn abstract_class_sets_the_abstract_symbol_flag() {
+        assert_eq!(
+            entered_class_flags(vec![Modifier::Abstract]),
+            SymbolFlags::ABSTRACT
+        );
+    }
+
+    #[test]
+    fn case_class_sets_the_case_symbol_flag() {
+        assert_eq!(entered_class_flags(vec![Modifier::Case]), SymbolFlags::CASE);
     }
 
     #[test]

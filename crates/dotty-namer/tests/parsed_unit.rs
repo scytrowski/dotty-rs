@@ -1,6 +1,7 @@
 use dotty_core::{
     HardKeyword, Packages, Punctuation, ScannerEvent, SemanticStore, SourceId, SourceText,
-    TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName, Visibility,
+    SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
+    Visibility,
 };
 use dotty_namer::name_compilation_unit;
 use dotty_parser::parse_compilation_unit;
@@ -158,6 +159,48 @@ fn a_parsed_private_class_keeps_its_source_visibility() {
         .unwrap();
 
     assert_eq!(store.symbols.get(class).visibility, Visibility::Private);
+}
+
+#[test]
+fn a_parsed_final_class_sets_the_final_symbol_flag() {
+    let source_text = "final class C";
+    let source = SourceId::from_index(12);
+    let mut store = SemanticStore::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        VecTokenSource {
+            tokens: vec![
+                token(TokenKind::Keyword(HardKeyword::Final), 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Class), 6, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            index: 0,
+        },
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+
+    name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "FinalClass.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = TypeName::new(store.names.intern("C"));
+    let class = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(class_name.as_name())
+        .unwrap();
+
+    assert!(store.symbols.get(class).flags.contains(SymbolFlags::FINAL));
 }
 
 fn token(kind: TokenKind, start: u32, end: u32) -> Token {
