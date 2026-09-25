@@ -534,8 +534,9 @@ parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
 `Apply(Select(New(type), <init>), args)` shape. Enum-case constructors preserve
 post-name annotations and optional `private`/`protected` access in the
-synthetic constructor's `Modifiers`; access is also retained on the case's
-`TypeDef`, matching Scala 3.9's parser tree. This constructor prefix is
+synthetic constructor's `Modifiers`. Visibility written before `case` remains
+on the case definition and is independent of constructor visibility. This
+constructor prefix is
 intentionally limited to annotations followed by an optional access modifier;
 other post-name modifiers are rejected. Parameter and type-parameter
 annotations, enum-case bodies, and feature-dependent

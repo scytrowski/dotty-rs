@@ -285,7 +285,7 @@ where
         case_position: dotty_core::SourceSpan,
         case_name_end: u32,
         name: TypeName,
-        mut metadata: Modifiers,
+        metadata: Modifiers,
     ) -> ParsedStatement {
         let diagnostics_before_type_params = self.diagnostics.len();
         let type_params = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
@@ -356,7 +356,6 @@ where
                 uses: Vec::new(),
             },
         };
-        let constructor_visibility = constructor_metadata.visibility;
         let (constructor, constructor_start) = self.synthetic_primary_constructor(
             mark.start(),
             type_params,
@@ -382,9 +381,6 @@ where
             }),
         );
         self.ast.get_mut(template).position = Some(template_position);
-        if constructor_visibility.is_some() {
-            metadata.visibility = constructor_visibility;
-        }
 
         ParsedStatement::Definition(self.alloc_from(
             mark,
@@ -2547,10 +2543,7 @@ mod tests {
             constructor.metadata.visibility,
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) })
         ));
-        assert!(matches!(
-            case.metadata.visibility,
-            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) })
-        ));
+        assert!(case.metadata.visibility.is_none());
         let constructor_span = parser
             .ast()
             .get(case_template.constructor)
@@ -3706,10 +3699,7 @@ mod tests {
         let TreeKind::TypeDef(case) = &parser.ast().get(template.body[0]).kind else {
             panic!("expected the access-modified case to be a TypeDef");
         };
-        assert_eq!(
-            case.metadata.visibility,
-            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
-        );
+        assert!(case.metadata.visibility.is_none());
         let TreeKind::Template(case_template) = &parser.ast().get(case.rhs).kind else {
             panic!("expected the enum-case Template");
         };
@@ -3736,6 +3726,60 @@ mod tests {
             parser.ast().get(template.body[1]).kind,
             TreeKind::DefDef(_)
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_enum_case_prefix_visibility_separate_from_constructor_visibility() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { protected case C private(x: Int) }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Protected), 9, 18),
+                token(TokenKind::Keyword(HardKeyword::Case), 19, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Keyword(HardKeyword::Private), 26, 33),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 33, 34),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::ColonFollow, 35, 36),
+                token(TokenKind::Identifier, 37, 40),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 40, 41),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 42, 43),
+                token(TokenKind::Eof, 43, 43),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::TypeDef(case) = &parser.ast().get(template.body[0]).kind else {
+            panic!("expected the enum case TypeDef");
+        };
+        assert_eq!(
+            case.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Protected { qualifier: None })
+        );
+        let TreeKind::Template(case_template) = &parser.ast().get(case.rhs).kind else {
+            panic!("expected the enum-case Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(case_template.constructor).kind
+        else {
+            panic!("expected the enum-case constructor");
+        };
+        assert_eq!(
+            constructor.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
