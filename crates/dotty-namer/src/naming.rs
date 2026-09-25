@@ -1850,6 +1850,37 @@ mod tests {
     }
 
     #[test]
+    fn method_private_local_role_marker_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::PrivateLocal],
+            None,
+        );
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "convert",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "methods", vec![class]);
+
+        assert_eq!(
+            name_package(&arena, root, 40, &mut store, &mut Packages::new()).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: parameter.index(),
+                expected: "ordinary method ValDef without constructor-role metadata",
+            }
+        );
+    }
+
+    #[test]
     fn primary_constructor_in_template_body_is_not_entered_twice() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
@@ -1889,6 +1920,44 @@ mod tests {
             1
         );
         assert!(index.symbol_at(SourceId::from_index(33), primary).is_some());
+    }
+
+    #[test]
+    fn secondary_constructor_member_uses_constructor_kind() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(41);
+        let secondary = method_definition(&mut arena, &mut store, "<init>", vec![], vec![], None);
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![secondary], None);
+        let root = package_with_stat(&mut arena, &mut store, "constructors", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 41, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["constructors"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let constructor_symbol = index.symbol_at(source, secondary).unwrap();
+        let TreeKind::TypeDef(class_definition) = &arena.get(class).kind else {
+            unreachable!("class_definition constructs a TypeDef");
+        };
+        let TreeKind::Template(template) = &arena.get(class_definition.rhs).kind else {
+            unreachable!("class_definition constructs a Template");
+        };
+        let primary_symbol = index.symbol_at(source, template.constructor).unwrap();
+        let init = dotty_core::TermName::new(store.names.intern("<init>"));
+
+        assert_eq!(
+            store.symbols.get(constructor_symbol).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(
+            store.symbols.get(constructor_symbol).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            store.scopes.get(class_scope).lookup_all(init.as_name()),
+            &[primary_symbol, constructor_symbol]
+        );
     }
 
     #[test]
