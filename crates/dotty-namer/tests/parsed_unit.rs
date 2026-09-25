@@ -42,6 +42,185 @@ fn named_source(source_text: &str, source_index: u32) -> NamedSource {
     }
 }
 
+fn named_source_tree_name(
+    named: &NamedSource,
+    tree: dotty_core::TreeId<dotty_core::Untyped>,
+) -> String {
+    let symbol = named
+        .index
+        .symbol_at(named.source, tree)
+        .expect("source definition should have a symbol");
+    let name = named.store.symbols.get(symbol).name;
+    named.store.names.resolve(name.text()).to_owned()
+}
+
+#[test]
+fn anonymous_given_alias_gets_a_deterministic_invented_name() {
+    let named = named_source("given Config = makeConfig", 105);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        "given_Config"
+    );
+    let repeated = named_source("given Config = makeConfig", 110);
+    let TreeKind::PackageDef(repeated_package) =
+        &repeated.parsed.ast.get(repeated.parsed.root).kind
+    else {
+        panic!("parser should return a package root");
+    };
+    assert_eq!(
+        named_source_tree_name(&repeated, repeated_package.stats[0]),
+        "given_Config"
+    );
+}
+
+#[test]
+fn explicitly_named_given_keeps_its_source_name() {
+    let named = named_source("given config: Config = makeConfig", 106);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+
+    assert_eq!(named_source_tree_name(&named, package.stats[0]), "config");
+}
+
+#[test]
+fn anonymous_given_field_inside_a_class_is_normalized_before_symbol_entry() {
+    let named = named_source("class C:\n  given Config = makeConfig", 115);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+
+    assert_eq!(
+        named_source_tree_name(&named, template.body[0]),
+        "given_Config"
+    );
+}
+
+#[test]
+fn anonymous_method_like_given_uses_its_declared_result_type() {
+    let named = named_source(
+        "given [A] => (using ctx: Ctx[A]) => Show[A] = makeShow",
+        107,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::DefDef(definition) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("parameterized given alias should be a DefDef");
+    };
+
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        "given_Show_A"
+    );
+    assert_eq!(definition.type_params.len(), 1);
+    assert_eq!(definition.value_param_clauses.len(), 1);
+}
+
+#[test]
+fn anonymous_structural_module_given_derives_object_and_module_class_names() {
+    use dotty_core::{SymbolKind, TypeName};
+
+    let named = named_source("given Ordering[Int]:\n  def compare = 0", 108);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let given = package.stats[0];
+    let symbol = named.index.symbol_at(named.source, given).unwrap();
+    let package_symbol = named.store.symbols.get(symbol).owner.unwrap();
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let module_class_name = TypeName::new(
+        named
+            .store
+            .names
+            .get("given_Ordering_Int$")
+            .expect("normalized module class name should be interned"),
+    );
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(module_class_name.as_name())
+        .expect("module class should use normalized object name");
+
+    assert_eq!(named_source_tree_name(&named, given), "given_Ordering_Int");
+    assert_eq!(
+        named.store.symbols.get(module_class).kind,
+        SymbolKind::ModuleClass
+    );
+}
+
+#[test]
+fn anonymous_structural_given_joins_multiple_parent_names_in_source_order() {
+    let named = named_source("given First with Second:\n  def value = result", 111);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        "given_First_Second"
+    );
+}
+
+#[test]
+fn structurally_identical_anonymous_givens_keep_the_same_name_without_renaming() {
+    let named = named_source("given Config = first\ngiven Config = second", 112);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let first = named
+        .index
+        .symbol_at(named.source, package.stats[0])
+        .unwrap();
+    let second = named
+        .index
+        .symbol_at(named.source, package.stats[1])
+        .unwrap();
+
+    assert_ne!(first, second);
+    assert_eq!(
+        named.store.symbols.get(first).name,
+        named.store.symbols.get(second).name
+    );
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[0]),
+        "given_Config"
+    );
+    assert_eq!(
+        named_source_tree_name(&named, package.stats[1]),
+        "given_Config"
+    );
+}
+
+#[test]
+fn anonymous_parameterized_structural_given_uses_a_type_namespace_name() {
+    use dotty_core::Namespace;
+
+    let named = named_source("given [A] => Show[A]:\n  def show = result", 109);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let given = package.stats[0];
+    let symbol = named.index.symbol_at(named.source, given).unwrap();
+
+    assert_eq!(named_source_tree_name(&named, given), "given_Show_A");
+    assert_eq!(
+        named.store.symbols.get(symbol).name.namespace(),
+        Namespace::Type
+    );
+}
+
 struct PrimaryConstructorParts {
     class_tree: dotty_core::TreeId<dotty_core::Untyped>,
     constructor_tree: dotty_core::TreeId<dotty_core::Untyped>,
