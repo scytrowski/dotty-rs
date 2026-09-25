@@ -669,11 +669,13 @@ where
         .then_some(self.current().span.start());
         let value_param_clauses = self.parse_term_param_clauses(owner);
         let constructor_end = self.last_real_token_end;
-        let tail = if is_enum {
-            self.with_enum_body(true, |parser| parser.parse_template_tail(true))
-        } else {
-            self.with_enum_body(false, |parser| parser.parse_template_tail(false))
-        };
+        let tail = self.with_secondary_constructor_allowed(!is_trait && !is_enum, |parser| {
+            if is_enum {
+                parser.with_enum_body(true, |parser| parser.parse_template_tail(true))
+            } else {
+                parser.with_enum_body(false, |parser| parser.parse_template_tail(false))
+            }
+        });
         let parent_start = self.template_tail_start(&tail);
         let body_start = tail.body.first().and_then(|member| {
             self.ast

@@ -131,7 +131,7 @@ where
         match self.current().kind {
             TokenKind::Keyword(HardKeyword::This) => {
                 self.advance();
-                if self.context.template_body {
+                if self.context.secondary_constructor_allowed {
                     TermName::new(self.names.intern("<init>"))
                 } else {
                     self.report(
@@ -634,8 +634,10 @@ mod tests {
             &mut names,
         );
 
-        let ParsedStatement::Definition(id) =
-            parser.with_template_body(|parser| parser.parse_method_definition(Location::InBlock))
+        let ParsedStatement::Definition(id) = parser
+            .with_secondary_constructor_allowed(true, |parser| {
+                parser.parse_method_definition(Location::InBlock)
+            })
         else {
             panic!("expected a secondary constructor definition");
         };

@@ -4,7 +4,7 @@ use dotty_core::{
     Visibility,
 };
 use dotty_namer::name_compilation_unit;
-use dotty_parser::parse_compilation_unit;
+use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 
 struct VecTokenSource {
     tokens: Vec<Token>,
@@ -757,4 +757,42 @@ fn parsed_secondary_constructor_parameters_belong_to_the_constructor_scope() {
         Some(parameter_symbol)
     );
     assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+}
+
+fn assert_secondary_constructor_is_rejected(source_text: &str, source: SourceId) {
+    use dotty_lexer::ContextualScanner;
+
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken),
+        "expected an unexpected-token diagnostic, got {:?}",
+        parsed.diagnostics
+    );
+}
+
+#[test]
+fn parsed_secondary_constructor_is_rejected_in_a_trait() {
+    assert_secondary_constructor_is_rejected(
+        "trait T { def this(x: Int) = this() }",
+        SourceId::from_index(58),
+    );
+}
+
+#[test]
+fn parsed_secondary_constructor_is_rejected_in_an_object() {
+    assert_secondary_constructor_is_rejected(
+        "object O { def this(x: Int) = this() }",
+        SourceId::from_index(59),
+    );
 }

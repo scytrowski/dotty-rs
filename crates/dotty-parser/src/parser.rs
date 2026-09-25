@@ -245,12 +245,16 @@ where
         result
     }
 
-    /// Runs a nested parse with class-like template member syntax enabled.
-    pub(crate) fn with_template_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
-        let previous = self.context.template_body;
-        self.context.template_body = true;
+    /// Runs a nested parse with the requested secondary-constructor policy.
+    pub(crate) fn with_secondary_constructor_allowed<T>(
+        &mut self,
+        allowed: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.context.secondary_constructor_allowed;
+        self.context.secondary_constructor_allowed = allowed;
         let result = parse(self);
-        self.context.template_body = previous;
+        self.context.secondary_constructor_allowed = previous;
         result
     }
 

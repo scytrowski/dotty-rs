@@ -51,11 +51,9 @@ where
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
 
         let result = self.with_placeholder_scope(|parser| {
-            parser.with_template_body(|parser| {
-                parser.with_location(Location::InBlock, |parser| {
-                    parser.with_block_end(Some(closing), |parser| {
-                        parser.parse_template_members(closing, body_indent)
-                    })
+            parser.with_location(Location::InBlock, |parser| {
+                parser.with_block_end(Some(closing), |parser| {
+                    parser.parse_template_members(closing, body_indent)
                 })
             })
         });
