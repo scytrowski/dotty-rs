@@ -387,24 +387,112 @@ impl Namer<'_> {
                         } else {
                             SymbolKind::Method
                         };
-                    let method = self.enter_symbol(
-                        member,
-                        *definition.name.as_name(),
-                        symbol,
-                        scope,
-                        SymbolSpec {
-                            kind,
-                            flags: SymbolFlags::EMPTY,
-                            visibility: Visibility::Public,
-                        },
-                    )?;
                     if kind == SymbolKind::Method {
-                        let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
-                        self.index.record_scope(method, method_scope)?;
+                        self.enter_method(member, &definition, symbol, scope)?;
+                    } else {
+                        self.enter_symbol(
+                            member,
+                            *definition.name.as_name(),
+                            symbol,
+                            scope,
+                            SymbolSpec {
+                                kind,
+                                flags: SymbolFlags::EMPTY,
+                                visibility: Visibility::Public,
+                            },
+                        )?;
                     }
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    fn enter_method(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        owner: SymbolId,
+        class_scope: ScopeId,
+    ) -> Result<(), NamerError> {
+        let mut type_parameters = Vec::with_capacity(definition.type_params.len());
+        for parameter in &definition.type_params {
+            let TreeKind::TypeDef(parameter_definition) = &self.arena.get(*parameter).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter.index(),
+                    expected: "TypeDef method type parameter",
+                });
+            };
+            type_parameters.push((*parameter, *parameter_definition.name.as_name()));
+        }
+
+        let mut value_parameters = Vec::new();
+        for clause in &definition.value_param_clauses {
+            for parameter in clause {
+                let TreeKind::ValDef(parameter_definition) = &self.arena.get(*parameter).kind
+                else {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter.index(),
+                        expected: "ValDef method value parameter",
+                    });
+                };
+                if parameter_definition
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .any(|modifier| {
+                        matches!(modifier, Modifier::ParamAccessor | Modifier::PrivateLocal)
+                    })
+                {
+                    return Err(NamerError::MalformedAstShape {
+                        tree_index: parameter.index(),
+                        expected: "ordinary method ValDef without constructor-role metadata",
+                    });
+                }
+                value_parameters.push((*parameter, *parameter_definition.name.as_name()));
+            }
+        }
+
+        let method = self.enter_symbol(
+            tree,
+            *definition.name.as_name(),
+            owner,
+            class_scope,
+            SymbolSpec {
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+            },
+        )?;
+        let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
+        self.index.record_scope(method, method_scope)?;
+
+        for (parameter_tree, name) in type_parameters {
+            self.enter_symbol(
+                parameter_tree,
+                name,
+                method,
+                method_scope,
+                SymbolSpec {
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
+            )?;
+        }
+        for (parameter_tree, name) in value_parameters {
+            self.enter_symbol(
+                parameter_tree,
+                name,
+                method,
+                method_scope,
+                SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
+            )?;
         }
         Ok(())
     }
@@ -1580,6 +1668,136 @@ mod tests {
 
         assert_eq!(overloads, &[first_symbol, second_symbol]);
         assert_ne!(first_symbol, second_symbol);
+    }
+
+    #[test]
+    fn method_type_and_value_parameters_are_owned_and_scoped() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(34);
+        let type_parameter = type_parameter(&mut arena, &mut store, "A", None);
+        let first_value = value_parameter(&mut arena, &mut store, "x", vec![], None);
+        let second_value = value_parameter(&mut arena, &mut store, "y", vec![], None);
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "convert",
+            vec![type_parameter],
+            vec![vec![first_value], vec![second_value]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "methods", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 34, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["methods"]).unwrap();
+        let class_symbol = type_symbol(&mut store, package.scope, "C").unwrap();
+        let class_scope = index.scope_of(class_symbol).unwrap();
+        let method_symbol = term_symbol(&mut store, class_scope, "convert").unwrap();
+        let method_scope = index.scope_of(method_symbol).unwrap();
+        let type_symbol = type_symbol(&mut store, method_scope, "A").unwrap();
+        let x_symbol = term_symbol(&mut store, method_scope, "x").unwrap();
+        let y_symbol = term_symbol(&mut store, method_scope, "y").unwrap();
+
+        assert_eq!(
+            store.symbols.get(type_symbol).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(store.symbols.get(type_symbol).owner, Some(method_symbol));
+        assert_eq!(store.symbols.get(x_symbol).kind, SymbolKind::Parameter);
+        assert_eq!(store.symbols.get(y_symbol).kind, SymbolKind::Parameter);
+        assert_eq!(store.symbols.get(x_symbol).owner, Some(method_symbol));
+        assert_eq!(store.symbols.get(y_symbol).owner, Some(method_symbol));
+        assert_eq!(term_symbol(&mut store, class_scope, "x"), None);
+        assert_eq!(term_symbol(&mut store, class_scope, "y"), None);
+        assert_eq!(index.symbol_at(source, type_parameter), Some(type_symbol));
+        assert_eq!(index.symbol_at(source, first_value), Some(x_symbol));
+        assert_eq!(index.symbol_at(source, second_value), Some(y_symbol));
+    }
+
+    #[test]
+    fn method_with_a_non_type_type_parameter_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let malformed = ident(&mut arena, &mut store, "A");
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "convert",
+            vec![malformed],
+            vec![],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "methods", vec![class]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 35, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: malformed.index(),
+                expected: "TypeDef method type parameter",
+            }
+        );
+    }
+
+    #[test]
+    fn method_with_a_non_val_value_parameter_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let malformed = ident(&mut arena, &mut store, "x");
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "convert",
+            vec![],
+            vec![vec![malformed]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "methods", vec![class]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 36, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: malformed.index(),
+                expected: "ValDef method value parameter",
+            }
+        );
+    }
+
+    #[test]
+    fn method_constructor_role_marker_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let parameter = value_parameter(
+            &mut arena,
+            &mut store,
+            "x",
+            vec![Modifier::ParamAccessor],
+            None,
+        );
+        let method = method_definition(
+            &mut arena,
+            &mut store,
+            "convert",
+            vec![],
+            vec![vec![parameter]],
+            None,
+        );
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![method], None);
+        let root = package_with_stat(&mut arena, &mut store, "methods", vec![class]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 37, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: parameter.index(),
+                expected: "ordinary method ValDef without constructor-role metadata",
+            }
+        );
     }
 
     #[test]
