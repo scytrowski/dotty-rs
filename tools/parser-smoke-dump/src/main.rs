@@ -362,14 +362,35 @@ fn render_tree(
             {
                 fields.push("\"mutable\":true".to_owned());
             }
-            if is_value_definition_source(&source_text) {
-                fields.extend(render_definition_metadata(
-                    &definition.metadata,
-                    arena,
-                    names,
-                    source,
-                ));
+            let mut parameter_metadata = definition.metadata.clone();
+            // The normalized ValDef already exposes context-clause ownership
+            // through its `given` field; Scala's source-ordered modifier list
+            // does not repeat the synthetic Given flag for that parameter.
+            if parameter_metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Param)
+            {
+                parameter_metadata
+                    .modifiers
+                    .retain(|modifier| *modifier != dotty_core::ast::Modifier::Given);
             }
+            parameter_metadata.modifiers.retain(|modifier| {
+                modifier_keyword(*modifier)
+                    .is_some_and(|keyword| source_has_word(&source_text, keyword))
+            });
+            parameter_metadata.visibility = parameter_metadata.visibility.filter(|visibility| {
+                let keyword = match visibility {
+                    dotty_core::ast::VisibilitySyntax::Private { .. } => "private",
+                    dotty_core::ast::VisibilitySyntax::Protected { .. } => "protected",
+                };
+                source_has_word(&source_text, keyword)
+            });
+            fields.extend(render_definition_metadata(
+                &parameter_metadata,
+                arena,
+                names,
+                source,
+            ));
         }
         TreeKind::DefDef(definition) => {
             fields.push(format!(
@@ -664,10 +685,42 @@ fn render_definition_metadata(
     fields
 }
 
-fn is_value_definition_source(source: &str) -> bool {
+fn modifier_keyword(modifier: dotty_core::ast::Modifier) -> Option<&'static str> {
+    use dotty_core::ast::Modifier;
+    Some(match modifier {
+        Modifier::Abstract => "abstract",
+        Modifier::Final => "final",
+        Modifier::Sealed => "sealed",
+        Modifier::Case => "case",
+        Modifier::Var => "var",
+        Modifier::Update => "update",
+        Modifier::Implicit => "implicit",
+        Modifier::Given => "given",
+        Modifier::Impure => "impure",
+        Modifier::Lazy => "lazy",
+        Modifier::Override => "override",
+        Modifier::Inline => "inline",
+        Modifier::Transparent => "transparent",
+        Modifier::Opaque => "opaque",
+        Modifier::Open => "open",
+        Modifier::Infix => "infix",
+        Modifier::Tracked => "tracked",
+        Modifier::Into => "into",
+        Modifier::Extension => "extension",
+        Modifier::Erased => "erased",
+        Modifier::Trait
+        | Modifier::Enum
+        | Modifier::EnumCase
+        | Modifier::Param
+        | Modifier::ParamAccessor
+        | Modifier::PrivateLocal => return None,
+    })
+}
+
+fn source_has_word(source: &str, expected: &str) -> bool {
     source
         .split(|character: char| !character.is_ascii_alphabetic())
-        .any(|word| matches!(word, "val" | "var"))
+        .any(|word| word == expected)
 }
 
 fn is_type_definition_source(source: &str) -> bool {
