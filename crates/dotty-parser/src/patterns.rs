@@ -66,13 +66,16 @@ where
         let mut alternatives = vec![first];
         while self.current_text_is("|") {
             self.advance();
-            if !can_start_simple_pattern(self) {
+            let Some(operand_offset) = pattern_alternative_operand_offset(self) else {
                 self.report(
                     ParseDiagnosticKind::ExpectedPattern,
                     "expected a pattern after `|`",
                 );
                 alternatives.push(self.error_pattern(self.current_span()));
                 break;
+            };
+            if operand_offset > 0 {
+                self.consume_pattern_newlines();
             }
             let alternative = self.pattern1();
             alternatives.push(alternative);
@@ -300,6 +303,7 @@ where
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
+            TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
                 self.parse_literal(mark, Constant::Boolean(true))
@@ -600,17 +604,28 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
         || matches!(
             kind,
             TokenKind::StringLiteral
+                | TokenKind::CharLiteral
                 | TokenKind::Keyword(HardKeyword::True)
                 | TokenKind::Keyword(HardKeyword::False)
                 | TokenKind::Keyword(HardKeyword::Null)
                 | TokenKind::Keyword(HardKeyword::This)
                 | TokenKind::Keyword(HardKeyword::Super)
+                | TokenKind::Quote
                 | TokenKind::Punctuation(Punctuation::LeftParen)
         )
 }
 
-fn can_start_simple_pattern<S: TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
-    can_start_simple_pattern_at(parser, 0)
+fn pattern_alternative_operand_offset<S: TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> Option<usize> {
+    let mut offset = 0;
+    while matches!(
+        parser.cursor.lookahead(offset).kind,
+        TokenKind::Newline | TokenKind::Newlines
+    ) {
+        offset += 1;
+    }
+    can_start_simple_pattern_at(parser, offset).then_some(offset)
 }
 
 fn can_start_simple_pattern_at<S: TokenSource>(
@@ -633,6 +648,24 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Alternative, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode};
     use dotty_core::{NameInterner, Punctuation, TextRange};
+
+    #[test]
+    fn quoted_pattern_can_start_an_alternative_after_a_newline() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "|\n'{ $x }",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Quote, 2, 3),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+        parser.advance();
+
+        assert_eq!(pattern_alternative_operand_offset(&mut parser), Some(1));
+    }
 
     #[test]
     fn quoted_pattern_parses_simple_dollar_identifiers_as_splice_patterns() {
@@ -864,6 +897,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_character_literal_pattern_through_the_shared_literal_decoder() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "'B'",
+            vec![
+                token(TokenKind::CharLiteral, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: Constant::Char(66)
+            })
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 3).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn keeps_extractor_patterns_as_source_level_apply_trees() {
         let mut names = NameInterner::new();
         let parser = parser_for(
@@ -1033,6 +1092,39 @@ mod tests {
             TreeKind::Alternative(Alternative { ref alternatives })
                 if alternatives.len() == 2
         ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn continues_an_alternative_pattern_after_a_newline_following_pipe() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Left(x) |\nRight(x)",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 15, 16),
+                token(TokenKind::Identifier, 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(Alternative { ref alternatives }) if alternatives.len() == 2
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 18).unwrap()
+        );
         assert!(result.diagnostics.is_empty());
     }
 
