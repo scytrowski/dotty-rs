@@ -1,6 +1,6 @@
 use dotty_core::{
     HardKeyword, Packages, Punctuation, ScannerEvent, SemanticStore, SourceId, SourceText,
-    TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind,
+    TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName, Visibility,
 };
 use dotty_namer::name_compilation_unit;
 use dotty_parser::parse_compilation_unit;
@@ -76,6 +76,88 @@ fn an_empty_parsed_compilation_unit_maps_to_the_shared_root_package() {
     assert_ne!(store.checkpoint(), before);
     assert!(packages.get(&["<empty>"]).is_none());
     assert!(packages.is_empty());
+}
+
+#[test]
+fn a_backquoted_empty_package_identifier_is_not_the_synthetic_default_package() {
+    let source_text = "package `<empty>`";
+    let source = SourceId::from_index(10);
+    let mut store = SemanticStore::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        VecTokenSource {
+            tokens: vec![
+                token(TokenKind::Keyword(HardKeyword::Package), 0, 7),
+                token(TokenKind::BackquotedIdentifier, 8, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            index: 0,
+        },
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "QuotedPackage.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let named_package = packages.get(&["<empty>"]).unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+
+    assert_ne!(named_package.symbol, root_package.symbol);
+    assert_eq!(
+        index.symbol_at(source, parsed.root),
+        Some(named_package.symbol)
+    );
+}
+
+#[test]
+fn a_parsed_private_class_keeps_its_source_visibility() {
+    let source_text = "private class C";
+    let source = SourceId::from_index(11);
+    let mut store = SemanticStore::new();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        VecTokenSource {
+            tokens: vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Class), 8, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            index: 0,
+        },
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+
+    name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "PrivateClass.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let root_package = packages.get::<&str>(&[]).unwrap();
+    let class_name = TypeName::new(store.names.intern("C"));
+    let class = store
+        .scopes
+        .get(root_package.scope)
+        .lookup(class_name.as_name())
+        .unwrap();
+
+    assert_eq!(store.symbols.get(class).visibility, Visibility::Private);
 }
 
 fn token(kind: TokenKind, start: u32, end: u32) -> Token {

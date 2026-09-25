@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Modifier, Select};
+use dotty_core::ast::{Modifier, Select, VisibilitySyntax};
 use dotty_core::{
     AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, Symbol, SymbolFlags, SymbolId,
     SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, Untyped, Visibility,
@@ -25,6 +25,8 @@ pub enum NamerError {
         tree_index: u32,
         expected: &'static str,
     },
+    /// A source visibility form whose access boundary is not modeled yet.
+    UnsupportedVisibility { tree_index: u32 },
 }
 
 impl fmt::Display for NamerError {
@@ -57,6 +59,10 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} does not have expected shape: {expected}"
                 )
             }
+            Self::UnsupportedVisibility { tree_index } => write!(
+                f,
+                "tree {tree_index} has a qualified visibility the namer does not support"
+            ),
         }
     }
 }
@@ -88,17 +94,33 @@ pub fn name_compilation_unit(
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Result<SourceSemanticIndex, NamerError> {
-    let mut namer = Namer {
-        arena,
-        source,
-        _source_file_name: source_file_name,
-        store,
-        packages,
-        root,
-        index: SourceSemanticIndex::new(),
+    let checkpoint = store.checkpoint();
+    let package_mark = packages.mark();
+    let (result, scope_insertions) = {
+        let mut namer = Namer {
+            arena,
+            source,
+            _source_file_name: source_file_name,
+            store,
+            packages,
+            root,
+            index: SourceSemanticIndex::new(),
+            scope_insertions: Vec::new(),
+        };
+        let result = namer.index(root).map(|()| namer.index);
+        (result, namer.scope_insertions)
     };
-    namer.index(root)?;
-    Ok(namer.index)
+    match result {
+        Ok(index) => Ok(index),
+        Err(error) => {
+            for (scope, symbol) in scope_insertions.into_iter().rev() {
+                store.scopes.get_mut(scope).remove(symbol);
+            }
+            packages.roll_back_to(store, package_mark);
+            store.rollback_to(checkpoint);
+            Err(error)
+        }
+    }
 }
 
 struct Namer<'a> {
@@ -109,6 +131,7 @@ struct Namer<'a> {
     packages: &'a mut Packages,
     root: TreeId<Untyped>,
     index: SourceSemanticIndex,
+    scope_insertions: Vec<(ScopeId, SymbolId)>,
 }
 
 impl Namer<'_> {
@@ -209,7 +232,7 @@ impl Namer<'_> {
             owner: Some(owner_context.owner),
             kind,
             flags: SymbolFlags::EMPTY,
-            visibility: Visibility::Public,
+            visibility: self.class_visibility(tree, &definition.metadata.visibility)?,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
             annotations: Vec::new(),
@@ -220,6 +243,7 @@ impl Namer<'_> {
             .scopes
             .get_mut(owner_context.scope)
             .enter(name, symbol);
+        self.scope_insertions.push((owner_context.scope, symbol));
         self.index.record_symbol(self.source, tree, symbol)?;
 
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
@@ -240,8 +264,37 @@ impl Namer<'_> {
     fn is_empty_package_sentinel(&self, name: TreeId<Untyped>) -> bool {
         matches!(
             &self.arena.get(name).kind,
-            TreeKind::Ident(ident) if self.store.names.resolve(ident.name.text()) == "<empty>"
+            TreeKind::Ident(ident)
+                if !ident.backquoted && self.store.names.resolve(ident.name.text()) == "<empty>"
         )
+    }
+
+    fn class_visibility(
+        &self,
+        tree: TreeId<Untyped>,
+        visibility: &Option<VisibilitySyntax>,
+    ) -> Result<Visibility, NamerError> {
+        let supported_this_qualifier = |qualifier: Option<dotty_core::Name>| {
+            qualifier.is_some_and(|name| self.store.names.resolve(name.text()) == "this")
+        };
+        match visibility {
+            None => Ok(Visibility::Public),
+            Some(VisibilitySyntax::Private { qualifier })
+                if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
+            {
+                Ok(Visibility::Private)
+            }
+            Some(VisibilitySyntax::Protected { qualifier })
+                if qualifier.is_none() || supported_this_qualifier(*qualifier) =>
+            {
+                Ok(Visibility::Protected)
+            }
+            Some(VisibilitySyntax::Private { .. } | VisibilitySyntax::Protected { .. }) => {
+                Err(NamerError::UnsupportedVisibility {
+                    tree_index: tree.index(),
+                })
+            }
+        }
     }
 
     fn flatten_package_name(&self, tree: TreeId<Untyped>) -> Result<Vec<String>, NamerError> {
@@ -278,7 +331,8 @@ impl Namer<'_> {
 #[cfg(test)]
 mod tests {
     use dotty_core::ast::{
-        Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef, UntypedTemplateMetadata,
+        Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef,
+        UntypedTemplateMetadata, VisibilitySyntax,
     };
     use dotty_core::{
         AstArena, Packages, SemanticStore, SourceId, SourceSpan, Span, SymbolFlags, SymbolInfo,
@@ -297,6 +351,22 @@ mod tests {
             kind: TreeKind::Ident(Ident {
                 name: *dotty_core::TermName::new(name).as_name(),
                 backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        })
+    }
+
+    fn backquoted_ident(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        text: &str,
+    ) -> TreeId<Untyped> {
+        let name = store.names.intern(text);
+        arena.alloc(Tree {
+            kind: TreeKind::Ident(Ident {
+                name: *dotty_core::TermName::new(name).as_name(),
+                backquoted: true,
             }),
             position: None,
             ty: (),
@@ -341,6 +411,18 @@ mod tests {
         body: Vec<TreeId<Untyped>>,
         position: Option<SourceSpan>,
     ) -> TreeId<Untyped> {
+        class_definition_with_visibility(arena, store, name, modifiers, None, body, position)
+    }
+
+    fn class_definition_with_visibility(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        visibility: Option<VisibilitySyntax>,
+        body: Vec<TreeId<Untyped>>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
         let constructor = arena.alloc(Tree {
             kind: TreeKind::Literal(Literal {
                 value: dotty_core::Constant::Unit,
@@ -365,6 +447,7 @@ mod tests {
                 name: TypeName::new(name_id),
                 rhs: template,
                 metadata: Modifiers {
+                    visibility,
                     modifiers,
                     ..Modifiers::default()
                 },
@@ -459,6 +542,30 @@ mod tests {
         assert_eq!(
             store.symbols.get(root_package.symbol).origin,
             SymbolOrigin::Source(SourceId::from_index(1))
+        );
+    }
+
+    #[test]
+    fn quoted_empty_package_name_is_a_real_package_segment() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let quoted_name = backquoted_ident(&mut arena, &mut store, "<empty>");
+        let root = package(&mut arena, quoted_name, vec![]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 18, &mut store, &mut packages).unwrap();
+        let named_package = packages.get(&["<empty>"]).unwrap();
+
+        assert_ne!(named_package, packages.get::<&str>(&[]).unwrap());
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(18), root),
+            Some(named_package.symbol)
+        );
+        assert_eq!(
+            store
+                .names
+                .resolve(store.symbols.get(named_package.symbol).name.text()),
+            "<empty>"
         );
     }
 
@@ -598,6 +705,81 @@ mod tests {
             index.symbol_at(SourceId::from_index(11), class),
             Some(symbol)
         );
+    }
+
+    #[test]
+    fn private_class_visibility_is_preserved() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "PrivateClass",
+            vec![],
+            Some(VisibilitySyntax::Private { qualifier: None }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 19, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["visibility"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "PrivateClass").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn protected_class_visibility_is_preserved() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "ProtectedClass",
+            vec![],
+            Some(VisibilitySyntax::Protected { qualifier: None }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 20, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["visibility"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "ProtectedClass").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Protected);
+    }
+
+    #[test]
+    fn unsupported_qualified_class_visibility_is_rejected() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let qualifier_id = store.names.intern("outer");
+        let qualifier = *dotty_core::TermName::new(qualifier_id).as_name();
+        let class = class_definition_with_visibility(
+            &mut arena,
+            &mut store,
+            "QualifiedPrivate",
+            vec![],
+            Some(VisibilitySyntax::Private {
+                qualifier: Some(qualifier),
+            }),
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "visibility", vec![class]);
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 21, &mut store, &mut packages).unwrap_err(),
+            NamerError::UnsupportedVisibility {
+                tree_index: class.index()
+            }
+        );
+        assert!(packages.get(&["visibility"]).is_none());
     }
 
     #[test]
@@ -782,6 +964,51 @@ mod tests {
                 tree_index: name.index(),
                 expected: "Ident or qualified Select package name",
             }
+        );
+    }
+
+    #[test]
+    fn failed_indexing_rolls_back_packages_symbols_scopes_and_scope_entries() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        packages.enter(&mut store, SymbolOrigin::Builtin, &["existing"]);
+        let before = store.checkpoint();
+
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Leaked", vec![], vec![], None);
+        let nested_name = ident(&mut arena, &mut store, "created");
+        let nested_package = package(&mut arena, nested_name, vec![]);
+        let malformed_name = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let malformed_package = package(&mut arena, malformed_name, vec![]);
+        let root = package_with_stat(
+            &mut arena,
+            &mut store,
+            "existing",
+            vec![class, nested_package, malformed_package],
+        );
+        let existing = packages.get(&["existing"]).unwrap();
+
+        assert!(matches!(
+            name_package(&arena, root, 22, &mut store, &mut packages),
+            Err(NamerError::MalformedAstShape { .. })
+        ));
+
+        assert_eq!(store.checkpoint(), before);
+        assert_eq!(packages.get(&["existing"]).unwrap(), existing);
+        assert!(packages.get(&["existing", "created"]).is_none());
+        let leaked_name = TypeName::new(store.names.intern("Leaked"));
+        assert!(
+            store
+                .scopes
+                .get(existing.scope)
+                .lookup_all(leaked_name.as_name())
+                .is_empty()
         );
     }
 }
