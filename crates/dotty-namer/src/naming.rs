@@ -3,8 +3,10 @@
 use std::error::Error;
 use std::fmt;
 
+use dotty_core::ast::{Modifier, Select};
 use dotty_core::{
-    AstArena, Packages, ScopeId, SemanticStore, SourceId, SymbolId, TreeId, TreeKind, Untyped,
+    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, Symbol, SymbolFlags, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, Untyped, Visibility,
 };
 
 use crate::SourceSemanticIndex;
@@ -64,13 +66,12 @@ impl Error for NamerError {}
 /// Dynamic traversal state for naming declarations.
 ///
 /// This is intentionally local to a naming traversal and is never stored in
-/// [`SemanticStore`]. The first naming increment does not yet create owners
-/// or declaration scopes, so it does not construct a context value.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug)]
+/// [`SemanticStore`].
+#[derive(Clone, Debug)]
 struct NamingContext {
     owner: SymbolId,
     scope: ScopeId,
+    package_path: Vec<String>,
 }
 
 /// Runs the source naming pass for one parsed compilation unit.
@@ -90,9 +91,10 @@ pub fn name_compilation_unit(
     let mut namer = Namer {
         arena,
         source,
-        source_file_name,
+        _source_file_name: source_file_name,
         store,
         packages,
+        root,
         index: SourceSemanticIndex::new(),
     };
     namer.index(root)?;
@@ -102,66 +104,311 @@ pub fn name_compilation_unit(
 struct Namer<'a> {
     arena: &'a AstArena<Untyped>,
     source: SourceId,
-    source_file_name: &'a str,
+    _source_file_name: &'a str,
     store: &'a mut SemanticStore,
     packages: &'a mut Packages,
+    root: TreeId<Untyped>,
     index: SourceSemanticIndex,
 }
 
 impl Namer<'_> {
     fn index(&mut self, tree: TreeId<Untyped>) -> Result<(), NamerError> {
-        self.expand(tree)
+        self.expand(tree, &[], true)
     }
 
     /// Desugaring hook. It is a no-op until source constructs need expansion.
-    fn expand(&mut self, tree: TreeId<Untyped>) -> Result<(), NamerError> {
-        self.index_expanded(tree)
+    fn expand(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enclosing_package: &[String],
+        source_root: bool,
+    ) -> Result<(), NamerError> {
+        self.index_expanded(tree, enclosing_package, source_root)
     }
 
-    fn index_expanded(&mut self, tree: TreeId<Untyped>) -> Result<(), NamerError> {
-        if !matches!(self.arena.get(tree).kind, TreeKind::PackageDef(_)) {
-            return Err(NamerError::RootIsNotPackage {
+    fn index_expanded(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enclosing_package: &[String],
+        source_root: bool,
+    ) -> Result<(), NamerError> {
+        let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
+            if tree == self.root {
+                return Err(NamerError::RootIsNotPackage {
+                    tree_index: tree.index(),
+                });
+            }
+            return Ok(());
+        };
+
+        let package = package.clone();
+        let segments = if source_root && self.is_empty_package_sentinel(package.name) {
+            Vec::new()
+        } else {
+            self.flatten_package_name(package.name)?
+        };
+        let mut package_path = enclosing_package.to_vec();
+        package_path.extend(segments);
+
+        let entered =
+            self.packages
+                .enter(self.store, SymbolOrigin::Source(self.source), &package_path);
+        let Some(leaf) = entered.last().copied() else {
+            return Err(NamerError::MalformedAstShape {
                 tree_index: tree.index(),
+                expected: "package registry path result",
             });
+        };
+        self.index.record_symbol(self.source, tree, leaf.symbol)?;
+        self.index.record_scope(leaf.symbol, leaf.scope)?;
+
+        let context = NamingContext {
+            owner: leaf.symbol,
+            scope: leaf.scope,
+            package_path,
+        };
+        for stat in package.stats {
+            match self.arena.get(stat).kind {
+                TreeKind::PackageDef(_) => {
+                    self.expand(stat, &context.package_path, false)?;
+                }
+                TreeKind::TypeDef(_) => self.enter_class_or_trait(stat, &context)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn enter_class_or_trait(
+        &mut self,
+        tree: TreeId<Untyped>,
+        owner_context: &NamingContext,
+    ) -> Result<(), NamerError> {
+        let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
+            return Ok(());
+        };
+        let definition = definition.clone();
+        let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
+            return Ok(());
+        };
+        let body = template.body.clone();
+        // Enum identity has its own later naming step. Never misclassify it
+        // as a class while that step remains out of scope.
+        if definition.metadata.modifiers.contains(&Modifier::Enum) {
+            return Ok(());
         }
 
-        // Keep the full entry state available to subsequent naming routines.
-        // None of it is persisted in SemanticStore in this foundation pass.
-        let _ = (
-            self.source,
-            self.source_file_name,
-            &mut self.store,
-            &mut self.packages,
-        );
+        let name = *definition.name.as_name();
+        let kind = if definition.metadata.modifiers.contains(&Modifier::Trait) {
+            SymbolKind::Trait
+        } else {
+            SymbolKind::Class
+        };
+        let symbol = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(owner_context.owner),
+            kind,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: self.arena.get(tree).position,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_context.scope)
+            .enter(name, symbol);
+        self.index.record_symbol(self.source, tree, symbol)?;
+
+        let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
+        self.index.record_scope(symbol, scope)?;
+        let class_context = NamingContext {
+            owner: symbol,
+            scope,
+            package_path: owner_context.package_path.clone(),
+        };
+        for member in body {
+            if matches!(self.arena.get(member).kind, TreeKind::TypeDef(_)) {
+                self.enter_class_or_trait(member, &class_context)?;
+            }
+        }
         Ok(())
+    }
+
+    fn is_empty_package_sentinel(&self, name: TreeId<Untyped>) -> bool {
+        matches!(
+            &self.arena.get(name).kind,
+            TreeKind::Ident(ident) if self.store.names.resolve(ident.name.text()) == "<empty>"
+        )
+    }
+
+    fn flatten_package_name(&self, tree: TreeId<Untyped>) -> Result<Vec<String>, NamerError> {
+        let mut segments = Vec::new();
+        self.flatten_package_name_into(tree, &mut segments)?;
+        Ok(segments)
+    }
+
+    fn flatten_package_name_into(
+        &self,
+        tree: TreeId<Untyped>,
+        segments: &mut Vec<String>,
+    ) -> Result<(), NamerError> {
+        match &self.arena.get(tree).kind {
+            TreeKind::Ident(ident) => {
+                segments.push(self.store.names.resolve(ident.name.text()).to_owned());
+                Ok(())
+            }
+            TreeKind::Select(Select {
+                qualifier, name, ..
+            }) => {
+                self.flatten_package_name_into(*qualifier, segments)?;
+                segments.push(self.store.names.resolve(name.text()).to_owned());
+                Ok(())
+            }
+            _ => Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "Ident or qualified Select package name",
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use dotty_core::ast::{Ident, Literal, PackageDef};
-    use dotty_core::{AstArena, Packages, SemanticStore, SourceId, Tree, TreeKind, Untyped};
+    use dotty_core::ast::{
+        Ident, Literal, Modifier, Modifiers, PackageDef, Template, TypeDef, UntypedTemplateMetadata,
+    };
+    use dotty_core::{
+        AstArena, Packages, SemanticStore, SourceId, SourceSpan, Span, SymbolFlags, SymbolInfo,
+        SymbolKind, SymbolOrigin, TextRange, Tree, TreeKind, TypeName, Untyped, Visibility,
+    };
 
     use super::*;
 
-    fn package_root(arena: &mut AstArena<Untyped>, store: &mut SemanticStore) -> TreeId<Untyped> {
-        let name_id = store.names.intern("<empty>");
-        let name = arena.alloc(Tree {
+    fn ident(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        text: &str,
+    ) -> TreeId<Untyped> {
+        let name = store.names.intern(text);
+        arena.alloc(Tree {
             kind: TreeKind::Ident(Ident {
-                name: *dotty_core::TermName::new(name_id).as_name(),
+                name: *dotty_core::TermName::new(name).as_name(),
                 backquoted: false,
             }),
             position: None,
             ty: (),
-        });
+        })
+    }
+
+    fn select(
+        arena: &mut AstArena<Untyped>,
+        qualifier: TreeId<Untyped>,
+        store: &mut SemanticStore,
+        text: &str,
+    ) -> TreeId<Untyped> {
+        let name = store.names.intern(text);
         arena.alloc(Tree {
-            kind: TreeKind::PackageDef(PackageDef {
-                name,
-                stats: vec![],
+            kind: TreeKind::Select(Select {
+                qualifier,
+                name: *dotty_core::TermName::new(name).as_name(),
+                backquoted: false,
             }),
             position: None,
             ty: (),
         })
+    }
+
+    fn package(
+        arena: &mut AstArena<Untyped>,
+        name: TreeId<Untyped>,
+        stats: Vec<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        arena.alloc(Tree {
+            kind: TreeKind::PackageDef(PackageDef { name, stats }),
+            position: None,
+            ty: (),
+        })
+    }
+
+    fn class_definition(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        name: &str,
+        modifiers: Vec<Modifier>,
+        body: Vec<TreeId<Untyped>>,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Untyped> {
+        let constructor = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let template = arena.alloc(Tree {
+            kind: TreeKind::Template(Template {
+                constructor,
+                parents: vec![],
+                self_val: None,
+                body,
+                metadata: UntypedTemplateMetadata::default(),
+            }),
+            position: None,
+            ty: (),
+        });
+        let name_id = store.names.intern(name);
+        arena.alloc(Tree {
+            kind: TreeKind::TypeDef(TypeDef {
+                name: TypeName::new(name_id),
+                rhs: template,
+                metadata: Modifiers {
+                    modifiers,
+                    ..Modifiers::default()
+                },
+                variance: None,
+            }),
+            position,
+            ty: (),
+        })
+    }
+
+    fn package_with_stat(
+        arena: &mut AstArena<Untyped>,
+        store: &mut SemanticStore,
+        segment: &str,
+        stats: Vec<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        let name = ident(arena, store, segment);
+        package(arena, name, stats)
+    }
+
+    fn type_symbol(
+        store: &mut SemanticStore,
+        scope: dotty_core::ScopeId,
+        text: &str,
+    ) -> Option<SymbolId> {
+        let name = TypeName::new(store.names.intern(text));
+        store.scopes.get(scope).lookup(name.as_name())
+    }
+
+    fn name_package(
+        arena: &AstArena<Untyped>,
+        root: TreeId<Untyped>,
+        source: u32,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+    ) -> Result<SourceSemanticIndex, NamerError> {
+        name_compilation_unit(
+            arena,
+            root,
+            SourceId::from_index(source),
+            "Example.scala",
+            store,
+            packages,
+        )
     }
 
     #[test]
@@ -174,39 +421,367 @@ mod tests {
             position: None,
             ty: (),
         });
-        let error = name_compilation_unit(
-            &arena,
-            root,
-            SourceId::from_index(1),
-            "Bad.scala",
-            &mut SemanticStore::new(),
-            &mut Packages::new(),
-        )
-        .unwrap_err();
 
-        assert_eq!(error, NamerError::RootIsNotPackage { tree_index: 0 });
+        assert_eq!(
+            name_compilation_unit(
+                &arena,
+                root,
+                SourceId::from_index(1),
+                "Bad.scala",
+                &mut SemanticStore::new(),
+                &mut Packages::new(),
+            )
+            .unwrap_err(),
+            NamerError::RootIsNotPackage { tree_index: 0 }
+        );
     }
 
     #[test]
-    fn empty_package_root_creates_no_symbols_or_scopes() {
-        let mut arena = AstArena::<Untyped>::new();
+    fn synthetic_empty_package_uses_root_and_never_creates_an_empty_segment() {
         let mut store = SemanticStore::new();
-        let root = package_root(&mut arena, &mut store);
-        let before = store.checkpoint();
+        let mut arena = AstArena::<Untyped>::new();
+        let sentinel = ident(&mut arena, &mut store, "<empty>");
+        let root = package(&mut arena, sentinel, vec![]);
         let mut packages = Packages::new();
 
-        let index = name_compilation_unit(
-            &arena,
-            root,
-            SourceId::from_index(1),
-            "Foo.scala",
-            &mut store,
-            &mut packages,
-        )
-        .expect("empty package should be accepted");
+        let index = name_package(&arena, root, 1, &mut store, &mut packages).unwrap();
+        let root_package = packages.get::<&str>(&[]).unwrap();
 
-        assert!(index.symbol_at(SourceId::from_index(1), root).is_none());
-        assert_eq!(store.checkpoint(), before);
-        assert_eq!(packages.len(), 0);
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(1), root),
+            Some(root_package.symbol)
+        );
+        assert_eq!(
+            index.scope_of(root_package.symbol),
+            Some(root_package.scope)
+        );
+        assert!(packages.get(&["<empty>"]).is_none());
+        assert_eq!(
+            store.symbols.get(root_package.symbol).origin,
+            SymbolOrigin::Source(SourceId::from_index(1))
+        );
+    }
+
+    #[test]
+    fn qualified_package_name_enters_each_segment_and_maps_the_leaf() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let foo = ident(&mut arena, &mut store, "foo");
+        let bar = select(&mut arena, foo, &mut store, "bar");
+        let baz = select(&mut arena, bar, &mut store, "baz");
+        let root = package(&mut arena, baz, vec![]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 2, &mut store, &mut packages).unwrap();
+        let leaf = packages.get(&["foo", "bar", "baz"]).unwrap();
+
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(2), root),
+            Some(leaf.symbol)
+        );
+        assert_eq!(index.scope_of(leaf.symbol), Some(leaf.scope));
+        assert!(packages.get(&["foo"]).is_some());
+        assert!(packages.get(&["foo", "bar"]).is_some());
+    }
+
+    #[test]
+    fn nested_package_clauses_are_relative_to_the_enclosing_package() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let foo_name = ident(&mut arena, &mut store, "foo");
+        let bar_name = ident(&mut arena, &mut store, "bar");
+        let nested = package(&mut arena, bar_name, vec![]);
+        let root = package(&mut arena, foo_name, vec![nested]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 3, &mut store, &mut packages).unwrap();
+        let foo = packages.get(&["foo"]).unwrap();
+        let foo_bar = packages.get(&["foo", "bar"]).unwrap();
+
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(3), root),
+            Some(foo.symbol)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(3), nested),
+            Some(foo_bar.symbol)
+        );
+        assert_eq!(store.symbols.owner(foo_bar.symbol), Some(foo.symbol));
+    }
+
+    #[test]
+    fn separate_source_units_reuse_the_same_package_symbol_and_scope() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+
+        let mut first_arena = AstArena::<Untyped>::new();
+        let first_name = ident(&mut first_arena, &mut store, "shared");
+        let first_root = package(&mut first_arena, first_name, vec![]);
+        let first = name_package(&first_arena, first_root, 4, &mut store, &mut packages).unwrap();
+
+        let mut second_arena = AstArena::<Untyped>::new();
+        let second_name = ident(&mut second_arena, &mut store, "shared");
+        let second_root = package(&mut second_arena, second_name, vec![]);
+        let second =
+            name_package(&second_arena, second_root, 5, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["shared"]).unwrap();
+
+        assert_eq!(
+            first.symbol_at(SourceId::from_index(4), first_root),
+            Some(package.symbol)
+        );
+        assert_eq!(
+            second.symbol_at(SourceId::from_index(5), second_root),
+            Some(package.symbol)
+        );
+        assert_eq!(first.scope_of(package.symbol), Some(package.scope));
+        assert_eq!(second.scope_of(package.symbol), Some(package.scope));
+    }
+
+    #[test]
+    fn repeated_package_path_in_one_source_reuses_the_registered_scope() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let outer_name = ident(&mut arena, &mut store, "outer");
+        let first_inner_name = ident(&mut arena, &mut store, "inner");
+        let second_inner_name = ident(&mut arena, &mut store, "inner");
+        let first_inner = package(&mut arena, first_inner_name, vec![]);
+        let second_inner = package(&mut arena, second_inner_name, vec![]);
+        let root = package(&mut arena, outer_name, vec![first_inner, second_inner]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 10, &mut store, &mut packages).unwrap();
+        let inner = packages.get(&["outer", "inner"]).unwrap();
+
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(10), first_inner),
+            Some(inner.symbol)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(10), second_inner),
+            Some(inner.symbol)
+        );
+        assert_eq!(index.scope_of(inner.symbol), Some(inner.scope));
+    }
+
+    #[test]
+    fn package_created_by_another_adapter_keeps_its_existing_origin() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let prior_origin = SymbolOrigin::Builtin;
+        packages.enter(&mut store, prior_origin, &["existing"]);
+
+        let mut arena = AstArena::<Untyped>::new();
+        let name = ident(&mut arena, &mut store, "existing");
+        let root = package(&mut arena, name, vec![]);
+        let _index = name_package(&arena, root, 6, &mut store, &mut packages).unwrap();
+        let package = packages.get(&["existing"]).unwrap();
+
+        assert_eq!(store.symbols.get(package.symbol).origin, prior_origin);
+    }
+
+    #[test]
+    fn class_in_a_named_package_is_entered_in_the_package_scope() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "C", vec![], vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "foo", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 11, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["foo"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "C").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+        assert_eq!(store.symbols.get(symbol).owner, Some(owner.symbol));
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(11), class),
+            Some(symbol)
+        );
+    }
+
+    #[test]
+    fn trait_marker_selects_trait_kind() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let trait_tree = class_definition(
+            &mut arena,
+            &mut store,
+            "Showable",
+            vec![Modifier::Trait],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "traits", vec![trait_tree]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 12, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["traits"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Showable").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Trait);
+    }
+
+    #[test]
+    fn case_class_remains_class_kind() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(
+            &mut arena,
+            &mut store,
+            "Point",
+            vec![Modifier::Case],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "geometry", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 13, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["geometry"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Point").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn nested_class_and_trait_are_owned_by_the_enclosing_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let nested_class = class_definition(&mut arena, &mut store, "Nested", vec![], vec![], None);
+        let nested_trait = class_definition(
+            &mut arena,
+            &mut store,
+            "NestedTrait",
+            vec![Modifier::Trait],
+            vec![],
+            None,
+        );
+        let outer = class_definition(
+            &mut arena,
+            &mut store,
+            "Outer",
+            vec![],
+            vec![nested_class, nested_trait],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "nesting", vec![outer]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 14, &mut store, &mut packages).unwrap();
+        let package_owner = packages.get(&["nesting"]).unwrap();
+        let outer_symbol = type_symbol(&mut store, package_owner.scope, "Outer").unwrap();
+        let outer_scope = index.scope_of(outer_symbol).unwrap();
+        let nested_symbol = type_symbol(&mut store, outer_scope, "Nested").unwrap();
+        let nested_trait_symbol = type_symbol(&mut store, outer_scope, "NestedTrait").unwrap();
+
+        assert_eq!(store.symbols.get(nested_symbol).owner, Some(outer_symbol));
+        assert_eq!(
+            store.symbols.get(nested_trait_symbol).owner,
+            Some(outer_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(nested_trait_symbol).kind,
+            SymbolKind::Trait
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(14), nested_class),
+            Some(nested_symbol)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(14), nested_trait),
+            Some(nested_trait_symbol)
+        );
+    }
+
+    #[test]
+    fn class_scope_belongs_to_class_and_symbol_stays_incomplete() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let class = class_definition(&mut arena, &mut store, "Incomplete", vec![], vec![], None);
+        let root = package_with_stat(&mut arena, &mut store, "scopecheck", vec![class]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 15, &mut store, &mut packages).unwrap();
+        let package_owner = packages.get(&["scopecheck"]).unwrap();
+        let symbol = type_symbol(&mut store, package_owner.scope, "Incomplete").unwrap();
+        let scope = index.scope_of(symbol).unwrap();
+
+        assert_eq!(store.scopes.get(scope).owner, Some(symbol));
+        assert_eq!(store.symbols.get(symbol).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(symbol).flags, SymbolFlags::EMPTY);
+        assert_eq!(store.symbols.get(symbol).visibility, Visibility::Public);
+        assert_eq!(
+            store.symbols.get(symbol).origin,
+            SymbolOrigin::Source(SourceId::from_index(15))
+        );
+    }
+
+    #[test]
+    fn class_source_position_is_preserved() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let source = SourceId::from_index(16);
+        let range = TextRange::new(20, 35).unwrap();
+        let position = Some(SourceSpan::new(source, Span::without_point(range)));
+        let class = class_definition(&mut arena, &mut store, "Located", vec![], vec![], position);
+        let root = package_with_stat(&mut arena, &mut store, "positions", vec![class]);
+        let mut packages = Packages::new();
+
+        name_package(&arena, root, 16, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["positions"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Located").unwrap();
+
+        assert_eq!(store.symbols.get(symbol).position, position);
+    }
+
+    #[test]
+    fn enum_template_is_not_entered_as_an_ordinary_class() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let enumeration = class_definition(
+            &mut arena,
+            &mut store,
+            "Color",
+            vec![Modifier::Enum],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "enums", vec![enumeration]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 17, &mut store, &mut packages).unwrap();
+        let owner = packages.get(&["enums"]).unwrap();
+
+        assert_eq!(type_symbol(&mut store, owner.scope, "Color"), None);
+        assert_eq!(index.symbol_at(SourceId::from_index(17), enumeration), None);
+    }
+
+    #[test]
+    fn malformed_package_name_shape_is_rejected() {
+        let mut arena = AstArena::<Untyped>::new();
+        let name = arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: dotty_core::Constant::Unit,
+            }),
+            position: None,
+            ty: (),
+        });
+        let root = package(&mut arena, name, vec![]);
+
+        assert_eq!(
+            name_package(
+                &arena,
+                root,
+                7,
+                &mut SemanticStore::new(),
+                &mut Packages::new(),
+            )
+            .unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: name.index(),
+                expected: "Ident or qualified Select package name",
+            }
+        );
     }
 }
