@@ -80,6 +80,13 @@ struct NamingContext {
     package_path: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+struct SymbolSpec {
+    kind: SymbolKind,
+    flags: SymbolFlags,
+    visibility: Visibility,
+}
+
 /// Runs the source naming pass for one parsed compilation unit.
 ///
 /// The pass enters or reuses package symbols and scopes, then enters symbols
@@ -305,11 +312,12 @@ impl Namer<'_> {
                 *tree,
                 *parameter.name.as_name(),
                 symbol,
-                SymbolKind::TypeParameter,
-                SymbolFlags::EMPTY,
-                Visibility::Public,
                 scope,
-                true,
+                SymbolSpec {
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
             )?;
         }
         for (tree, parameter) in value_parameters {
@@ -321,30 +329,34 @@ impl Namer<'_> {
                 tree,
                 *parameter.name.as_name(),
                 symbol,
-                if private_local {
-                    SymbolKind::Parameter
-                } else {
-                    SymbolKind::Field
-                },
-                if !private_local && parameter.metadata.modifiers.contains(&Modifier::Var) {
-                    SymbolFlags::MUTABLE
-                } else {
-                    SymbolFlags::EMPTY
-                },
-                self.class_visibility(tree, &parameter.metadata.visibility)?,
                 scope,
-                true,
+                SymbolSpec {
+                    kind: if private_local {
+                        SymbolKind::Parameter
+                    } else {
+                        SymbolKind::Field
+                    },
+                    flags: if !private_local
+                        && parameter.metadata.modifiers.contains(&Modifier::Var)
+                    {
+                        SymbolFlags::MUTABLE
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
+                    visibility: self.class_visibility(tree, &parameter.metadata.visibility)?,
+                },
             )?;
         }
         self.enter_symbol(
             template.constructor,
             *constructor.name.as_name(),
             symbol,
-            SymbolKind::Constructor,
-            SymbolFlags::EMPTY,
-            Visibility::Public,
             scope,
-            true,
+            SymbolSpec {
+                kind: SymbolKind::Constructor,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+            },
         )?;
 
         for member in template.body {
@@ -376,27 +388,22 @@ impl Namer<'_> {
         tree: TreeId<Untyped>,
         name: dotty_core::Name,
         owner: SymbolId,
-        kind: SymbolKind,
-        flags: SymbolFlags,
-        visibility: Visibility,
         scope: ScopeId,
-        enter_in_scope: bool,
+        spec: SymbolSpec,
     ) -> Result<SymbolId, NamerError> {
         let symbol = self.store.symbols.alloc(Symbol {
             name,
             owner: Some(owner),
-            kind,
-            flags,
-            visibility,
+            kind: spec.kind,
+            flags: spec.flags,
+            visibility: spec.visibility,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
             annotations: Vec::new(),
             position: self.arena.get(tree).position,
             links: SymbolLinks::default(),
         });
-        if enter_in_scope {
-            self.store.scopes.get_mut(scope).enter(name, symbol);
-        }
+        self.store.scopes.get_mut(scope).enter(name, symbol);
         self.index.record_symbol(self.source, tree, symbol)?;
         Ok(symbol)
     }
