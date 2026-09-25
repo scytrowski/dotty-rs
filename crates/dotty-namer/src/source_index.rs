@@ -123,12 +123,15 @@ impl SourceSemanticIndex {
 
     /// Returns an immutable source context owned by this index.
     ///
-    /// Passing an ID from another index, or an out-of-range ID, is an
-    /// internal arena invariant violation and panics, like other arena IDs.
+    /// An out-of-range ID is an internal arena invariant violation and
+    /// panics, like other arena IDs. IDs are index-relative and do not carry
+    /// their originating index, so passing an ID from another index that has
+    /// the same numeric slot accesses this index's context at that slot; that
+    /// is a caller logic error and cannot be detected here.
     pub fn source_context(&self, id: SourceContextId) -> &SourceContext {
         self.source_contexts
             .get(id.index() as usize)
-            .expect("SourceContextId must belong to this SourceSemanticIndex")
+            .expect("SourceContextId must be in range for this SourceSemanticIndex")
     }
 
     /// Returns the source declaration context recorded for `symbol`.
@@ -306,8 +309,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SourceContextId must belong to this SourceSemanticIndex")]
-    fn looking_up_a_context_from_another_index_is_an_internal_invariant_violation() {
+    #[should_panic(expected = "SourceContextId must be in range for this SourceSemanticIndex")]
+    fn looking_up_an_out_of_range_context_is_an_internal_invariant_violation() {
         let index = SourceSemanticIndex::new();
         let _ = index.source_context(SourceContextId(0));
     }
