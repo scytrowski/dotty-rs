@@ -1,5 +1,6 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, New, Parens, Select, Super, This, Tuple, UntypedNode, ValDef,
+    Apply, ApplyKind, Block, Ident, New, Parens, Quote, Select, Super, This, Tuple, UntypedNode,
+    ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -72,9 +73,72 @@ where
             }
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
+            TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
             _ => self.unexpected_expression(),
+        }
+    }
+
+    fn parse_quote(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        match self.current().kind {
+            TokenKind::Punctuation(Punctuation::LeftBrace) => {
+                let body_mark = self.mark();
+                self.advance();
+                let (stats, expr) = self
+                    .parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+                if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected `}` to close quoted expression",
+                    );
+                }
+                let body = if stats.is_empty() {
+                    expr
+                } else {
+                    self.alloc_from(body_mark, TreeKind::Block(Block { stats, expr }))
+                };
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
+            TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                self.advance();
+                let body =
+                    self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr());
+                if !self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected `]` to close quoted type",
+                    );
+                }
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
+            _ => {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `{` or `[` after quote marker",
+                );
+                let body = self.error_expr(self.current_span());
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
         }
     }
 

@@ -80,6 +80,68 @@ fn expression_entry_preserves_operator_expression_behavior() {
 }
 
 #[test]
+fn parses_a_quoted_expression_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ x }",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected expression quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 6).unwrap()
+    );
+}
+
+#[test]
+fn parses_a_quoted_type_with_the_type_grammar() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[T]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 4).unwrap()
+    );
+}
+
+#[test]
 fn parses_if_with_then_and_else() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

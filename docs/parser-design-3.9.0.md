@@ -113,9 +113,10 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `do ... while`, `quote`, and
-XML syntax produce an `UnsupportedSyntax` diagnostic and a recoverable error
-tree instead of a panic.
+Valid but not yet implemented constructs such as `do ... while` and XML syntax
+produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
+of a panic. Scala 3 quotes are parsed by the expression and type grammar
+described below.
 
 ## AST root and current grammar
 
@@ -178,6 +179,7 @@ integer, long, decimal, exponent, float, and double literals
 string literals and interpolated strings with simple or braced splices
 true, false, null, this
 (expr), (), and (a, b, ...)
+'{ expr } and '[Type] quotes
 simple selections such as foo.bar and foo.`bar`
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
