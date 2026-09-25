@@ -259,13 +259,6 @@ where
     }
 
     fn parse_wildcard_selector(&mut self) -> ImportSelector<Untyped> {
-        let legacy = self.current_is_legacy_wildcard();
-        if legacy {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "`_` is no longer supported for a wildcard import/export; use `*` instead",
-            );
-        }
         let imported = self.names.intern("*");
         self.advance();
         ImportSelector {
@@ -509,6 +502,118 @@ mod tests {
         };
         let imported = import.selectors[0].imported;
         assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "*");
+    }
+
+    #[test]
+    fn accepts_a_legacy_unbraced_wildcard_import() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import p._",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Dot), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an import tree");
+        };
+        assert_eq!(import.selectors.len(), 1);
+        let imported = import.selectors[0].imported;
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "*");
+    }
+
+    #[test]
+    fn accepts_a_legacy_braced_wildcard_import() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import p.{_}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Dot), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an import tree");
+        };
+        assert_eq!(import.selectors.len(), 1);
+        let imported = import.selectors[0].imported;
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "*");
+    }
+
+    #[test]
+    fn accepts_a_legacy_unbraced_wildcard_export() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "export p._",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Export), 0, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Dot), 8, 9),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_export_clause(Location::Elsewhere);
+        let TreeKind::Export(export) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an export tree");
+        };
+        assert_eq!(export.selectors.len(), 1);
+        let imported = export.selectors[0].imported;
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(imported.text()), "*");
+    }
+
+    #[test]
+    fn accepts_a_legacy_braced_wildcard_export() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "export p.{_}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Export), 0, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Dot), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_export_clause(Location::Elsewhere);
+        let TreeKind::Export(export) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an export tree");
+        };
+        assert_eq!(export.selectors.len(), 1);
+        let imported = export.selectors[0].imported;
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         drop(parser);
         assert_eq!(names.resolve(imported.text()), "*");
     }
