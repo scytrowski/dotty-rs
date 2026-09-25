@@ -66,13 +66,16 @@ where
         let mut alternatives = vec![first];
         while self.current_text_is("|") {
             self.advance();
-            if !can_start_simple_pattern(self) {
+            let Some(operand_offset) = pattern_alternative_operand_offset(self) else {
                 self.report(
                     ParseDiagnosticKind::ExpectedPattern,
                     "expected a pattern after `|`",
                 );
                 alternatives.push(self.error_pattern(self.current_span()));
                 break;
+            };
+            if operand_offset > 0 {
+                self.consume_pattern_newlines();
             }
             let alternative = self.pattern1();
             alternatives.push(alternative);
@@ -611,8 +614,17 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
         )
 }
 
-fn can_start_simple_pattern<S: TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
-    can_start_simple_pattern_at(parser, 0)
+fn pattern_alternative_operand_offset<S: TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+) -> Option<usize> {
+    let mut offset = 0;
+    while matches!(
+        parser.cursor.lookahead(offset).kind,
+        TokenKind::Newline | TokenKind::Newlines
+    ) {
+        offset += 1;
+    }
+    can_start_simple_pattern_at(parser, offset).then_some(offset)
 }
 
 fn can_start_simple_pattern_at<S: TokenSource>(
@@ -1065,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_missing_alternative_pattern_after_a_significant_newline() {
+    fn continues_an_alternative_pattern_after_a_newline_following_pipe() {
         let mut names = NameInterner::new();
         let parser = parser_for(
             "Left(x) |\nRight(x)",
@@ -1088,13 +1100,13 @@ mod tests {
 
         assert!(matches!(
             result.ast.get(result.root).kind,
-            TreeKind::Alternative(Alternative { ref alternatives })
-                if matches!(result.ast.get(alternatives[1]).kind, TreeKind::PhaseSpecific(UntypedNode::Error(_)))
+            TreeKind::Alternative(Alternative { ref alternatives }) if alternatives.len() == 2
         ));
-        assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern
-                && diagnostic.message() == "expected a pattern after `|`"
-        }));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 18).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]

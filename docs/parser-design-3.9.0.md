@@ -594,7 +594,9 @@ negative numbers,
 parentheses and tuples, syntactic selections including `this.member` and
 `super.member`, extractor-shaped `Apply`/`TypeApply` trees, `@` binders,
 simple typed patterns, precedence-aware infix patterns, `|` alternatives, and
-named extractor arguments. A trailing variable or wildcard followed by `*`
+named extractor arguments. In a case-clause context an alternative may
+continue on the line after `|` when the next token starts a pattern. A trailing
+variable or wildcard followed by `*`
 inside extractor arguments is represented as `Typed(pattern, Ident(_*))`,
 matching Dotty's parser tree; sequence markers elsewhere remain invalid.
 Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
