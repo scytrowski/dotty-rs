@@ -155,11 +155,14 @@ enum EnteredHeader {
 
 /// Runs the source naming pass for one parsed compilation unit.
 ///
-/// The pass enters or reuses package symbols and scopes, then enters symbols
-/// and declaration scopes for supported class and trait definitions. The
-/// returned index maps the package and class/trait trees to their semantic
-/// symbols and scopes. These symbols remain incomplete until later compiler
-/// phases provide their semantic information.
+/// The pass enters or reuses package symbols and scopes, partitions package
+/// declarations, and places supported top-level values, methods, aliases,
+/// pattern binders, and extension methods in synthetic source package
+/// wrappers. Ordinary classes and objects remain package members. The
+/// returned index maps supported source symbol-producing trees to their semantic symbols and
+/// scopes; synthetic wrapper identities have no source-tree mapping. These
+/// symbols remain incomplete until later compiler phases provide their
+/// semantic information.
 ///
 /// If indexing fails, package registrations, allocated store entries, and
 /// scope insertions made by this call are rolled back. The input keeps the
@@ -230,7 +233,8 @@ impl Namer<'_> {
         self.expand(tree, &[], true)
     }
 
-    /// Desugaring hook. It is a no-op until source constructs need expansion.
+    /// Source expansion hook. Package headers perform their stats partition
+    /// and create the synthetic wrapper before entering any declarations.
     fn expand(
         &mut self,
         tree: TreeId<Untyped>,
