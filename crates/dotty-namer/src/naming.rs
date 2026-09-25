@@ -109,6 +109,14 @@ enum EnteredHeader {
         symbol: SymbolId,
         scope: ScopeId,
     },
+    Field {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    },
+    TypeAlias {
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    },
 }
 
 /// Runs the source naming pass for one parsed compilation unit.
@@ -379,6 +387,10 @@ impl Namer<'_> {
                 symbol,
                 scope,
             } => return self.scan_constructor_parameters(tree, symbol, scope),
+            EnteredHeader::Field { tree, symbol } | EnteredHeader::TypeAlias { tree, symbol } => {
+                let _entered_identity = (tree, symbol);
+                return Ok(());
+            }
         };
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
@@ -484,7 +496,7 @@ impl Namer<'_> {
                             nested_headers.push(header);
                         }
                     } else {
-                        self.enter_symbol(
+                        let alias = self.enter_symbol(
                             *member,
                             *definition.name.as_name(),
                             symbol,
@@ -496,11 +508,15 @@ impl Namer<'_> {
                                     .source_visibility(*member, &definition.metadata.visibility)?,
                             },
                         )?;
+                        nested_headers.push(EnteredHeader::TypeAlias {
+                            tree: *member,
+                            symbol: alias,
+                        });
                     }
                 }
                 TreeKind::ValDef(definition) => {
                     let definition = definition.clone();
-                    self.enter_symbol(
+                    let field = self.enter_symbol(
                         *member,
                         *definition.name.as_name(),
                         symbol,
@@ -512,6 +528,10 @@ impl Namer<'_> {
                                 .source_visibility(*member, &definition.metadata.visibility)?,
                         },
                     )?;
+                    nested_headers.push(EnteredHeader::Field {
+                        tree: *member,
+                        symbol: field,
+                    });
                 }
                 TreeKind::DefDef(definition) => {
                     let definition = definition.clone();
