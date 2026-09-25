@@ -1,12 +1,13 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, New, Parens, Select, Super, This, Tuple, UntypedNode, ValDef,
+    Apply, ApplyKind, Block, Ident, New, Parens, Quote, Select, Super, This, Tuple, UntypedNode,
+    ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
 
 use crate::Parser;
-use crate::statements::StatementSequenceBoundary;
+use crate::statements::{ParsedStatement, StatementSequenceBoundary};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -22,6 +23,12 @@ where
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        if self.expression_quote_depth > 0
+            && (self.current_starts_braced_splice() || self.current_starts_simple_splice())
+        {
+            return self.parse_expression_splice(mark);
+        }
+
         if matches!(
             self.current().kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
@@ -72,10 +79,237 @@ where
             }
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
+            TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
             _ => self.unexpected_expression(),
         }
+    }
+
+    fn parse_quote(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        match self.current().kind {
+            TokenKind::Punctuation(Punctuation::LeftBrace) => {
+                self.advance();
+                let body_mark = self.mark();
+                self.expression_quote_depth += 1;
+                let (stats, expr) = self
+                    .parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+                self.expression_quote_depth -= 1;
+                let body = if stats.is_empty() {
+                    if self.is_synthetic_unit(expr) {
+                        self.alloc(
+                            TreeKind::Block(Block { stats, expr }),
+                            Some(self.zero_width_span(mark.start())),
+                        )
+                    } else {
+                        expr
+                    }
+                } else {
+                    let first = stats[0];
+                    let start = self
+                        .ast
+                        .get(first)
+                        .position
+                        .map(|position| position.span().range().start())
+                        .unwrap_or(body_mark.start());
+                    self.alloc_from(
+                        crate::Mark { start },
+                        TreeKind::Block(Block { stats, expr }),
+                    )
+                };
+                if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected `}` to close quoted expression",
+                    );
+                }
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
+            TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                self.advance();
+                self.type_quote_depth += 1;
+                let body = self.with_parse_kind(crate::ParseKind::Type, |parser| {
+                    parser.parse_type_quote_body()
+                });
+                self.type_quote_depth -= 1;
+                if !self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected `]` to close quoted type",
+                    );
+                }
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
+            _ => {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `{` or `[` after quote marker",
+                );
+                let body = self.error_expr(self.current_span());
+                self.alloc_from(
+                    mark,
+                    TreeKind::Quote(Quote {
+                        body,
+                        tags: Vec::new(),
+                    }),
+                )
+            }
+        }
+    }
+
+    /// Parses Dotty's `TypeBlock ::= { TypeBlockStat semi } Type` used by
+    /// quoted types. A type block with local aliases is represented by the
+    /// shared `Block` node, just like Dotty's source tree.
+    fn parse_type_quote_body(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut stats = Vec::new();
+
+        while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type) {
+            let checkpoint = self.cursor.checkpoint();
+            if let ParsedStatement::Definition(definition) =
+                self.parse_type_definition(crate::Location::InBlock)
+            {
+                stats.push(definition);
+            }
+
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+
+            let definition_end = stats
+                .last()
+                .and_then(|definition| self.ast.get(*definition).position)
+                .map(|position| position.span().range().end());
+            let mut consumed_separator = false;
+            while matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Punctuation(Punctuation::Semicolon)
+                    | TokenKind::Indent
+                    | TokenKind::Outdent
+            ) {
+                consumed_separator = true;
+                self.advance();
+            }
+
+            if !consumed_separator
+                && self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)
+                && let Some(definition_end) = definition_end
+            {
+                let separator_range =
+                    TextRange::new(definition_end, self.current().span.start()).ok();
+                consumed_separator = separator_range
+                    .and_then(|range| self.source.slice(range).ok())
+                    .is_some_and(|trivia| {
+                        trivia.contains('\n') || trivia.contains('\r') || trivia.contains(';')
+                    });
+            }
+
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)
+                && !consumed_separator
+            {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "expected a separator between quoted type definitions",
+                );
+                break;
+            }
+        }
+
+        let expr = self.type_expr();
+        if stats.is_empty() {
+            expr
+        } else {
+            self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        }
+    }
+
+    fn parse_expression_splice(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        if self.current_starts_simple_splice() {
+            let token = self.current().clone();
+            let spelling = self
+                .token_text(&token)
+                .ok()
+                .and_then(|text| text.strip_prefix('$'))
+                .map(str::to_owned);
+            let Some(spelling) = spelling else {
+                return self.unexpected_expression();
+            };
+            let name = self.names.intern(&spelling);
+            self.advance();
+            let expr = self.alloc_from(
+                crate::Mark {
+                    start: token.span.start() + 1,
+                },
+                TreeKind::Ident(Ident {
+                    name: *dotty_core::TermName::new(name).as_name(),
+                    backquoted: false,
+                }),
+            );
+            return self.alloc_from(mark, TreeKind::Splice(dotty_core::ast::Splice { expr }));
+        }
+
+        self.advance(); // `$`
+        self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
+        let body_mark = self.mark();
+        let (stats, expr) =
+            self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+        let body = if stats.is_empty() {
+            if self.is_synthetic_unit(expr) {
+                self.alloc(
+                    TreeKind::Block(Block { stats, expr }),
+                    Some(self.zero_width_span(mark.start())),
+                )
+            } else {
+                expr
+            }
+        } else {
+            let first = stats[0];
+            let start = self
+                .ast
+                .get(first)
+                .position
+                .map(|position| position.span().range().start())
+                .unwrap_or(body_mark.start());
+            self.alloc_from(
+                crate::Mark { start },
+                TreeKind::Block(Block { stats, expr }),
+            )
+        };
+        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `}` to close expression splice",
+            );
+        }
+        self.alloc_from(
+            mark,
+            TreeKind::Splice(dotty_core::ast::Splice { expr: body }),
+        )
+    }
+
+    fn is_synthetic_unit(&self, id: TreeId<Untyped>) -> bool {
+        matches!(
+            &self.ast.get(id).kind,
+            TreeKind::Literal(literal) if literal.value == Constant::Unit
+        ) && self.ast.get(id).position.is_some_and(|position| {
+            let range = position.span().range();
+            range.start() == range.end()
+        })
     }
 
     fn parse_placeholder(&mut self, mark: crate::Mark) -> TreeId<Untyped> {

@@ -681,6 +681,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::Select(_) => "Select",
         TreeKind::Apply(_) => "Apply",
         TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Quote(_) => "Quote",
+        TreeKind::Splice(_) => "Splice",
         TreeKind::PackageDef(_) => "PackageDef",
         TreeKind::Import(_) => "Import",
         TreeKind::Export(_) => "Export",
@@ -833,6 +835,8 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::Bind(bind) => vec![bind.body],
         TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
         TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],
+        TreeKind::Quote(quote) => vec![quote.body],
+        TreeKind::Splice(splice) => vec![splice.expr],
         TreeKind::Typed(typed) => vec![typed.expr, typed.tpt],
         TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
         TreeKind::If(if_tree) => {

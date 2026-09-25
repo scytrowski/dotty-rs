@@ -32,6 +32,12 @@ where
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
     pub(crate) defer_template_outdent_feedback: bool,
+    /// Active quoted expression bodies; `$` followed by `{` is a splice only
+    /// while this depth is nonzero.
+    pub(crate) expression_quote_depth: u32,
+    /// Active quoted type bodies; braced legacy type splices are diagnosed
+    /// while this depth is nonzero.
+    pub(crate) type_quote_depth: u32,
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -69,6 +75,8 @@ where
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
             defer_template_outdent_feedback: false,
+            expression_quote_depth: 0,
+            type_quote_depth: 0,
         }
     }
 
@@ -116,6 +124,21 @@ where
     /// Checks the current source spelling against a parser-known name.
     pub fn current_is_known_name(&mut self, expected: TermName) -> Result<bool, SourceTextError> {
         Ok(self.intern_current_term_name()? == expected)
+    }
+
+    pub(crate) fn current_starts_braced_splice(&mut self) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self.source.slice(self.current().span).ok() == Some("$")
+            && self.cursor.lookahead(1).kind
+                == TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace)
+    }
+
+    pub(crate) fn current_starts_simple_splice(&self) -> bool {
+        self.current().kind == TokenKind::Identifier
+            && self
+                .source
+                .slice(self.current().span)
+                .is_ok_and(|spelling| spelling.starts_with('$') && spelling.len() > 1)
     }
 
     /// Consumes the diagnostics accumulated by this parser.

@@ -80,6 +80,469 @@ fn expression_entry_preserves_operator_expression_behavior() {
 }
 
 #[test]
+fn parses_a_quoted_expression_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ x }",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected expression quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 6).unwrap()
+    );
+}
+
+#[test]
+fn parses_a_quoted_type_with_the_type_grammar() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[T]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 4).unwrap()
+    );
+}
+
+#[test]
+fn parses_local_type_definitions_in_a_quoted_type_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[type A = Int; A]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 10),
+            token(TokenKind::Identifier, 11, 14),
+            token(TokenKind::Punctuation(Punctuation::Semicolon), 14, 15),
+            token(TokenKind::Identifier, 16, 17),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(quote.body).kind else {
+        panic!("expected a TypeBlock represented as Block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::TypeDef(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(2, 17).unwrap()
+    );
+}
+
+#[test]
+fn parses_newline_separated_type_definitions_in_a_quoted_type_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[type A = Int\ntype B = String\nB]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Type), 2, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Operator, 9, 10),
+            token(TokenKind::Identifier, 11, 14),
+            token(TokenKind::Newline, 14, 15),
+            token(TokenKind::Keyword(HardKeyword::Type), 15, 19),
+            token(TokenKind::Identifier, 20, 21),
+            token(TokenKind::Operator, 22, 23),
+            token(TokenKind::Identifier, 24, 30),
+            token(TokenKind::Newline, 30, 31),
+            token(TokenKind::Identifier, 31, 32),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 32, 33),
+            token(TokenKind::Eof, 33, 33),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(quote.body).kind else {
+        panic!("expected a TypeBlock represented as Block");
+    };
+    assert_eq!(block.stats.len(), 2);
+    assert!(
+        block
+            .stats
+            .iter()
+            .all(|stat| matches!(parser.ast().get(*stat).kind, TreeKind::TypeDef(_)))
+    );
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(2, 32).unwrap()
+    );
+}
+
+#[test]
+fn parses_a_braced_expression_splice_inside_a_quote() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ ${value} }",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+            token(TokenKind::Identifier, 5, 10),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 10, 11),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected quote");
+    };
+    let TreeKind::Splice(splice) = &parser.ast().get(quote.body).kind else {
+        panic!("expected splice as the quoted body");
+    };
+    assert!(matches!(
+        parser.ast().get(splice.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(3, 11).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_simple_identifier_splice_inside_a_quote() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ $value }",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 9),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 10, 11),
+            token(TokenKind::Eof, 11, 11),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected quote");
+    };
+    let TreeKind::Splice(splice) = &parser.ast().get(quote.body).kind else {
+        panic!("expected splice");
+    };
+    let TreeKind::Ident(identifier) = &parser.ast().get(splice.expr).kind else {
+        panic!("expected spliced identifier");
+    };
+    let name = identifier.name.text();
+    assert_eq!(
+        parser
+            .ast()
+            .get(splice.expr)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 9).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name), "value");
+}
+
+#[test]
+fn preserves_an_empty_splice_block_with_dotty_zero_width_shape() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ ${} }",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 7, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected quote");
+    };
+    let TreeKind::Splice(splice) = &parser.ast().get(quote.body).kind else {
+        panic!("expected splice");
+    };
+    let body = parser.ast().get(splice.expr);
+    assert!(matches!(body.kind, TreeKind::Block(_)));
+    assert_eq!(
+        body.position.unwrap().span().range(),
+        TextRange::new(3, 3).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn preserves_the_statement_after_a_quote_inside_its_enclosing_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ '{ x }; next }",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Quote, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 6, 7),
+            token(TokenKind::Punctuation(Punctuation::Semicolon), 7, 8),
+            token(TokenKind::Identifier, 9, 13),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+            token(TokenKind::Eof, 15, 15),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Block(block) = &parser.ast().get(id).kind else {
+        panic!("expected enclosing block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::Quote(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn recovers_a_quoted_expression_missing_its_closing_brace_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ value",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Quote(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedToken
+    );
+}
+
+#[test]
+fn recovers_a_quoted_type_missing_its_closing_bracket_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[T",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Quote(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedToken
+    );
+}
+
+#[test]
+fn recovers_missing_splice_and_quote_braces_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'{ ${value",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 4),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+            token(TokenKind::Identifier, 5, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    assert!(matches!(parser.ast().get(id).kind, TreeKind::Quote(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 2);
+    assert!(
+        parser
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedToken })
+    );
+}
+
+#[test]
+fn rejects_a_legacy_braced_type_splice_inside_a_type_quote() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[${T}]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 6, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::UnsupportedSyntax
+    );
+}
+
+#[test]
+fn rejects_a_legacy_identifier_type_splice_inside_a_type_quote() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'[$T]",
+        vec![
+            token(TokenKind::Quote, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 4),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Quote(quote) = &parser.ast().get(id).kind else {
+        panic!("expected type quote");
+    };
+    assert!(matches!(
+        parser.ast().get(quote.body).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::UnsupportedSyntax
+    );
+}
+
+#[test]
 fn parses_if_with_then_and_else() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
