@@ -6,6 +6,36 @@ use dotty_core::{ScopeId, SourceId, SymbolId, TreeId, Untyped};
 
 use crate::NamerError;
 
+/// Opaque identifier for an immutable source declaration context.
+///
+/// IDs are meaningful only in the [`SourceSemanticIndex`] that allocated
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceContextId(u32);
+
+impl SourceContextId {
+    /// Returns the arena index backing this context identity.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// Lexical source environment captured for a declaration site.
+///
+/// `import` is the unresolved source import that transitions from `parent` to
+/// this context. A context with no import is a base owner/scope environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceContext {
+    /// Source lexical owner, independent of a declaration's semantic owner.
+    pub owner: SymbolId,
+    /// Lexical scope active at this source site.
+    pub lexical_scope: ScopeId,
+    /// Enclosing source environment inherited by this context.
+    pub parent: Option<SourceContextId>,
+    /// Unresolved import tree applied after the parent context, if any.
+    pub import: Option<TreeId<Untyped>>,
+}
+
 /// Canonical and owner-specific derived identities associated with source
 /// trees in compilation units.
 ///
@@ -18,6 +48,8 @@ pub struct SourceSemanticIndex {
     derived_symbols_by_owner_and_tree: HashMap<(SymbolId, SourceId, TreeId<Untyped>), SymbolId>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
+    source_contexts: Vec<SourceContext>,
+    declaration_contexts_by_symbol: HashMap<SymbolId, SourceContextId>,
 }
 
 impl SourceSemanticIndex {
@@ -87,6 +119,59 @@ impl SourceSemanticIndex {
         self.extension_prefix_clauses_by_method
             .get(&method)
             .map(Vec::as_slice)
+    }
+
+    /// Returns an immutable source context owned by this index.
+    ///
+    /// An out-of-range ID is an internal arena invariant violation and
+    /// panics, like other arena IDs. IDs are index-relative and do not carry
+    /// their originating index, so passing an ID from another index that has
+    /// the same numeric slot accesses this index's context at that slot; that
+    /// is a caller logic error and cannot be detected here.
+    pub fn source_context(&self, id: SourceContextId) -> &SourceContext {
+        self.source_contexts
+            .get(id.index() as usize)
+            .expect("SourceContextId must be in range for this SourceSemanticIndex")
+    }
+
+    /// Returns the source declaration context recorded for `symbol`.
+    pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
+        self.declaration_contexts_by_symbol.get(&symbol).copied()
+    }
+
+    /// Records one immutable source context node and returns its index-local
+    /// identity.
+    pub(crate) fn alloc_source_context(&mut self, context: SourceContext) -> SourceContextId {
+        let id = SourceContextId(
+            u32::try_from(self.source_contexts.len())
+                .unwrap_or_else(|_| panic!("source context arena exceeded u32::MAX entries")),
+        );
+        self.source_contexts.push(context);
+        id
+    }
+
+    /// Associates a declaration symbol with its source lexical context.
+    ///
+    /// Repeating the same association is idempotent. Assigning a different
+    /// context to the same symbol is an internal naming error and preserves
+    /// the original association.
+    pub(crate) fn record_declaration_context(
+        &mut self,
+        symbol: SymbolId,
+        context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        match self.declaration_contexts_by_symbol.get(&symbol) {
+            Some(existing) if *existing == context => Ok(()),
+            Some(existing) => Err(NamerError::DuplicateDeclarationContext {
+                symbol,
+                existing: *existing,
+                attempted: context,
+            }),
+            None => {
+                self.declaration_contexts_by_symbol.insert(symbol, context);
+                Ok(())
+            }
+        }
     }
 
     /// Records the original extension prefix clauses for one method.
@@ -202,6 +287,92 @@ mod tests {
 
         assert_eq!(index.symbol_at(SourceId::from_index(1), tree), Some(first));
         assert_eq!(index.symbol_at(SourceId::from_index(2), tree), Some(second));
+    }
+
+    #[test]
+    fn source_contexts_are_stored_and_retrievable_by_opaque_id() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let lexical_scope = store.scopes.alloc(Scope::new(Some(owner)));
+        let mut index = SourceSemanticIndex::new();
+        let context = SourceContext {
+            owner,
+            lexical_scope,
+            parent: None,
+            import: None,
+        };
+
+        let id = index.alloc_source_context(context);
+
+        assert_eq!(id.index(), 0);
+        assert_eq!(index.source_context(id), &context);
+    }
+
+    #[test]
+    #[should_panic(expected = "SourceContextId must be in range for this SourceSemanticIndex")]
+    fn looking_up_an_out_of_range_context_is_an_internal_invariant_violation() {
+        let index = SourceSemanticIndex::new();
+        let _ = index.source_context(SourceContextId(0));
+    }
+
+    #[test]
+    fn a_symbol_gets_one_declaration_context_and_repeated_same_context_is_idempotent() {
+        let mut store = SemanticStore::new();
+        let declaration = symbol(&mut store);
+        let owner = symbol(&mut store);
+        let lexical_scope = store.scopes.alloc(Scope::new(Some(owner)));
+        let mut index = SourceSemanticIndex::new();
+        let context = index.alloc_source_context(SourceContext {
+            owner,
+            lexical_scope,
+            parent: None,
+            import: None,
+        });
+
+        index
+            .record_declaration_context(declaration, context)
+            .unwrap();
+        index
+            .record_declaration_context(declaration, context)
+            .unwrap();
+
+        assert_eq!(index.declaration_context_of(declaration), Some(context));
+    }
+
+    #[test]
+    fn assigning_a_different_declaration_context_is_rejected_without_replacement() {
+        let mut store = SemanticStore::new();
+        let declaration = symbol(&mut store);
+        let first_owner = symbol(&mut store);
+        let second_owner = symbol(&mut store);
+        let first_scope = store.scopes.alloc(Scope::new(Some(first_owner)));
+        let second_scope = store.scopes.alloc(Scope::new(Some(second_owner)));
+        let mut index = SourceSemanticIndex::new();
+        let first = index.alloc_source_context(SourceContext {
+            owner: first_owner,
+            lexical_scope: first_scope,
+            parent: None,
+            import: None,
+        });
+        let second = index.alloc_source_context(SourceContext {
+            owner: second_owner,
+            lexical_scope: second_scope,
+            parent: Some(first),
+            import: None,
+        });
+        index
+            .record_declaration_context(declaration, first)
+            .unwrap();
+
+        assert_eq!(
+            index.record_declaration_context(declaration, second),
+            Err(NamerError::DuplicateDeclarationContext {
+                symbol: declaration,
+                existing: first,
+                attempted: second,
+            })
+        );
+        assert_eq!(index.declaration_context_of(declaration), Some(first));
     }
 
     #[test]

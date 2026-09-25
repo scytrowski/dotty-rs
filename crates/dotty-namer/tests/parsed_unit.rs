@@ -3,7 +3,7 @@ use dotty_core::{
     SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
     Visibility,
 };
-use dotty_namer::{NamerError, SourceSemanticIndex, name_compilation_unit};
+use dotty_namer::{NamerError, SourceContextId, SourceSemanticIndex, name_compilation_unit};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 
 struct NamedSource {
@@ -60,6 +60,28 @@ fn named_source_tree_name(
         .expect("source definition should have a symbol");
     let name = named.store.symbols.get(symbol).name;
     named.store.names.resolve(name.text()).to_owned()
+}
+
+fn declaration_context(
+    named: &NamedSource,
+    tree: dotty_core::TreeId<dotty_core::Untyped>,
+) -> (dotty_core::SymbolId, SourceContextId) {
+    let symbol = named
+        .index
+        .symbol_at(named.source, tree)
+        .expect("source declaration should have a symbol");
+    let context = named
+        .index
+        .declaration_context_of(symbol)
+        .expect("source declaration should have a declaration context");
+    (symbol, context)
+}
+
+fn package_stat_trees(named: &NamedSource) -> &[dotty_core::TreeId<dotty_core::Untyped>] {
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    &package.stats
 }
 
 fn source_pattern_bindings(
@@ -2146,6 +2168,394 @@ fn wildcard_only_pattern_does_not_resolve_unused_visibility_qualifier() {
     };
 
     assert!(source_pattern_bindings(&named, &patdef.patterns).is_empty());
+}
+
+#[test]
+fn package_imports_form_ordered_contexts_for_following_wrapped_declarations() {
+    let named = named_source(
+        "val first = 1\nval same = 2\nimport alpha.*\nval after_alpha = 3\nimport beta.*\nval after_beta = 4",
+        224,
+    );
+    let stats = package_stat_trees(&named);
+    let (first_symbol, first_context) = declaration_context(&named, stats[0]);
+    let (_, same_context) = declaration_context(&named, stats[1]);
+    let (after_alpha_symbol, after_alpha_context) = declaration_context(&named, stats[3]);
+    let (after_beta_symbol, after_beta_context) = declaration_context(&named, stats[5]);
+    let alpha = named.index.source_context(after_alpha_context);
+    let beta = named.index.source_context(after_beta_context);
+
+    assert_eq!(first_context, same_context);
+    assert_eq!(
+        alpha.owner,
+        named
+            .index
+            .symbol_at(named.source, named.parsed.root)
+            .unwrap()
+    );
+    assert_eq!(alpha.parent, Some(first_context));
+    assert_eq!(alpha.import, Some(stats[2]));
+    assert_eq!(beta.parent, Some(after_alpha_context));
+    assert_eq!(beta.import, Some(stats[4]));
+    assert_ne!(
+        named.store.symbols.get(first_symbol).owner,
+        Some(alpha.owner),
+        "wrapper symbols retain their semantic owner while contexts keep package ownership"
+    );
+    assert_eq!(
+        named.store.symbols.get(after_alpha_symbol).owner,
+        named.store.symbols.get(after_beta_symbol).owner
+    );
+
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .unwrap();
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    for import_name in ["alpha", "beta"] {
+        assert!(
+            named
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(
+                    dotty_core::TypeName::new(named.store.names.get(import_name).unwrap())
+                        .as_name()
+                )
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn package_import_context_is_captured_by_following_direct_class_and_object() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("import alpha.*\nclass C\nobject O", 225);
+    let stats = package_stat_trees(&named);
+    let (_, class_context) = declaration_context(&named, stats[1]);
+    let (_, object_context) = declaration_context(&named, stats[2]);
+    let class_env = named.index.source_context(class_context);
+    let object_env = named.index.source_context(object_context);
+    let TreeKind::Import(_) = &named.parsed.ast.get(stats[0]).kind else {
+        panic!("first package statement should be an import");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) = &named.parsed.ast.get(stats[2]).kind
+    else {
+        panic!("object declaration should be a ModuleDef");
+    };
+
+    assert_eq!(class_context, object_context);
+    assert_eq!(class_env.import, Some(stats[0]));
+    assert_eq!(object_env.import, Some(stats[0]));
+}
+
+#[test]
+fn class_imports_affect_following_members_and_nested_contexts_inherit_them() {
+    let named = named_source(
+        "class C:\n  val before = 1\n  import alpha.*\n  val after_alpha = 2\n  import beta.*\n  val after_beta = 3\n  class Nested:\n    val inside = 4",
+        226,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let (_, before_context) = declaration_context(&named, template.body[0]);
+    let (_, after_alpha_context) = declaration_context(&named, template.body[2]);
+    let (_, after_beta_context) = declaration_context(&named, template.body[4]);
+    let (_, nested_context) = declaration_context(&named, template.body[5]);
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let before = named.index.source_context(before_context);
+    let after_alpha = named.index.source_context(after_alpha_context);
+    let after_beta = named.index.source_context(after_beta_context);
+    let nested = named.index.source_context(nested_context);
+    let TreeKind::Import(_) = &named.parsed.ast.get(template.body[1]).kind else {
+        panic!("template statement should be an import");
+    };
+    let TreeKind::Import(_) = &named.parsed.ast.get(template.body[3]).kind else {
+        panic!("template statement should be an import");
+    };
+    let TreeKind::TypeDef(nested_def) = &named.parsed.ast.get(template.body[5]).kind else {
+        panic!("nested declaration should be a TypeDef");
+    };
+    let TreeKind::Template(nested_template) = &named.parsed.ast.get(nested_def.rhs).kind else {
+        panic!("nested class RHS should be a Template");
+    };
+    let (_, inside_context) = declaration_context(&named, nested_template.body[0]);
+    let inside = named.index.source_context(inside_context);
+
+    assert_ne!(before_context, after_alpha_context);
+    assert_eq!(before.owner, class_symbol);
+    assert_eq!(after_alpha.parent, Some(before_context));
+    assert_eq!(after_alpha.import, Some(template.body[1]));
+    assert_eq!(after_beta.parent, Some(after_alpha_context));
+    assert_eq!(after_beta.import, Some(template.body[3]));
+    assert_eq!(nested_context, after_beta_context);
+    assert_eq!(nested.owner, class_symbol);
+    assert_eq!(
+        inside.owner,
+        named
+            .index
+            .symbol_at(named.source, template.body[5])
+            .unwrap()
+    );
+    assert_eq!(inside.parent, Some(nested_context));
+    assert_eq!(inside.import, None);
+
+    let class_scope = named.index.scope_of(class_symbol).unwrap();
+    assert!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(
+                dotty_core::TermName::new(named.store.names.get("alpha").unwrap()).as_name()
+            )
+            .is_empty()
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(dotty_core::TermName::new(named.store.names.get("beta").unwrap()).as_name())
+            .is_empty()
+    );
+}
+
+#[test]
+fn module_class_imports_follow_source_order_without_resolving_imports() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "object O:\n  import alpha.*\n  val before = 1\n  import beta.*\n  val after = 2",
+        231,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("object should be a ModuleDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(module.template).kind else {
+        panic!("object body should be a Template");
+    };
+    let (_, before_context) = declaration_context(&named, template.body[1]);
+    let (_, after_context) = declaration_context(&named, template.body[3]);
+    let before = named.index.source_context(before_context);
+    let after = named.index.source_context(after_context);
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .unwrap();
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(dotty_core::TypeName::new(named.store.names.get("O$").unwrap()).as_name())
+        .unwrap();
+    let module_scope = named.index.scope_of(module_class).unwrap();
+
+    assert_eq!(before.owner, module_class);
+    assert_eq!(before.lexical_scope, module_scope);
+    assert_eq!(after.parent, Some(before_context));
+    assert_eq!(after.import, Some(template.body[2]));
+    for import_name in ["alpha", "beta"] {
+        assert!(
+            named
+                .store
+                .scopes
+                .get(module_scope)
+                .lookup_all(
+                    dotty_core::TermName::new(named.store.names.get(import_name).unwrap())
+                        .as_name()
+                )
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn method_parameters_use_a_method_owned_child_context() {
+    let named = named_source("class C:\n  def method[A](value: Int): Int = value", 227);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let method_tree = template.body[0];
+    let TreeKind::DefDef(method) = &named.parsed.ast.get(method_tree).kind else {
+        panic!("method declaration should be a DefDef");
+    };
+    let (method_symbol, method_context) = declaration_context(&named, method_tree);
+    let (type_parameter_symbol, type_parameter_context) =
+        declaration_context(&named, method.type_params[0]);
+    let (value_parameter_symbol, value_parameter_context) =
+        declaration_context(&named, method.value_param_clauses[0][0]);
+    let lexical_scope = named.index.scope_of(method_symbol).unwrap();
+    let parameter_env = named.index.source_context(value_parameter_context);
+
+    assert_eq!(type_parameter_context, value_parameter_context);
+    assert_eq!(parameter_env.owner, method_symbol);
+    assert_eq!(parameter_env.lexical_scope, lexical_scope);
+    assert_eq!(parameter_env.parent, Some(method_context));
+    assert_eq!(
+        named.index.declaration_context_of(type_parameter_symbol),
+        Some(parameter_env_id(&named, value_parameter_symbol))
+    );
+}
+
+fn parameter_env_id(named: &NamedSource, symbol: dotty_core::SymbolId) -> SourceContextId {
+    named.index.declaration_context_of(symbol).unwrap()
+}
+
+#[test]
+fn constructor_parameters_use_the_constructor_lexical_child_context() {
+    let named = named_source("class C[A](val field: Int, local: String)", 228);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        panic!("primary constructor should be a DefDef");
+    };
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, template.constructor)
+        .unwrap();
+    let (_, constructor_context) = declaration_context(&named, template.constructor);
+    let class_type_parameter = constructor.type_params[0];
+    let class_type_parameter_symbol = named
+        .index
+        .symbol_at(named.source, class_type_parameter)
+        .unwrap();
+    let derived_type_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, class_type_parameter)
+        .unwrap();
+    let field_parameter = constructor.value_param_clauses[0][0];
+    let canonical_field_parameter = named
+        .index
+        .symbol_at(named.source, field_parameter)
+        .unwrap();
+    let derived_field_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, field_parameter)
+        .unwrap();
+    let local_parameter = constructor.value_param_clauses[0][1];
+    let constructor_env_id = named
+        .index
+        .declaration_context_of(derived_type_parameter)
+        .unwrap();
+    let constructor_env = named.index.source_context(constructor_env_id);
+
+    assert_eq!(
+        named
+            .index
+            .declaration_context_of(class_type_parameter_symbol),
+        Some(constructor_context)
+    );
+    assert_eq!(constructor_env.owner, constructor_symbol);
+    assert_eq!(constructor_env.parent, Some(constructor_context));
+    assert_eq!(
+        named.index.declaration_context_of(derived_field_parameter),
+        Some(constructor_env_id)
+    );
+    assert_eq!(
+        named
+            .index
+            .declaration_context_of(canonical_field_parameter),
+        Some(constructor_context)
+    );
+    assert_eq!(
+        named.index.declaration_context_of(
+            named
+                .index
+                .symbol_at(named.source, local_parameter)
+                .unwrap()
+        ),
+        Some(constructor_env_id)
+    );
+}
+
+#[test]
+fn extension_prefix_parameters_use_the_target_methods_lexical_context() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("extension (receiver: Int)\n  def doubled = receiver", 229);
+    let stats = package_stat_trees(&named);
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(stats[0]).kind
+    else {
+        panic!("source stat should be ExtensionMethods");
+    };
+    let method_tree = extension.methods[0];
+    let (method_symbol, method_context) = declaration_context(&named, method_tree);
+    let receiver_tree = extension.param_clauses[0][0];
+    let receiver_symbol = named
+        .index
+        .derived_symbol_at(method_symbol, named.source, receiver_tree)
+        .unwrap();
+    let receiver_context_id = parameter_env_id(&named, receiver_symbol);
+    let receiver_context = named.index.source_context(receiver_context_id);
+
+    assert_eq!(receiver_context.owner, method_symbol);
+    assert_eq!(receiver_context.parent, Some(method_context));
+    assert_eq!(
+        receiver_context.lexical_scope,
+        named.index.scope_of(method_symbol).unwrap()
+    );
+}
+
+#[test]
+fn pattern_binding_symbols_share_the_patdef_declaration_context() {
+    let named = named_source(
+        "class C:\n  import alpha.*\n  val (left, right) = pair",
+        230,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(package.stats[0]).kind else {
+        panic!("class declaration should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("class RHS should be a Template");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(patdef)) =
+        &named.parsed.ast.get(template.body[1]).kind
+    else {
+        panic!("tuple member should remain a PatDef");
+    };
+    let context_ids = source_pattern_bindings(&named, &patdef.patterns)
+        .into_iter()
+        .map(|(tree, _)| declaration_context(&named, tree).1)
+        .collect::<Vec<_>>();
+
+    assert_eq!(context_ids.len(), 2);
+    assert_eq!(context_ids[0], context_ids[1]);
+    assert_eq!(
+        named.index.source_context(context_ids[0]).import,
+        Some(template.body[0])
+    );
 }
 
 #[test]

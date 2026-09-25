@@ -14,6 +14,7 @@ use dotty_core::{
 };
 
 use crate::SourceSemanticIndex;
+use crate::source_index::{SourceContext, SourceContextId};
 
 /// Internal structural error encountered while indexing a source tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +33,12 @@ pub enum NamerError {
     DuplicateExtensionPrefixClauses { method: SymbolId },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
+    /// A declaration symbol was assigned two different source contexts.
+    DuplicateDeclarationContext {
+        symbol: SymbolId,
+        existing: SourceContextId,
+        attempted: SourceContextId,
+    },
     /// A tree did not have the shape required by a naming routine.
     MalformedAstShape {
         tree_index: u32,
@@ -94,6 +101,17 @@ impl fmt::Display for NamerError {
                     symbol.index()
                 )
             }
+            Self::DuplicateDeclarationContext {
+                symbol,
+                existing,
+                attempted,
+            } => write!(
+                f,
+                "symbol {} already has source context {}, cannot assign context {}",
+                symbol.index(),
+                existing.index(),
+                attempted.index()
+            ),
             Self::MalformedAstShape {
                 tree_index,
                 expected,
@@ -344,11 +362,18 @@ struct NamingContext {
     owner: SymbolId,
     scope: ScopeId,
     package_path: Vec<String>,
+    source_context: SourceContextId,
+}
+
+#[derive(Clone, Copy)]
+struct ContextualStat {
+    tree: TreeId<Untyped>,
+    source_context: SourceContextId,
 }
 
 struct PackageStatPartition {
-    top_stats: Vec<TreeId<Untyped>>,
-    wrapped_stats: Vec<TreeId<Untyped>>,
+    top_stats: Vec<ContextualStat>,
+    wrapped_stats: Vec<ContextualStat>,
 }
 
 #[derive(Clone, Copy)]
@@ -377,7 +402,7 @@ enum EnteredHeader {
         context: NamingContext,
     },
     SourcePackageWrapper {
-        stats: Vec<TreeId<Untyped>>,
+        stats: Vec<ContextualStat>,
         context: NamingContext,
         package_symbol: SymbolId,
     },
@@ -386,6 +411,7 @@ enum EnteredHeader {
         symbol: SymbolId,
         scope: ScopeId,
         package_path: Vec<String>,
+        declaration_context: SourceContextId,
     },
     ModuleClass {
         template: TreeId<Untyped>,
@@ -394,17 +420,20 @@ enum EnteredHeader {
         symbol: SymbolId,
         scope: ScopeId,
         package_path: Vec<String>,
+        declaration_context: SourceContextId,
     },
     Method {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
         scope: ScopeId,
         extension_prefix_clauses: Option<Vec<Vec<TreeId<Untyped>>>>,
+        declaration_context: SourceContextId,
     },
     SecondaryConstructor {
         tree: TreeId<Untyped>,
         symbol: SymbolId,
         scope: ScopeId,
+        declaration_context: SourceContextId,
     },
     Field {
         tree: TreeId<Untyped>,
@@ -508,15 +537,20 @@ impl Namer<'_> {
     }
 
     fn partition_package_stats(
-        &self,
+        &mut self,
         stats: &[TreeId<Untyped>],
-        package_path: &[String],
+        context: &NamingContext,
     ) -> Result<PackageStatPartition, NamerError> {
-        let wrapped_type_names = self.wrapped_type_names_for_package_path(package_path)?;
+        let wrapped_type_names = self.wrapped_type_names_for_package_path(&context.package_path)?;
 
         let mut top_stats = Vec::new();
         let mut wrapped_stats = Vec::new();
+        let mut active_context = context.source_context;
         for tree in stats {
+            if matches!(self.arena.get(*tree).kind, TreeKind::Import(_)) {
+                active_context = self.context_after_import(active_context, *tree);
+                continue;
+            }
             let wrapped = match &self.arena.get(*tree).kind {
                 TreeKind::PackageDef(_) => false,
                 TreeKind::ValDef(_) | TreeKind::DefDef(_) | TreeKind::Export(_) => true,
@@ -541,18 +575,49 @@ impl Namer<'_> {
                 TreeKind::PhaseSpecific(
                     UntypedNode::PatDef(_) | UntypedNode::ExtensionMethods(_),
                 ) => true,
-                TreeKind::Import(_) => continue,
                 _ => continue,
             };
+            let stat = ContextualStat {
+                tree: *tree,
+                source_context: active_context,
+            };
             if wrapped {
-                wrapped_stats.push(*tree);
+                wrapped_stats.push(stat);
             } else {
-                top_stats.push(*tree);
+                top_stats.push(stat);
             }
         }
         Ok(PackageStatPartition {
             top_stats,
             wrapped_stats,
+        })
+    }
+
+    fn context_after_import(
+        &mut self,
+        parent: SourceContextId,
+        import: TreeId<Untyped>,
+    ) -> SourceContextId {
+        let previous = *self.index.source_context(parent);
+        self.index.alloc_source_context(SourceContext {
+            owner: previous.owner,
+            lexical_scope: previous.lexical_scope,
+            parent: Some(parent),
+            import: Some(import),
+        })
+    }
+
+    fn child_source_context(
+        &mut self,
+        owner: SymbolId,
+        lexical_scope: ScopeId,
+        parent: Option<SourceContextId>,
+    ) -> SourceContextId {
+        self.index.alloc_source_context(SourceContext {
+            owner,
+            lexical_scope,
+            parent,
+            import: None,
         })
     }
 
@@ -617,7 +682,7 @@ impl Namer<'_> {
     fn enter_source_package_wrapper(
         &mut self,
         package_context: &NamingContext,
-        stats: Vec<TreeId<Untyped>>,
+        stats: Vec<ContextualStat>,
     ) -> Result<EnteredHeader, NamerError> {
         if let Some((module_class, scope)) = self
             .source_package_wrappers
@@ -630,6 +695,7 @@ impl Namer<'_> {
                     owner: module_class,
                     scope,
                     package_path: package_context.package_path.clone(),
+                    source_context: package_context.source_context,
                 },
                 package_symbol: package_context.owner,
             });
@@ -692,6 +758,7 @@ impl Namer<'_> {
                 owner: module_class,
                 scope,
                 package_path: package_context.package_path.clone(),
+                source_context: package_context.source_context,
             },
             package_symbol: package_context.owner,
         })
@@ -699,15 +766,15 @@ impl Namer<'_> {
 
     fn scan_source_package_wrapper(
         &mut self,
-        stats: &[TreeId<Untyped>],
+        stats: &[ContextualStat],
         context: &NamingContext,
         package_symbol: SymbolId,
     ) -> Result<(), NamerError> {
         let previous_boundary = self.package_private_boundary;
         self.package_private_boundary = Some((context.owner, package_symbol));
         let mut headers = Vec::new();
-        for tree in stats {
-            match self.enter_wrapped_stat_headers(*tree, context) {
+        for stat in stats {
+            match self.enter_wrapped_stat_headers(*stat, context) {
                 Ok(entered) => headers.extend(entered),
                 Err(error) => {
                     self.package_private_boundary = previous_boundary;
@@ -727,14 +794,17 @@ impl Namer<'_> {
 
     fn enter_wrapped_stat_headers(
         &mut self,
-        tree: TreeId<Untyped>,
+        stat: ContextualStat,
         context: &NamingContext,
     ) -> Result<Vec<EnteredHeader>, NamerError> {
+        let tree = stat.tree;
+        let mut declaration_context = context.clone();
+        declaration_context.source_context = stat.source_context;
         match &self.arena.get(tree).kind {
             TreeKind::TypeDef(definition) => {
                 if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
                     Ok(self
-                        .enter_class_or_trait_header(tree, context)?
+                        .enter_class_or_trait_header(tree, &declaration_context)?
                         .into_iter()
                         .collect())
                 } else {
@@ -752,6 +822,8 @@ impl Namer<'_> {
                         context.scope,
                         spec,
                     )?;
+                    self.index
+                        .record_declaration_context(symbol, stat.source_context)?;
                     Ok(vec![EnteredHeader::TypeAlias { tree, symbol }])
                 }
             }
@@ -770,25 +842,43 @@ impl Namer<'_> {
                     SymbolKind::Field,
                 )?;
                 let symbol = self.enter_symbol(tree, name, context.owner, context.scope, spec)?;
+                self.index
+                    .record_declaration_context(symbol, stat.source_context)?;
                 Ok(vec![EnteredHeader::Field { tree, symbol }])
             }
             TreeKind::DefDef(definition) => self
-                .enter_method_header(tree, definition, context.owner, context.scope, None)
+                .enter_method_header(
+                    tree,
+                    definition,
+                    context.owner,
+                    context.scope,
+                    None,
+                    stat.source_context,
+                )
                 .map(|header| vec![header]),
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => Ok(self
-                .enter_module_header(tree, context)?
+                .enter_module_header(tree, &declaration_context)?
                 .into_iter()
                 .collect()),
             // These raw source forms are assigned to the package wrapper by
             // partitioning. Their lowered declarations are handled by later
             // naming work, so they do not introduce identities here.
-            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
-                self.enter_pattern_binding_headers(tree, definition, context.owner, context.scope)
-            }
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => self
+                .enter_pattern_binding_headers(
+                    tree,
+                    definition,
+                    context.owner,
+                    context.scope,
+                    stat.source_context,
+                ),
             TreeKind::Export(_) => Ok(Vec::new()),
-            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
-                self.enter_extension_method_headers(extension, context.owner, context.scope)
-            }
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => self
+                .enter_extension_method_headers(
+                    extension,
+                    context.owner,
+                    context.scope,
+                    stat.source_context,
+                ),
             _ => Ok(Vec::new()),
         }
     }
@@ -847,6 +937,7 @@ impl Namer<'_> {
         definition: &dotty_core::ast::PatDef,
         owner: SymbolId,
         scope: ScopeId,
+        declaration_context: SourceContextId,
     ) -> Result<Vec<EnteredHeader>, NamerError> {
         if definition.modifiers.modifiers.contains(&Modifier::EnumCase) {
             return Ok(Vec::new());
@@ -863,6 +954,8 @@ impl Namer<'_> {
         for (binding_tree, binding_name) in bindings {
             let name = *dotty_core::TermName::new(binding_name.text()).as_name();
             let symbol = self.enter_symbol(binding_tree, name, owner, scope, spec)?;
+            self.index
+                .record_declaration_context(symbol, declaration_context)?;
             headers.push(EnteredHeader::Field {
                 tree: binding_tree,
                 symbol,
@@ -877,7 +970,8 @@ impl Namer<'_> {
         enclosing_package: &[String],
         source_root: bool,
     ) -> Result<(), NamerError> {
-        let Some(header) = self.enter_package_header(tree, enclosing_package, source_root)? else {
+        let Some(header) = self.enter_package_header(tree, enclosing_package, source_root, None)?
+        else {
             return Ok(());
         };
         self.scan_entered_header(header)
@@ -888,6 +982,7 @@ impl Namer<'_> {
         tree: TreeId<Untyped>,
         enclosing_package: &[String],
         source_root: bool,
+        parent_context: Option<SourceContextId>,
     ) -> Result<Option<EnteredHeader>, NamerError> {
         let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
             if tree == self.root {
@@ -919,10 +1014,12 @@ impl Namer<'_> {
         self.index.record_symbol(self.source, tree, leaf.symbol)?;
         self.index.record_scope(leaf.symbol, leaf.scope)?;
 
+        let source_context = self.child_source_context(leaf.symbol, leaf.scope, parent_context);
         let context = NamingContext {
             owner: leaf.symbol,
             scope: leaf.scope,
             package_path,
+            source_context,
         };
         Ok(Some(EnteredHeader::Package { tree, context }))
     }
@@ -1012,6 +1109,8 @@ impl Namer<'_> {
             .enter(name, symbol);
         self.scope_insertions.push((owner_context.scope, symbol));
         self.index.record_symbol(self.source, tree, symbol)?;
+        self.index
+            .record_declaration_context(symbol, owner_context.source_context)?;
 
         let scope = self.store.scopes.alloc(Scope::new(Some(symbol)));
         self.index.record_scope(symbol, scope)?;
@@ -1020,6 +1119,7 @@ impl Namer<'_> {
             symbol,
             scope,
             package_path: owner_context.package_path.clone(),
+            declaration_context: owner_context.source_context,
         }))
     }
 
@@ -1073,6 +1173,8 @@ impl Namer<'_> {
             owner_context.scope,
             object_spec,
         )?;
+        self.index
+            .record_declaration_context(object_symbol, owner_context.source_context)?;
         self.scope_insertions
             .push((owner_context.scope, object_symbol));
         let symbol = self.store.symbols.alloc(Symbol {
@@ -1087,6 +1189,8 @@ impl Namer<'_> {
             position: self.arena.get(tree).position,
             links: SymbolLinks::default(),
         });
+        self.index
+            .record_declaration_context(symbol, owner_context.source_context)?;
         self.store
             .scopes
             .get_mut(owner_context.scope)
@@ -1102,36 +1206,44 @@ impl Namer<'_> {
             symbol,
             scope,
             package_path: owner_context.package_path.clone(),
+            declaration_context: owner_context.source_context,
         }))
     }
 
     fn scan_entered_header(&mut self, header: EnteredHeader) -> Result<(), NamerError> {
-        let (tree, symbol, scope, package_path) = match header {
+        let (tree, symbol, scope, package_path, declaration_context) = match header {
             EnteredHeader::Package { tree, context } => {
                 let TreeKind::PackageDef(package) = &self.arena.get(tree).kind else {
                     return Ok(());
                 };
-                let partition =
-                    self.partition_package_stats(&package.stats, &context.package_path)?;
+                let stats = package.stats.clone();
+                let partition = self.partition_package_stats(&stats, &context)?;
                 let mut headers = Vec::new();
                 for stat in partition.top_stats {
-                    match self.arena.get(stat).kind {
+                    let mut stat_context = context.clone();
+                    stat_context.source_context = stat.source_context;
+                    match self.arena.get(stat.tree).kind {
                         TreeKind::PackageDef(_) => {
-                            if let Some(header) =
-                                self.enter_package_header(stat, &context.package_path, false)?
-                            {
+                            if let Some(header) = self.enter_package_header(
+                                stat.tree,
+                                &context.package_path,
+                                false,
+                                Some(stat.source_context),
+                            )? {
                                 headers.push(header);
                             }
                         }
                         TreeKind::TypeDef(_) => {
                             if let Some(header) =
-                                self.enter_class_or_trait_header(stat, &context)?
+                                self.enter_class_or_trait_header(stat.tree, &stat_context)?
                             {
                                 headers.push(header);
                             }
                         }
                         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
-                            if let Some(header) = self.enter_module_header(stat, &context)? {
+                            if let Some(header) =
+                                self.enter_module_header(stat.tree, &stat_context)?
+                            {
                                 headers.push(header);
                             }
                         }
@@ -1158,7 +1270,8 @@ impl Namer<'_> {
                 symbol,
                 scope,
                 package_path,
-            } => (tree, symbol, scope, package_path),
+                declaration_context,
+            } => (tree, symbol, scope, package_path, declaration_context),
             EnteredHeader::ModuleClass {
                 template,
                 object_symbol,
@@ -1166,29 +1279,44 @@ impl Namer<'_> {
                 symbol,
                 scope,
                 package_path,
+                declaration_context,
             } => {
                 let object_name = self.store.symbols.get(object_symbol).name;
                 if let Some(class) = self.source_companion_class(object_name, enclosing_scope) {
                     self.companion_links.push((class, object_symbol));
                 }
-                return self.scan_template_body(template, symbol, scope, package_path);
+                return self.scan_template_body(
+                    template,
+                    symbol,
+                    scope,
+                    package_path,
+                    declaration_context,
+                );
             }
             EnteredHeader::Method {
                 tree,
                 symbol,
                 scope,
                 extension_prefix_clauses,
+                declaration_context,
             } => {
+                let method_context =
+                    self.child_source_context(symbol, scope, Some(declaration_context));
                 if let Some(clauses) = extension_prefix_clauses {
-                    self.scan_extension_prefix_parameters(symbol, scope, &clauses)?;
+                    self.scan_extension_prefix_parameters(symbol, scope, &clauses, method_context)?;
                 }
-                return self.scan_method_parameters(tree, symbol, scope);
+                return self.scan_method_parameters(tree, symbol, scope, method_context);
             }
             EnteredHeader::SecondaryConstructor {
                 tree,
                 symbol,
                 scope,
-            } => return self.scan_constructor_parameters(tree, symbol, scope),
+                declaration_context,
+            } => {
+                let constructor_context =
+                    self.child_source_context(symbol, scope, Some(declaration_context));
+                return self.scan_constructor_parameters(tree, symbol, scope, constructor_context);
+            }
             EnteredHeader::Field { tree, symbol } | EnteredHeader::TypeAlias { tree, symbol } => {
                 let _entered_identity = (tree, symbol);
                 return Ok(());
@@ -1197,7 +1325,13 @@ impl Namer<'_> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
-        self.scan_template_body(definition.rhs, symbol, scope, package_path)
+        self.scan_template_body(
+            definition.rhs,
+            symbol,
+            scope,
+            package_path,
+            declaration_context,
+        )
     }
 
     fn source_companion_class(
@@ -1228,6 +1362,7 @@ impl Namer<'_> {
         symbol: SymbolId,
         scope: ScopeId,
         package_path: Vec<String>,
+        declaration_context: SourceContextId,
     ) -> Result<(), NamerError> {
         let TreeKind::Template(template) = &self.arena.get(template_tree).kind else {
             return Ok(());
@@ -1238,12 +1373,16 @@ impl Namer<'_> {
                 expected: "DefDef primary constructor",
             });
         };
+        let class_source_context =
+            self.child_source_context(symbol, scope, Some(declaration_context));
         let class_context = NamingContext {
             owner: symbol,
             scope,
             package_path,
+            source_context: class_source_context,
         };
         let constructor = constructor.clone();
+        let mut private_local_parameters = Vec::new();
         for parameter_tree in &constructor.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
@@ -1264,13 +1403,15 @@ impl Namer<'_> {
             {
                 spec.visibility = Visibility::Private;
             }
-            self.enter_symbol(
+            let type_parameter = self.enter_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
                 symbol,
                 scope,
                 spec,
             )?;
+            self.index
+                .record_declaration_context(type_parameter, class_source_context)?;
         }
         for clause in &constructor.value_param_clauses {
             for parameter_tree in clause {
@@ -1306,20 +1447,23 @@ impl Namer<'_> {
                 )?;
                 if private_local {
                     spec.visibility = Visibility::Private;
-                    self.record_unscoped_symbol(
+                    let parameter_symbol = self.record_unscoped_symbol(
                         *parameter_tree,
                         *parameter.name.as_name(),
                         symbol,
                         spec,
                     )?;
+                    private_local_parameters.push(parameter_symbol);
                 } else {
-                    self.enter_symbol(
+                    let field = self.enter_symbol(
                         *parameter_tree,
                         *parameter.name.as_name(),
                         symbol,
                         scope,
                         spec,
                     )?;
+                    self.index
+                        .record_declaration_context(field, class_source_context)?;
                 }
             }
         }
@@ -1336,12 +1480,23 @@ impl Namer<'_> {
             scope,
             constructor_spec,
         )?;
+        self.index
+            .record_declaration_context(constructor_symbol, class_source_context)?;
         let constructor_scope = self
             .store
             .scopes
             .alloc(Scope::new(Some(constructor_symbol)));
         self.index
             .record_scope(constructor_symbol, constructor_scope)?;
+        let constructor_context = self.child_source_context(
+            constructor_symbol,
+            constructor_scope,
+            Some(class_source_context),
+        );
+        for parameter in private_local_parameters {
+            self.index
+                .record_declaration_context(parameter, constructor_context)?;
+        }
 
         for parameter_tree in &constructor.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
@@ -1356,13 +1511,15 @@ impl Namer<'_> {
                 constructor_symbol,
                 SymbolKind::TypeParameter,
             )?;
-            self.enter_derived_symbol(
+            let parameter = self.enter_derived_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
                 constructor_symbol,
                 constructor_scope,
                 spec,
             )?;
+            self.index
+                .record_declaration_context(parameter, constructor_context)?;
         }
         for clause in &constructor.value_param_clauses {
             for parameter_tree in clause {
@@ -1383,27 +1540,36 @@ impl Namer<'_> {
                         & (SymbolFlags::GIVEN | SymbolFlags::IMPLICIT | SymbolFlags::ERASED),
                     visibility: mapped.visibility,
                 };
-                self.enter_derived_symbol(
+                let parameter = self.enter_derived_symbol(
                     *parameter_tree,
                     *parameter.name.as_name(),
                     constructor_symbol,
                     constructor_scope,
                     spec,
                 )?;
+                self.index
+                    .record_declaration_context(parameter, constructor_context)?;
             }
         }
 
         let mut nested_headers = Vec::new();
+        let mut active_source_context = class_source_context;
         for member in &template.body {
             if *member == template.constructor {
                 continue;
             }
+            if matches!(self.arena.get(*member).kind, TreeKind::Import(_)) {
+                active_source_context = self.context_after_import(active_source_context, *member);
+                continue;
+            }
+            let mut member_context = class_context.clone();
+            member_context.source_context = active_source_context;
             match &self.arena.get(*member).kind {
                 TreeKind::TypeDef(definition) => {
                     let definition = definition.clone();
                     if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
                         if let Some(header) =
-                            self.enter_class_or_trait_header(*member, &class_context)?
+                            self.enter_class_or_trait_header(*member, &member_context)?
                         {
                             nested_headers.push(header);
                         }
@@ -1421,6 +1587,8 @@ impl Namer<'_> {
                             scope,
                             spec,
                         )?;
+                        self.index
+                            .record_declaration_context(alias, active_source_context)?;
                         nested_headers.push(EnteredHeader::TypeAlias {
                             tree: *member,
                             symbol: alias,
@@ -1442,6 +1610,8 @@ impl Namer<'_> {
                         SymbolKind::Field,
                     )?;
                     let field = self.enter_symbol(*member, name, symbol, scope, spec)?;
+                    self.index
+                        .record_declaration_context(field, active_source_context)?;
                     nested_headers.push(EnteredHeader::Field {
                         tree: *member,
                         symbol: field,
@@ -1454,10 +1624,11 @@ impl Namer<'_> {
                         &definition,
                         symbol,
                         scope,
+                        active_source_context,
                     )?);
                 }
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
-                    if let Some(header) = self.enter_module_header(*member, &class_context)? {
+                    if let Some(header) = self.enter_module_header(*member, &member_context)? {
                         nested_headers.push(header);
                     }
                 }
@@ -1476,6 +1647,7 @@ impl Namer<'_> {
                             symbol,
                             scope,
                             None,
+                            active_source_context,
                         )?);
                     } else {
                         nested_headers.push(self.enter_secondary_constructor_header(
@@ -1483,13 +1655,18 @@ impl Namer<'_> {
                             &definition,
                             symbol,
                             scope,
+                            active_source_context,
                         )?);
                     }
                 }
                 TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
                     let extension = extension.clone();
-                    nested_headers
-                        .extend(self.enter_extension_method_headers(&extension, symbol, scope)?);
+                    nested_headers.extend(self.enter_extension_method_headers(
+                        &extension,
+                        symbol,
+                        scope,
+                        active_source_context,
+                    )?);
                 }
                 _ => {}
             }
@@ -1507,6 +1684,7 @@ impl Namer<'_> {
         owner: SymbolId,
         class_scope: ScopeId,
         extension_prefix_clauses: Option<&[Vec<TreeId<Untyped>>]>,
+        declaration_context: SourceContextId,
     ) -> Result<EnteredHeader, NamerError> {
         for parameter in &definition.type_params {
             let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
@@ -1554,6 +1732,8 @@ impl Namer<'_> {
             spec.flags = spec.flags | SymbolFlags::EXTENSION;
         }
         let method = self.enter_symbol(tree, name, owner, class_scope, spec)?;
+        self.index
+            .record_declaration_context(method, declaration_context)?;
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
         self.index.record_scope(method, method_scope)?;
         if let Some(clauses) = extension_prefix_clauses {
@@ -1567,6 +1747,7 @@ impl Namer<'_> {
             scope: method_scope,
             extension_prefix_clauses: extension_prefix_clauses
                 .map(<[Vec<TreeId<Untyped>>]>::to_vec),
+            declaration_context,
         })
     }
 
@@ -1575,6 +1756,7 @@ impl Namer<'_> {
         extension: &ExtensionMethods,
         owner: SymbolId,
         scope: ScopeId,
+        declaration_context: SourceContextId,
     ) -> Result<Vec<EnteredHeader>, NamerError> {
         let mut headers = Vec::new();
         for method in &extension.methods {
@@ -1585,6 +1767,7 @@ impl Namer<'_> {
                     owner,
                     scope,
                     Some(&extension.param_clauses),
+                    declaration_context,
                 )?),
                 TreeKind::Export(_) => {}
                 _ => {
@@ -1603,6 +1786,7 @@ impl Namer<'_> {
         method: SymbolId,
         method_scope: ScopeId,
         clauses: &[Vec<TreeId<Untyped>>],
+        method_context: SourceContextId,
     ) -> Result<(), NamerError> {
         for clause in clauses {
             for parameter_tree in clause {
@@ -1614,13 +1798,15 @@ impl Namer<'_> {
                             method,
                             SymbolKind::TypeParameter,
                         )?;
-                        self.enter_derived_symbol(
+                        let parameter = self.enter_derived_symbol(
                             *parameter_tree,
                             *parameter.name.as_name(),
                             method,
                             method_scope,
                             spec,
                         )?;
+                        self.index
+                            .record_declaration_context(parameter, method_context)?;
                     }
                     TreeKind::ValDef(parameter) => {
                         let mapped = self.map_source_modifiers(
@@ -1636,13 +1822,15 @@ impl Namer<'_> {
                                     | SymbolFlags::ERASED),
                             visibility: mapped.visibility,
                         };
-                        self.enter_derived_symbol(
+                        let parameter = self.enter_derived_symbol(
                             *parameter_tree,
                             *parameter.name.as_name(),
                             method,
                             method_scope,
                             spec,
                         )?;
+                        self.index
+                            .record_declaration_context(parameter, method_context)?;
                     }
                     _ => {
                         return Err(NamerError::MalformedAstShape {
@@ -1662,6 +1850,7 @@ impl Namer<'_> {
         definition: &dotty_core::ast::DefDef<Untyped>,
         owner: SymbolId,
         class_scope: ScopeId,
+        declaration_context: SourceContextId,
     ) -> Result<EnteredHeader, NamerError> {
         for clause in &definition.value_param_clauses {
             for parameter in clause {
@@ -1678,6 +1867,8 @@ impl Namer<'_> {
             self.source_symbol_spec(tree, &definition.metadata, owner, SymbolKind::Constructor)?;
         let constructor =
             self.enter_symbol(tree, *definition.name.as_name(), owner, class_scope, spec)?;
+        self.index
+            .record_declaration_context(constructor, declaration_context)?;
         let constructor_scope = self.store.scopes.alloc(Scope::new(Some(constructor)));
         self.index.record_scope(constructor, constructor_scope)?;
 
@@ -1685,6 +1876,7 @@ impl Namer<'_> {
             tree,
             symbol: constructor,
             scope: constructor_scope,
+            declaration_context,
         })
     }
 
@@ -1693,6 +1885,7 @@ impl Namer<'_> {
         tree: TreeId<Untyped>,
         method: SymbolId,
         method_scope: ScopeId,
+        method_context: SourceContextId,
     ) -> Result<(), NamerError> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
@@ -1710,13 +1903,15 @@ impl Namer<'_> {
                 method,
                 SymbolKind::TypeParameter,
             )?;
-            self.enter_symbol(
+            let parameter_symbol = self.enter_symbol(
                 *parameter_tree,
                 *parameter.name.as_name(),
                 method,
                 method_scope,
                 spec,
             )?;
+            self.index
+                .record_declaration_context(parameter_symbol, method_context)?;
         }
         for clause in &definition.value_param_clauses {
             for parameter_tree in clause {
@@ -1740,13 +1935,15 @@ impl Namer<'_> {
                     method,
                     SymbolKind::Parameter,
                 )?;
-                self.enter_symbol(
+                let parameter_symbol = self.enter_symbol(
                     *parameter_tree,
                     *parameter.name.as_name(),
                     method,
                     method_scope,
                     spec,
                 )?;
+                self.index
+                    .record_declaration_context(parameter_symbol, method_context)?;
             }
         }
         Ok(())
@@ -1757,6 +1954,7 @@ impl Namer<'_> {
         tree: TreeId<Untyped>,
         constructor: SymbolId,
         constructor_scope: ScopeId,
+        constructor_context: SourceContextId,
     ) -> Result<(), NamerError> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
@@ -1775,13 +1973,15 @@ impl Namer<'_> {
                     constructor,
                     SymbolKind::Parameter,
                 )?;
-                self.enter_symbol(
+                let parameter_symbol = self.enter_symbol(
                     *parameter_tree,
                     *parameter.name.as_name(),
                     constructor,
                     constructor_scope,
                     spec,
                 )?;
+                self.index
+                    .record_declaration_context(parameter_symbol, constructor_context)?;
             }
         }
         Ok(())
