@@ -165,7 +165,7 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                (ScannerEvent::Outdented, TokenKind::Punctuation(Punctuation::RightBrace)) => {
+                (ScannerEvent::Outdented, _) => {
                     let offset = self.current().span.start();
                     self.tokens.insert(
                         self.index,
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn requests_layout_feedback_for_match_cases_inside_braces() {
-        let source = "{\n  value match\n    case A => a\n    case B => b\n}";
+        let source = "{\n  value match\n    case A => a\n    case B => b\n  after\n}";
         let tokens = vec![
             token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
             token(TokenKind::Identifier, 4, 9),
@@ -193,8 +193,10 @@ mod tests {
             token(TokenKind::Identifier, 41, 42),
             token(TokenKind::Operator, 43, 45),
             token(TokenKind::Identifier, 46, 47),
-            token(TokenKind::Punctuation(Punctuation::RightBrace), 48, 49),
-            token(TokenKind::Eof, 49, 49),
+            token(TokenKind::Newline, 47, 48),
+            token(TokenKind::Identifier, 50, 55),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 56, 57),
+            token(TokenKind::Eof, 57, 57),
         ];
         let mut names = NameInterner::new();
         let mut parser = Parser::new(
@@ -206,13 +208,15 @@ mod tests {
 
         let tree = parser.expr();
 
-        let TreeKind::Block(Block { expr, .. }) = parser.ast().get(tree).kind else {
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(tree).kind else {
             panic!("expected the surrounding braced expression block");
         };
-        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(expr).kind else {
+        assert_eq!(stats.len(), 1);
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
             panic!("expected the match expression");
         };
         assert_eq!(cases.len(), 2);
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
         assert!(
             parser.diagnostics().is_empty(),
             "unexpected diagnostics: {:?}",
