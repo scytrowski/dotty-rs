@@ -552,7 +552,7 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<Option<SymbolId>, TyperError> {
         let direct = self.store.scopes.get(scope).lookup_all(&name);
         if !direct.is_empty() {
-            return self.unique_type_candidate(direct, name, tree_index);
+            return self.unique_symbol_candidate(direct, name, tree_index);
         }
         let alternate = dotty_core::Name::new(
             name.text(),
@@ -561,7 +561,7 @@ impl<'a> SourceTyper<'a> {
                 dotty_core::Namespace::Type => dotty_core::Namespace::Term,
             },
         );
-        self.unique_type_candidate(
+        self.unique_symbol_candidate(
             self.store.scopes.get(scope).lookup_all(&alternate),
             name,
             tree_index,
@@ -569,6 +569,29 @@ impl<'a> SourceTyper<'a> {
     }
 
     fn unique_type_candidate(
+        &self,
+        candidates: &[SymbolId],
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|symbol| {
+                matches!(
+                    self.store.symbols.get(*symbol).kind,
+                    SymbolKind::Class
+                        | SymbolKind::Trait
+                        | SymbolKind::ModuleClass
+                        | SymbolKind::TypeParameter
+                        | SymbolKind::TypeAlias
+                )
+            })
+            .collect();
+        self.unique_symbol_candidate(&candidates, name, tree_index)
+    }
+
+    fn unique_symbol_candidate(
         &self,
         candidates: &[SymbolId],
         name: dotty_core::Name,
@@ -830,6 +853,33 @@ mod tests {
             *typer.store().symbols.info(symbol),
             SymbolInfo::Complete(completed)
         );
+    }
+
+    #[test]
+    fn object_name_alone_does_not_resolve_as_a_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object O\nval x: O = 1");
+        let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(symbol),
+            Err(TyperError::TypeNameNotFound {
+                source: found_source,
+                tree_index,
+                name,
+            }) if found_source == source
+                && tree_index == type_tree.index()
+                && typer.store().names.resolve(name.text()) == "O"
+                && name.is_type()
+        ));
     }
 
     #[test]
