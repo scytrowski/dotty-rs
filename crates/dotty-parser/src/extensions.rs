@@ -264,6 +264,45 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_legacy_implicit_extension_receiver_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (implicit ctx: Ctx) def f = ctx",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Implicit), 11, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::ColonFollow, 23, 24),
+                token(TokenKind::Identifier, 25, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Keyword(HardKeyword::Def), 30, 33),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Operator, 36, 37),
+                token(TokenKind::Identifier, 38, 41),
+                token(TokenKind::Eof, 41, 41),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition for recovery");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected an ExtensionMethods recovery tree");
+        };
+
+        assert_eq!(extension.methods.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == crate::ParseDiagnosticKind::UnsupportedSyntax
+        }));
+    }
+
+    #[test]
     fn preserves_extension_using_clauses_before_and_after_the_receiver() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

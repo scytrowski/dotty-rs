@@ -112,6 +112,21 @@ where
         let mut params = Vec::new();
         let mut metadata = Modifiers::default();
 
+        if is_implicit
+            && !matches!(
+                owner,
+                ParamOwner::Def
+                    | ParamOwner::Class
+                    | ParamOwner::CaseClass
+                    | ParamOwner::ExtensionFollow
+            )
+        {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                "legacy `implicit` clauses are not allowed for this parameter owner",
+            );
+        }
+
         if is_using || owner == ParamOwner::Given {
             metadata.modifiers.push(Modifier::Given);
         }
