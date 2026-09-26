@@ -82,12 +82,23 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         name: dotty_core::Name,
+        position: Option<SourceSpan>,
+    },
+    /// A source name exists, but its semantic symbol cannot denote a type.
+    WrongTypeNameKind {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::Name,
+        symbol: SymbolId,
+        kind: SymbolKind,
+        position: Option<SourceSpan>,
     },
     /// The lexical scope exposes multiple possible type declarations.
     AmbiguousTypeName {
         source: SourceId,
         tree_index: u32,
         name: dotty_core::Name,
+        position: Option<SourceSpan>,
     },
     /// The type-tree cache was already bound to a different type.
     DuplicateSourceTypeCacheEntry {
@@ -343,7 +354,8 @@ impl<'a> SourceTyper<'a> {
                 context_index: context.index(),
             });
         }
-        let target = self.lookup_type_symbol(*name, context, tree.index())?;
+        let position = source_tree.position;
+        let target = self.lookup_type_symbol(*name, context, tree.index(), position)?;
         let ty = match target {
             Some(target) => {
                 let prefix = self.type_symbol_prefix(target);
@@ -352,14 +364,32 @@ impl<'a> SourceTyper<'a> {
                     target: TypeRefTarget::Symbol(target),
                 })
             }
-            None => self
-                .definitions
-                .source_builtin_type(self.store, *name)
-                .ok_or(TyperError::TypeNameNotFound {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: *name,
-                })?,
+            None => {
+                if let Some(builtin) = self.definitions.source_builtin_type(self.store, *name) {
+                    builtin
+                } else if let Some(symbol) = self.lookup_term_candidate_for_type_name(
+                    *name,
+                    context,
+                    tree.index(),
+                    position,
+                )? {
+                    return Err(TyperError::WrongTypeNameKind {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        name: *name,
+                        symbol,
+                        kind: self.store.symbols.get(symbol).kind,
+                        position,
+                    });
+                } else {
+                    return Err(TyperError::TypeNameNotFound {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        name: *name,
+                        position,
+                    });
+                }
+            }
         };
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {
@@ -391,6 +421,7 @@ impl<'a> SourceTyper<'a> {
         name: dotty_core::Name,
         context: SourceContextId,
         tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         let mut current = Some(context);
         while let Some(context_id) = current {
@@ -406,7 +437,9 @@ impl<'a> SourceTyper<'a> {
                 .scopes
                 .get(source_context.lexical_scope)
                 .lookup_all(&name);
-            if let Some(symbol) = self.unique_type_candidate(candidates, name, tree_index)? {
+            if let Some(symbol) =
+                self.unique_type_candidate(candidates, name, tree_index, position)?
+            {
                 return Ok(Some(symbol));
             }
             if let Some(import_tree) = source_context.import
@@ -417,6 +450,7 @@ impl<'a> SourceTyper<'a> {
                     name,
                     tree_index,
                     true,
+                    position,
                 )?
             {
                 return Ok(Some(symbol));
@@ -434,6 +468,7 @@ impl<'a> SourceTyper<'a> {
         wanted: dotty_core::Name,
         tree_index: u32,
         type_only: bool,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         let Some(node) = self.arena.try_get(import_tree) else {
             return Err(TyperError::TreeOutsideArena {
@@ -485,8 +520,12 @@ impl<'a> SourceTyper<'a> {
         }
 
         let qualifier_context = parent_context.unwrap_or(context_id);
-        let Some(scope) =
-            self.import_qualifier_scope(import.expr, qualifier_context, import_tree.index())?
+        let Some(scope) = self.import_qualifier_scope(
+            import.expr,
+            qualifier_context,
+            import_tree.index(),
+            position,
+        )?
         else {
             return Err(TyperError::ImportQualifierNotFound {
                 source: self.source,
@@ -506,7 +545,9 @@ impl<'a> SourceTyper<'a> {
                 matches.extend_from_slice(candidates);
             } else {
                 let name = if is_wildcard { wanted } else { imported };
-                if let Some(symbol) = self.unique_scoped_symbol(scope, name, tree_index)? {
+                if let Some(symbol) =
+                    self.unique_scoped_symbol(scope, name, tree_index, position)?
+                {
                     matches.push(symbol);
                 }
             }
@@ -514,9 +555,9 @@ impl<'a> SourceTyper<'a> {
         matches.sort_by_key(|symbol| symbol.index());
         matches.dedup();
         if type_only {
-            self.unique_type_candidate(&matches, wanted, tree_index)
+            self.unique_type_candidate(&matches, wanted, tree_index, position)
         } else {
-            self.unique_symbol_candidate(&matches, wanted, tree_index)
+            self.unique_symbol_candidate(&matches, wanted, tree_index, position)
         }
     }
 
@@ -525,6 +566,7 @@ impl<'a> SourceTyper<'a> {
         qualifier: TreeId<Untyped>,
         context: SourceContextId,
         import_tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<dotty_core::ScopeId>, TyperError> {
         let mut selections = Vec::new();
         let mut cursor = qualifier;
@@ -550,7 +592,8 @@ impl<'a> SourceTyper<'a> {
                 }
             }
         };
-        let mut symbol = self.lookup_context_symbol(root_name, context, import_tree_index)?;
+        let mut symbol =
+            self.lookup_context_symbol(root_name, context, import_tree_index, position)?;
         for selection in selections.into_iter().rev() {
             let Some(current_symbol) = symbol else {
                 return Ok(None);
@@ -558,7 +601,7 @@ impl<'a> SourceTyper<'a> {
             let Some(scope) = self.scope_of(current_symbol) else {
                 return Ok(None);
             };
-            symbol = self.unique_scoped_symbol(scope, selection, import_tree_index)?;
+            symbol = self.unique_scoped_symbol(scope, selection, import_tree_index, position)?;
         }
         Ok(symbol.and_then(|symbol| self.scope_of(symbol)))
     }
@@ -568,6 +611,7 @@ impl<'a> SourceTyper<'a> {
         name: dotty_core::Name,
         context: SourceContextId,
         import_tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         let mut current = Some(context);
         while let Some(context_id) = current {
@@ -578,9 +622,12 @@ impl<'a> SourceTyper<'a> {
                     context_index: context_id.index(),
                 });
             };
-            if let Some(symbol) =
-                self.unique_scoped_symbol(source_context.lexical_scope, name, import_tree_index)?
-            {
+            if let Some(symbol) = self.unique_scoped_symbol(
+                source_context.lexical_scope,
+                name,
+                import_tree_index,
+                position,
+            )? {
                 return Ok(Some(symbol));
             }
             if let Some(import_tree) = source_context.import
@@ -591,6 +638,7 @@ impl<'a> SourceTyper<'a> {
                     name,
                     import_tree_index,
                     false,
+                    position,
                 )?
             {
                 return Ok(Some(symbol));
@@ -605,10 +653,11 @@ impl<'a> SourceTyper<'a> {
         scope: dotty_core::ScopeId,
         name: dotty_core::Name,
         tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         let direct = self.store.scopes.get(scope).lookup_all(&name);
         if !direct.is_empty() {
-            return self.unique_symbol_candidate(direct, name, tree_index);
+            return self.unique_symbol_candidate(direct, name, tree_index, position);
         }
         let alternate = dotty_core::Name::new(
             name.text(),
@@ -621,7 +670,38 @@ impl<'a> SourceTyper<'a> {
             self.store.scopes.get(scope).lookup_all(&alternate),
             name,
             tree_index,
+            position,
         )
+    }
+
+    fn lookup_term_candidate_for_type_name(
+        &self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let term_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Term);
+        let mut current = Some(context);
+        while let Some(context_id) = current {
+            let Some(source_context) = self.index.try_source_context(context_id) else {
+                return Err(TyperError::SourceContextMissing {
+                    source: self.source,
+                    tree_index,
+                    context_index: context_id.index(),
+                });
+            };
+            let candidates = self
+                .store
+                .scopes
+                .get(source_context.lexical_scope)
+                .lookup_all(&term_name);
+            if !candidates.is_empty() {
+                return self.unique_symbol_candidate(candidates, name, tree_index, position);
+            }
+            current = source_context.parent;
+        }
+        Ok(None)
     }
 
     fn unique_type_candidate(
@@ -629,8 +709,9 @@ impl<'a> SourceTyper<'a> {
         candidates: &[SymbolId],
         name: dotty_core::Name,
         tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
-        let candidates: Vec<_> = candidates
+        let type_candidates: Vec<_> = candidates
             .iter()
             .copied()
             .filter(|symbol| {
@@ -644,7 +725,24 @@ impl<'a> SourceTyper<'a> {
                 )
             })
             .collect();
-        self.unique_symbol_candidate(&candidates, name, tree_index)
+        if type_candidates.is_empty() {
+            match candidates {
+                [symbol] => {
+                    let kind = self.store.symbols.get(*symbol).kind;
+                    Err(TyperError::WrongTypeNameKind {
+                        source: self.source,
+                        tree_index,
+                        name,
+                        symbol: *symbol,
+                        kind,
+                        position,
+                    })
+                }
+                _ => self.unique_symbol_candidate(candidates, name, tree_index, position),
+            }
+        } else {
+            self.unique_symbol_candidate(&type_candidates, name, tree_index, position)
+        }
     }
 
     fn unique_symbol_candidate(
@@ -652,6 +750,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &[SymbolId],
         name: dotty_core::Name,
         tree_index: u32,
+        position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         match candidates {
             [] => Ok(None),
@@ -660,6 +759,7 @@ impl<'a> SourceTyper<'a> {
                 source: self.source,
                 tree_index,
                 name,
+                position,
             }),
         }
     }
@@ -912,10 +1012,153 @@ mod tests {
     }
 
     #[test]
+    fn class_type_parameter_is_resolved_in_a_field_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { val value: A = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let type_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "A" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), type_parameter);
+    }
+
+    #[test]
+    fn method_type_parameter_shadows_a_class_type_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { def f[A](value: A): A = value }");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
+            unreachable!()
+        };
+        let method_type_parameter = index.symbol_at(source, definition.type_params[0]).unwrap();
+        let value_parameter = index
+            .symbol_at(source, definition.value_param_clauses[0][0])
+            .unwrap();
+        let context = index.declaration_context_of(value_parameter).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(definition.tpt, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), method_type_parameter);
+    }
+
+    #[test]
+    fn unresolved_type_name_error_has_position_and_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("val x: MissingType = 1");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let position = parsed.ast.get(type_tree).position;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::TypeNameNotFound {
+                source: found_source,
+                tree_index,
+                name,
+                position: found_position,
+            }) if found_source == source
+                && tree_index == type_tree.index()
+                && found_position == position
+                && typer.store().names.resolve(name.text()) == "MissingType"
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(value), SymbolInfo::Missing);
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+    }
+
+    #[test]
+    fn duplicate_type_candidates_return_a_positioned_ambiguity_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class T; class T; val x: T = 1");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let position = parsed.ast.get(type_tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::AmbiguousTypeName {
+                source: found_source,
+                tree_index,
+                name,
+                position: found_position,
+            }) if found_source == source
+                && tree_index == type_tree.index()
+                && found_position == position
+                && typer.store().names.resolve(name.text()) == "T"
+        ));
+    }
+
+    #[test]
     fn object_name_alone_does_not_resolve_as_a_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("object O\nval x: O = 1");
         let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let object = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(
+                    node.kind,
+                    TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(_))
+                )
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let position = parsed.ast.get(type_tree).position;
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -927,12 +1170,17 @@ mod tests {
 
         assert!(matches!(
             typer.complete_symbol(symbol),
-            Err(TyperError::TypeNameNotFound {
+            Err(TyperError::WrongTypeNameKind {
                 source: found_source,
                 tree_index,
                 name,
+                symbol: found_symbol,
+                kind: SymbolKind::Object,
+                position: found_position,
             }) if found_source == source
                 && tree_index == type_tree.index()
+                && found_symbol == object
+                && found_position == position
                 && typer.store().names.resolve(name.text()) == "O"
                 && name.is_type()
         ));
@@ -1337,6 +1585,13 @@ mod tests {
         let (ty, definitions) = complete_builtin_annotation("Int");
 
         assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
+    fn primitive_boolean_annotation_uses_the_bootstrapped_type() {
+        let (ty, definitions) = complete_builtin_annotation("Boolean");
+
+        assert_eq!(ty, definitions.boolean);
     }
 
     #[test]
