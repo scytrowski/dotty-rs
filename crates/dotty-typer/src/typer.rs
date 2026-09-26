@@ -2,11 +2,11 @@
 
 use std::fmt;
 
-use dotty_core::ast::{Ident, TreeKind};
+use dotty_core::ast::{Ident, TreeKind, UntypedNode};
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SymbolId, SymbolInfo, SymbolKind,
-    TreeId, TypeId, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo,
+    SymbolKind, TreeId, TypeId, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
@@ -54,6 +54,12 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         tree_kind: &'static str,
+    },
+    /// A declaration has no source-written type and must not be inferred here.
+    MissingDeclaredType {
+        source: SourceId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
     },
     /// The source tree does not have the definition shape expected by its symbol.
     MalformedSourceAst {
@@ -297,6 +303,25 @@ impl<'a> SourceTyper<'a> {
                 tree_index: tree.index(),
             });
         };
+        if matches!(&source_tree.kind, TreeKind::TypeTree(_)) {
+            return Err(TyperError::MissingDeclaredType {
+                source: self.source,
+                tree_index: tree.index(),
+                position: source_tree.position,
+            });
+        }
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source_tree.kind {
+            let ty = self.type_of_tpt(parens.inner, context)?;
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
         let TreeKind::Ident(Ident { name, .. }) = &source_tree.kind else {
             return Err(TyperError::UnsupportedTypeTree {
                 source: self.source,
@@ -911,6 +936,66 @@ mod tests {
                 && typer.store().names.resolve(name.text()) == "O"
                 && name.is_type()
         ));
+    }
+
+    #[test]
+    fn parenthesized_type_projects_the_inner_type_and_caches_both_trees() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("val x: (Int) = 1");
+        let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(parens)) =
+            &parsed.ast.get(type_tree).kind
+        else {
+            panic!("expected the parser to preserve parentheses around the type")
+        };
+        let inner = parens.inner;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(symbol).unwrap();
+
+        assert_eq!(projected, definitions.int);
+        assert_eq!(
+            typer.source_type_index().type_at(source, type_tree),
+            Some(projected)
+        );
+        assert_eq!(
+            typer.source_type_index().type_at(source, inner),
+            Some(projected)
+        );
+    }
+
+    #[test]
+    fn missing_declared_type_is_not_inferred_from_the_value_rhs() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("val x = 1");
+        let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let position = parsed.ast.get(type_tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(symbol),
+            Err(TyperError::MissingDeclaredType {
+                source: found_source,
+                tree_index,
+                position: found_position,
+            }) if found_source == source
+                && tree_index == type_tree.index()
+                && found_position == position
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
     }
 
     #[test]
