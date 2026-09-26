@@ -5,6 +5,7 @@ import java.nio.file.{Files, Paths}
 import dotty.tools.dotc.core.Contexts.ContextBase
 import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
+import dotty.tools.dotc.core.Flags.Package as PackageFlag
 import dotty.tools.dotc.util.SourceFile
 import scala.util.control.NonFatal
 
@@ -126,6 +127,8 @@ object Main:
           fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase, includeMutable = false)
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
         fields += field("name", quote(module.name.toString))
+        if module.mods.is(PackageFlag) then
+          fields += field("package_object", "true")
         fields ++= renderDefinitionMetadata(module.mods, module, source, placeholderBase, includeMutable = false)
       case vdef: dotty.tools.dotc.ast.Trees.ValDef[?] =>
         if !slice(vdef, source).trim.startsWith("_") && !vdef.name.toString.startsWith("_$") then

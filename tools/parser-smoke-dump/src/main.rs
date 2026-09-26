@@ -279,6 +279,13 @@ fn render_tree(
                 "\"name\":{}",
                 quote(names.resolve(module.name.as_name().text()))
             ));
+            if module
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::PackageObject)
+            {
+                fields.push("\"package_object\":true".to_owned());
+            }
             fields.extend(render_definition_metadata(
                 &module.metadata,
                 arena,
@@ -653,6 +660,7 @@ fn render_definition_metadata(
             dotty_core::ast::Modifier::Trait => None,
             dotty_core::ast::Modifier::Enum => None,
             dotty_core::ast::Modifier::EnumCase => None,
+            dotty_core::ast::Modifier::PackageObject => None,
             dotty_core::ast::Modifier::Param
             | dotty_core::ast::Modifier::ParamAccessor
             | dotty_core::ast::Modifier::PrivateLocal => None,
@@ -744,6 +752,7 @@ fn modifier_keyword(modifier: dotty_core::ast::Modifier) -> Option<&'static str>
         Modifier::Trait
         | Modifier::Enum
         | Modifier::EnumCase
+        | Modifier::PackageObject
         | Modifier::Param
         | Modifier::ParamAccessor
         | Modifier::PrivateLocal => return None,

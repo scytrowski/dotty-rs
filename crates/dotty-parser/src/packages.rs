@@ -1,6 +1,7 @@
-use dotty_core::ast::PackageDef;
+use dotty_core::ast::{Modifier, PackageDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
+use crate::modifiers::DefinitionPrefix;
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::{ParsedStatement, StatementSequenceBoundary};
 use crate::{Location, ParseDiagnosticKind, Parser};
@@ -14,13 +15,9 @@ where
         self.advance();
 
         if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "package objects are not supported yet",
-            );
-            self.advance();
-            self.recover_until(crate::RecoverySet::Statement);
-            return ParsedStatement::Expression(self.error_expr(self.current_span()));
+            let mut prefix = DefinitionPrefix::empty(mark.start());
+            prefix.metadata.modifiers.push(Modifier::PackageObject);
+            return self.parse_object_definition_with_prefix(prefix);
         }
 
         let name = self.parse_package_name();
@@ -190,5 +187,49 @@ mod tests {
             TreeKind::Import(_)
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_empty_package_object_as_a_package_marked_module() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "package object foo {}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Package), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Object), 8, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 19, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        else {
+            panic!("expected package object definition");
+        };
+        let (package_name, template_id, has_package_object_marker) =
+            match &parser.ast().get(id).kind {
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(module)) => (
+                    module.name,
+                    module.template,
+                    module.metadata.modifiers.contains(&Modifier::PackageObject),
+                ),
+                _ => panic!("expected package object to remain a ModuleDef"),
+            };
+        assert!(has_package_object_marker);
+        let TreeKind::Template(template) = &parser.ast().get(template_id).kind else {
+            panic!("expected module template");
+        };
+        assert!(template.body.is_empty());
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 21).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(package_name.as_name().text()), "foo");
     }
 }
