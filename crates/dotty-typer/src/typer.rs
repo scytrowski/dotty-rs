@@ -3775,6 +3775,56 @@ mod tests {
     }
 
     #[test]
+    fn failed_primary_constructor_parameter_type_rolls_back_everything() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Missing)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let parameter_tree = match &parsed.ast.get(template.constructor).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("expected a primary constructor definition"),
+        };
+        let parameter = index
+            .derived_symbol_at(constructor, source, parameter_tree)
+            .unwrap();
+        let type_tree = match &parsed.ast.get(parameter_tree).kind {
+            TreeKind::ValDef(definition) => definition.tpt,
+            _ => panic!("expected a constructor parameter definition"),
+        };
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::TypeNameNotFound {
+                source: error_source,
+                tree_index,
+                ..
+            }) if error_source == source && tree_index == type_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
     fn constructor_rejects_malformed_precompleted_owner_info() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let (class_tree, template_tree) = parsed
