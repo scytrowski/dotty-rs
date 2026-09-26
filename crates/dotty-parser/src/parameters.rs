@@ -593,6 +593,7 @@ fn current_is_anonymous_context_type<S: dotty_core::TokenSource>(
 ) -> bool {
     parser.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
         && !is_parameter_colon_at(parser, 1)
+        && !parser.current_is_inline_parameter_modifier()
 }
 
 fn is_class_parameter_owner(owner: ParamOwner) -> bool {
@@ -779,6 +780,34 @@ mod tests {
         let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
         let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
             panic!("expected using parameter ValDef");
+        };
+
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_on_named_given_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using inline evidence: Evidence)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Identifier, 14, 22),
+                token(TokenKind::ColonFollow, 22, 23),
+                token(TokenKind::Identifier, 24, 32),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 32, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let clause = parser.parse_single_term_param_clause(ParamOwner::Given, true, true, 0);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clause[0]).kind else {
+            panic!("expected given parameter ValDef");
         };
 
         assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
