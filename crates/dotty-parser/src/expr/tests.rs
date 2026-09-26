@@ -342,6 +342,26 @@ fn parses_a_template_after_a_constructor_application() {
         parser.ast().get(template.parents[0]).kind,
         TreeKind::Apply(_)
     ));
+    assert_eq!(
+        parser
+            .ast()
+            .get(template.parents[0])
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 10).unwrap()
+    );
+    assert_eq!(
+        parser
+            .ast()
+            .get(template.constructor)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 4).unwrap()
+    );
     assert_eq!(parser.current().kind, TokenKind::Eof);
     assert!(parser.diagnostics().is_empty());
 }

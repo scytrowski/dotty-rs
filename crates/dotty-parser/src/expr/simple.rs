@@ -688,14 +688,28 @@ where
         qualifier
     }
 
-    fn new_template_parent(&self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
+    fn new_template_parent(&mut self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
         match &self.ast.get(tree).kind {
             TreeKind::New(new) => Some(new.tpt),
             TreeKind::Apply(application) => {
-                let TreeKind::Select(selection) = &self.ast.get(application.function).kind else {
+                let function = application.function;
+                let TreeKind::Select(selection) = &self.ast.get(function).kind else {
                     return None;
                 };
-                matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)).then_some(tree)
+                if !matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) {
+                    return None;
+                }
+
+                if let (Some(function_position), Some(parent_position)) =
+                    (self.ast.get(function).position, self.ast.get(tree).position)
+                {
+                    let start = function_position.span().range().start();
+                    let end = parent_position.span().range().end();
+                    let range = TextRange::new(start, end).expect("constructor span is ordered");
+                    self.ast.get_mut(tree).position =
+                        Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+                }
+                Some(tree)
             }
             _ => None,
         }
