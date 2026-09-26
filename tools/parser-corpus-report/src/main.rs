@@ -809,6 +809,9 @@ fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
         dotty_namer::NamerError::DuplicateDerivedSourceTreeSymbol { .. } => {
             "DuplicateDerivedSourceTreeSymbol"
         }
+        dotty_namer::NamerError::ConflictingSourceProvenance { .. } => {
+            "ConflictingSourceProvenance"
+        }
         dotty_namer::NamerError::DuplicateExtensionPrefixClauses { .. } => {
             "DuplicateExtensionPrefixClauses"
         }
@@ -1256,6 +1259,30 @@ mod tests {
 
         assert!(matches!(parsed.status, Status::RecoverableDiagnostics));
         assert!(parsed.namer.is_some());
+    }
+
+    #[test]
+    fn conflicting_source_provenance_has_a_typed_report_bucket() {
+        let mut store = SemanticStore::new();
+        let symbol = Packages::new().enter(&mut store, dotty_core::SymbolOrigin::Synthetic, &["p"])
+            [0]
+        .symbol;
+        let mut arena = AstArena::<Untyped>::new();
+        let tree = arena.alloc(dotty_core::Tree {
+            kind: TreeKind::PhaseSpecific(UntypedNode::Error(dotty_core::ast::ErrorNode {
+                kind: dotty_core::ast::ErrorNodeKind::UnexpectedToken,
+            })),
+            position: None,
+            ty: (),
+        });
+        let source = SourceId::from_index(1);
+        let error = dotty_namer::NamerError::ConflictingSourceProvenance {
+            symbol,
+            existing: dotty_namer::SourceDefinition::Canonical { source, tree },
+            attempted: dotty_namer::SourceDefinition::Derived { source, tree },
+        };
+
+        assert_eq!(namer_error_kind(&error), "ConflictingSourceProvenance");
     }
 
     #[test]
