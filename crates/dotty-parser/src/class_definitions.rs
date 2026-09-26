@@ -1426,6 +1426,56 @@ where
         );
         (constructor, constructor_start)
     }
+
+    pub(crate) fn allocate_anonymous_new_template(
+        &mut self,
+        start: u32,
+        parent: TreeId<Untyped>,
+        body: TemplateBodyResult,
+    ) -> TreeId<Untyped> {
+        let parent_position = self.ast.get(parent).position;
+        let parent_start = parent_position.map(|position| position.span().range().start());
+        let parent_end = parent_position.map(|position| position.span().range().end());
+        let body_start = body.members.first().and_then(|member| {
+            self.ast
+                .get(*member)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let tail = TemplateTail {
+            parents: vec![parent],
+            self_val: body.self_val,
+            body: body.members,
+            metadata: UntypedTemplateMetadata::default(),
+        };
+        let (constructor, constructor_start) = self.synthetic_primary_constructor(
+            start,
+            Vec::new(),
+            Vec::new(),
+            parent_end.unwrap_or(start),
+            ConstructorBoundary {
+                parameter_start: None,
+                constructor_metadata_start: None,
+                parent_start,
+                body_start,
+            },
+            Modifiers::default(),
+        );
+        let position = self.template_position(constructor, constructor_start, &tail);
+        let template = self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Template(Template {
+                constructor,
+                parents: tail.parents,
+                self_val: tail.self_val,
+                body: tail.body,
+                metadata: tail.metadata,
+            }),
+        );
+        self.ast.get_mut(template).position = Some(position);
+        template
+    }
+
     /// Builds the existing source-level template shape used by a structural
     /// given. A given has no class name of its own, but its parent and body use
     /// exactly the same template machinery as class-like definitions.

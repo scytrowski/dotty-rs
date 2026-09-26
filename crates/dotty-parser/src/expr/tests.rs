@@ -239,7 +239,7 @@ fn a_parenthesized_case_lambda_can_take_an_application_suffix() {
 }
 
 #[test]
-fn does_not_treat_a_new_template_body_as_a_braced_argument() {
+fn parses_an_empty_anonymous_template_after_new() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
         "new Foo {}",
@@ -254,15 +254,88 @@ fn does_not_treat_a_new_template_body_as_a_braced_argument() {
     );
 
     let tree = parser.expr();
-    let TreeKind::Apply(Apply { ref args, .. }) = parser.ast().get(tree).kind else {
-        panic!("expected the supported constructor application");
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
     };
-
-    assert!(args.is_empty());
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template body");
+    };
+    assert_eq!(template.parents.len(), 1);
+    assert!(template.body.is_empty());
     assert_eq!(
-        parser.current().kind,
-        TokenKind::Punctuation(Punctuation::LeftBrace)
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 10).unwrap()
     );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_members_in_anonymous_template_bodies_after_new() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo { def value = 1 }",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Keyword(HardKeyword::Def), 10, 13),
+            token(TokenKind::Identifier, 14, 19),
+            token(TokenKind::Operator, 20, 21),
+            token(TokenKind::IntegerLiteral, 22, 23),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 24, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template body");
+    };
+    assert_eq!(template.body.len(), 1);
+    assert!(matches!(
+        parser.ast().get(template.body[0]).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_template_after_a_constructor_application() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo(1) {}",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+            token(TokenKind::IntegerLiteral, 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template body");
+    };
+    assert!(matches!(
+        parser.ast().get(template.parents[0]).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
 }
 
 #[test]
