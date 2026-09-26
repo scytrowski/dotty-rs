@@ -31,7 +31,7 @@ where
         let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
         let is_name = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => true,
-            TokenKind::Operator => !["=", "=>", "<-", "<:", ">:", "<%", "@", "?=>"]
+            TokenKind::Operator => !["=", "=>", "<-", "<:", ">:", "<%", "@", "?=>", "#", "=>>"]
                 .iter()
                 .any(|reserved| self.current_text_is(reserved)),
             _ => false,

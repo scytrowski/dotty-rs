@@ -879,6 +879,54 @@ mod tests {
     }
 
     #[test]
+    fn leaves_reserved_hash_unconsumed_after_a_pattern_selection_dot() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.#",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.pattern();
+
+        assert_eq!(parser.current().kind, TokenKind::Operator);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "expected a selector after `.` in pattern"
+        );
+    }
+
+    #[test]
+    fn leaves_reserved_context_function_arrow_unconsumed_after_a_pattern_selection_dot() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x.=>>",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.pattern();
+
+        assert_eq!(parser.current().kind, TokenKind::Operator);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "expected a selector after `.` in pattern"
+        );
+    }
+
+    #[test]
     fn parses_a_wildcard_pattern_as_the_source_name() {
         let mut names = NameInterner::new();
         let parser = parser_for(
