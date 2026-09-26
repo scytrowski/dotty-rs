@@ -3,7 +3,10 @@
 use std::fmt;
 
 use dotty_core::ast::{Ident, TreeKind, TypeBoundsTree, UntypedNode};
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{
+    MethodKind, MethodParamSpec, Type, TypeParamSpec, TypeRefTarget, method_type_from_symbols,
+    poly_type_from_symbols,
+};
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
     ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
@@ -58,6 +61,23 @@ pub enum TyperError {
     },
     /// Opaque alias completion is deferred until opaque visibility is modeled.
     OpaqueAliasDeferred { symbol: SymbolId, tree_index: u32 },
+    /// Method result inference is deferred to expression typing.
+    InferredMethodResultDeferred { symbol: SymbolId, tree_index: u32 },
+    /// Extension signature normalization for right-associative methods is deferred.
+    RightAssociativeExtensionDeferred { symbol: SymbolId, tree_index: u32 },
+    /// A source method parameter tree has no symbol for this method owner.
+    MethodParameterSymbolMissing {
+        method: SymbolId,
+        parameter_tree_index: u32,
+    },
+    /// Extension method prefix parameter metadata is absent from the source index.
+    ExtensionPrefixClausesMissing { method: SymbolId },
+    /// A method clause has malformed parameter kinds or inconsistent flags.
+    MalformedMethodClause {
+        method: SymbolId,
+        method_tree_index: u32,
+        clause_index: usize,
+    },
     /// A deferred completion belongs to a future completion engine.
     DeferredSymbolCompletion { symbol: SymbolId },
     /// A previous fatal semantic failure has already been recorded.
@@ -171,6 +191,11 @@ struct SourceImport {
     tree: TreeId<Untyped>,
     context: SourceContextId,
     parent: Option<SourceContextId>,
+}
+
+enum MethodClauseSpec {
+    Types(Vec<TypeParamSpec>),
+    Terms(Vec<MethodParamSpec>, MethodKind),
 }
 
 /// Resolves source-written type names without making the type-tree dispatcher
@@ -380,6 +405,10 @@ impl<'a> SourceTyper<'a> {
             TreeKind::TypeDef(definition) => Some(definition.rhs),
             _ => None,
         };
+        let method_definition = match &source_tree.kind {
+            TreeKind::DefDef(definition) => Some(definition.clone()),
+            _ => None,
+        };
 
         match kind {
             SymbolKind::Field
@@ -432,8 +461,27 @@ impl<'a> SourceTyper<'a> {
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
                 self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
             }
-            SymbolKind::Method
-            | SymbolKind::Constructor
+            SymbolKind::Method => {
+                let definition = method_definition.ok_or(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                })?;
+                let info = self.complete_method_signature(
+                    symbol,
+                    tree.index(),
+                    &definition,
+                    info_journal,
+                )?;
+                let previous = *self.store.symbols.info(symbol);
+                info_journal.push((symbol, previous));
+                self.store
+                    .symbols
+                    .set_info(symbol, SymbolInfo::Complete(info));
+                Ok(info)
+            }
+            SymbolKind::Constructor
             | SymbolKind::Class
             | SymbolKind::Trait
             | SymbolKind::ModuleClass => {
@@ -595,6 +643,324 @@ impl<'a> SourceTyper<'a> {
             self.definitions.any_type
         };
         Ok(self.store.types.alloc(Type::Bounds { low, high }))
+    }
+
+    fn complete_method_signature(
+        &mut self,
+        method: SymbolId,
+        method_tree_index: u32,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let method_name = self.store.names.resolve(definition.name.as_name().text());
+        let is_extension = self
+            .store
+            .symbols
+            .get(method)
+            .flags
+            .contains(SymbolFlags::EXTENSION);
+        if is_extension && method_name.ends_with(':') {
+            return Err(TyperError::RightAssociativeExtensionDeferred {
+                symbol: method,
+                tree_index: method_tree_index,
+            });
+        }
+        let declaration_context = self
+            .index
+            .declaration_context_of(method)
+            .ok_or(TyperError::DeclarationContextMissing { symbol: method })?;
+        let mut clauses = Vec::new();
+        let prefix_clauses = if is_extension {
+            Some(
+                self.index
+                    .extension_prefix_clauses(method)
+                    .ok_or(TyperError::ExtensionPrefixClausesMissing { method })?
+                    .to_vec(),
+            )
+        } else {
+            None
+        };
+        let first_signature_parameter = prefix_clauses
+            .as_ref()
+            .and_then(|clauses| clauses.iter().flatten().next().map(|tree| (*tree, true)))
+            .or_else(|| definition.type_params.first().map(|tree| (*tree, false)))
+            .or_else(|| {
+                definition
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map(|tree| (*tree, false))
+            });
+        let signature_parameter_context = if let Some((tree, derived)) = first_signature_parameter {
+            let parameter = self.method_parameter_symbol(method, tree, derived)?;
+            self.index
+                .declaration_context_of(parameter)
+                .ok_or(TyperError::DeclarationContextMissing { symbol: parameter })?
+        } else {
+            declaration_context
+        };
+        if let Some(prefix_clauses) = prefix_clauses {
+            for (clause_index, trees) in prefix_clauses.iter().enumerate() {
+                clauses.push(self.extension_prefix_clause(
+                    method,
+                    method_tree_index,
+                    clause_index,
+                    trees,
+                    info_journal,
+                )?);
+            }
+        }
+        if !definition.type_params.is_empty() {
+            clauses.push(MethodClauseSpec::Types(self.type_parameter_specs(
+                method,
+                &definition.type_params,
+                false,
+                info_journal,
+                method_tree_index,
+                clauses.len(),
+            )?));
+        }
+        for trees in &definition.value_param_clauses {
+            let clause_index = clauses.len();
+            let (parameters, kind) = self.method_parameter_specs(
+                method,
+                trees,
+                false,
+                method_tree_index,
+                clause_index,
+                info_journal,
+            )?;
+            clauses.push(MethodClauseSpec::Terms(parameters, kind));
+        }
+
+        let Some(result_node) = self.arena.try_get(definition.tpt) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: definition.tpt.index(),
+            });
+        };
+        if matches!(&result_node.kind, TreeKind::TypeTree(_)) {
+            return Err(TyperError::InferredMethodResultDeferred {
+                symbol: method,
+                tree_index: definition.tpt.index(),
+            });
+        }
+        let mut signature = self.type_of_tpt_inner(definition.tpt, signature_parameter_context)?;
+        for clause in clauses.into_iter().rev() {
+            signature = match clause {
+                MethodClauseSpec::Types(parameters) => {
+                    poly_type_from_symbols(self.store, &parameters, signature).map_err(|error| {
+                        TyperError::TypeRebinding {
+                            source: self.source,
+                            tree_index: method_tree_index,
+                            error,
+                        }
+                    })?
+                }
+                MethodClauseSpec::Terms(parameters, kind) => {
+                    method_type_from_symbols(self.store, &parameters, signature, kind).map_err(
+                        |error| TyperError::TypeRebinding {
+                            source: self.source,
+                            tree_index: method_tree_index,
+                            error,
+                        },
+                    )?
+                }
+            };
+        }
+        Ok(signature)
+    }
+
+    fn extension_prefix_clause(
+        &mut self,
+        method: SymbolId,
+        method_tree_index: u32,
+        clause_index: usize,
+        trees: &[TreeId<Untyped>],
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<MethodClauseSpec, TyperError> {
+        let Some(first_tree) = trees.first() else {
+            return Ok(MethodClauseSpec::Terms(Vec::new(), MethodKind::Plain));
+        };
+        let Some(first_node) = self.arena.try_get(*first_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: first_tree.index(),
+            });
+        };
+        match &first_node.kind {
+            TreeKind::TypeDef(_) => Ok(MethodClauseSpec::Types(self.type_parameter_specs(
+                method,
+                trees,
+                true,
+                info_journal,
+                method_tree_index,
+                clause_index,
+            )?)),
+            TreeKind::ValDef(_) => {
+                let (parameters, kind) = self.method_parameter_specs(
+                    method,
+                    trees,
+                    true,
+                    method_tree_index,
+                    clause_index,
+                    info_journal,
+                )?;
+                Ok(MethodClauseSpec::Terms(parameters, kind))
+            }
+            _ => Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index,
+                clause_index,
+            }),
+        }
+    }
+
+    fn type_parameter_specs(
+        &mut self,
+        method: SymbolId,
+        trees: &[TreeId<Untyped>],
+        derived: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        method_tree_index: u32,
+        clause_index: usize,
+    ) -> Result<Vec<TypeParamSpec>, TyperError> {
+        let mut parameters = Vec::with_capacity(trees.len());
+        for tree in trees {
+            let Some(node) = self.arena.try_get(*tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            };
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            };
+            let symbol = self.method_parameter_symbol(method, *tree, derived)?;
+            if self.store.symbols.get(symbol).kind != SymbolKind::TypeParameter {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            }
+            let bounds = self.complete_signature_parameter(symbol, info_journal)?;
+            parameters.push(TypeParamSpec {
+                symbol,
+                name: definition.name,
+                bounds,
+                declared_variance: None,
+            });
+        }
+        Ok(parameters)
+    }
+
+    fn method_parameter_specs(
+        &mut self,
+        method: SymbolId,
+        trees: &[TreeId<Untyped>],
+        derived: bool,
+        method_tree_index: u32,
+        clause_index: usize,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(Vec<MethodParamSpec>, MethodKind), TyperError> {
+        let mut parameters = Vec::with_capacity(trees.len());
+        let mut clause_kind = None;
+        for tree in trees {
+            let Some(node) = self.arena.try_get(*tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            };
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            };
+            let symbol = self.method_parameter_symbol(method, *tree, derived)?;
+            if self.store.symbols.get(symbol).kind != SymbolKind::Parameter {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            }
+            let flags = self.store.symbols.get(symbol).flags;
+            let given = flags.contains(SymbolFlags::GIVEN);
+            let implicit = flags.contains(SymbolFlags::IMPLICIT);
+            if given && implicit {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            }
+            let parameter_kind = if given {
+                MethodKind::Contextual
+            } else if implicit {
+                MethodKind::Implicit
+            } else {
+                MethodKind::Plain
+            };
+            if clause_kind.is_some_and(|kind| kind != parameter_kind) {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                });
+            }
+            clause_kind = Some(parameter_kind);
+            let ty = self.complete_signature_parameter(symbol, info_journal)?;
+            parameters.push(MethodParamSpec {
+                symbol,
+                name: definition.name,
+                ty,
+                erased: flags.contains(SymbolFlags::ERASED),
+                varargs: false,
+            });
+        }
+        Ok((parameters, clause_kind.unwrap_or(MethodKind::Plain)))
+    }
+
+    fn method_parameter_symbol(
+        &self,
+        method: SymbolId,
+        tree: TreeId<Untyped>,
+        derived: bool,
+    ) -> Result<SymbolId, TyperError> {
+        let symbol = if derived {
+            self.index.derived_symbol_at(method, self.source, tree)
+        } else {
+            self.index.symbol_at(self.source, tree)
+        };
+        symbol.ok_or(TyperError::MethodParameterSymbolMissing {
+            method,
+            parameter_tree_index: tree.index(),
+        })
+    }
+
+    fn complete_signature_parameter(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if !self.store.symbols.contains(symbol) {
+            return Err(TyperError::UnknownSymbol { symbol });
+        }
+        match *self.store.symbols.info(symbol) {
+            SymbolInfo::Complete(ty) => Ok(ty),
+            SymbolInfo::Missing => self.complete_symbol_inner(symbol, info_journal),
+            SymbolInfo::Deferred(_) => Err(TyperError::DeferredSymbolCompletion { symbol }),
+            SymbolInfo::Error => Err(TyperError::SymbolAlreadyErrored { symbol }),
+        }
     }
 
     /// Projects a source type tree using the declaration context from the namer.
@@ -2470,6 +2836,232 @@ mod tests {
     }
 
     #[test]
+    fn method_signature_binds_type_and_value_parameters_by_symbol() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A](value: A): A = value");
+        let (method_tree, method_definition) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "id" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("expected the method type parameter binder");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let poly_binder = signature;
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("expected the value parameter clause");
+        };
+        assert_eq!(method_type.kind, MethodKind::Plain);
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == poly_binder
+        ));
+        assert!(matches!(
+            typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == poly_binder
+        ));
+        let TreeKind::ValDef(parameter) = &parsed
+            .ast
+            .get(method_definition.value_param_clauses[0][0])
+            .kind
+        else {
+            panic!("expected a value parameter definition");
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(method_type.params[0].name.as_name().text()),
+            typer.store().names.resolve(parameter.name.as_name().text())
+        );
+    }
+
+    #[test]
+    fn method_signature_preserves_curried_clause_kinds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def f(a: Int)(using b: Int)(implicit c: Boolean): Unit = ()");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let mut signature = typer.complete_symbol(method).unwrap();
+        let expected_kinds = [
+            MethodKind::Plain,
+            MethodKind::Contextual,
+            MethodKind::Implicit,
+        ];
+        for (clause_index, expected_kind) in expected_kinds.into_iter().enumerate() {
+            let Type::Method(method_type) = typer.store().types.get(signature) else {
+                panic!("expected method clause {clause_index}");
+            };
+            assert_eq!(method_type.kind, expected_kind);
+            assert_eq!(method_type.params.len(), 1);
+            assert!(!method_type.params[0].erased);
+            signature = method_type.result;
+        }
+        assert_eq!(signature, definitions.unit);
+    }
+
+    #[test]
+    fn inconsistent_parameter_flags_fail_method_completion_atomically() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def f(using first: Int, second: Int): Int = first");
+        let (method_tree, method_definition) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let first = index
+            .symbol_at(source, method_definition.value_param_clauses[0][0])
+            .unwrap();
+        let second = index
+            .symbol_at(source, method_definition.value_param_clauses[0][1])
+            .unwrap();
+        let second_flags = store.symbols.get(second).flags;
+        store.symbols.get_mut(second).flags =
+            second_flags.difference(SymbolFlags::GIVEN) | SymbolFlags::IMPLICIT;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::MalformedMethodClause {
+                method: error_method,
+                method_tree_index,
+                clause_index: 0
+            }) if error_method == method && method_tree_index == method_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(first), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn explicit_parameterless_method_signature_is_its_result_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def answer: Int = 42");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "answer" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+        assert_eq!(typer.complete_symbol(method).unwrap(), signature);
+
+        assert_eq!(signature, definitions.int);
+    }
+
+    #[test]
+    fn method_signature_preserves_erased_parameter_flags() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def f(value: Int): Int = value");
+        let (method_tree, method_definition) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let parameter = index
+            .symbol_at(source, method_definition.value_param_clauses[0][0])
+            .unwrap();
+        let parameter_flags = store.symbols.get(parameter).flags;
+        store.symbols.get_mut(parameter).flags = parameter_flags | SymbolFlags::ERASED;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected a method clause");
+        };
+        assert!(method_type.params[0].erased);
+    }
+
+    #[test]
     fn class_field_completes_its_declared_int_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value: Int = 1 }");
@@ -2582,6 +3174,182 @@ mod tests {
         let info = typer.complete_symbol(parameter).unwrap();
 
         assert_eq!(info, definitions.int);
+    }
+
+    #[test]
+    fn extension_signature_prepends_contextual_and_receiver_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "extension (using context: Int) (value: Int) def identity(argument: Int): Int = value",
+        );
+        let extension = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    Some((tree, extension))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, extension.1.methods[0]).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let mut signature = typer.complete_symbol(method).unwrap();
+
+        for expected_kind in [MethodKind::Contextual, MethodKind::Plain, MethodKind::Plain] {
+            let Type::Method(method_type) = typer.store().types.get(signature) else {
+                panic!("expected the next extension method clause");
+            };
+            assert_eq!(method_type.kind, expected_kind);
+            assert_eq!(method_type.params.len(), 1);
+            assert_eq!(method_type.params[0].ty, definitions.int);
+            signature = method_type.result;
+        }
+        assert_eq!(signature, definitions.int);
+    }
+
+    #[test]
+    fn extension_signature_binds_prefix_type_parameters_before_value_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("extension [A](value: A) def identity: A = value");
+        let extension = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    Some(extension)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, extension.methods[0]).unwrap();
+        let type_parameter = index
+            .derived_symbol_at(method, source, extension.param_clauses[0][0])
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("expected an extension type parameter binder");
+        };
+        let Type::Method(receiver) = typer.store().types.get(poly.result) else {
+            panic!("expected an extension receiver clause after the type binder");
+        };
+        assert_eq!(receiver.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(receiver.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(receiver.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(poly.params[0].bounds),
+            Type::Bounds { low, high }
+                if *low == definitions.nothing_type && *high == definitions.any_type
+        ));
+        assert_eq!(
+            typer.store().symbols.get(type_parameter).kind,
+            SymbolKind::TypeParameter
+        );
+    }
+
+    #[test]
+    fn extension_methods_get_owner_specific_parameter_binders() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "extension (value: Int) { def first: Int = value; def second: Int = value }",
+        );
+        let extension = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    Some(extension)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(extension.methods.len(), 2);
+        let first = index.symbol_at(source, extension.methods[0]).unwrap();
+        let second = index.symbol_at(source, extension.methods[1]).unwrap();
+        let receiver_tree = extension.param_clauses[0][0];
+        let first_receiver = index
+            .derived_symbol_at(first, source, receiver_tree)
+            .unwrap();
+        let second_receiver = index
+            .derived_symbol_at(second, source, receiver_tree)
+            .unwrap();
+        assert_ne!(first_receiver, second_receiver);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first_signature = typer.complete_symbol(first).unwrap();
+        let second_signature = typer.complete_symbol(second).unwrap();
+
+        for signature in [first_signature, second_signature] {
+            let Type::Method(method_type) = typer.store().types.get(signature) else {
+                panic!("expected an extension receiver clause");
+            };
+            assert_eq!(method_type.params.len(), 1);
+            assert_eq!(method_type.params[0].ty, definitions.int);
+            assert_eq!(method_type.result, definitions.int);
+        }
+    }
+
+    #[test]
+    fn right_associative_extension_signature_is_deferred_without_mutation() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("extension (value: Int) def +::(other: Int): Int = value");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(_) => Some(tree),
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::RightAssociativeExtensionDeferred {
+                symbol,
+                tree_index
+            }) if symbol == method && tree_index == method_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
     }
 
     #[test]
@@ -4206,9 +4974,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_method_signature_fails_without_store_changes() {
+    fn method_without_result_type_is_deferred_without_store_changes() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("def method: Int = 1");
+            parse_and_name("def method = 1");
         let before = store.checkpoint();
         let method = index
             .symbol_at(
@@ -4229,12 +4997,17 @@ mod tests {
             &packages,
         );
 
+        let method_tree = index.definition_of(method).unwrap();
+        let SourceDefinition::Canonical { tree, .. } = method_tree else {
+            panic!("source method should be canonical");
+        };
+        let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("source method should use a DefDef");
+        };
         assert!(matches!(
             typer.complete_symbol(method),
-            Err(TyperError::UnsupportedSymbolCompletion {
-                symbol,
-                kind: SymbolKind::Method
-            }) if symbol == method
+            Err(TyperError::InferredMethodResultDeferred { symbol, tree_index })
+                if symbol == method && tree_index == definition.tpt.index()
         ));
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
@@ -4286,7 +5059,7 @@ mod tests {
     #[test]
     fn a_later_failed_completion_keeps_an_earlier_success() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C\nval x: C = 1\ndef method: C = 1");
+            parse_and_name("class C\nval x: C = 1\ndef method: Missing = 1");
         let (value, value_tpt) = val_symbol(&parsed, &store, &index, source, "x");
         let method_tree = parsed
             .ast
@@ -4310,10 +5083,8 @@ mod tests {
         let value_type = typer.complete_symbol(value).unwrap();
         assert!(matches!(
             typer.complete_symbol(method),
-            Err(TyperError::UnsupportedSymbolCompletion {
-                kind: SymbolKind::Method,
-                ..
-            })
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
         ));
 
         assert_eq!(
