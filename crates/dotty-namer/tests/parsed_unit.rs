@@ -2925,6 +2925,123 @@ fn parsed_private_package_qualified_top_level_method_uses_package_boundary() {
 }
 
 #[test]
+fn parsed_private_class_qualified_member_uses_enclosing_class_boundary() {
+    let named = named_source(
+        "class CaptureSet { private[CaptureSet] val hidden = 1 }",
+        306,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("CaptureSet should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("CaptureSet should have a Template");
+    };
+    let member_tree = template.body[0];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let member_symbol = named.index.symbol_at(named.source, member_tree).unwrap();
+
+    assert_eq!(
+        named.store.symbols.get(member_symbol).visibility,
+        Visibility::PrivateWithin(class_symbol)
+    );
+}
+
+#[test]
+fn parsed_protected_class_qualified_member_uses_enclosing_class_boundary() {
+    let named = named_source("class Phases { protected[Phases] def hidden = 1 }", 307);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(class) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("Phases should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(class.rhs).kind else {
+        panic!("Phases should have a Template");
+    };
+    let member_tree = template.body[0];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let member_symbol = named.index.symbol_at(named.source, member_tree).unwrap();
+
+    assert_eq!(
+        named.store.symbols.get(member_symbol).visibility,
+        Visibility::ProtectedWithin(class_symbol)
+    );
+}
+
+#[test]
+fn parsed_private_qualified_top_level_class_uses_enclosing_package_boundary() {
+    let (parsed, source, mut store) = parsed_source(
+        "package dotty.tools.dotc.core\nprivate[core] class Hidden",
+        308,
+    );
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Hidden.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("enclosing package qualifier should be accepted");
+    let package = packages.get(&["dotty", "tools", "dotc", "core"]).unwrap();
+    let TreeKind::PackageDef(package_tree) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let class = package_tree.stats[0];
+    let class_symbol = index.symbol_at(source, class).unwrap();
+
+    assert_eq!(
+        store.symbols.get(class_symbol).visibility,
+        Visibility::PrivateWithin(package.symbol)
+    );
+}
+
+#[test]
+fn parsed_non_enclosing_visibility_qualifier_remains_a_typed_namer_error() {
+    let (parsed, source, mut store) = parsed_source(
+        "class Outer { private[Sibling] val hidden = 1 }\nclass Sibling",
+        309,
+    );
+    let mut packages = Packages::new();
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let outer_tree = package.stats[0];
+    let TreeKind::TypeDef(outer) = &parsed.ast.get(outer_tree).kind else {
+        panic!("Outer should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(outer.rhs).kind else {
+        panic!("Outer should have a Template");
+    };
+    let member_tree = template.body[0];
+    let qualifier = *dotty_core::TermName::new(store.names.intern("Sibling")).as_name();
+
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "InvalidVisibility.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::InvalidVisibilityQualifier {
+            tree_index: member_tree.index(),
+            position: parsed.ast.get(member_tree).position,
+            qualifier,
+            protected: false,
+        }
+    );
+}
+
+#[test]
 fn parsed_top_level_extension_methods_are_entered_in_the_source_wrapper() {
     use dotty_core::SymbolKind;
     use dotty_lexer::ContextualScanner;
