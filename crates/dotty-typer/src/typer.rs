@@ -7,7 +7,7 @@ use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
     ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo, SymbolKind,
-    SymbolResolver, TreeId, TypeId, Untyped,
+    SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
@@ -584,34 +584,50 @@ impl<'a> SourceTyper<'a> {
                 position,
             });
         };
-        let scope = self.scope_of(qualifier);
-        if let Some(scope) = scope {
-            let candidates = self.store.scopes.get(scope).lookup_all(&name);
-            if let Some(symbol) =
-                self.unique_type_candidate(candidates, name, tree_index, position)?
-            {
-                let prefix = self.type_symbol_prefix(symbol);
-                return Ok(self.store.types.alloc(Type::TypeRef {
-                    prefix,
-                    target: TypeRefTarget::Symbol(symbol),
-                }));
-            }
-            let term_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Term);
-            if let Some(symbol) = self.unique_symbol_candidate(
-                self.store.scopes.get(scope).lookup_all(&term_name),
-                name,
+        let scopes = self.scopes_of(qualifier);
+        let type_candidates: Vec<_> = scopes
+            .iter()
+            .flat_map(|scope| {
+                self.store
+                    .scopes
+                    .get(*scope)
+                    .lookup_all(&name)
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        if let Some(symbol) =
+            self.unique_type_candidate(&type_candidates, name, tree_index, position)?
+        {
+            let prefix = self.type_symbol_prefix(symbol);
+            return Ok(self.store.types.alloc(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(symbol),
+            }));
+        }
+        let term_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Term);
+        let term_candidates: Vec<_> = scopes
+            .iter()
+            .flat_map(|scope| {
+                self.store
+                    .scopes
+                    .get(*scope)
+                    .lookup_all(&term_name)
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        if let Some(symbol) =
+            self.unique_symbol_candidate(&term_candidates, name, tree_index, position)?
+        {
+            return Err(TyperError::WrongTypeNameKind {
+                source: self.source,
                 tree_index,
+                name,
+                symbol,
+                kind: self.store.symbols.get(symbol).kind,
                 position,
-            )? {
-                return Err(TyperError::WrongTypeNameKind {
-                    source: self.source,
-                    tree_index,
-                    name,
-                    symbol,
-                    kind: self.store.symbols.get(symbol).kind,
-                    position,
-                });
-            }
+            });
         }
         let prefix = self.type_prefix_for_qualifier(qualifier);
         let request = MemberRequest {
@@ -692,10 +708,18 @@ impl<'a> SourceTyper<'a> {
                 else {
                     return Ok(None);
                 };
-                let scope = self.scope_of(qualifier);
-                if let Some(scope) = scope
-                    && let Some(symbol) =
+                let mut candidates = Vec::new();
+                for scope in self.scopes_of(qualifier) {
+                    if let Some(symbol) =
                         self.unique_scoped_symbol(scope, select.name, tree_index, position)?
+                    {
+                        candidates.push(symbol);
+                    }
+                }
+                candidates.sort_by_key(|symbol| symbol.index());
+                candidates.dedup();
+                if let Some(symbol) =
+                    self.unique_symbol_candidate(&candidates, select.name, tree_index, position)?
                 {
                     return Ok(Some(symbol));
                 }
@@ -981,7 +1005,7 @@ impl<'a> SourceTyper<'a> {
                 import_tree_index: source_import.tree.index(),
             });
         };
-        let scope = self.scope_of(qualifier);
+        let scopes = self.scopes_of(qualifier);
         let mut matches = Vec::new();
         for (imported, is_wildcard) in relevant {
             let name = if is_wildcard {
@@ -991,19 +1015,20 @@ impl<'a> SourceTyper<'a> {
             } else {
                 imported
             };
-            if let Some(scope) = scope {
+            let mut found_locally = false;
+            for scope in &scopes {
                 if type_only {
-                    matches.extend_from_slice(self.store.scopes.get(scope).lookup_all(&name));
+                    let candidates = self.store.scopes.get(*scope).lookup_all(&name);
+                    found_locally |= !candidates.is_empty();
+                    matches.extend_from_slice(candidates);
                 } else if let Some(symbol) =
-                    self.unique_scoped_symbol(scope, name, location.tree_index, location.position)?
+                    self.unique_scoped_symbol(*scope, name, location.tree_index, location.position)?
                 {
+                    found_locally = true;
                     matches.push(symbol);
                 }
             }
-            let should_resolve_externally = scope
-                .map(|scope| self.store.scopes.get(scope).lookup_all(&name).is_empty())
-                .unwrap_or(true);
-            if should_resolve_externally {
+            if !found_locally {
                 let request = MemberRequest {
                     prefix: self.type_prefix_for_qualifier(qualifier),
                     name,
@@ -1230,35 +1255,65 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
-    fn scope_of(&self, symbol: SymbolId) -> Option<dotty_core::ScopeId> {
+    fn scopes_of(&self, symbol: SymbolId) -> Vec<dotty_core::ScopeId> {
+        let mut scopes = Vec::new();
         if let Some(scope) = self
             .packages
             .scope_of(symbol)
             .or_else(|| self.index.scope_of(symbol))
         {
-            return Some(scope);
+            insert_scope(&mut scopes, scope);
+        }
+        if self.store.symbols.get(symbol).kind == SymbolKind::Package
+            && let Some(package_scope) = scopes.first().copied()
+        {
+            let wrappers: Vec<_> = self
+                .store
+                .scopes
+                .get(package_scope)
+                .entered_symbols()
+                .filter(|member| {
+                    let wrapper = self.store.symbols.get(*member);
+                    wrapper.kind == SymbolKind::ModuleClass
+                        && wrapper.owner == Some(symbol)
+                        && wrapper.origin == SymbolOrigin::Synthetic
+                        && self
+                            .store
+                            .names
+                            .resolve(wrapper.name.text())
+                            .ends_with("$package$")
+                })
+                .collect();
+            for wrapper in wrappers {
+                if let Some(scope) = self.index.scope_of(wrapper) {
+                    insert_scope(&mut scopes, scope);
+                }
+            }
         }
         if let SymbolInfo::Complete(ty) = self.store.symbols.get(symbol).info
             && let Type::ClassInfo(info) = self.store.types.get(ty)
         {
-            return Some(info.declarations);
+            insert_scope(&mut scopes, info.declarations);
         }
         let semantic = self.store.symbols.get(symbol);
         if semantic.kind != SymbolKind::Object {
-            return None;
+            return scopes;
         }
-        let owner = semantic.owner?;
-        let SourceDefinition::Canonical { source, tree } = self.index.definition_of(symbol)? else {
-            return None;
+        let Some(owner) = semantic.owner else {
+            return scopes;
         };
-        if source != self.source {
-            return None;
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return scopes;
+        };
+        if source == self.source
+            && let Some(module_class) = self.index.derived_symbol_at(owner, source, tree)
+            && self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass
+            && let Some(scope) = self.index.scope_of(module_class)
+        {
+            insert_scope(&mut scopes, scope);
         }
-        let module_class = self.index.derived_symbol_at(owner, source, tree)?;
-        if self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass {
-            return self.index.scope_of(module_class);
-        }
-        None
+        scopes
     }
 
     /// Exposes the shared semantic store after the driver is no longer needed.
@@ -1269,6 +1324,12 @@ impl<'a> SourceTyper<'a> {
     /// Exposes the package registry used by this driver.
     pub fn packages(&self) -> &Packages {
         self.packages
+    }
+}
+
+fn insert_scope(scopes: &mut Vec<dotty_core::ScopeId>, scope: dotty_core::ScopeId) {
+    if !scopes.contains(&scope) {
+        scopes.push(scope);
     }
 }
 
@@ -2399,9 +2460,11 @@ mod tests {
 
     #[test]
     fn imported_type_alias_resolves_without_completing_the_alias() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("object Lib { type Alias = Int }; import Lib.Alias; val x: Alias = 1");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { type Alias = Int }; package app { import lib.Alias; val x: Alias = 1; val y: lib.Alias = 1 }",
+        );
         let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let (qualified_value, _) = val_symbol(&parsed, &store, &index, source, "y");
         let alias = parsed
             .ast
             .iter()
@@ -2428,6 +2491,8 @@ mod tests {
         let projected = typer.complete_symbol(value).unwrap();
 
         assert_eq!(type_symbol(typer.store(), projected), alias);
+        let qualified = typer.complete_symbol(qualified_value).unwrap();
+        assert_eq!(type_symbol(typer.store(), qualified), alias);
         assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
     }
 
