@@ -246,6 +246,9 @@ where
 
         if is_class_parameter_owner(owner) {
             self.parse_class_parameter_modifiers(&mut metadata);
+        } else if self.current_is_inline_parameter_modifier() {
+            self.add_modifier(&mut metadata, Modifier::Inline);
+            self.advance();
         }
 
         let explicit_accessor = match self.current().kind {
@@ -346,9 +349,24 @@ where
                     self.add_modifier(metadata, Modifier::Override);
                     self.advance();
                 }
+                TokenKind::Identifier => {
+                    if !self.current_is_inline_parameter_modifier() {
+                        break;
+                    }
+                    self.add_modifier(metadata, Modifier::Inline);
+                    self.advance();
+                }
                 _ => break,
             }
         }
+    }
+
+    fn current_is_inline_parameter_modifier(&mut self) -> bool {
+        if self.current().kind != TokenKind::Identifier || is_parameter_colon_at(self, 1) {
+            return false;
+        }
+        let inline = self.known_names().inline;
+        self.intern_current_term_name().ok() == Some(inline)
     }
 
     fn comma_is_followed_by_line_break_before_right_paren(&self, comma_end: u32) -> bool {
@@ -389,6 +407,7 @@ where
     fn current_is_anonymous_using_type(&mut self) -> bool {
         self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && !is_parameter_colon_at(self, 1)
+            && !self.current_is_inline_parameter_modifier()
     }
 
     fn parse_anonymous_using_types(
@@ -668,6 +687,159 @@ mod tests {
         assert_eq!(parser.names.resolve(first_name.as_name().text()), "x");
         assert_eq!(parser.names.resolve(second_name.as_name().text()), "y");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_on_method_parameters_without_affecting_neighbors() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(inline op: Boolean, value: Int)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 19),
+                token(TokenKind::Punctuation(Punctuation::Comma), 19, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::ColonFollow, 26, 27),
+                token(TokenKind::Identifier, 28, 31),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let first = match &parser.ast().get(clauses[0][0]).kind {
+            TreeKind::ValDef(parameter) => parameter,
+            _ => panic!("expected first parameter ValDef"),
+        };
+        let second = match &parser.ast().get(clauses[0][1]).kind {
+            TreeKind::ValDef(parameter) => parameter,
+            _ => panic!("expected second parameter ValDef"),
+        };
+
+        assert!(first.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(first.metadata.modifiers.contains(&Modifier::Param));
+        assert_eq!(second.metadata.modifiers, vec![Modifier::Param]);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_on_constructor_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(inline x: Boolean)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::ColonFollow, 9, 10),
+                token(TokenKind::Identifier, 11, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected constructor parameter ValDef");
+        };
+
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_on_named_using_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using inline context: Context)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 13),
+                token(TokenKind::Identifier, 14, 21),
+                token(TokenKind::ColonFollow, 21, 22),
+                token(TokenKind::Identifier, 23, 30),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected using parameter ValDef");
+        };
+
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_inline_as_a_parameter_name_when_followed_by_a_colon() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(inline: Boolean)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::ColonFollow, 7, 8),
+                token(TokenKind::Identifier, 9, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected parameter ValDef");
+        };
+
+        assert_eq!(
+            parser.names.resolve(parameter.name.as_name().text()),
+            "inline"
+        );
+        assert!(!parameter.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_inline_parameter_without_a_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(inline value)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
