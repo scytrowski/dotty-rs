@@ -663,6 +663,10 @@ where
         } else {
             Vec::new()
         };
+        let constructor_metadata_start = self
+            .starts_constructor_modifier()
+            .then_some(self.current().span.start());
+        let constructor_metadata = self.parse_constructor_modifiers();
         self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
             Punctuation::LeftParen,
         ));
@@ -692,11 +696,11 @@ where
             constructor_end,
             ConstructorBoundary {
                 parameter_start,
-                constructor_metadata_start: None,
+                constructor_metadata_start,
                 parent_start,
                 body_start,
             },
-            Modifiers::default(),
+            constructor_metadata,
         );
         let template_position = self.template_position(constructor, constructor_start, &tail);
         let template = self.alloc_from(
@@ -4486,6 +4490,145 @@ mod tests {
             TreeKind::Select(select) if matches!(parser.ast().get(select.qualifier).kind, TreeKind::Super(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_private_access_on_a_primary_constructor_without_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C private",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Private), 8, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected primary constructor");
+        };
+        assert!(constructor.value_param_clauses.is_empty());
+        assert_eq!(
+            constructor.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
+        assert_eq!(
+            parser
+                .ast()
+                .get(template.constructor)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(8, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_protected_access_on_a_primary_constructor_with_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C protected ()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Protected), 8, 17),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected primary constructor");
+        };
+        assert_eq!(constructor.value_param_clauses, vec![Vec::new()]);
+        assert_eq!(
+            constructor.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Protected { qualifier: None })
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_qualified_primary_constructor_access_after_type_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C[A] private[pkg](x: Int)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Keyword(HardKeyword::Private), 11, 18),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 18, 19),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 22, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 23, 24),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::Colon), 25, 26),
+                token(TokenKind::Identifier, 27, 30),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected primary constructor");
+        };
+        assert_eq!(constructor.type_params.len(), 1);
+        let Some(dotty_core::ast::VisibilitySyntax::Private {
+            qualifier: Some(qualifier),
+        }) = constructor.metadata.visibility
+        else {
+            panic!("expected a qualified private constructor modifier");
+        };
+        assert_eq!(
+            parser
+                .ast()
+                .get(template.constructor)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(7, 31).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(qualifier.text()), "pkg");
     }
 
     #[test]

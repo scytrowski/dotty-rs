@@ -129,6 +129,14 @@ where
 
     /// Parses the restricted constructor prefix accepted by Dotty:
     /// annotations followed by an optional access modifier.
+    pub(crate) fn starts_constructor_modifier(&self) -> bool {
+        is_annotation_start(self)
+            || matches!(
+                self.current().kind,
+                TokenKind::Keyword(HardKeyword::Private | HardKeyword::Protected)
+            )
+    }
+
     pub(crate) fn parse_constructor_modifiers(&mut self) -> Modifiers {
         let mut metadata = Modifiers::default();
         while is_annotation_start(self) {
