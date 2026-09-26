@@ -169,6 +169,60 @@ fn parses_a_character_literal_as_a_block_expression() {
 }
 
 #[test]
+fn recovers_from_an_empty_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "''",
+        vec![
+            token(TokenKind::CharLiteral, 0, 2),
+            token(TokenKind::Eof, 2, 2),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(error))
+            if error.kind == dotty_core::ast::ErrorNodeKind::MissingExpression
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedExpression
+    );
+}
+
+#[test]
+fn recovers_from_an_unterminated_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'a",
+        vec![
+            token(TokenKind::CharLiteral, 0, 2),
+            token(TokenKind::Eof, 2, 2),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(error))
+            if error.kind == dotty_core::ast::ErrorNodeKind::MissingExpression
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedExpression
+    );
+}
+
+#[test]
 fn postfix_expression_entry_preserves_simple_expression_behavior() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

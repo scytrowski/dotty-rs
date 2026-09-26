@@ -202,7 +202,7 @@ simple-expression pipeline, `patterns.rs` owns the source-level pattern
 pipeline, `type_definitions.rs` owns source-level type definitions, `types.rs`
 owns the initial simple/applied/infix type subset used by annotations, bounds,
 type applications, and definitions, and
-`literals.rs` owns numeric and string decoding. These names describe the
+`literals.rs` owns numeric, character, and string decoding. These names describe the
 current milestone; they do not claim complete Scala grammar coverage.
 
 The currently implemented expression grammar covers:
@@ -210,6 +210,7 @@ The currently implemented expression grammar covers:
 ```text
 identifier, backquoted identifier
 integer, long, decimal, exponent, float, and double literals
+character literals
 string literals and interpolated strings with simple or braced splices
 true, false, null, this
 (expr), (), and (a, b, ...)
