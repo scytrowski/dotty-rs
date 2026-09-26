@@ -498,6 +498,61 @@ fn parses_repeated_constructor_argument_clauses_before_a_template() {
 }
 
 #[test]
+fn handles_many_new_constructor_clauses_without_recursive_chain_walks() {
+    const CLAUSE_COUNT: usize = 20_000;
+
+    let mut source = String::from("new C");
+    let mut tokens = vec![
+        token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+        token(TokenKind::Identifier, 4, 5),
+    ];
+    for _ in 0..CLAUSE_COUNT {
+        let start = source.len() as u32;
+        source.push_str("()");
+        tokens.push(token(
+            TokenKind::Punctuation(Punctuation::LeftParen),
+            start,
+            start + 1,
+        ));
+        tokens.push(token(
+            TokenKind::Punctuation(Punctuation::RightParen),
+            start + 1,
+            start + 2,
+        ));
+    }
+    let body_start = source.len() as u32 + 1;
+    source.push_str(" {}");
+    tokens.push(token(
+        TokenKind::Punctuation(Punctuation::LeftBrace),
+        body_start,
+        body_start + 1,
+    ));
+    tokens.push(token(
+        TokenKind::Punctuation(Punctuation::RightBrace),
+        body_start + 1,
+        body_start + 2,
+    ));
+    tokens.push(token(TokenKind::Eof, body_start + 2, body_start + 2));
+
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(&source, tokens, &mut names);
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression with an anonymous template");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected the anonymous template body");
+    };
+    assert!(matches!(
+        parser.ast().get(template.parents[0]).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn does_not_apply_a_completed_anonymous_new_template() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

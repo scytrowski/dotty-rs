@@ -740,20 +740,22 @@ where
 
     fn new_constructor_select_in_application(
         &self,
-        tree: TreeId<Untyped>,
+        mut tree: TreeId<Untyped>,
     ) -> Option<TreeId<Untyped>> {
-        let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
-            return None;
-        };
-        let function = application.function;
-        match &self.ast.get(function).kind {
-            TreeKind::Select(selection)
-                if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
-            {
-                Some(function)
+        loop {
+            let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
+                return None;
+            };
+            let function = application.function;
+            match &self.ast.get(function).kind {
+                TreeKind::Select(selection)
+                    if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
+                {
+                    return Some(function);
+                }
+                TreeKind::Apply(_) => tree = function,
+                _ => return None,
             }
-            TreeKind::Apply(_) => self.new_constructor_select_in_application(function),
-            _ => None,
         }
     }
 
