@@ -560,14 +560,20 @@ impl<'a> SourceTyper<'a> {
     }
 
     fn validate_existing_class_info(&self, symbol: SymbolId, ty: TypeId) -> Result<(), TyperError> {
-        let Some(scope) = self.index.scope_of(symbol) else {
-            return Err(TyperError::MissingClassScope { symbol });
+        let expected_scope = if self.index.definition_of(symbol).is_some() {
+            Some(
+                self.index
+                    .scope_of(symbol)
+                    .ok_or(TyperError::MissingClassScope { symbol })?,
+            )
+        } else {
+            None
         };
         match self.store.types.get(ty) {
             Type::ClassInfo(info)
                 if info.class == symbol
                     && info.prefix == self.definitions.no_prefix
-                    && info.declarations == scope =>
+                    && expected_scope.is_none_or(|scope| info.declarations == scope) =>
             {
                 Ok(())
             }
@@ -4261,6 +4267,32 @@ mod tests {
             typer.complete_symbol(symbol),
             Ok(ty) if ty == definitions.int
         ));
+    }
+
+    #[test]
+    fn complete_class_info_without_source_scope_is_reused_for_external_symbols() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let declarations = store.scopes.alloc(dotty_core::Scope::new(Some(class)));
+        let info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: vec![definitions.object_type],
+            declarations,
+            self_type: None,
+        }));
+        store.symbols.set_info(class, SymbolInfo::Complete(info));
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(0),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(typer.complete_symbol(class), Ok(completed) if completed == info));
     }
 
     #[test]
