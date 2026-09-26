@@ -708,6 +708,29 @@ impl<'a> SourceTyper<'a> {
             if !candidates.is_empty() {
                 return self.unique_symbol_candidate(candidates, name, tree_index, position);
             }
+            if let Some(import_tree) = source_context.import
+                && let Some(symbol) = self.lookup_imported_symbol(
+                    import_tree,
+                    context_id,
+                    source_context.parent,
+                    name,
+                    false,
+                    SourceTreeLocation {
+                        tree_index,
+                        position,
+                    },
+                )?
+                && !matches!(
+                    self.store.symbols.get(symbol).kind,
+                    SymbolKind::Class
+                        | SymbolKind::Trait
+                        | SymbolKind::ModuleClass
+                        | SymbolKind::TypeParameter
+                        | SymbolKind::TypeAlias
+                )
+            {
+                return Ok(Some(symbol));
+            }
             current = source_context.parent;
         }
         Ok(None)
@@ -1191,6 +1214,52 @@ mod tests {
                 && found_symbol == object
                 && found_position == position
                 && typer.store().names.resolve(name.text()) == "O"
+                && name.is_type()
+        ));
+    }
+
+    #[test]
+    fn imported_object_alias_does_not_resolve_as_a_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object Lib { object O }\nimport Lib.O as Alias\nval x: Alias = 1");
+        let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let object = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(module)) =
+                    &node.kind
+                else {
+                    return None;
+                };
+                (store.names.resolve(module.name.as_name().text()) == "O")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let position = parsed.ast.get(type_tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(symbol),
+            Err(TyperError::WrongTypeNameKind {
+                source: found_source,
+                tree_index,
+                name,
+                symbol: found_symbol,
+                kind: SymbolKind::Object,
+                position: found_position,
+            }) if found_source == source
+                && tree_index == type_tree.index()
+                && found_symbol == object
+                && found_position == position
+                && typer.store().names.resolve(name.text()) == "Alias"
                 && name.is_type()
         ));
     }
