@@ -304,15 +304,19 @@ impl<'a> SourceTyper<'a> {
         };
         let lexical_scope = source_context.lexical_scope;
         let candidates = self.store.scopes.get(lexical_scope).lookup_all(name);
-        let target = match candidates {
-            [] => {
-                return Err(TyperError::TypeNameNotFound {
+        let ty = match candidates {
+            [] => self
+                .definitions
+                .source_builtin_type(self.store, *name)
+                .ok_or(TyperError::TypeNameNotFound {
                     source: self.source,
                     tree_index: tree.index(),
                     name: *name,
-                });
-            }
-            [target] => *target,
+                })?,
+            [target] => self.store.types.alloc(Type::TypeRef {
+                prefix: self.definitions.no_prefix,
+                target: TypeRefTarget::Symbol(*target),
+            }),
             _ => {
                 return Err(TyperError::AmbiguousTypeName {
                     source: self.source,
@@ -321,10 +325,6 @@ impl<'a> SourceTyper<'a> {
                 });
             }
         };
-        let ty = self.store.types.alloc(Type::TypeRef {
-            prefix: self.definitions.no_prefix,
-            target: TypeRefTarget::Symbol(target),
-        });
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {
                 source: self.source,
@@ -445,6 +445,22 @@ mod tests {
         panic!("source val `{target}` not found");
     }
 
+    fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
+        let text = format!("val x: {name} = 1");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
+        let (symbol, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let ty = typer.complete_symbol(symbol).unwrap();
+        (ty, definitions)
+    }
+
     #[test]
     fn constructor_uses_caller_bootstrapped_definitions() {
         let (arena, mut store, packages, definitions) = setup();
@@ -530,6 +546,34 @@ mod tests {
             *typer.store().symbols.info(symbol),
             SymbolInfo::Complete(completed)
         );
+    }
+
+    #[test]
+    fn primitive_int_annotation_uses_the_bootstrapped_type() {
+        let (ty, definitions) = complete_builtin_annotation("Int");
+
+        assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
+    fn unit_annotation_uses_the_bootstrapped_type() {
+        let (ty, definitions) = complete_builtin_annotation("Unit");
+
+        assert_eq!(ty, definitions.unit);
+    }
+
+    #[test]
+    fn any_annotation_uses_the_bootstrapped_type() {
+        let (ty, definitions) = complete_builtin_annotation("Any");
+
+        assert_eq!(ty, definitions.any_type);
+    }
+
+    #[test]
+    fn nothing_annotation_uses_the_bootstrapped_type() {
+        let (ty, definitions) = complete_builtin_annotation("Nothing");
+
+        assert_eq!(ty, definitions.nothing_type);
     }
 
     #[test]
