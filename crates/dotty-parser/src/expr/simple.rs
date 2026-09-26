@@ -510,28 +510,19 @@ where
             return super_tree;
         }
 
-        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-        let name = match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                match self.intern_current_term_name() {
-                    Ok(name) => name,
-                    Err(_) => return super_tree,
-                }
-            }
-            _ => {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected an identifier after `super.`",
-                );
-                return super_tree;
-            }
+        let Some((name, backquoted)) = self.current_selector_name() else {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected a selector after `super.`",
+            );
+            return super_tree;
         };
         self.advance();
         self.alloc_from(
             mark,
             TreeKind::Select(Select {
                 qualifier: super_tree,
-                name: *name.as_name(),
+                name,
                 backquoted,
             }),
         )
@@ -622,31 +613,25 @@ where
         loop {
             let checkpoint = self.cursor.checkpoint();
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-                let name = match self.current().kind {
-                    TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                        match self.intern_current_term_name() {
-                            Ok(name) => name,
-                            Err(_) => return self.unexpected_expression(),
-                        }
-                    }
-                    _ => {
-                        self.report(
-                            crate::ParseDiagnosticKind::ExpectedToken,
-                            "expected an identifier after `.`",
-                        );
-                        return qualifier;
-                    }
-                };
-                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-                self.advance();
-                qualifier = self.alloc_from(
-                    mark,
-                    TreeKind::Select(Select {
-                        qualifier,
-                        name: *name.as_name(),
-                        backquoted,
-                    }),
-                );
+                if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+                    qualifier = self.parse_match_clause(qualifier);
+                } else if let Some((name, backquoted)) = self.current_selector_name() {
+                    self.advance();
+                    qualifier = self.alloc_from(
+                        mark,
+                        TreeKind::Select(Select {
+                            qualifier,
+                            name,
+                            backquoted,
+                        }),
+                    );
+                } else {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected a selector after `.`",
+                    );
+                    return qualifier;
+                }
                 can_apply = true;
             } else if self
                 .cursor

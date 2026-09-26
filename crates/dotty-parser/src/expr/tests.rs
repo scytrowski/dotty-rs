@@ -3581,6 +3581,157 @@ fn parses_a_simple_selection() {
 }
 
 #[test]
+fn parses_a_symbolic_method_name_after_a_selection_dot() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x.##",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+            token(TokenKind::Operator, 2, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+        panic!("expected a symbolic selection");
+    };
+    assert_eq!(parser.names.resolve(selection.name.text()), "##");
+    assert!(!selection.backquoted);
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 4).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_symbolic_name_after_super_dot() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "super.##",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::Super), 0, 5),
+            token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+            token(TokenKind::Operator, 6, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.simple_expr();
+    let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+        panic!("expected a symbolic selection from super");
+    };
+    assert_eq!(parser.names.resolve(selection.name.text()), "##");
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_match_after_dot_as_a_match_clause_not_a_selection() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x.match { case _ => y }",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+            token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+            token(TokenKind::Identifier, 15, 16),
+            token(TokenKind::Operator, 17, 19),
+            token(TokenKind::Identifier, 20, 21),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+            token(TokenKind::Eof, 23, 23),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Match(match_tree) = &parser.ast().get(tree).kind else {
+        panic!("expected a match clause after dot");
+    };
+    assert_eq!(match_tree.cases.len(), 1);
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn leaves_reserved_equals_unconsumed_after_a_selection_dot() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x.=",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+            token(TokenKind::Operator, 2, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let _ = parser.simple_expr();
+
+    assert_eq!(parser.current().kind, TokenKind::Operator);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].message(),
+        "expected a selector after `.`"
+    );
+}
+
+#[test]
+fn leaves_reserved_hash_unconsumed_after_a_selection_dot() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x.#",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+            token(TokenKind::Operator, 2, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let _ = parser.simple_expr();
+
+    assert_eq!(parser.current().kind, TokenKind::Operator);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].message(),
+        "expected a selector after `.`"
+    );
+}
+
+#[test]
+fn leaves_reserved_context_function_arrow_unconsumed_after_a_selection_dot() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x.=>>",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+            token(TokenKind::Operator, 2, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let _ = parser.simple_expr();
+
+    assert_eq!(parser.current().kind, TokenKind::Operator);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].message(),
+        "expected a selector after `.`"
+    );
+}
+
+#[test]
 fn parses_a_backquoted_selection_without_its_delimiters() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
