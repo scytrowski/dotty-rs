@@ -232,4 +232,92 @@ mod tests {
         drop(parser);
         assert_eq!(names.resolve(package_name.as_name().text()), "foo");
     }
+
+    #[test]
+    fn preserves_package_object_members_and_full_source_span() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "package object foo { def answer = 42 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Package), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Object), 8, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Def), 21, 24),
+                token(TokenKind::Identifier, 25, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::IntegerLiteral, 34, 36),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 37, 38),
+                token(TokenKind::Eof, 38, 38),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_package_definition(Location::Elsewhere)
+        else {
+            panic!("expected package object definition");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(module)) =
+            &parser.ast().get(id).kind
+        else {
+            panic!("expected package object ModuleDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(module.template).kind else {
+            panic!("expected package object template");
+        };
+        assert_eq!(template.body.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 38).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn missing_package_object_name_does_not_swallow_the_next_top_level_object() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "package object {}\nobject Next {}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Package), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Object), 8, 14),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Keyword(HardKeyword::Object), 18, 24),
+                token(TokenKind::Identifier, 25, 29),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 30, 31),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let result = parser.source_compilation_unit();
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected the source package root");
+        };
+        assert_eq!(package.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(package.stats[0]).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(_))
+        ));
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(next)) =
+            &result.ast.get(package.stats[1]).kind
+        else {
+            panic!("expected following object definition to survive recovery");
+        };
+        assert_eq!(names.resolve(next.name.as_name().text()), "Next");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == crate::ParseDiagnosticKind::ExpectedToken)
+        );
+    }
 }
