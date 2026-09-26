@@ -508,7 +508,10 @@ not inferred from constructor shape or body contents.
 
 The supported subset preserves class type parameters, primary constructor
 term-parameter clauses, simple `extends` parent types, constructor arguments,
-and comma/`with` parent lists. Scala 3.9 trailing commas before `)` are
+and comma/`with` parent lists. Primary-constructor annotations and an optional
+`private`/`protected` access modifier (including a qualifier) are stored on the
+synthetic constructor's `DefDef`, separately from the class's definition
+metadata. Scala 3.9 trailing commas before `)` are
 accepted in ordinary named term-parameter clauses for constructors and
 methods. The same trailing-comma rule applies to ordinary and `using`
 parameter clauses; a same-line comma immediately before `)` is diagnosed.
@@ -610,17 +613,16 @@ set. It is attached to the existing definition nodes, including
 semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
-`Apply(Select(New(type), <init>), args)` shape. Enum-case constructors preserve
-post-name annotations and optional `private`/`protected` access in the
+`Apply(Select(New(type), <init>), args)` shape. Enum-case constructors also
+preserve post-name annotations and optional `private`/`protected` access in the
 synthetic constructor's `Modifiers`. Visibility written before `case` remains
 on the case definition and is independent of constructor visibility. This
-constructor prefix is
-intentionally limited to annotations followed by an optional access modifier;
-other post-name modifiers are rejected. Parameter and type-parameter
-annotations, enum-case bodies, and feature-dependent
+constructor prefix is intentionally limited to annotations followed by an
+optional access modifier; other post-name modifiers are rejected. Parameter
+and type-parameter annotations, enum-case bodies, and feature-dependent
 `erased`/`tracked`/`into`/`update` modifiers remain deferred. `opaque` is
-recognized only before a type definition; it remains an ordinary identifier in
-other positions.
+recognized only before a type definition; it remains an ordinary identifier
+in other positions.
 
 String interpolation uses the scanner's `InterpolationId`/`StringPart` protocol
 and the existing `InterpolatedString` node. Parts remain source-level literal,
