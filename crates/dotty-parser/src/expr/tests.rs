@@ -2606,6 +2606,37 @@ fn recovers_from_an_indented_body_without_an_outdent() {
     assert!(!parser.diagnostics().is_empty());
 }
 
+#[test]
+fn recovers_from_an_aligned_local_definition_in_a_control_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ if c then\nval x = 1\nx\n}",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::If), 2, 4),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Keyword(HardKeyword::Then), 7, 11),
+            token(TokenKind::Newline, 11, 12),
+            token(TokenKind::Keyword(HardKeyword::Val), 12, 15),
+            token(TokenKind::Identifier, 16, 17),
+            token(TokenKind::Operator, 18, 19),
+            token(TokenKind::IntegerLiteral, 20, 21),
+            token(TokenKind::Newline, 21, 22),
+            token(TokenKind::Identifier, 22, 23),
+            token(TokenKind::Newline, 23, 24),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 24, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let block = parser.simple_expr();
+
+    assert!(matches!(parser.ast().get(block).kind, TreeKind::Block(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(!parser.diagnostics().is_empty());
+}
+
 fn assert_prefix_operator_parses(source: &str, operator: &str) {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
