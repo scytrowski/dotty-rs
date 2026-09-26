@@ -2204,6 +2204,35 @@ mod tests {
     }
 
     #[test]
+    fn higher_kinded_source_type_alias_is_deferred_and_stays_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("type F[A] = Option[A]");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "F");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(alias).unwrap() else {
+            panic!("canonical source type alias expected");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type alias must be represented by a TypeDef");
+        };
+        let rhs = definition.rhs;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::HigherKindedTypeAliasDeferred { symbol, tree_index })
+                if symbol == alias && tree_index == rhs.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+    }
+
+    #[test]
     fn to_bounds_preserves_existing_aliasing_bounds_id() {
         let (arena, mut store, packages, definitions) = setup();
         let index = SourceSemanticIndex::new();
