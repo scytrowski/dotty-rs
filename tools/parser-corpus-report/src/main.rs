@@ -750,10 +750,20 @@ fn collect_deferred_features(
                     |_| false,
                 );
             }
-            TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => {
-                record(&mut features, "context_bound_evidence_synthesis", 1, |_| {
-                    false
-                });
+            TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => {
+                record(
+                    &mut features,
+                    "context_bound_evidence_synthesis",
+                    bounds.context_bounds.len(),
+                    |count_index| {
+                        named.is_some_and(|(source_index, _)| {
+                            bounds
+                                .context_bounds
+                                .get(count_index)
+                                .is_some_and(|tree| source_index.symbol_at(source, *tree).is_some())
+                        })
+                    },
+                );
             }
             _ => {}
         }
@@ -1280,12 +1290,36 @@ mod tests {
 
     #[test]
     fn deferred_inventory_counts_context_bound_evidence() {
-        let parsed = parse_source("object C { type F = [A: Ordering] => A }", "C.scala", true);
+        let parsed = parse_source(
+            "object C { type F = [A: Ordering] => A => A }",
+            "C.scala",
+            true,
+        );
         let evidence = parsed.deferred_features.get("context_bound_evidence_synthesis").unwrap_or_else(|| {
             panic!("context bound evidence not counted: status={:?}, diagnostics={:?}, features={:?}", parsed.status, parsed.diagnostics, parsed.deferred_features)
         });
 
-        assert_eq!(evidence.occurrences, 1);
+        assert_eq!(
+            evidence.occurrences, 1,
+            "status={:?}, diagnostics={:?}, features={:?}",
+            parsed.status, parsed.diagnostics, parsed.deferred_features
+        );
+        assert_eq!(evidence.materialized, 0);
+    }
+
+    #[test]
+    fn deferred_inventory_counts_each_context_bound_evidence_candidate() {
+        let parsed = parse_source(
+            "object C { type F = [A: {Ordering, Show}] => A => A }",
+            "C.scala",
+            true,
+        );
+        let evidence = parsed
+            .deferred_features
+            .get("context_bound_evidence_synthesis")
+            .expect("context-bound evidence candidates counted");
+
+        assert_eq!(evidence.occurrences, 2);
         assert_eq!(evidence.materialized, 0);
     }
 
