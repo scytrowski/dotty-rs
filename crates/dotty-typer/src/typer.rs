@@ -772,8 +772,10 @@ impl<'a> SourceTyper<'a> {
             }
             TreeKind::New(new) => self.type_of_tpt_inner(new.tpt, context),
             TreeKind::TypeApply(application) => {
+                let repeated_arguments =
+                    self.parent_constructor_has_applied_tpt(application.function, depth + 1);
                 let tycon = self.project_parent_type(application.function, context, depth + 1)?;
-                if matches!(self.store.types.get(tycon), Type::Applied { .. }) {
+                if repeated_arguments {
                     return Ok(tycon);
                 }
                 let mut args = Vec::with_capacity(application.args.len());
@@ -800,6 +802,58 @@ impl<'a> SourceTyper<'a> {
                 self.type_of_tpt_inner(new.tpt, context)
             }
             _ => self.type_of_tpt_inner(tree, context),
+        }
+    }
+
+    fn parent_constructor_has_applied_tpt(&self, tree: TreeId<Untyped>, depth: usize) -> bool {
+        if depth > 256 {
+            return false;
+        }
+        let Some(node) = self.arena.try_get(tree) else {
+            return false;
+        };
+        match &node.kind {
+            TreeKind::Apply(application) => {
+                self.parent_constructor_has_applied_tpt(application.function, depth + 1)
+            }
+            TreeKind::Block(block) => {
+                self.parent_constructor_has_applied_tpt(block.expr, depth + 1)
+            }
+            TreeKind::TypeApply(application) => {
+                self.parent_constructor_has_applied_tpt(application.function, depth + 1)
+            }
+            TreeKind::Select(selection)
+                if self.store.names.resolve(selection.name.text()) == "<init>" =>
+            {
+                let Some(qualifier) = self.arena.try_get(selection.qualifier) else {
+                    return false;
+                };
+                let TreeKind::New(new) = &qualifier.kind else {
+                    return false;
+                };
+                self.is_applied_type_tree(new.tpt, depth + 1)
+            }
+            TreeKind::New(new) => self.is_applied_type_tree(new.tpt, depth + 1),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.parent_constructor_has_applied_tpt(parens.inner, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_applied_type_tree(&self, tree: TreeId<Untyped>, depth: usize) -> bool {
+        if depth > 256 {
+            return false;
+        }
+        let Some(node) = self.arena.try_get(tree) else {
+            return false;
+        };
+        match &node.kind {
+            TreeKind::AppliedTypeTree(_) => true,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.is_applied_type_tree(parens.inner, depth + 1)
+            }
+            _ => false,
         }
     }
 
@@ -2561,7 +2615,7 @@ fn tree_kind_name(kind: &TreeKind<Untyped>) -> &'static str {
 mod tests {
     use super::*;
     use dotty_core::{
-        Name, Namespace, SourceText, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility,
+        Name, Namespace, SourceText, SymbolFlags, SymbolLinks, SymbolOrigin, TermName, Visibility,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
@@ -2936,6 +2990,177 @@ mod tests {
         };
         assert_eq!(info.parents.len(), 1);
         assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+    }
+
+    #[test]
+    fn outer_parent_type_apply_keeps_its_arguments_after_an_applied_tpt() {
+        // Synthetic source AST: the parser represents ordinary nested type
+        // applications as AppliedTypeTree, while this explicit TypeApply
+        // exercises the distinct constructor-call wrapper shape.
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base; val seed: Int = 0; class Child extends Base");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let context = index.declaration_context_of(child).unwrap();
+        let base_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(identifier)
+                    if identifier.name.is_type()
+                        && store.names.resolve(identifier.name.text()) == "Base" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let int_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(identifier)
+                    if identifier.name.is_type()
+                        && store.names.resolve(identifier.name.text()) == "Int" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let inner = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: base_tpt,
+                args: vec![int_tpt],
+            }),
+            position: None,
+            ty: (),
+        });
+        let outer = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::TypeApply(dotty_core::ast::TypeApply {
+                function: inner,
+                args: vec![int_tpt],
+            }),
+            position: None,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.project_parent_type(outer, context, 0).unwrap();
+
+        let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
+            panic!("the outer TypeApply must be preserved");
+        };
+        assert_eq!(args.len(), 1);
+        let Type::Applied {
+            tycon: inner_tycon,
+            args: inner_args,
+        } = typer.store().types.get(*tycon)
+        else {
+            panic!("the inner applied type tree must be preserved");
+        };
+        assert_eq!(args[0], inner_args[0]);
+        assert_eq!(type_symbol(typer.store(), *inner_tycon), base);
+    }
+
+    #[test]
+    fn parent_constructor_type_apply_does_not_repeat_applied_tpt_arguments() {
+        // Synthetic source AST mirroring Dotty's constructor-call wrapper:
+        // `TypeApply(Apply(Select(New(Base[Int]), <init>), ...), [Int])`.
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base[A]; val seed: Int = 0; class Child extends Base");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let context = index.declaration_context_of(child).unwrap();
+        let base_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(identifier)
+                    if identifier.name.is_type()
+                        && store.names.resolve(identifier.name.text()) == "Base" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let int_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(identifier)
+                    if identifier.name.is_type()
+                        && store.names.resolve(identifier.name.text()) == "Int" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let applied_tpt = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::AppliedTypeTree(dotty_core::ast::AppliedTypeTree {
+                tpt: base_tpt,
+                args: vec![int_tpt],
+            }),
+            position: None,
+            ty: (),
+        });
+        let new_tree = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::New(dotty_core::ast::New { tpt: applied_tpt }),
+            position: None,
+            ty: (),
+        });
+        let constructor_name = *TermName::new(store.names.intern("<init>")).as_name();
+        let selected_constructor = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::Select(dotty_core::ast::Select {
+                qualifier: new_tree,
+                name: constructor_name,
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
+        let constructor_call = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::Apply(dotty_core::ast::Apply {
+                function: selected_constructor,
+                args: vec![int_tpt],
+                kind: dotty_core::ast::ApplyKind::Regular,
+            }),
+            position: None,
+            ty: (),
+        });
+        let parent = parsed.ast.alloc(dotty_core::Tree {
+            kind: TreeKind::TypeApply(dotty_core::ast::TypeApply {
+                function: constructor_call,
+                args: vec![int_tpt],
+            }),
+            position: None,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.project_parent_type(parent, context, 0).unwrap();
+
+        let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
+            panic!("expected one application from the New type tree");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), base);
+        assert_eq!(args.len(), 1);
     }
 
     #[test]
