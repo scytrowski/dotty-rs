@@ -275,6 +275,34 @@ fn parses_an_empty_anonymous_template_after_new() {
 }
 
 #[test]
+fn parses_a_parentless_anonymous_template_after_new() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new {}",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template body");
+    };
+
+    assert!(template.parents.is_empty());
+    assert!(template.body.is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_members_in_anonymous_template_bodies_after_new() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
