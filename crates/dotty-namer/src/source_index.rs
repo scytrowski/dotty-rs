@@ -171,16 +171,30 @@ impl SourceSemanticIndex {
             }
             if semantic.kind == dotty_core::SymbolKind::Package {
                 let indexed_scope = self.scopes_by_owner.get(symbol).copied();
-                if packages.scope_of(*symbol) != indexed_scope {
-                    violations.push(format!(
-                        "package symbol {} does not reuse its Packages scope",
-                        symbol.index()
-                    ));
+                match (packages.scope_of(*symbol), indexed_scope) {
+                    (Some(package_scope), Some(indexed_scope))
+                        if package_scope == indexed_scope => {}
+                    (registered_scope, indexed_scope) => {
+                        violations.push(format!(
+                            "package symbol {} does not reuse its Packages scope (registry: {:?}, index: {:?})",
+                            symbol.index(),
+                            registered_scope.map(ScopeId::index),
+                            indexed_scope.map(ScopeId::index)
+                        ));
+                    }
                 }
             }
         }
 
         for ((owner, source, tree), symbol) in &self.derived_symbols_by_owner_and_tree {
+            if !store.symbols.contains(*owner) {
+                violations.push(format!(
+                    "derived source {}/tree {} has missing owner {}",
+                    source.index(),
+                    tree.index(),
+                    owner.index()
+                ));
+            }
             if !store.symbols.contains(*symbol) {
                 violations.push(format!(
                     "derived source {}/tree {} for owner {} refers to missing symbol {}",
@@ -604,6 +618,58 @@ mod tests {
             violations
                 .iter()
                 .any(|violation| violation.contains("does not reuse its Packages scope"))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unregistered_package_symbols_without_scopes() {
+        let mut store = SemanticStore::new();
+        let package_name = store.names.intern("p");
+        let package = store.symbols.alloc(Symbol {
+            name: *dotty_core::TypeName::new(package_name).as_name(),
+            owner: None,
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), package)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.contains("does not reuse its Packages scope") })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_derived_identities_with_missing_owners() {
+        let mut store = SemanticStore::new();
+        let checkpoint = store.checkpoint();
+        let _filler = symbol(&mut store);
+        let owner = symbol(&mut store);
+        store.rollback_to(checkpoint);
+        let derived = symbol(&mut store);
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_derived_symbol(owner, SourceId::from_index(1), tree_id(), derived)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("has missing owner 1"))
         );
     }
 
