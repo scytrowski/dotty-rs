@@ -432,6 +432,72 @@ fn parses_a_template_after_a_constructor_application() {
 }
 
 #[test]
+fn parses_repeated_constructor_argument_clauses_before_a_template() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo(1)(2) { def value = 1 }",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+            token(TokenKind::IntegerLiteral, 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+            token(TokenKind::IntegerLiteral, 11, 12),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 14, 15),
+            token(TokenKind::Keyword(HardKeyword::Def), 16, 19),
+            token(TokenKind::Identifier, 20, 25),
+            token(TokenKind::Operator, 26, 27),
+            token(TokenKind::IntegerLiteral, 28, 29),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 30, 31),
+            token(TokenKind::Eof, 31, 31),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template body");
+    };
+    let outer_parent = template.parents[0];
+    let TreeKind::Apply(outer_application) = &parser.ast().get(outer_parent).kind else {
+        panic!("expected the second constructor argument clause");
+    };
+    assert_eq!(outer_application.args.len(), 1);
+    let TreeKind::Apply(inner_application) = &parser.ast().get(outer_application.function).kind
+    else {
+        panic!("expected the first constructor argument clause");
+    };
+    assert_eq!(inner_application.args.len(), 1);
+    assert_eq!(
+        parser
+            .ast()
+            .get(outer_application.function)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 10).unwrap()
+    );
+    assert_eq!(
+        parser
+            .ast()
+            .get(outer_parent)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 13).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn does_not_apply_a_completed_anonymous_new_template() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

@@ -555,11 +555,13 @@ where
             tpt
         };
         let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
-        let constructor = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
-            self.parse_application(mark, new_tree)
-        } else {
-            new_tree
+        let constructor_mark = crate::Mark {
+            start: type_mark.start,
         };
+        let mut constructor = new_tree;
+        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            constructor = self.parse_application(constructor_mark, constructor);
+        }
         if self.optional_template_body_starts_here() {
             let body = self.parse_optional_template_body();
             let parent = self.new_template_parent(constructor).or(Some(tpt));
@@ -575,6 +577,13 @@ where
                 }),
             )
         } else {
+            if let Some(position) = self.ast.get(constructor).position {
+                let end = position.span().range().end();
+                let range =
+                    TextRange::new(mark.start, end).expect("new expression span is ordered");
+                self.ast.get_mut(constructor).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
             constructor
         }
     }
@@ -704,16 +713,19 @@ where
             TreeKind::New(new) => Some(new.tpt),
             TreeKind::Apply(application) => {
                 let function = application.function;
-                let TreeKind::Select(selection) = &self.ast.get(function).kind else {
-                    return None;
-                };
-                if !matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) {
-                    return None;
-                }
+                let constructor_select = match &self.ast.get(function).kind {
+                    TreeKind::Select(selection)
+                        if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
+                    {
+                        Some(function)
+                    }
+                    _ => self.new_constructor_select_in_application(function),
+                }?;
 
-                if let (Some(function_position), Some(parent_position)) =
-                    (self.ast.get(function).position, self.ast.get(tree).position)
-                {
+                if let (Some(function_position), Some(parent_position)) = (
+                    self.ast.get(constructor_select).position,
+                    self.ast.get(tree).position,
+                ) {
                     let start = function_position.span().range().start();
                     let end = parent_position.span().range().end();
                     let range = TextRange::new(start, end).expect("constructor span is ordered");
@@ -722,6 +734,25 @@ where
                 }
                 Some(tree)
             }
+            _ => None,
+        }
+    }
+
+    fn new_constructor_select_in_application(
+        &self,
+        tree: TreeId<Untyped>,
+    ) -> Option<TreeId<Untyped>> {
+        let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
+            return None;
+        };
+        let function = application.function;
+        match &self.ast.get(function).kind {
+            TreeKind::Select(selection)
+                if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
+            {
+                Some(function)
+            }
+            TreeKind::Apply(_) => self.new_constructor_select_in_application(function),
             _ => None,
         }
     }
