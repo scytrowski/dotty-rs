@@ -229,7 +229,8 @@ infix operators with Scala 3.9 precedence and associativity
 feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
 named arguments in ordinary and `using` lists in the narrow bare-identifier form
-the initial `if` and `while` expression forms
+the initial `if` and `while` expression forms, including Scala 2-compatible
+parenthesized conditions with braced branches
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form

@@ -30,6 +30,21 @@ where
         self.simple_expr_rest(mark, tree, can_apply)
     }
 
+    /// Parses a parenthesized condition and its ordinary suffixes without
+    /// consuming a following braced control-flow body as a block-application suffix.
+    pub(super) fn simple_expr_before_braced_control_body(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let can_apply = self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::New);
+        let tree = self.simple_expr_atom(mark);
+        let can_apply = can_apply
+            && !matches!(
+                self.ast.get(tree).kind,
+                TreeKind::Block(_) | TreeKind::Match(_)
+            );
+
+        self.simple_expr_rest_with_brace_application(mark, tree, can_apply, false)
+    }
+
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         if self.expression_quote_depth > 0
             && (self.current_starts_braced_splice() || self.current_starts_simple_splice())
@@ -607,8 +622,18 @@ where
     pub(super) fn simple_expr_rest(
         &mut self,
         mark: crate::Mark,
+        qualifier: TreeId<Untyped>,
+        can_apply: bool,
+    ) -> TreeId<Untyped> {
+        self.simple_expr_rest_with_brace_application(mark, qualifier, can_apply, true)
+    }
+
+    fn simple_expr_rest_with_brace_application(
+        &mut self,
+        mark: crate::Mark,
         mut qualifier: TreeId<Untyped>,
         mut can_apply: bool,
+        allow_brace_application: bool,
     ) -> TreeId<Untyped> {
         loop {
             let checkpoint = self.cursor.checkpoint();
@@ -668,6 +693,7 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBrace))
                 && can_apply
+                && allow_brace_application
             {
                 let argument = self.parse_block(self.mark());
                 qualifier = self.alloc_from(
