@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use dotty_core::ast::TreeKind;
+use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::ids::{SourceId, SymbolId, TypeId};
 use dotty_core::names::{Name, Namespace};
 use dotty_core::symbols::{
@@ -23,13 +23,24 @@ const INFO_PARENT_TASTY: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoParent.tasty");
 const INFO_BASE_TASTY: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoBase.tasty");
+const INFO_DEP_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoDep.tasty");
+const INFO_CHILD_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoChild.tasty");
+const INFO_HOLDER_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/InfoHolder.tasty");
+const METHODS_SOURCE: &str =
+    include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.scala");
+const METHODS_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.tasty");
 
 fn symbol_key(store: &SemanticStore, symbol: SymbolId) -> String {
     let entry = store.symbols.get(symbol);
     let name = store.names.resolve(entry.name.text());
     if entry.origin == SymbolOrigin::Builtin {
         let owner = match name {
-            "Any" | "Nothing" => "Package:scala",
+            "Any" | "Nothing" | "Boolean" | "Byte" | "Char" | "Double" | "Float" | "Int"
+            | "Long" | "Short" | "Unit" => "Package:scala",
             "Object" => "Package:java/Package:lang",
             _ => "",
         };
@@ -60,6 +71,46 @@ fn normalized_type(store: &SemanticStore, ty: TypeId) -> String {
     render_type(store, ty, &mut HashMap::new(), &mut Vec::new())
 }
 
+fn normalized_visibility(store: &SemanticStore, visibility: Visibility) -> String {
+    match visibility {
+        Visibility::Public => "Public".to_owned(),
+        Visibility::Private => "Private".to_owned(),
+        Visibility::Protected => "Protected".to_owned(),
+        Visibility::Package(symbol) => format!("Package({})", symbol_key(store, symbol)),
+        Visibility::PrivateWithin(symbol) => {
+            format!("PrivateWithin({})", symbol_key(store, symbol))
+        }
+        Visibility::ProtectedWithin(symbol) => {
+            format!("ProtectedWithin({})", symbol_key(store, symbol))
+        }
+    }
+}
+
+fn normalized_symbol_header(store: &SemanticStore, symbol: SymbolId) -> String {
+    let entry = store.symbols.get(symbol);
+    let companion = entry
+        .links
+        .companion
+        .map(|companion| symbol_key(store, companion))
+        .unwrap_or_else(|| "None".to_owned());
+    format!(
+        "{}[flags={:?}, visibility={}, companion={companion}]",
+        symbol_key(store, symbol),
+        entry.flags,
+        normalized_visibility(store, entry.visibility)
+    )
+}
+
+fn package_prefix(store: &SemanticStore, ty: TypeId) -> Option<String> {
+    let package = match store.types.get(ty) {
+        Type::TypeRef { target, .. } => target.symbol(),
+        dotty_core::types::Type::TermRef { target, .. } => target.symbol(),
+        Type::ThisType { class } => Some(*class),
+        _ => None,
+    }?;
+    (store.symbols.get(package).kind == SymbolKind::Package).then(|| symbol_key(store, package))
+}
+
 fn render_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -84,10 +135,11 @@ fn render_type(
                     format!("name:{}", store.names.resolve(name.as_name().text()))
                 }
             };
-            format!(
-                "TermRef({}, {target})",
-                render_type(store, *prefix, binders, active)
-            )
+            let prefix = package_prefix(store, *prefix).map_or_else(
+                || render_type(store, *prefix, binders, active),
+                |package| format!("PackagePrefix({package})"),
+            );
+            format!("TermRef({prefix}, {target})")
         }
         Type::TypeRef { prefix, target } => {
             let target = match target {
@@ -104,7 +156,10 @@ fn render_type(
                 // package prefixes. Normalize this named builtin family.
                 "NoPrefix".to_owned()
             } else {
-                render_type(store, *prefix, binders, active)
+                package_prefix(store, *prefix).map_or_else(
+                    || render_type(store, *prefix, binders, active),
+                    |package| format!("PackagePrefix({package})"),
+                )
             };
             format!("TypeRef({prefix}, {target})")
         }
@@ -314,6 +369,12 @@ fn normalized_class_info(
         .scopes
         .get(info.declarations)
         .entered_symbols()
+        .filter(|symbol| {
+            let entry = store.symbols.get(*symbol);
+            !(entry.kind == SymbolKind::Method
+                && store.names.resolve(entry.name.text()) == "writeReplace"
+                && entry.flags.contains(SymbolFlags::SYNTHETIC))
+        })
         .map(|symbol| {
             let member_info = match *store.symbols.info(symbol) {
                 SymbolInfo::Missing => "Missing".to_owned(),
@@ -321,13 +382,13 @@ fn normalized_class_info(
                 SymbolInfo::Error => "Error".to_owned(),
                 SymbolInfo::Complete(ty) => render_type(store, ty, binders, active),
             };
-            format!("{}={member_info}", symbol_key(store, symbol))
+            format!("{}={member_info}", normalized_symbol_header(store, symbol))
         })
         .collect::<Vec<_>>();
     declarations.sort();
     format!(
         "ClassInfo(class={}, prefix={}, parents=[{}], members=[{}], self={})",
-        symbol_key(store, info.class),
+        normalized_symbol_header(store, info.class),
         render_type(store, info.prefix, binders, active),
         parents,
         declarations.join(", "),
@@ -337,16 +398,51 @@ fn normalized_class_info(
     )
 }
 
+fn normalized_member_infos(store: &SemanticStore, info: &ClassInfo, name: &str) -> Vec<String> {
+    let mut members = store
+        .scopes
+        .get(info.declarations)
+        .entered_symbols()
+        .filter(|symbol| store.names.resolve(store.symbols.get(*symbol).name.text()) == name)
+        .map(|symbol| {
+            let info = match *store.symbols.info(symbol) {
+                SymbolInfo::Complete(ty) => normalized_type(store, ty),
+                SymbolInfo::Missing => "Missing".to_owned(),
+                SymbolInfo::Deferred(_) => "Deferred".to_owned(),
+                SymbolInfo::Error => "Error".to_owned(),
+            };
+            format!("{}={info}", normalized_symbol_header(store, symbol))
+        })
+        .collect::<Vec<_>>();
+    members.sort();
+    members
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use dotty_core::names::TypeName;
     use dotty_core::types::{PolyType, TypeParam};
 
-    fn enter_common_tasty_classes(store: &mut SemanticStore, packages: &mut Packages) {
+    fn enter_common_classes(
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        include_java_comparable: bool,
+    ) {
+        let java_lang_types: &[&str] = if include_java_comparable {
+            &["Object", "Comparable"]
+        } else {
+            &["Object"]
+        };
         for (path, names) in [
-            (&["scala"][..], &["Any", "Nothing"][..]),
-            (&["java", "lang"][..], &["Object"][..]),
+            (
+                &["scala"][..],
+                &[
+                    "Any", "Nothing", "Boolean", "Byte", "Char", "Double", "Float", "Int", "Long",
+                    "Short", "Unit",
+                ][..],
+            ),
+            (&["java", "lang"][..], java_lang_types),
         ] {
             let package = packages
                 .enter(store, SymbolOrigin::Synthetic, path)
@@ -372,7 +468,6 @@ mod tests {
     }
 
     fn source_type_info(name: &str, keyword: &str, kind: SymbolKind) -> (SemanticStore, TypeId) {
-        let source = SourceId::from_index(281);
         let declaration = CLASS_INFOS_SOURCE
             .lines()
             .find(|line| {
@@ -381,13 +476,28 @@ mod tests {
                     || declaration.trim_end_matches(':') == format!("{keyword} {name}")
             })
             .unwrap_or_else(|| panic!("source declaration `{name}` is missing from fixture"));
-        let source_text = format!(
-            "package me.cytrowski.tastyfixtures.semantic\n{}",
-            declaration.trim()
-        );
+        source_type_info_from_source(
+            &format!(
+                "package me.cytrowski.tastyfixtures.semantic\n{}",
+                declaration.trim()
+            ),
+            name,
+            kind,
+            &[],
+        )
+    }
+
+    fn source_type_info_from_source(
+        source_text: &str,
+        name: &str,
+        kind: SymbolKind,
+        complete_members: &[&str],
+    ) -> (SemanticStore, TypeId) {
+        let source = SourceId::from_index(281);
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
+        enter_common_classes(&mut store, &mut packages, false);
         let scanner = ContextualScanner::new(&source_text).unwrap();
         let parsed = parse_compilation_unit(
             SourceText::new(&source_text).unwrap(),
@@ -408,19 +518,26 @@ mod tests {
         let symbol = parsed
             .ast
             .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::TypeDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == name
-                        && index
-                            .symbol_at(source, tree)
-                            .is_some_and(|symbol| store.symbols.get(symbol).kind == kind)
-                        && index
-                            .definition_of(index.symbol_at(source, tree)?)
-                            .is_some() =>
-                {
-                    index.symbol_at(source, tree)
-                }
-                _ => None,
+            .find_map(|(tree, node)| {
+                let candidate = match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
+                        if kind == SymbolKind::ModuleClass
+                            && store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        let object = index.symbol_at(source, tree)?;
+                        let owner = store.symbols.get(object).owner?;
+                        index.derived_symbol_at(owner, source, tree)
+                    }
+                    _ => None,
+                }?;
+                (store.symbols.get(candidate).kind == kind
+                    && index.definition_of(candidate).is_some())
+                .then_some(candidate)
             })
             .unwrap_or_else(|| panic!("source type `{name}` was not named"));
         let completed = {
@@ -432,40 +549,199 @@ mod tests {
                 definitions,
                 &packages,
             );
-            typer.complete_symbol(symbol).unwrap()
+            let completed = typer.complete_symbol(symbol).unwrap();
+            for member_name in complete_members {
+                let member_symbols = parsed
+                    .ast
+                    .iter()
+                    .filter_map(|(tree, node)| match node.kind {
+                        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
+                            index.derived_symbol_at(symbol, source, tree)
+                        }
+                        _ => index.symbol_at(source, tree),
+                    })
+                    .filter(|member| {
+                        let member = typer.store().symbols.get(*member);
+                        member.owner == Some(symbol)
+                            && (typer.store().names.resolve(member.name.text()) == *member_name
+                                || typer
+                                    .store()
+                                    .names
+                                    .resolve(member.name.text())
+                                    .trim_end_matches('$')
+                                    == *member_name)
+                            && member.kind != SymbolKind::Object
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    !member_symbols.is_empty(),
+                    "source member `{member_name}` was not named"
+                );
+                for member in member_symbols {
+                    typer.complete_symbol(member).unwrap();
+                }
+            }
+            completed
         };
         (store, completed)
     }
 
-    fn tasty_type_info(name: &str, bytes: &[u8], kind: SymbolKind) -> (SemanticStore, TypeId) {
-        let file = TastyFile::parse_scala_3_9(bytes).unwrap();
+    fn tasty_type_info(
+        name: &str,
+        bytes: &'static [u8],
+        kind: SymbolKind,
+    ) -> (SemanticStore, TypeId) {
+        tasty_type_info_with_units(name, &[bytes], kind, &[])
+    }
+
+    fn tasty_type_info_with_units(
+        name: &str,
+        fixture_bytes: &[&'static [u8]],
+        kind: SymbolKind,
+        complete_members: &[&str],
+    ) -> (SemanticStore, TypeId) {
+        let files = fixture_bytes
+            .iter()
+            .map(|bytes| TastyFile::parse_scala_3_9(bytes).unwrap())
+            .collect::<Vec<_>>();
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
-        enter_common_tasty_classes(&mut store, &mut packages);
-        let mut unpickler = TastyUnpickler::with_packages(&file, &mut store, definitions, packages);
-        unpickler.enter_symbols().unwrap();
-        let ast = file.ast_address_index().unwrap();
-        let address = ast
-            .iter_nodes()
-            .find_map(|node| {
-                let address = u32::try_from(node.offset).ok()?;
-                let raw = ast.get(address)?;
-                let StructuredNode::TypeDef(DefinitionBody::TypeDef {
-                    name: type_name, ..
-                }) = raw.decode_structured().ok()?
-                else {
-                    return None;
-                };
-                (file.names().get_utf8(type_name) == Some(name)
-                    && unpickler
-                        .symbol_state_at(address)
-                        .is_some_and(|(entered_kind, _)| entered_kind == kind))
-                .then_some(address)
-            })
-            .unwrap_or_else(|| panic!("TASTy type `{name}` was not entered"));
-        let completed = unpickler.complete_symbol(address).unwrap();
-        (store, completed)
+        enter_common_classes(&mut store, &mut packages, true);
+        for file in &files {
+            let mut unpickler =
+                TastyUnpickler::with_packages(file, &mut store, definitions, packages);
+            unpickler.enter_symbols().unwrap();
+            let ast = file.ast_address_index().unwrap();
+            let candidates = ast
+                .iter_nodes()
+                .filter_map(|node| {
+                    let address = u32::try_from(node.offset).ok()?;
+                    let raw = ast.get(address)?;
+                    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                        name: type_name, ..
+                    }) = raw.decode_structured().ok()?
+                    else {
+                        return None;
+                    };
+                    let entered_kind = unpickler.symbol_state_at(address)?.0;
+                    (entered_kind == kind).then_some((address, file.names().get_utf8(type_name)))
+                })
+                .collect::<Vec<_>>();
+            if kind == SymbolKind::ModuleClass {
+                let completed = candidates
+                    .iter()
+                    .map(|(address, _)| (*address, unpickler.complete_symbol(*address).unwrap()))
+                    .collect::<Vec<_>>();
+                let (index, next_packages) = unpickler.into_parts();
+                let selected = completed.into_iter().find(|(address, _)| {
+                    index.symbol_at(*address).is_some_and(|symbol| {
+                        let symbol_name =
+                            store.names.resolve(store.symbols.get(symbol).name.text());
+                        symbol_name == name || symbol_name.trim_end_matches('$') == name
+                    })
+                });
+                if let Some((_, completed)) = selected {
+                    return (store, completed);
+                }
+                packages = next_packages;
+                continue;
+            }
+            if let Some((address, _)) = candidates
+                .iter()
+                .find(|(_, node_name)| *node_name == Some(name))
+            {
+                let completed = unpickler.complete_symbol(*address).unwrap();
+                for member_name in complete_members {
+                    let member_addresses = ast
+                        .iter_nodes()
+                        .filter_map(|node| {
+                            let member_address = u32::try_from(node.offset).ok()?;
+                            let raw = ast.get(member_address)?;
+                            let name_ref = match raw.decode_structured().ok()? {
+                                StructuredNode::ValDef(DefinitionBody::ValDef { name, .. })
+                                | StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                                    name, ..
+                                }) => name,
+                                StructuredNode::DefDef(definition) => definition.name,
+                                StructuredNode::Parameter(
+                                    dotty_tasty::tasty::ParameterNode::TermParam { name, .. },
+                                ) => name,
+                                _ => return None,
+                            };
+                            (file.names().get_utf8(name_ref) == Some(*member_name))
+                                .then_some(member_address)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !member_addresses.is_empty(),
+                        "TASTy member `{member_name}` was not entered"
+                    );
+                    for member_address in member_addresses {
+                        unpickler.complete_symbol(member_address).unwrap();
+                    }
+                }
+                return (store, completed);
+            }
+            packages = unpickler.into_parts().1;
+        }
+        panic!("TASTy type `{name}` was not entered")
+    }
+
+    fn class_infos_definition(keyword: &str, name: &str) -> String {
+        let lines = CLASS_INFOS_SOURCE.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with(&format!("{keyword} {name}")))
+            .unwrap_or_else(|| panic!("fixture declaration `{name}` is missing"));
+        let mut definition = Vec::new();
+        for (offset, line) in lines[start..].iter().enumerate() {
+            if offset > 0 && !line.trim().is_empty() && !line.starts_with(char::is_whitespace) {
+                break;
+            }
+            definition.push(*line);
+        }
+        definition.join("\n").trim_end().to_owned()
+    }
+
+    fn methods_fixture_method(name: &str) -> String {
+        METHODS_SOURCE
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("def {name}")))
+            .unwrap_or_else(|| panic!("method `{name}` is missing from source fixture"))
+            .trim()
+            .to_owned()
+    }
+
+    fn assert_source_and_tasty_method_parity(name: &str, source_text: &str, method_name: &str) {
+        let (source_store, source_info) =
+            source_type_info_from_source(source_text, "Methods", SymbolKind::Class, &[method_name]);
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "Methods",
+            &[METHODS_TASTY],
+            SymbolKind::Class,
+            &[method_name],
+        );
+        let source_members = normalized_member_infos(
+            &source_store,
+            match source_store.types.get(source_info) {
+                Type::ClassInfo(info) => info,
+                other => panic!("expected source ClassInfo, got {other:?}"),
+            },
+            method_name,
+        );
+        let tasty_members = normalized_member_infos(
+            &tasty_store,
+            match tasty_store.types.get(tasty_info) {
+                Type::ClassInfo(info) => info,
+                other => panic!("expected TASTy ClassInfo, got {other:?}"),
+            },
+            method_name,
+        );
+        assert_eq!(
+            source_members, tasty_members,
+            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.Methods.{name}"
+        );
     }
 
     #[test]
@@ -493,6 +769,109 @@ mod tests {
             normalized_type(&tasty_store, tasty_info),
             "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoBase"
         );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_info_child_preserve_parents_and_self_type() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\n{}\n{}\n{}\n{}",
+            class_infos_definition("trait", "InfoBase"),
+            class_infos_definition("trait", "InfoDep"),
+            class_infos_definition("class", "InfoParent"),
+            class_infos_definition("class", "InfoChild"),
+        );
+        let (source_store, source_info) = source_type_info_from_source(
+            &source_text,
+            "InfoChild",
+            SymbolKind::Class,
+            &["value", "Member", "method"],
+        );
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "InfoChild",
+            &[
+                INFO_PARENT_TASTY,
+                INFO_BASE_TASTY,
+                INFO_DEP_TASTY,
+                INFO_CHILD_TASTY,
+            ],
+            SymbolKind::Class,
+            &["value", "Member", "method"],
+        );
+
+        assert_eq!(
+            normalized_type(&source_store, source_info),
+            normalized_type(&tasty_store, tasty_info),
+            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoChild"
+        );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_nested_class_info_match() {
+        let source_text = "package me.cytrowski.tastyfixtures.semantic\nclass InfoParent[A]\nobject InfoHolder:\n  class Nested extends InfoParent[Int]";
+        let (source_store, source_info) =
+            source_type_info_from_source(source_text, "Nested", SymbolKind::Class, &[]);
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "Nested",
+            &[INFO_PARENT_TASTY, INFO_HOLDER_TASTY],
+            SymbolKind::Class,
+            &[],
+        );
+
+        assert_eq!(
+            normalized_type(&source_store, source_info),
+            normalized_type(&tasty_store, tasty_info),
+            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoHolder.Nested"
+        );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_curried_method_signatures_match() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  {}",
+            methods_fixture_method("curried")
+        );
+        assert_source_and_tasty_method_parity("curried", &source_text, "curried");
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_polymorphic_method_signatures_match() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  {}",
+            methods_fixture_method("polymorphic")
+        );
+        assert_source_and_tasty_method_parity("polymorphic", &source_text, "polymorphic");
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_contextual_clause_kind_matches() {
+        let method =
+            methods_fixture_method("contextual").replace("Comparable", "java.lang.Comparable");
+        let source_text = format!(
+            "package java.lang {{ class Comparable[A] }}\npackage me.cytrowski.tastyfixtures.semantic {{ class Methods {{ {method} }} }}"
+        );
+        assert_source_and_tasty_method_parity("contextual", &source_text, "contextual");
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_overloads_keep_distinct_signatures() {
+        let overloads = METHODS_SOURCE
+            .lines()
+            .filter(|line| line.trim_start().starts_with("def overloaded("))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        let source_text =
+            format!("package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  {overloads}");
+        assert_source_and_tasty_method_parity("overloaded", &source_text, "overloaded");
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_empty_clause_is_preserved() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  {}",
+            methods_fixture_method("empty")
+        );
+        assert_source_and_tasty_method_parity("empty", &source_text, "empty");
     }
 
     fn class_info_fixture(padding: usize, parent_name: &str) -> (SemanticStore, TypeId) {
