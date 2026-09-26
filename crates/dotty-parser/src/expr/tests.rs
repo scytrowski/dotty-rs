@@ -432,6 +432,41 @@ fn parses_a_template_after_a_constructor_application() {
 }
 
 #[test]
+fn does_not_apply_a_completed_anonymous_new_template() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo {}(1)",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 9, 10),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+            token(TokenKind::IntegerLiteral, 11, 12),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected the completed anonymous `new` expression");
+    };
+    assert!(matches!(parser.ast().get(tpt).kind, TreeKind::Template(_)));
+    assert_eq!(
+        parser.current().kind,
+        TokenKind::Punctuation(Punctuation::LeftParen)
+    );
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].message(),
+        "a constructor application cannot be applied again"
+    );
+}
+
+#[test]
 fn selection_can_follow_an_anonymous_new_template() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

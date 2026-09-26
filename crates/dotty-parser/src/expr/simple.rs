@@ -16,11 +16,16 @@ where
     /// Parses one simple expression and all of its currently supported suffixes.
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        // Constructor argument clauses belong to `new` itself. In particular,
+        // an anonymous template body is a completed `NEW` and cannot acquire
+        // another application suffix in `simple_expr_rest`.
+        let can_apply = self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::New);
         let tree = self.simple_expr_atom(mark);
-        let can_apply = !matches!(
-            self.ast.get(tree).kind,
-            TreeKind::Block(_) | TreeKind::Match(_)
-        );
+        let can_apply = can_apply
+            && !matches!(
+                self.ast.get(tree).kind,
+                TreeKind::Block(_) | TreeKind::Match(_)
+            );
 
         self.simple_expr_rest(mark, tree, can_apply)
     }
@@ -550,21 +555,27 @@ where
             tpt
         };
         let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
-        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
-            new_tree
-        } else if self.optional_template_body_starts_here() {
-            let body = self.parse_optional_template_body();
-            self.new_with_anonymous_template(mark, Some(tpt), body)
+        let constructor = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            self.parse_application(mark, new_tree)
         } else {
-            let constructor = self.constructor_select(new_tree);
+            new_tree
+        };
+        if self.optional_template_body_starts_here() {
+            let body = self.parse_optional_template_body();
+            let parent = self.new_template_parent(constructor).or(Some(tpt));
+            self.new_with_anonymous_template(mark, parent, body)
+        } else if matches!(self.ast.get(constructor).kind, TreeKind::New(_)) {
+            let init = self.constructor_select(constructor);
             self.alloc_from(
                 mark,
                 TreeKind::Apply(Apply {
-                    function: constructor,
+                    function: init,
                     args: Vec::new(),
                     kind: ApplyKind::Regular,
                 }),
             )
+        } else {
+            constructor
         }
     }
 
