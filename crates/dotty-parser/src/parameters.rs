@@ -31,18 +31,22 @@ where
                 if parser.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
                     break;
                 }
-                if parser.current_is_legacy_implicit_parameter_clause() {
-                    clauses.push(parser.parse_unsupported_term_param_clause());
-                    continue;
-                }
+                let is_implicit = parser.current_is_implicit_parameter_clause();
                 let is_using = parser.current_is_using_parameter_clause();
                 let clause = if is_using {
-                    parser.parse_term_param_clause_with_policy(owner, false, true, num_lead_params)
+                    parser.parse_term_param_clause_with_policy(
+                        owner,
+                        false,
+                        true,
+                        false,
+                        num_lead_params,
+                    )
                 } else {
                     let clause = parser.parse_term_param_clause_with_policy(
                         owner,
                         first_ordinary_clause,
                         false,
+                        is_implicit,
                         num_lead_params,
                     );
                     first_ordinary_clause = false;
@@ -50,19 +54,12 @@ where
                 };
                 num_lead_params += clause.len();
                 clauses.push(clause);
+                if is_implicit {
+                    break;
+                }
             }
             clauses
         })
-    }
-
-    fn parse_unsupported_term_param_clause(&mut self) -> Vec<TreeId<Untyped>> {
-        self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "legacy `implicit` parameter clauses are not supported; use a named `using` clause",
-        );
-        self.recover_term_param_clause();
-        Vec::new()
     }
 
     /// Parses one term parameter clause for a grammar production that needs
@@ -74,16 +71,14 @@ where
         is_using: bool,
         num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
-        if self.current_is_legacy_implicit_parameter_clause() {
-            self.parse_unsupported_term_param_clause()
-        } else {
-            self.parse_term_param_clause_with_policy(
-                owner,
-                first_ordinary_clause,
-                is_using,
-                num_lead_params,
-            )
-        }
+        let is_implicit = self.current_is_implicit_parameter_clause();
+        self.parse_term_param_clause_with_policy(
+            owner,
+            first_ordinary_clause,
+            is_using,
+            is_implicit,
+            num_lead_params,
+        )
     }
 
     /// Consumes layout separators only when they lead to the requested
@@ -110,6 +105,7 @@ where
         owner: ParamOwner,
         first_ordinary_clause: bool,
         is_using: bool,
+        is_implicit: bool,
         num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
         self.expect(TokenKind::Punctuation(Punctuation::LeftParen));
@@ -118,6 +114,18 @@ where
 
         if is_using || owner == ParamOwner::Given {
             metadata.modifiers.push(Modifier::Given);
+        }
+
+        if is_implicit {
+            metadata.modifiers.push(Modifier::Implicit);
+            self.advance();
+            if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a parameter after `implicit`",
+                );
+                return params;
+            }
         }
 
         if is_using {
@@ -148,7 +156,8 @@ where
             );
         }
 
-        if !is_using && self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
+        if !is_using && !is_implicit && self.accept(TokenKind::Punctuation(Punctuation::RightParen))
+        {
             return params;
         }
 
@@ -352,7 +361,7 @@ where
                 .unwrap_or(false)
     }
 
-    pub(crate) fn current_is_legacy_implicit_parameter_clause(&mut self) -> bool {
+    fn current_is_implicit_parameter_clause(&mut self) -> bool {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return false;
         }
@@ -1538,18 +1547,95 @@ mod tests {
     }
 
     #[test]
-    fn reports_legacy_implicit_clauses_as_explicitly_unsupported() {
+    fn parses_a_legacy_implicit_parameter_clause() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "(implicit ctx: Ctx)",
             vec![
                 token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
                 token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 8),
-                token(TokenKind::Identifier, 9, 12),
-                token(TokenKind::ColonFollow, 12, 13),
-                token(TokenKind::Identifier, 14, 17),
-                token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
-                token(TokenKind::Eof, 18, 18),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::ColonFollow, 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].len(), 1);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected an implicit parameter ValDef");
+        };
+        let parameter_name = *parameter.name.as_name();
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Implicit));
+        assert!(!parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(parameter_name.text()), "ctx");
+    }
+
+    #[test]
+    fn legacy_implicit_clause_follows_regular_clause_and_ends_clause_sequence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A)(implicit ctx: Ctx)(y: B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 7, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::ColonFollow, 19, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 24, 25),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 25, 26),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::ColonFollow, 27, 28),
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(clauses[1].len(), 1);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[1][0]).kind else {
+            panic!("expected the implicit parameter ValDef");
+        };
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Implicit));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::LeftParen)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_empty_legacy_implicit_clause_without_hanging() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(implicit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
             ],
             &mut names,
         );
@@ -1557,13 +1643,12 @@ mod tests {
         let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
 
         assert_eq!(clauses, vec![Vec::new()]);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
-        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
     }
 
     #[test]

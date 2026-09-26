@@ -318,6 +318,28 @@ fn render_tree(
                     .collect::<Vec<_>>()
                     .join(",")
             ));
+            fields.push(format!(
+                "\"implicit_clauses\":[{}]",
+                extension
+                    .param_clauses
+                    .iter()
+                    .map(|clause| {
+                        clause
+                            .first()
+                            .is_some_and(|parameter| {
+                                matches!(
+                                    &arena.get(*parameter).kind,
+                                    TreeKind::ValDef(value)
+                                        if value.metadata.modifiers.contains(
+                                            &dotty_core::ast::Modifier::Implicit
+                                        )
+                                )
+                            })
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         TreeKind::ValDef(definition) => {
             let source_text = source_slice(tree, source);
@@ -406,26 +428,37 @@ fn render_tree(
                     + definition.value_param_clauses.len(),
             );
             let mut using_clauses = Vec::with_capacity(clause_sizes.capacity());
+            let mut implicit_clauses = Vec::with_capacity(clause_sizes.capacity());
             if !definition.type_params.is_empty() {
                 clause_sizes.push(definition.type_params.len().to_string());
                 using_clauses.push("false".to_owned());
+                implicit_clauses.push("false".to_owned());
             }
             for clause in &definition.value_param_clauses {
                 clause_sizes.push(clause.len().to_string());
-                let using = clause.first().is_some_and(|parameter| {
-                    matches!(
-                        &arena.get(*parameter).kind,
-                        TreeKind::ValDef(value)
-                            if value.metadata.modifiers.contains(&dotty_core::ast::Modifier::Given)
-                    )
-                });
+                let has_modifier = |modifier| {
+                    clause.first().is_some_and(|parameter| {
+                        matches!(
+                            &arena.get(*parameter).kind,
+                            TreeKind::ValDef(value)
+                                if value.metadata.modifiers.contains(&modifier)
+                        )
+                    })
+                };
+                let using = has_modifier(dotty_core::ast::Modifier::Given);
                 using_clauses.push(using.to_string());
+                implicit_clauses
+                    .push(has_modifier(dotty_core::ast::Modifier::Implicit).to_string());
             }
             fields.push(format!(
                 "\"param_clause_sizes\":[{}]",
                 clause_sizes.join(",")
             ));
             fields.push(format!("\"using_clauses\":[{}]", using_clauses.join(",")));
+            fields.push(format!(
+                "\"implicit_clauses\":[{}]",
+                implicit_clauses.join(",")
+            ));
             fields.extend(render_definition_metadata(
                 &definition.metadata,
                 arena,
