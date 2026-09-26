@@ -453,8 +453,11 @@ inside a brace or indented `Block`; a typed declaration without `=` has no
 RHS. The shared definition-prefix layer now preserves source annotations,
 hard modifiers, the supported soft modifiers, and private/protected visibility
 including qualifiers on the definition nodes. It deliberately does not yet
-handle constructors, legacy `(implicit ...)` clauses, context-type shorthand
-outside parameter clauses, or the remaining definition forms.
+handle constructors, context-type shorthand outside parameter clauses, or the
+remaining definition forms. Legacy `(implicit ...)` method and constructor
+parameter clauses are retained as source clauses with the `Implicit` modifier;
+as in Scala 3.9's default source mode, they are not rewritten to `using`.
+The parser does not currently model Scala's future-source migration warnings.
 Unsupported parameter forms produce an explicit unsupported-syntax diagnostic
 and synchronize at the closing parenthesis.
 

@@ -158,6 +158,14 @@ object Main:
               case _ => "false"
           .mkString("[", ",", "]")
         )
+        fields += field(
+          "implicit_clauses",
+          clauses.map: clause =>
+            clause.headOption match
+              case Some(value: dotty.tools.dotc.ast.Trees.ValDef[?]) => value.mods.is(Implicit).toString
+              case _ => "false"
+          .mkString("[", ",", "]")
+        )
         fields ++= renderDefinitionMetadata(ddef.mods, ddef, source, placeholderBase, includeMutable = false)
       case ext if normalizedKind == "ExtMethods" =>
         val clauses = ext.productElement(0).asInstanceOf[List[List[dotty.tools.dotc.ast.Trees.Tree[?]]]]
@@ -167,6 +175,14 @@ object Main:
           clauses.map: clause =>
             clause.headOption match
               case Some(value: dotty.tools.dotc.ast.Trees.ValDef[?]) => value.mods.is(Given).toString
+              case _ => "false"
+          .mkString("[", ",", "]")
+        )
+        fields += field(
+          "implicit_clauses",
+          clauses.map: clause =>
+            clause.headOption match
+              case Some(value: dotty.tools.dotc.ast.Trees.ValDef[?]) => value.mods.is(Implicit).toString
               case _ => "false"
           .mkString("[", ",", "]")
         )
