@@ -1,0 +1,496 @@
+{
+  "schema_version": 2,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_oracle_files": null,
+  "scala_oracle_failures": null,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 503,
+  "files_parsed_with_recoverable_diagnostics": 733,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 17,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 19209,
+    "ExpectedPattern": 7,
+    "ExpectedToken": 3745,
+    "ExpectedType": 1882,
+    "UnexpectedToken": 12322,
+    "UnsupportedSyntax": 8373
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 264,
+      "examples": [
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 83,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/BCodeRepository.scala",
+        "compiler/src/dotty/tools/debug/ExpressionCompilerBridge.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 114,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/OptimizerSettings.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 140,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+        "compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala",
+        "compiler/src/dotty/tools/backend/jvm/PostProcessor.scala"
+      ]
+    },
+    "UnsupportedSyntax: _ is no longer supported for a wildcard import/export; use * instead": {
+      "count": 61,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/opt/CallGraph.scala",
+        "compiler/src/dotty/tools/dotc/core/Signature.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/AttributeUnpickler.scala",
+        "compiler/src/dotty/tools/dotc/printing/Printer.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala"
+      ]
+    },
+    "UnsupportedSyntax: compound template self types are not supported yet": {
+      "count": 7,
+      "examples": [
+        "library/src/scala/PartialFunction.scala",
+        "library/src/scala/collection/IndexedSeq.scala",
+        "library/src/scala/collection/IterableOnce.scala",
+        "library/src/scala/collection/Iterator.scala",
+        "library/src/scala/collection/Seq.scala"
+      ]
+    },
+    "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "UnsupportedSyntax: legacy implicit parameter clauses are not supported; use a named using clause": {
+      "count": 39,
+      "examples": [
+        "compiler/src/dotty/tools/backend/sjs/JSEncoding.scala",
+        "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
+        "compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala",
+        "compiler/src/dotty/tools/dotc/ast/Positioned.scala",
+        "compiler/src/dotty/tools/dotc/ast/Trees.scala"
+      ]
+    },
+    "UnsupportedSyntax: package objects are not supported yet": {
+      "count": 19,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/dotc/parsing/package.scala",
+        "compiler/src/dotty/tools/dotc/printing/package.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/package.scala",
+        "compiler/src/dotty/tools/io/package.scala"
+      ]
+    },
+    "UnsupportedSyntax: unsupported enum case syntax": {
+      "count": 5,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        "compiler/src/dotty/tools/dotc/reporting/ErrorMessageID.scala",
+        "compiler/src/dotty/tools/io/FileExtension.scala"
+      ]
+    }
+  },
+  "namer": {
+    "files_parse_prevented_naming": 0,
+    "files_namer_ran": 1236,
+    "files_namer_succeeded": 1196,
+    "files_namer_returned_error": 40,
+    "files_named_after_parser_recovery": 693,
+    "files_with_namer_errors_after_parser_recovery": 40,
+    "files_with_invariant_failures": 0,
+    "failed_calls_with_transaction_residue": 0,
+    "namer_success_percent": 96.76375404530744,
+    "namer_typed_error_percent": 3.236245954692557,
+    "clean_parse_vs_namer_success_delta": 693,
+    "namer_error_histogram": {
+      "InvalidVisibilityQualifier": {
+        "count": 14,
+        "clean_parse_failures": 0,
+        "recovered_parse_failures": 14,
+        "examples": [
+          {
+            "path": "compiler/src/dotty/tools/backend/sjs/ScopedVar.scala",
+            "message": "tree 103 has an invalid qualified private visibility"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+            "message": "tree 2269 has an invalid qualified private visibility"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/core/Contexts.scala",
+            "message": "tree 1670 has an invalid qualified private visibility"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/core/Phases.scala",
+            "message": "tree 1568 has an invalid qualified protected visibility"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/core/SymDenotations.scala",
+            "message": "tree 8675 has an invalid qualified private visibility"
+          }
+        ]
+      },
+      "MalformedAstShape": {
+        "count": 16,
+        "clean_parse_failures": 0,
+        "recovered_parse_failures": 16,
+        "examples": [
+          {
+            "path": "compiler/src/dotty/tools/dotc/Run.scala",
+            "message": "tree 2523 does not have expected shape: DefDef or Export extension method"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/ast/TreeInfo.scala",
+            "message": "tree 4899 does not have expected shape: DefDef or Export extension method"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+            "message": "tree 5925 does not have expected shape: DefDef or Export extension method"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+            "message": "tree 952 does not have expected shape: DefDef or Export extension method"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/classpath/FileUtils.scala",
+            "message": "tree 119 does not have expected shape: DefDef or Export extension method"
+          }
+        ]
+      },
+      "UnsupportedGivenNameShape": {
+        "count": 10,
+        "clean_parse_failures": 0,
+        "recovered_parse_failures": 10,
+        "examples": [
+          {
+            "path": "compiler/src/dotty/tools/dotc/core/Constants.scala",
+            "message": "tree 1116 has an anonymous given with unsupported Error name shape"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/core/TypeComparer.scala",
+            "message": "tree 100 has an anonymous given with unsupported Error name shape"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/interactive/Completion.scala",
+            "message": "tree 1785 has an anonymous given with unsupported New name shape"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/printing/PlainPrinter.scala",
+            "message": "tree 75 has an anonymous given with unsupported Error name shape"
+          },
+          {
+            "path": "compiler/src/dotty/tools/dotc/transform/ExplicitOuter.scala",
+            "message": "tree 1256 has an anonymous given with unsupported Error name shape"
+          }
+        ]
+      }
+    },
+    "invariant_failure_histogram": {}
+  },
+  "deferred_features": {
+    "case_class_synthetic_apis": {
+      "files": 153,
+      "occurrences": 622,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 551,
+      "examples": [
+        "compiler/src/dotty/tools/FatalError.scala",
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala"
+      ]
+    },
+    "context_bound_evidence_synthesis": {
+      "files": 0,
+      "occurrences": 0,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": []
+    },
+    "derives_clauses": {
+      "files": 25,
+      "occurrences": 135,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 131,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala"
+      ]
+    },
+    "enum_cases": {
+      "files": 53,
+      "occurrences": 538,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 484,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/TestOp.scala",
+        "compiler/src/dotty/tools/debug/ReflectEvalStrategy.scala"
+      ]
+    },
+    "enum_definitions": {
+      "files": 56,
+      "occurrences": 77,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 63,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/TestOp.scala",
+        "compiler/src/dotty/tools/debug/ReflectEvalStrategy.scala"
+      ]
+    },
+    "export_forwarders": {
+      "files": 9,
+      "occurrences": 33,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 11,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Signature.scala",
+        "compiler/src/dotty/tools/dotc/core/Types.scala"
+      ]
+    },
+    "local_definitions": {
+      "files": 695,
+      "occurrences": 34902,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 29579,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala"
+      ]
+    },
+    "package_objects_blocked_by_parser": {
+      "files": 20,
+      "occurrences": 20,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/dotc/parsing/package.scala",
+        "compiler/src/dotty/tools/dotc/printing/package.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/package.scala",
+        "compiler/src/dotty/tools/io/package.scala"
+      ]
+    },
+    "parser_blocked: _ is no longer supported for a wildcard import/export; use * instead": {
+      "files": 89,
+      "occurrences": 133,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CallGraph.scala",
+        "compiler/src/dotty/tools/dotc/core/Signature.scala"
+      ]
+    },
+    "parser_blocked: compound template self types are not supported yet": {
+      "files": 10,
+      "occurrences": 12,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/PartialFunction.scala",
+        "library/src/scala/collection/IndexedSeq.scala",
+        "library/src/scala/collection/IterableOnce.scala",
+        "library/src/scala/collection/Iterator.scala",
+        "library/src/scala/collection/Map.scala"
+      ]
+    },
+    "parser_blocked: expected a type, val, var, or def declaration in a type refinement": {
+      "files": 2,
+      "occurrences": 4,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/collection/convert/StreamExtensions.scala",
+        "library/src/scala/quoted/ToExpr.scala"
+      ]
+    },
+    "parser_blocked: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "files": 1,
+      "occurrences": 1,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "parser_blocked: legacy implicit parameter clauses are not supported; use a named using clause": {
+      "files": 118,
+      "occurrences": 775,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSEncoding.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSPositions.scala",
+        "compiler/src/dotty/tools/dotc/ast/Desugar.scala"
+      ]
+    },
+    "parser_blocked: only methods and exports are allowed inside an extension": {
+      "files": 25,
+      "occurrences": 155,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/ast/TreeInfo.scala",
+        "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala"
+      ]
+    },
+    "parser_blocked: package objects are not supported yet": {
+      "files": 20,
+      "occurrences": 20,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/dotc/parsing/package.scala",
+        "compiler/src/dotty/tools/dotc/printing/package.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/package.scala",
+        "compiler/src/dotty/tools/io/package.scala"
+      ]
+    },
+    "parser_blocked: refinement val, var, and def declarations cannot have a right-hand side or default argument": {
+      "files": 3,
+      "occurrences": 20,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/quoted/FromExpr.scala",
+        "library/src/scala/quoted/ToExpr.scala",
+        "library/src/scala/util/FromDigits.scala"
+      ]
+    },
+    "parser_blocked: syntax beginning with keyword(match) is not supported by this parser milestone": {
+      "files": 4,
+      "occurrences": 5,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/typer/ImportSuggestions.scala",
+        "compiler/src/dotty/tools/dotc/typer/Namer.scala",
+        "compiler/src/dotty/tools/dotc/util/Signatures.scala"
+      ]
+    },
+    "parser_blocked: syntax beginning with operator is not supported by this parser milestone": {
+      "files": 1,
+      "occurrences": 1,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/collection/immutable/List.scala"
+      ]
+    },
+    "parser_blocked: this contextual modifier is not supported yet": {
+      "files": 1,
+      "occurrences": 1,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "library/src/scala/caps/package.scala"
+      ]
+    },
+    "parser_blocked: this pattern form is not supported yet": {
+      "files": 2,
+      "occurrences": 3,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/interactive/Completion.scala",
+        "compiler/src/dotty/tools/io/FileWriters.scala"
+      ]
+    },
+    "parser_blocked: top-level expressions are not supported in a compilation unit": {
+      "files": 428,
+      "occurrences": 7172,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala"
+      ]
+    },
+    "parser_blocked: unsupported enum case syntax": {
+      "files": 7,
+      "occurrences": 71,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 0,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+        "compiler/src/dotty/tools/dotc/core/NameKinds.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        "compiler/src/dotty/tools/dotc/profile/Profiler.scala"
+      ]
+    },
+    "source_annotations": {
+      "files": 540,
+      "occurrences": 2881,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 2742,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala"
+      ]
+    }
+  }
+}
