@@ -240,12 +240,14 @@ method definitions with a leading type-parameter clause, ordered term
 parameter clauses, supported type-expression return types, declarations, and
 expression RHSs
 parameter nodes are represented as `ValDef`; ordinary and named `using`
-clauses, default parameter expressions, and indented method bodies are
-supported. Interleaved type/term parameter clauses are explicitly deferred
+clauses, inline parameters, default parameter expressions, and indented method
+bodies are supported. The soft name `inline` remains a parameter name when
+followed by `:`. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
 Primary-constructor parameters preserve source annotations and the supported
-`private`/`protected` visibility and `override` modifier in class-parameter
-contexts; explicit `val`/`var` accessor metadata remains context-sensitive.
+`private`/`protected` visibility, `override`, and `inline` modifiers in
+class-parameter contexts; explicit `val`/`var` accessor metadata remains
+context-sensitive.
 Annotations on ordinary method parameters are also preserved. These prefixes
 are not treated as a blanket set of modifiers valid for every parameter kind.
 Ordinary named method and non-accessor class-constructor parameters also
