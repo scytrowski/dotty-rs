@@ -3768,7 +3768,7 @@ fn parses_new_qualified_type_and_constructor_application() {
 }
 
 #[test]
-fn rejects_a_second_application_after_a_new_constructor() {
+fn parses_repeated_constructor_argument_clauses_without_a_template() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
         "new Foo(1)(2)",
@@ -3788,19 +3788,16 @@ fn rejects_a_second_application_after_a_new_constructor() {
 
     let id = parser.simple_expr();
 
-    let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
-        panic!("expected the constructor application");
+    let TreeKind::Apply(application) = &parser.ast().get(id).kind else {
+        panic!("expected the second constructor application");
     };
     assert_eq!(application.args.len(), 1);
-    assert_eq!(
-        parser.current().kind,
-        TokenKind::Punctuation(Punctuation::LeftParen)
-    );
-    assert_eq!(parser.diagnostics().len(), 1);
-    assert_eq!(
-        parser.diagnostics()[0].message(),
-        "a constructor application cannot be applied again"
-    );
+    let TreeKind::Apply(first_application) = &parser.ast().get(application.function).kind else {
+        panic!("expected the first constructor application");
+    };
+    assert_eq!(first_application.args.len(), 1);
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
 }
 
 #[test]
