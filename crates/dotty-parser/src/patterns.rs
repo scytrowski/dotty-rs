@@ -707,6 +707,10 @@ mod tests {
             TreeKind::Ident(_)
         ));
         assert_unchecked_type(&result.ast, typed.tpt, &names);
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
     }
 
     #[test]
@@ -768,6 +772,37 @@ mod tests {
         };
         assert_eq!(names.resolve(selection.name.text()), "T");
         assert_unchecked_type(&result.ast, typed.tpt, &names);
+    }
+
+    #[test]
+    fn recovers_from_a_missing_unchecked_annotation_type_at_pattern_end() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x: T @",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Typed(_)
+        ));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected an annotation type after `@`"
+        );
     }
 
     #[test]
