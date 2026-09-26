@@ -500,6 +500,14 @@ class-like members and definition modifiers. Refined type members,
 capture-checking refinements and other
 full type forms remain deferred.
 
+Type-parameter clauses preserve Scala 3.9 context bounds in the existing
+`ContextBounds` / `ContextBoundTypeTree` nodes, including explicit lower/upper
+bounds, braced multiple bounds, and `as` aliases. The owner policy follows
+Dotty: method, class/case-class, given, extension-prefix, and polymorphic
+function type parameters accept context bounds; higher-kinded parameters do
+not. The parser retains this source structure and does not synthesize evidence
+parameters.
+
 ### Class-like definitions and templates
 
 The initial class-like definition layer parses `class`, `trait`, and `object`

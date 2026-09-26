@@ -2,6 +2,7 @@
   def method[A: Show](value: A): A = value
   def aliased[A: Show as show](value: A): A = value
   def multiple[A: {Ord, Show}]: Int = 1
+  def chained[A: Ord: Show]: Int = 1
   def bounded[A >: Low <: High: Show]: Int = 1
   class C[A: Show]
   case class D[A: Show](value: A)

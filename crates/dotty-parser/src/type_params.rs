@@ -410,10 +410,27 @@ where
                     );
                 } else {
                     loop {
+                        if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
+                            self.report(
+                                ParseDiagnosticKind::ExpectedType,
+                                "expected a context-bound type",
+                            );
+                            self.advance();
+                            continue;
+                        }
+                        let checkpoint = self.cursor.checkpoint();
                         context_bounds.push(self.parse_context_bound_type(parameter));
-                        if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                        if !self.cursor.progressed_since(checkpoint) {
+                            self.report(
+                                ParseDiagnosticKind::UnexpectedToken,
+                                "parser made no progress while parsing a context bound",
+                            );
+                            self.recover_context_bound_list();
+                        }
+                        if self.current().kind != TokenKind::Punctuation(Punctuation::Comma) {
                             break;
                         }
+                        self.advance();
                         if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
                             self.report(
                                 ParseDiagnosticKind::ExpectedType,
@@ -429,6 +446,19 @@ where
             }
         }
         (!context_bounds.is_empty()).then_some(context_bounds)
+    }
+
+    fn recover_context_bound_list(&mut self) {
+        while !matches!(
+            self.current().kind,
+            TokenKind::Eof | TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBrace)
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
     }
 
     fn parse_context_bound_type(&mut self, parameter: TypeName) -> TreeId<Untyped> {
@@ -708,6 +738,43 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(bound_names, ["Ord", "Show"]);
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_missing_braced_context_bound_and_keeps_the_next_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: {, Show}, B]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::Comma), 5, 6),
+                token(TokenKind::Identifier, 7, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::Comma), 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Def);
+        let parsed_names = params
+            .iter()
+            .map(|param| match &parser.ast().get(*param).kind {
+                TreeKind::TypeDef(definition) => {
+                    parser.names.resolve(definition.name.as_name().text())
+                }
+                _ => panic!("expected a type parameter"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(parsed_names, ["A", "B"]);
+        assert!(!parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
