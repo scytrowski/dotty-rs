@@ -34,7 +34,6 @@
 
 use dotty_core::ids::TypeId;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
-use dotty_core::types::Type;
 use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, VALDEF_TAG};
 
 use crate::ast_view::{AstView, address};
@@ -137,13 +136,8 @@ impl TastyUnpickler<'_, '_, '_> {
     /// thing a type definition can be (a by-name or a methodic type) is
     /// refused rather than wrapped.
     fn bounds_of(&mut self, at: u32, ty: TypeId) -> Result<TypeId, UnpickleError> {
-        match self.store.types.get(ty) {
-            Type::Bounds { .. } | Type::AliasingBounds { .. } => Ok(ty),
-            Type::ByName { .. } | Type::Method(_) | Type::Poly(_) => {
-                Err(UnpickleError::InvalidCompletedBounds { address: at, ty })
-            }
-            _ => Ok(self.store.types.alloc(Type::AliasingBounds { alias: ty })),
-        }
+        dotty_core::types::to_bounds(&mut self.store.types, ty)
+            .map_err(|_| UnpickleError::InvalidCompletedBounds { address: at, ty })
     }
 }
 

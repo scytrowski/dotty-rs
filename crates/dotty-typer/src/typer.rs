@@ -2,12 +2,12 @@
 
 use std::fmt;
 
-use dotty_core::ast::{Ident, TreeKind, UntypedNode};
+use dotty_core::ast::{Ident, TreeKind, TypeBoundsTree, UntypedNode};
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
-    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
+    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
@@ -46,6 +46,18 @@ pub enum TyperError {
     },
     /// Completion for this semantic declaration category is not implemented.
     UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
+    /// Higher-kinded source type parameter completion is deferred.
+    HigherKindedTypeParameterDeferred { symbol: SymbolId, tree_index: u32 },
+    /// Higher-kinded source type alias completion is deferred.
+    HigherKindedTypeAliasDeferred { symbol: SymbolId, tree_index: u32 },
+    /// A type alias RHS cannot be represented by source alias bounds.
+    InvalidCompletedBounds {
+        source: SourceId,
+        tree_index: u32,
+        ty: TypeId,
+    },
+    /// Opaque alias completion is deferred until opaque visibility is modeled.
+    OpaqueAliasDeferred { symbol: SymbolId, tree_index: u32 },
     /// A deferred completion belongs to a future completion engine.
     DeferredSymbolCompletion { symbol: SymbolId },
     /// A previous fatal semantic failure has already been recorded.
@@ -364,6 +376,10 @@ impl<'a> SourceTyper<'a> {
                 });
             }
         };
+        let type_definition_rhs = match &source_tree.kind {
+            TreeKind::TypeDef(definition) => Some(definition.rhs),
+            _ => None,
+        };
 
         match kind {
             SymbolKind::Field
@@ -390,9 +406,33 @@ impl<'a> SourceTyper<'a> {
                     .set_info(symbol, SymbolInfo::Complete(ty));
                 Ok(ty)
             }
-            SymbolKind::TypeParameter
-            | SymbolKind::TypeAlias
-            | SymbolKind::Method
+            SymbolKind::TypeParameter => {
+                let rhs = type_definition_rhs.ok_or(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                })?;
+                let context = self
+                    .index
+                    .declaration_context_of(symbol)
+                    .ok_or(TyperError::DeclarationContextMissing { symbol })?;
+                self.complete_type_parameter(symbol, rhs, context, info_journal)
+            }
+            SymbolKind::TypeAlias => {
+                let rhs = type_definition_rhs.ok_or(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                })?;
+                let context = self
+                    .index
+                    .declaration_context_of(symbol)
+                    .ok_or(TyperError::DeclarationContextMissing { symbol })?;
+                self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
+            }
+            SymbolKind::Method
             | SymbolKind::Constructor
             | SymbolKind::Class
             | SymbolKind::Trait
@@ -404,6 +444,157 @@ impl<'a> SourceTyper<'a> {
                 Err(TyperError::UnsupportedSymbolCompletion { symbol, kind })
             }
         }
+    }
+
+    fn complete_type_alias(
+        &mut self,
+        symbol: SymbolId,
+        rhs: TreeId<Untyped>,
+        declaration_tree_index: u32,
+        context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(SymbolFlags::OPAQUE)
+        {
+            return Err(TyperError::OpaqueAliasDeferred {
+                symbol,
+                tree_index: declaration_tree_index,
+            });
+        }
+        let Some(rhs_node) = self.arena.try_get(rhs) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: rhs.index(),
+            });
+        };
+        let info = match &rhs_node.kind {
+            TreeKind::LambdaTypeTree(_) => {
+                return Err(TyperError::HigherKindedTypeAliasDeferred {
+                    symbol,
+                    tree_index: rhs.index(),
+                });
+            }
+            TreeKind::TypeBoundsTree(bounds) => {
+                let bounds = *bounds;
+                if let Some(alias) = bounds.alias {
+                    let projected = self.type_of_tpt_inner(alias, context)?;
+                    self.alias_bounds_for_type(projected, alias.index())?
+                } else {
+                    self.project_type_bounds(&bounds, context)?
+                }
+            }
+            _ => {
+                let projected = self.type_of_tpt_inner(rhs, context)?;
+                self.alias_bounds_for_type(projected, rhs.index())?
+            }
+        };
+        let previous = *self.store.symbols.info(symbol);
+        info_journal.push((symbol, previous));
+        self.store
+            .symbols
+            .set_info(symbol, SymbolInfo::Complete(info));
+        Ok(info)
+    }
+
+    /// Source-side equivalent of Dotty's `toBounds`: genuine bounds and
+    /// aliases keep their distinction, ordinary types become aliases, and
+    /// methodic/by-name types are rejected.
+    fn alias_bounds_for_type(&mut self, ty: TypeId, tree_index: u32) -> Result<TypeId, TyperError> {
+        dotty_core::types::to_bounds(&mut self.store.types, ty).map_err(|_| {
+            TyperError::InvalidCompletedBounds {
+                source: self.source,
+                tree_index,
+                ty,
+            }
+        })
+    }
+
+    fn complete_type_parameter(
+        &mut self,
+        symbol: SymbolId,
+        rhs: TreeId<Untyped>,
+        context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let Some(rhs_node) = self.arena.try_get(rhs) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: rhs.index(),
+            });
+        };
+        let bounds_tree = match &rhs_node.kind {
+            TreeKind::TypeBoundsTree(_) => rhs,
+            TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context_bounds)) => {
+                // Context-bound evidence remains represented in the source AST
+                // for later lowering; this stage completes only the ordinary
+                // bounds carried by the wrapper.
+                context_bounds.bounds
+            }
+            TreeKind::LambdaTypeTree(_) => {
+                return Err(TyperError::HigherKindedTypeParameterDeferred {
+                    symbol,
+                    tree_index: rhs.index(),
+                });
+            }
+            _ => {
+                return Err(TyperError::UnsupportedTypeTree {
+                    source: self.source,
+                    tree_index: rhs.index(),
+                    tree_kind: tree_kind_name(&rhs_node.kind),
+                });
+            }
+        };
+        let Some(bounds_node) = self.arena.try_get(bounds_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: bounds_tree.index(),
+            });
+        };
+        let TreeKind::TypeBoundsTree(bounds) = &bounds_node.kind else {
+            return Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index: bounds_tree.index(),
+                tree_kind: tree_kind_name(&bounds_node.kind),
+            });
+        };
+        let bounds = *bounds;
+        if bounds.alias.is_some() {
+            return Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index: bounds_tree.index(),
+                tree_kind: "aliased type parameter bounds",
+            });
+        }
+        let info = self.project_type_bounds(&bounds, context)?;
+        let previous = *self.store.symbols.info(symbol);
+        info_journal.push((symbol, previous));
+        self.store
+            .symbols
+            .set_info(symbol, SymbolInfo::Complete(info));
+        Ok(info)
+    }
+
+    fn project_type_bounds(
+        &mut self,
+        bounds: &TypeBoundsTree<Untyped>,
+        context: SourceContextId,
+    ) -> Result<TypeId, TyperError> {
+        let low = if let Some(low) = bounds.low {
+            self.type_of_tpt_inner(low, context)?
+        } else {
+            self.definitions.nothing_type
+        };
+        let high = if let Some(high) = bounds.high {
+            self.type_of_tpt_inner(high, context)?
+        } else {
+            self.definitions.any_type
+        };
+        Ok(self.store.types.alloc(Type::Bounds { low, high }))
     }
 
     /// Projects a source type tree using the declaration context from the namer.
@@ -1584,6 +1775,54 @@ mod tests {
         }
     }
 
+    fn type_parameter_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source type parameter `{name}` not found"))
+    }
+
+    fn type_alias_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).kind == SymbolKind::TypeAlias
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source type alias `{name}` not found"))
+    }
+
     fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
         let text = format!("val x: {name} = 1");
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
@@ -1609,6 +1848,483 @@ mod tests {
         let typer = SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
         assert_eq!(typer.definitions.int, definitions.int);
+    }
+
+    #[test]
+    fn unbounded_type_parameter_uses_canonical_nothing_and_any() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A](x: A): A = x");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if *low == definitions.nothing_type && *high == definitions.any_type
+        ));
+    }
+
+    #[test]
+    fn type_parameter_completes_explicit_lower_and_upper_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class L; class H; def id[A >: L <: H](x: A): A = x");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let class_symbol = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let expected_low = class_symbol("L");
+        let expected_high = class_symbol("H");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if type_symbol(typer.store(), *low) == expected_low
+                    && type_symbol(typer.store(), *high) == expected_high
+        ));
+    }
+
+    #[test]
+    fn type_parameter_with_only_upper_bound_uses_nothing_as_lower_bound() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class H; def id[A <: H](x: A): A = x");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let expected_high = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "H" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if *low == definitions.nothing_type
+                    && type_symbol(typer.store(), *high) == expected_high
+        ));
+    }
+
+    #[test]
+    fn type_parameter_with_only_lower_bound_uses_any_as_upper_bound() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class L; def id[A >: L](x: A): A = x");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let expected_low = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "L" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if type_symbol(typer.store(), *low) == expected_low
+                    && *high == definitions.any_type
+        ));
+    }
+
+    #[test]
+    fn context_bound_type_parameter_completes_ordinary_bounds_only() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A: Evidence](x: A): A = x");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let parameter_tree = index.definition_of(parameter).unwrap();
+        let SourceDefinition::Canonical { tree, .. } = parameter_tree else {
+            panic!("canonical source type parameter expected");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type parameter must be represented by a TypeDef");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(wrapper)) =
+            &parsed.ast.get(definition.rhs).kind
+        else {
+            panic!("parser should preserve the context-bound wrapper");
+        };
+        assert_eq!(wrapper.context_bounds.len(), 1);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if *low == definitions.nothing_type && *high == definitions.any_type
+        ));
+    }
+
+    #[test]
+    fn higher_kinded_type_parameter_completion_is_deferred_without_mutation() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[F[_]](x: F[Int]): Int = 1");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "F");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(parameter).unwrap()
+        else {
+            panic!("canonical source type parameter expected");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type parameter must be represented by a TypeDef");
+        };
+        let rhs = definition.rhs;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(parameter),
+            Err(TyperError::HigherKindedTypeParameterDeferred { symbol, tree_index })
+                if symbol == parameter && tree_index == rhs.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn type_parameter_completion_is_idempotent_and_reuses_its_info_id() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A](value: A): A = value");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.complete_symbol(parameter).unwrap();
+        let after_first = typer.store().checkpoint();
+        let second = typer.complete_symbol(parameter).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(typer.store().checkpoint(), after_first);
+    }
+
+    #[test]
+    fn failed_type_parameter_bounds_roll_back_allocations_and_leave_info_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A <: Missing](value: A): A = value");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(parameter).unwrap()
+        else {
+            panic!("canonical source type parameter expected");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type parameter must be represented by a TypeDef");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("type parameter bounds must be represented by TypeBoundsTree");
+        };
+        let missing_type = bounds.high.unwrap();
+        let missing_position = parsed.ast.get(missing_type).position;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(parameter),
+            Err(TyperError::TypeNameNotFound {
+                source: found_source,
+                tree_index,
+                name,
+                position,
+            }) if found_source == source
+                && tree_index == missing_type.index()
+                && typer.store().names.resolve(name.text()) == "Missing"
+                && position == missing_position
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn source_type_alias_completes_to_aliasing_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("type Alias = Int");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(alias).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::AliasingBounds { alias } if *alias == definitions.int
+        ));
+    }
+
+    #[test]
+    fn source_abstract_type_completes_to_plain_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class L; class H; type Abstract >: L <: H");
+        let abstract_type = type_alias_symbol(&parsed, &store, &index, source, "Abstract");
+        let bound_symbol = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let expected_low = bound_symbol("L");
+        let expected_high = bound_symbol("H");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(abstract_type).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if type_symbol(typer.store(), *low) == expected_low
+                    && type_symbol(typer.store(), *high) == expected_high
+        ));
+    }
+
+    #[test]
+    fn opaque_source_type_alias_is_deferred_and_stays_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("opaque type Secret = Int");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Secret");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(alias).unwrap() else {
+            panic!("canonical source type alias expected");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::OpaqueAliasDeferred { symbol, tree_index })
+                if symbol == alias && tree_index == tree.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn higher_kinded_source_type_alias_is_deferred_and_stays_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("type F[A] = Option[A]");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "F");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(alias).unwrap() else {
+            panic!("canonical source type alias expected");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type alias must be represented by a TypeDef");
+        };
+        let rhs = definition.rhs;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::HigherKindedTypeAliasDeferred { symbol, tree_index })
+                if symbol == alias && tree_index == rhs.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn to_bounds_preserves_existing_aliasing_bounds_id() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let existing = store.types.alloc(Type::AliasingBounds {
+            alias: definitions.int,
+        });
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let actual = typer.alias_bounds_for_type(existing, 14).unwrap();
+
+        assert_eq!(actual, existing);
+    }
+
+    #[test]
+    fn to_bounds_rejects_by_name_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let by_name = store.types.alloc(Type::ByName {
+            result: definitions.int,
+        });
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(by_name, 14),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 14, ty, .. })
+                if ty == by_name
+        ));
+    }
+
+    #[test]
+    fn to_bounds_rejects_method_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let method = store
+            .types
+            .alloc(Type::Method(dotty_core::types::MethodType {
+                params: Vec::new(),
+                result: definitions.int,
+                kind: dotty_core::types::MethodKind::Plain,
+            }));
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(method, 19),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 19, ty, .. })
+                if ty == method
+        ));
+    }
+
+    #[test]
+    fn to_bounds_rejects_polymorphic_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let poly = store.types.alloc(Type::Poly(dotty_core::types::PolyType {
+            params: Vec::new(),
+            result: definitions.int,
+        }));
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(poly, 23),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 23, ty, .. })
+                if ty == poly
+        ));
     }
 
     #[test]
@@ -1716,6 +2432,178 @@ mod tests {
         let projected = typer.complete_symbol(value).unwrap();
 
         assert_eq!(type_symbol(typer.store(), projected), type_parameter);
+    }
+
+    #[test]
+    fn method_parameter_completion_uses_its_method_type_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def id[A](value: A): A = value");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "id" =>
+                {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let type_parameter = index.symbol_at(source, method.type_params[0]).unwrap();
+        let parameter = index
+            .symbol_at(source, method.value_param_clauses[0][0])
+            .unwrap();
+        assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), info), type_parameter);
+    }
+
+    #[test]
+    fn class_field_completes_its_declared_int_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1 }");
+        let (field, _) = val_symbol(&parsed, &store, &index, source, "value");
+        assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(field).unwrap();
+
+        assert_eq!(info, definitions.int);
+    }
+
+    #[test]
+    fn constructor_field_and_derived_parameter_complete_from_the_same_valdef() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(val value: Int)");
+        let (class_tree, class_definition) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class_symbol = index.symbol_at(source, class_tree).unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("class definition must own a template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("class template must own a primary constructor");
+        };
+        let parameter_tree = constructor.value_param_clauses[0][0];
+        let field = index.symbol_at(source, parameter_tree).unwrap();
+        let constructor_symbol = index.symbol_at(source, template.constructor).unwrap();
+        let derived_parameter = index
+            .derived_symbol_at(constructor_symbol, source, parameter_tree)
+            .unwrap();
+        assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(
+            store.symbols.get(derived_parameter).kind,
+            SymbolKind::Parameter
+        );
+        assert_ne!(field, derived_parameter);
+        assert_eq!(store.symbols.get(field).owner, Some(class_symbol));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let field_info = typer.complete_symbol(field).unwrap();
+        let parameter_info = typer.complete_symbol(derived_parameter).unwrap();
+
+        assert_eq!(field_info, definitions.int);
+        assert_eq!(parameter_info, definitions.int);
+        assert_eq!(
+            *typer.store().symbols.info(field),
+            SymbolInfo::Complete(field_info)
+        );
+        assert_eq!(
+            *typer.store().symbols.info(derived_parameter),
+            SymbolInfo::Complete(parameter_info)
+        );
+    }
+
+    #[test]
+    fn extension_receiver_parameter_completes_from_its_source_valdef() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("extension (value: Int) def identity: Int = value");
+        let extension = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    Some((tree, extension))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let parameter_tree = extension.1.param_clauses[0][0];
+        let method_tree = extension.1.methods[0];
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let parameter = index
+            .derived_symbol_at(method, source, parameter_tree)
+            .unwrap();
+        assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert_eq!(info, definitions.int);
+    }
+
+    #[test]
+    fn by_name_parameter_completion_preserves_its_by_name_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def f(value: => Int): Unit = ()");
+        let (parameter, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(parameter).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::ByName { result } if *result == definitions.int
+        ));
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod constant;
 mod method;
 mod rebind;
 mod structural;
+mod to_bounds;
 mod ty;
 
 pub use annotation::{
@@ -25,4 +26,5 @@ pub use rebind::{
 pub use structural::{
     MAX_STRUCTURAL_DEPTH, StructuralLookupError, StructuralMemberLookup, lookup_structural_member,
 };
+pub use to_bounds::{ToBoundsError, to_bounds};
 pub use ty::{ErrorType, MatchType, TermRefTarget, Type, TypeRefTarget};
