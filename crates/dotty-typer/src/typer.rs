@@ -680,7 +680,7 @@ impl<'a> SourceTyper<'a> {
         } else {
             None
         };
-        let signature_parameter_context = prefix_clauses
+        let first_signature_parameter = prefix_clauses
             .as_ref()
             .and_then(|clauses| clauses.iter().flatten().next().map(|tree| (*tree, true)))
             .or_else(|| definition.type_params.first().map(|tree| (*tree, false)))
@@ -691,10 +691,15 @@ impl<'a> SourceTyper<'a> {
                     .flatten()
                     .next()
                     .map(|tree| (*tree, false))
-            })
-            .and_then(|(tree, derived)| self.method_parameter_symbol(method, tree, derived).ok())
-            .and_then(|symbol| self.index.declaration_context_of(symbol))
-            .unwrap_or(declaration_context);
+            });
+        let signature_parameter_context = if let Some((tree, derived)) = first_signature_parameter {
+            let parameter = self.method_parameter_symbol(method, tree, derived)?;
+            self.index
+                .declaration_context_of(parameter)
+                .ok_or(TyperError::DeclarationContextMissing { symbol: parameter })?
+        } else {
+            declaration_context
+        };
         if let Some(prefix_clauses) = prefix_clauses {
             for (clause_index, trees) in prefix_clauses.iter().enumerate() {
                 clauses.push(self.extension_prefix_clause(
