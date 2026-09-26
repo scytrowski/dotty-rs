@@ -38,6 +38,80 @@ fn parses_an_identifier_with_its_source_span() {
 }
 
 #[test]
+fn parses_a_character_literal_expression_with_its_source_span() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'a'",
+        vec![
+            token(TokenKind::CharLiteral, 0, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x61)
+        })
+    ));
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 3).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn decodes_an_escaped_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        r#"'\n'"#,
+        vec![
+            token(TokenKind::CharLiteral, 0, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x0a)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn decodes_a_unicode_escape_in_a_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        r#"'\u0041'"#,
+        vec![
+            token(TokenKind::CharLiteral, 0, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x41)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn postfix_expression_entry_preserves_simple_expression_behavior() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

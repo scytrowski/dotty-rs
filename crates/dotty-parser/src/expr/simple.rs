@@ -87,6 +87,7 @@ where
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
+            TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::Keyword(dotty_core::HardKeyword::True) => {
                 self.parse_literal(mark, Constant::Boolean(true))
             }
