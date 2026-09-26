@@ -53,6 +53,14 @@ parsing and records both version and revision in the report. This keeps a
 checked-in baseline reproducible rather than silently measuring a newer
 compiler tree.
 
+Pass `--namer` to run source naming in the same isolated workers and add
+Namer outcomes and deferred-feature counts to the report. `--skip-oracle`
+skips the Scala compiler oracle batch while retaining the pinned revision
+check; in that mode the report leaves the oracle count fields empty. This is
+useful when the Scala source checkout is available but its sbt oracle cannot
+run. The Namer v0.1 compatibility measurement and its interpretation are in
+[`namer-v0.1-compatibility.md`](../../docs/namer-v0.1-compatibility.md).
+
 `baseline-scala3-3.9.0.json` is the initial measurement from issue #185.
 `parser-v0.1-final-scala3-3.9.0.json` is the post-#186–#193 measurement used
 for the Parser v0.1 gate. Recreate the latter from the pinned checkout with:

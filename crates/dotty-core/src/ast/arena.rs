@@ -40,6 +40,14 @@ impl<P: AstPhase> AstArena<P> {
     pub fn get_mut(&mut self, id: TreeId<P>) -> &mut Tree<P> {
         &mut self.nodes[id.index() as usize]
     }
+
+    /// Iterates over every allocated tree in stable arena order.
+    pub fn iter(&self) -> impl Iterator<Item = (TreeId<P>, &Tree<P>)> + '_ {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(index, tree)| (TreeId::new(index as u32), tree))
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +95,21 @@ mod tests {
                 kind: crate::ast::ErrorNodeKind::MissingType
             }))
         ));
+    }
+
+    #[test]
+    fn iter_returns_every_tree_in_allocation_order_with_its_id() {
+        let mut arena = AstArena::<Untyped>::new();
+        let first = arena.alloc(ident_tree(1));
+        let second = arena.alloc(ident_tree(2));
+
+        let trees = arena.iter().collect::<Vec<_>>();
+
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[0].0, first);
+        assert_eq!(trees[0].1, arena.get(first));
+        assert_eq!(trees[1].0, second);
+        assert_eq!(trees[1].1, arena.get(second));
     }
 
     #[test]

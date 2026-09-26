@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use dotty_core::{ScopeId, SourceId, SymbolId, TreeId, Untyped};
+use dotty_core::{Packages, ScopeId, SemanticStore, SourceId, SymbolId, TreeId, Untyped};
 
 use crate::NamerError;
 
@@ -137,6 +137,171 @@ impl SourceSemanticIndex {
     /// Returns the source declaration context recorded for `symbol`.
     pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.declaration_contexts_by_symbol.get(&symbol).copied()
+    }
+
+    /// Checks the source index and the semantic objects it refers to.
+    ///
+    /// This is intended for tests, corpus audits, and debug tooling. Naming
+    /// does not call it automatically, so production source naming does not
+    /// pay for a second graph traversal.
+    pub fn validate(&self, store: &SemanticStore, packages: &Packages) -> Vec<String> {
+        let mut violations = Vec::new();
+        for ((source, tree), symbol) in &self.symbols_by_tree {
+            if !store.symbols.contains(*symbol) {
+                violations.push(format!(
+                    "canonical source {}/tree {} refers to missing symbol {}",
+                    source.index(),
+                    tree.index(),
+                    symbol.index()
+                ));
+                continue;
+            }
+            let semantic = store.symbols.get(*symbol);
+            if matches!(
+                semantic.kind,
+                dotty_core::SymbolKind::Class
+                    | dotty_core::SymbolKind::Trait
+                    | dotty_core::SymbolKind::ModuleClass
+            ) && !self.scopes_by_owner.contains_key(symbol)
+            {
+                violations.push(format!(
+                    "class-like symbol {} has no indexed declaration scope",
+                    symbol.index()
+                ));
+            }
+            if semantic.kind == dotty_core::SymbolKind::Package {
+                let indexed_scope = self.scopes_by_owner.get(symbol).copied();
+                match (packages.scope_of(*symbol), indexed_scope) {
+                    (Some(package_scope), Some(indexed_scope))
+                        if package_scope == indexed_scope => {}
+                    (registered_scope, indexed_scope) => {
+                        violations.push(format!(
+                            "package symbol {} does not reuse its Packages scope (registry: {:?}, index: {:?})",
+                            symbol.index(),
+                            registered_scope.map(ScopeId::index),
+                            indexed_scope.map(ScopeId::index)
+                        ));
+                    }
+                }
+            }
+        }
+
+        for ((owner, source, tree), symbol) in &self.derived_symbols_by_owner_and_tree {
+            if !store.symbols.contains(*owner) {
+                violations.push(format!(
+                    "derived source {}/tree {} has missing owner {}",
+                    source.index(),
+                    tree.index(),
+                    owner.index()
+                ));
+            }
+            if !store.symbols.contains(*symbol) {
+                violations.push(format!(
+                    "derived source {}/tree {} for owner {} refers to missing symbol {}",
+                    source.index(),
+                    tree.index(),
+                    owner.index(),
+                    symbol.index()
+                ));
+            }
+            if self.symbols_by_tree.get(&(*source, *tree)) == Some(symbol) {
+                violations.push(format!(
+                    "derived source {}/tree {} overwrites its canonical identity",
+                    source.index(),
+                    tree.index()
+                ));
+            }
+        }
+
+        for (owner, scope) in &self.scopes_by_owner {
+            if !store.symbols.contains(*owner) {
+                violations.push(format!("scope owner {} is missing", owner.index()));
+                continue;
+            }
+            if !store.scopes.contains(*scope) {
+                violations.push(format!(
+                    "scope {} indexed for owner {} is missing",
+                    scope.index(),
+                    owner.index()
+                ));
+                continue;
+            }
+            let scope_data = store.scopes.get(*scope);
+            if scope_data.owner != Some(*owner) {
+                violations.push(format!(
+                    "scope {} indexed for owner {} declares owner {:?}",
+                    scope.index(),
+                    owner.index(),
+                    scope_data.owner
+                ));
+            }
+            for member in scope_data.entered_symbols() {
+                if !store.symbols.contains(member) {
+                    violations.push(format!(
+                        "scope {} contains missing symbol {}",
+                        scope.index(),
+                        member.index()
+                    ));
+                } else if scope_data
+                    .owner
+                    .is_some_and(|scope_owner| store.symbols.get(member).owner != Some(scope_owner))
+                {
+                    violations.push(format!(
+                        "symbol {} entered in scope {} is not owned by scope owner {}",
+                        member.index(),
+                        scope.index(),
+                        scope_data.owner.unwrap().index()
+                    ));
+                }
+            }
+        }
+
+        for context in &self.source_contexts {
+            if !store.symbols.contains(context.owner) {
+                violations.push(format!(
+                    "source context owner {} is missing",
+                    context.owner.index()
+                ));
+            }
+            if !store.scopes.contains(context.lexical_scope) {
+                violations.push(format!(
+                    "source context scope {} is missing",
+                    context.lexical_scope.index()
+                ));
+            } else if store.scopes.get(context.lexical_scope).owner != Some(context.owner) {
+                violations.push(format!(
+                    "source context scope {} is not owned by source context owner {}",
+                    context.lexical_scope.index(),
+                    context.owner.index()
+                ));
+            }
+            if let Some(parent) = context.parent
+                && self.source_contexts.get(parent.index() as usize).is_none()
+            {
+                violations.push(format!(
+                    "source context refers to missing parent context {}",
+                    parent.index()
+                ));
+            }
+        }
+
+        for (symbol, context) in &self.declaration_contexts_by_symbol {
+            if !store.symbols.contains(*symbol) {
+                violations.push(format!(
+                    "declaration context refers to missing symbol {}",
+                    symbol.index()
+                ));
+            }
+            if self.source_contexts.get(context.index() as usize).is_none() {
+                violations.push(format!(
+                    "declaration symbol {} refers to missing source context {}",
+                    symbol.index(),
+                    context.index()
+                ));
+            }
+        }
+
+        violations
     }
 
     /// Records one immutable source context node and returns its index-local
@@ -337,6 +502,175 @@ mod tests {
             .unwrap();
 
         assert_eq!(index.declaration_context_of(declaration), Some(context));
+    }
+
+    #[test]
+    fn validation_accepts_a_well_formed_symbol_scope_and_context_graph() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let scope = store.scopes.alloc(Scope::new(Some(owner)));
+        let member_name = store.names.intern("member");
+        let member = store.symbols.alloc(Symbol {
+            name: *dotty_core::TermName::new(member_name).as_name(),
+            owner: Some(owner),
+            kind: SymbolKind::Value,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(scope)
+            .enter(store.symbols.get(member).name, member);
+        let mut index = SourceSemanticIndex::new();
+        let tree = tree_id();
+        index
+            .record_symbol(SourceId::from_index(1), tree, member)
+            .unwrap();
+        index.record_scope(owner, scope).unwrap();
+        let context = index.alloc_source_context(SourceContext {
+            owner,
+            lexical_scope: scope,
+            parent: None,
+            import: None,
+        });
+        index.record_declaration_context(member, context).unwrap();
+
+        assert!(index.validate(&store, &Packages::new()).is_empty());
+    }
+
+    #[test]
+    fn validation_reports_scope_owner_and_member_owner_mismatches() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let other_owner = symbol(&mut store);
+        let scope = store.scopes.alloc(Scope::new(Some(other_owner)));
+        let member = symbol(&mut store);
+        store
+            .scopes
+            .get_mut(scope)
+            .enter(store.symbols.get(member).name, member);
+        let mut index = SourceSemanticIndex::new();
+        index.record_scope(owner, scope).unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("declares owner"))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("is not owned by scope owner"))
+        );
+    }
+
+    #[test]
+    fn validation_requires_class_like_symbols_to_have_a_declaration_scope() {
+        let mut store = SemanticStore::new();
+        let class_name = store.names.intern("C");
+        let class = store.symbols.alloc(Symbol {
+            name: *dotty_core::TypeName::new(class_name).as_name(),
+            owner: None,
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), class)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(violations.iter().any(|violation| {
+            violation.contains("class-like symbol")
+                && violation.contains("no indexed declaration scope")
+        }));
+    }
+
+    #[test]
+    fn validation_requires_package_scopes_to_come_from_the_shared_registry() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let package = packages.enter(&mut store, SymbolOrigin::Synthetic, &["p"])[0];
+        let unrelated_scope = store.scopes.alloc(Scope::new(Some(package.symbol)));
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), package.symbol)
+            .unwrap();
+        index.record_scope(package.symbol, unrelated_scope).unwrap();
+
+        let violations = index.validate(&store, &packages);
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("does not reuse its Packages scope"))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unregistered_package_symbols_without_scopes() {
+        let mut store = SemanticStore::new();
+        let package_name = store.names.intern("p");
+        let package = store.symbols.alloc(Symbol {
+            name: *dotty_core::TypeName::new(package_name).as_name(),
+            owner: None,
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), package)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.contains("does not reuse its Packages scope") })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_derived_identities_with_missing_owners() {
+        let mut store = SemanticStore::new();
+        let checkpoint = store.checkpoint();
+        let _filler = symbol(&mut store);
+        let owner = symbol(&mut store);
+        store.rollback_to(checkpoint);
+        let derived = symbol(&mut store);
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_derived_symbol(owner, SourceId::from_index(1), tree_id(), derived)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("has missing owner 1"))
+        );
     }
 
     #[test]

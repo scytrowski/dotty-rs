@@ -37,6 +37,11 @@ impl SymbolTable {
         &self.symbols[id.index() as usize]
     }
 
+    /// Returns whether `id` names a symbol allocated by this table.
+    pub fn contains(&self, id: SymbolId) -> bool {
+        (id.index() as usize) < self.symbols.len()
+    }
+
     pub fn get_mut(&mut self, id: SymbolId) -> &mut Symbol {
         &mut self.symbols[id.index() as usize]
     }
@@ -87,6 +92,15 @@ mod tests {
         let id = table.alloc(minimal_symbol(None));
 
         assert_eq!(table.get(id).kind, SymbolKind::Value);
+    }
+
+    #[test]
+    fn contains_checks_symbol_ids_without_indexing_the_table() {
+        let mut table = SymbolTable::new();
+        let id = table.alloc(minimal_symbol(None));
+
+        assert!(table.contains(id));
+        assert!(!table.contains(SymbolId::new(1)));
     }
 
     #[test]

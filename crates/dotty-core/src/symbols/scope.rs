@@ -54,6 +54,13 @@ impl Scope {
     pub fn lookup_all(&self, name: &Name) -> &[SymbolId] {
         self.entries.get(name).map_or(&[], Vec::as_slice)
     }
+
+    /// Iterates over symbols entered in this scope, including overloads.
+    pub fn entered_symbols(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.entries
+            .values()
+            .flat_map(|bucket| bucket.iter().copied())
+    }
 }
 
 /// Owns every [`Scope`] for one compilation session.
@@ -87,6 +94,11 @@ impl ScopeArena {
     /// `docs/dotty-core-design.md`, "Error handling policy."
     pub fn get(&self, id: ScopeId) -> &Scope {
         &self.scopes[id.index() as usize]
+    }
+
+    /// Returns whether `id` names a scope allocated by this arena.
+    pub fn contains(&self, id: ScopeId) -> bool {
+        (id.index() as usize) < self.scopes.len()
     }
 
     pub fn get_mut(&mut self, id: ScopeId) -> &mut Scope {
@@ -156,6 +168,18 @@ mod tests {
         let second = arena.alloc(Scope::new(None));
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn entered_symbols_includes_every_overload() {
+        let mut scope = Scope::new(None);
+        scope.enter(name(1), SymbolId::new(2));
+        scope.enter(name(1), SymbolId::new(3));
+
+        assert_eq!(
+            scope.entered_symbols().collect::<Vec<_>>(),
+            vec![SymbolId::new(2), SymbolId::new(3)]
+        );
     }
 
     #[test]

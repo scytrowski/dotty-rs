@@ -62,6 +62,7 @@ version = "0.1.0"
 dependencies = [
  "dotty-core",
  "dotty-lexer",
+ "dotty-namer",
  "dotty-parser",
  "serde",
  "serde_json",
