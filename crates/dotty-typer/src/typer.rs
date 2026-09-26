@@ -129,19 +129,20 @@ impl<'a> SourceTyper<'a> {
 
     /// Completes a source declaration, rolling back this call's mutations on failure.
     pub fn complete_symbol(&mut self, symbol: SymbolId) -> Result<TypeId, TyperError> {
-        if !self.store.symbols.contains(symbol) {
-            return Err(TyperError::UnknownSymbol { symbol });
-        }
-        match *self.store.symbols.info(symbol) {
-            SymbolInfo::Complete(ty) => return Ok(ty),
-            SymbolInfo::Missing => {}
-            SymbolInfo::Deferred(_) => {
-                return Err(TyperError::DeferredSymbolCompletion { symbol });
+        self.run_atomic(|typer, info_journal| {
+            if !typer.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
             }
-            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol }),
-        }
-
-        self.run_atomic(|typer, info_journal| typer.complete_symbol_inner(symbol, info_journal))
+            match *typer.store.symbols.info(symbol) {
+                SymbolInfo::Complete(ty) => return Ok(ty),
+                SymbolInfo::Missing => {}
+                SymbolInfo::Deferred(_) => {
+                    return Err(TyperError::DeferredSymbolCompletion { symbol });
+                }
+                SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol }),
+            }
+            typer.complete_symbol_inner(symbol, info_journal)
+        })
     }
 
     fn run_atomic<T>(
