@@ -125,6 +125,10 @@ object Main:
           fields += field("enum", "true")
         if isTypeDefinitionSource(slice(tdef, source)) || tdef.mods.flags.isAllOf(EnumCase) then
           fields ++= renderDefinitionMetadata(tdef.mods, tdef, source, placeholderBase, includeMutable = false)
+      case bound: dotty.tools.dotc.ast.untpd.ContextBoundTypeTree =>
+        fields += field("parameter", quote(bound.paramName.toString))
+        if bound.ownName.toString.nonEmpty then
+          fields += field("name", quote(bound.ownName.toString))
       case module: dotty.tools.dotc.ast.untpd.ModuleDef =>
         fields += field("name", quote(module.name.toString))
         if module.mods.is(PackageFlag) then

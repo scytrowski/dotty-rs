@@ -636,6 +636,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_context_bounds_for_the_polyfunction_type_owner_in_scala_39() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+
+        assert!(matches!(
+            parser.ast().get(params[0]).kind,
+            TreeKind::TypeDef(TypeDef { rhs, .. })
+                if matches!(parser.ast().get(rhs).kind, TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_braced_multiple_context_bounds_in_source_order() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
