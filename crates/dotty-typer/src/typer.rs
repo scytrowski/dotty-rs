@@ -368,12 +368,13 @@ impl<'a> SourceTyper<'a> {
                 return Ok(Some(symbol));
             }
             if let Some(import_tree) = source_context.import
-                && let Some(symbol) = self.lookup_imported_type(
+                && let Some(symbol) = self.lookup_imported_symbol(
                     import_tree,
                     context_id,
                     source_context.parent,
                     name,
                     tree_index,
+                    true,
                 )?
             {
                 return Ok(Some(symbol));
@@ -383,13 +384,14 @@ impl<'a> SourceTyper<'a> {
         Ok(None)
     }
 
-    fn lookup_imported_type(
+    fn lookup_imported_symbol(
         &self,
         import_tree: TreeId<Untyped>,
         context_id: SourceContextId,
         parent_context: Option<SourceContextId>,
         wanted: dotty_core::Name,
         tree_index: u32,
+        type_only: bool,
     ) -> Result<Option<SymbolId>, TyperError> {
         let Some(node) = self.arena.try_get(import_tree) else {
             return Err(TyperError::TreeOutsideArena {
@@ -451,18 +453,29 @@ impl<'a> SourceTyper<'a> {
         };
         let mut matches = Vec::new();
         for (imported, is_wildcard) in relevant {
-            let candidates = if is_wildcard {
-                self.store.scopes.get(scope).lookup_all(&wanted)
+            if type_only {
+                let candidates = if is_wildcard {
+                    self.store.scopes.get(scope).lookup_all(&wanted)
+                } else {
+                    let imported_type =
+                        dotty_core::Name::new(imported.text(), dotty_core::Namespace::Type);
+                    self.store.scopes.get(scope).lookup_all(&imported_type)
+                };
+                matches.extend_from_slice(candidates);
             } else {
-                let imported_type =
-                    dotty_core::Name::new(imported.text(), dotty_core::Namespace::Type);
-                self.store.scopes.get(scope).lookup_all(&imported_type)
-            };
-            matches.extend_from_slice(candidates);
+                let name = if is_wildcard { wanted } else { imported };
+                if let Some(symbol) = self.unique_scoped_symbol(scope, name, tree_index)? {
+                    matches.push(symbol);
+                }
+            }
         }
         matches.sort_by_key(|symbol| symbol.index());
         matches.dedup();
-        self.unique_type_candidate(&matches, wanted, tree_index)
+        if type_only {
+            self.unique_type_candidate(&matches, wanted, tree_index)
+        } else {
+            self.unique_symbol_candidate(&matches, wanted, tree_index)
+        }
     }
 
     fn import_qualifier_scope(
@@ -529,12 +542,13 @@ impl<'a> SourceTyper<'a> {
                 return Ok(Some(symbol));
             }
             if let Some(import_tree) = source_context.import
-                && let Some(symbol) = self.lookup_imported_type(
+                && let Some(symbol) = self.lookup_imported_symbol(
                     import_tree,
                     context_id,
                     source_context.parent,
                     name,
                     import_tree_index,
+                    false,
                 )?
             {
                 return Ok(Some(symbol));
@@ -1054,6 +1068,38 @@ mod tests {
             .find_map(|(tree, node)| match &node.kind {
                 TreeKind::TypeDef(definition)
                     if store.names.resolve(definition.name.as_name().text()) == "Nested" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), nested_type);
+    }
+
+    #[test]
+    fn later_import_qualifier_can_use_an_earlier_object_alias() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Lib { object Nested { class X } }\nimport Lib.Nested as Alias\nimport Alias.X\nval x: X = 1",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let nested_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "X" =>
                 {
                     index.symbol_at(source, tree)
                 }
