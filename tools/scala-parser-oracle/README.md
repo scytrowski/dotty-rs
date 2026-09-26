@@ -98,7 +98,10 @@ Dotty's real `Parser.pattern()` entry and Rust mode calls the
 parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
 in synthetic `match` expressions. The normalized tree compares `Bind`,
 `Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
-arguments as they appear before semantic extractor lowering. Sequence-pattern
+arguments as they appear before semantic extractor lowering. Type-pattern
+fixtures cover `@unchecked` on bound variables, wildcards, and qualified types;
+an expression fixture also checks the annotation inside a real case clause.
+Sequence-pattern
 fixtures cover trailing extractor arguments, nested extractors, wildcard and
 backquoted variables, while preserving ordinary infix operators such as `*:`.
 Quote syntax follows Dotty's parser-level tree (`Quote` containing
