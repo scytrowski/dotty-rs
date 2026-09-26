@@ -750,21 +750,22 @@ impl<'a> SourceTyper<'a> {
         for clause in clauses.into_iter().rev() {
             signature = match clause {
                 MethodClauseSpec::Types(parameters) => {
-                    poly_type_from_symbols(&mut self.store, &parameters, signature).map_err(
+                    poly_type_from_symbols(self.store, &parameters, signature).map_err(|error| {
+                        TyperError::TypeRebinding {
+                            source: self.source,
+                            tree_index: method_tree_index,
+                            error,
+                        }
+                    })?
+                }
+                MethodClauseSpec::Terms(parameters, kind) => {
+                    method_type_from_symbols(self.store, &parameters, signature, kind).map_err(
                         |error| TyperError::TypeRebinding {
                             source: self.source,
                             tree_index: method_tree_index,
                             error,
                         },
                     )?
-                }
-                MethodClauseSpec::Terms(parameters, kind) => {
-                    method_type_from_symbols(&mut self.store, &parameters, signature, kind)
-                        .map_err(|error| TyperError::TypeRebinding {
-                            source: self.source,
-                            tree_index: method_tree_index,
-                            error,
-                        })?
                 }
             };
         }
