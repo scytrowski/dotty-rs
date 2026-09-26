@@ -101,6 +101,8 @@ pub enum TyperError {
         constructor: SymbolId,
         owner: SymbolId,
     },
+    /// Secondary-constructor type parameters do not yet have source symbols.
+    SecondaryConstructorTypeParametersDeferred { constructor: SymbolId },
     /// A deferred completion belongs to a future completion engine.
     DeferredSymbolCompletion { symbol: SymbolId },
     /// A previous fatal semantic failure has already been recorded.
@@ -820,6 +822,9 @@ impl<'a> SourceTyper<'a> {
         let owner_constructor = self.owner_primary_constructor_tree(constructor, owner)?;
         let is_primary = owner_constructor == Some(constructor_tree);
 
+        if !is_primary && !definition.type_params.is_empty() {
+            return Err(TyperError::SecondaryConstructorTypeParametersDeferred { constructor });
+        }
         if !is_primary
             && definition.type_params.is_empty()
             && !self.owner_type_parameters(constructor, owner)?.is_empty()
@@ -3897,6 +3902,46 @@ mod tests {
                 constructor: error_constructor,
                 owner: error_owner
             }) if error_constructor == constructor && error_owner == owner
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn secondary_constructor_type_parameters_are_explicitly_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int) { def this[A](other: A) = this(0) }");
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::SecondaryConstructorTypeParametersDeferred {
+                constructor: error_constructor
+            }) if error_constructor == constructor
         ));
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(
