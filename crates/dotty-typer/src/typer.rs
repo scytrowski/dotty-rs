@@ -78,6 +78,31 @@ pub enum TyperError {
         method_tree_index: u32,
         clause_index: usize,
     },
+    /// A constructor is not owned by a class, trait, or module class.
+    ConstructorOwnerNotClassLike {
+        constructor: SymbolId,
+        owner: Option<SymbolId>,
+    },
+    /// A completed constructor owner does not contain canonical ClassInfo.
+    MalformedConstructorOwnerInfo {
+        constructor: SymbolId,
+        owner: SymbolId,
+        info: TypeId,
+    },
+    /// A constructor owner's source definition does not have a template.
+    MalformedConstructorOwner {
+        constructor: SymbolId,
+        owner: SymbolId,
+        tree_index: u32,
+    },
+    /// Source identities needed to apply a generic owner to a secondary
+    /// constructor result are not represented as constructor parameters.
+    GenericSecondaryConstructorDeferred {
+        constructor: SymbolId,
+        owner: SymbolId,
+    },
+    /// Secondary-constructor type parameters do not yet have source symbols.
+    SecondaryConstructorTypeParametersDeferred { constructor: SymbolId },
     /// A deferred completion belongs to a future completion engine.
     DeferredSymbolCompletion { symbol: SymbolId },
     /// A previous fatal semantic failure has already been recorded.
@@ -193,6 +218,7 @@ struct SourceImport {
     parent: Option<SourceContextId>,
 }
 
+#[derive(Clone)]
 enum MethodClauseSpec {
     Types(Vec<TypeParamSpec>),
     Terms(Vec<MethodParamSpec>, MethodKind),
@@ -481,10 +507,23 @@ impl<'a> SourceTyper<'a> {
                     .set_info(symbol, SymbolInfo::Complete(info));
                 Ok(info)
             }
-            SymbolKind::Constructor
-            | SymbolKind::Class
-            | SymbolKind::Trait
-            | SymbolKind::ModuleClass => {
+            SymbolKind::Constructor => {
+                let definition = method_definition.ok_or(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                })?;
+                let info =
+                    self.complete_constructor_signature(symbol, tree, &definition, info_journal)?;
+                let previous = *self.store.symbols.info(symbol);
+                info_journal.push((symbol, previous));
+                self.store
+                    .symbols
+                    .set_info(symbol, SymbolInfo::Complete(info));
+                Ok(info)
+            }
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
                 Err(TyperError::UnsupportedSymbolCompletion { symbol, kind })
             }
             SymbolKind::Object => Err(TyperError::UnsupportedSymbolCompletion { symbol, kind }),
@@ -770,6 +809,238 @@ impl<'a> SourceTyper<'a> {
             };
         }
         Ok(signature)
+    }
+
+    fn complete_constructor_signature(
+        &mut self,
+        constructor: SymbolId,
+        constructor_tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let owner = self.constructor_owner(constructor)?;
+        let owner_constructor = self.owner_primary_constructor_tree(constructor, owner)?;
+        let is_primary = owner_constructor == Some(constructor_tree);
+
+        if !is_primary && !definition.type_params.is_empty() {
+            return Err(TyperError::SecondaryConstructorTypeParametersDeferred { constructor });
+        }
+        if !is_primary
+            && definition.type_params.is_empty()
+            && !self.owner_type_parameters(constructor, owner)?.is_empty()
+        {
+            return Err(TyperError::GenericSecondaryConstructorDeferred { constructor, owner });
+        }
+
+        let mut clauses = Vec::new();
+        if !definition.type_params.is_empty() {
+            let clause_index = clauses.len();
+            clauses.push(MethodClauseSpec::Types(self.type_parameter_specs(
+                constructor,
+                &definition.type_params,
+                is_primary,
+                info_journal,
+                constructor_tree.index(),
+                clause_index,
+            )?));
+        }
+        for trees in &definition.value_param_clauses {
+            let clause_index = clauses.len();
+            let (parameters, kind) = self.method_parameter_specs(
+                constructor,
+                trees,
+                is_primary,
+                constructor_tree.index(),
+                clause_index,
+                info_journal,
+            )?;
+            clauses.push(MethodClauseSpec::Terms(parameters, kind));
+        }
+        let clauses = Self::normalize_constructor_clauses(&clauses);
+        let mut result = self.constructor_effective_result(owner, &clauses);
+        for clause in clauses.into_iter().rev() {
+            result = match clause {
+                MethodClauseSpec::Types(parameters) => {
+                    poly_type_from_symbols(self.store, &parameters, result).map_err(|error| {
+                        TyperError::TypeRebinding {
+                            source: self.source,
+                            tree_index: constructor_tree.index(),
+                            error,
+                        }
+                    })?
+                }
+                MethodClauseSpec::Terms(parameters, kind) => {
+                    method_type_from_symbols(self.store, &parameters, result, kind).map_err(
+                        |error| TyperError::TypeRebinding {
+                            source: self.source,
+                            tree_index: constructor_tree.index(),
+                            error,
+                        },
+                    )?
+                }
+            };
+        }
+        Ok(result)
+    }
+
+    fn constructor_owner(&self, constructor: SymbolId) -> Result<SymbolId, TyperError> {
+        let owner = self.store.symbols.get(constructor).owner;
+        let Some(owner) = owner.filter(|owner| {
+            self.store.symbols.contains(*owner)
+                && matches!(
+                    self.store.symbols.get(*owner).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                )
+        }) else {
+            return Err(TyperError::ConstructorOwnerNotClassLike { constructor, owner });
+        };
+        if let SymbolInfo::Complete(info) = *self.store.symbols.info(owner)
+            && !matches!(
+                self.store.types.get(info),
+                Type::ClassInfo(class_info)
+                    if class_info.class == owner && class_info.prefix == self.definitions.no_prefix
+            )
+        {
+            return Err(TyperError::MalformedConstructorOwnerInfo {
+                constructor,
+                owner,
+                info,
+            });
+        }
+        Ok(owner)
+    }
+
+    fn owner_primary_constructor_tree(
+        &self,
+        constructor: SymbolId,
+        owner: SymbolId,
+    ) -> Result<Option<TreeId<Untyped>>, TyperError> {
+        let definition = self
+            .index
+            .definition_of(owner)
+            .ok_or(TyperError::SourceProvenanceMissing { symbol: owner })?;
+        let (source, tree) = match definition {
+            SourceDefinition::Canonical { source, tree }
+            | SourceDefinition::Derived { source, tree } => (source, tree),
+        };
+        if source != self.source {
+            return Err(TyperError::SourceProvenanceMissing { symbol: owner });
+        }
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: tree.index(),
+            });
+        };
+        let template_tree = match &node.kind {
+            TreeKind::TypeDef(definition) => definition.rhs,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => definition.template,
+            _ => {
+                return Err(TyperError::MalformedConstructorOwner {
+                    constructor,
+                    owner,
+                    tree_index: tree.index(),
+                });
+            }
+        };
+        let Some(template_node) = self.arena.try_get(template_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: template_tree.index(),
+            });
+        };
+        match &template_node.kind {
+            TreeKind::Template(template) => Ok(Some(template.constructor)),
+            _ => Err(TyperError::MalformedConstructorOwner {
+                constructor,
+                owner,
+                tree_index: template_tree.index(),
+            }),
+        }
+    }
+
+    fn owner_type_parameters(
+        &self,
+        constructor: SymbolId,
+        owner: SymbolId,
+    ) -> Result<Vec<TreeId<Untyped>>, TyperError> {
+        let Some(owner_constructor) = self.owner_primary_constructor_tree(constructor, owner)?
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(node) = self.arena.try_get(owner_constructor) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: owner_constructor.index(),
+            });
+        };
+        match &node.kind {
+            TreeKind::DefDef(definition) => Ok(definition.type_params.clone()),
+            _ => Err(TyperError::MalformedConstructorOwner {
+                constructor,
+                owner,
+                tree_index: owner_constructor.index(),
+            }),
+        }
+    }
+
+    fn constructor_effective_result(
+        &mut self,
+        owner: SymbolId,
+        clauses: &[MethodClauseSpec],
+    ) -> TypeId {
+        let owner_ref = self
+            .store
+            .types
+            .alloc(Type::type_ref(self.definitions.no_prefix, owner));
+        match clauses.first() {
+            Some(MethodClauseSpec::Types(parameters)) => {
+                let args = parameters
+                    .iter()
+                    .map(|parameter| {
+                        self.store
+                            .types
+                            .alloc(Type::type_ref(self.definitions.no_prefix, parameter.symbol))
+                    })
+                    .collect();
+                self.store.types.alloc(Type::Applied {
+                    tycon: owner_ref,
+                    args,
+                })
+            }
+            _ => owner_ref,
+        }
+    }
+
+    fn normalize_constructor_clauses(clauses: &[MethodClauseSpec]) -> Vec<MethodClauseSpec> {
+        match clauses.split_first() {
+            Some((MethodClauseSpec::Types(parameters), rest)) => {
+                let mut normalized = vec![MethodClauseSpec::Types(parameters.clone())];
+                normalized.extend(Self::normalize_constructor_clauses(rest));
+                normalized
+            }
+            Some((MethodClauseSpec::Terms(parameters, MethodKind::Implicit), _))
+                if !parameters.is_empty() =>
+            {
+                let mut normalized = vec![MethodClauseSpec::Terms(Vec::new(), MethodKind::Plain)];
+                normalized.extend(clauses.iter().cloned());
+                normalized
+            }
+            _ => {
+                let all_contextual = clauses.iter().all(|clause| match clause {
+                    MethodClauseSpec::Types(_) => true,
+                    MethodClauseSpec::Terms(parameters, MethodKind::Contextual) => {
+                        !parameters.is_empty()
+                    }
+                    MethodClauseSpec::Terms(_, MethodKind::Plain | MethodKind::Implicit) => false,
+                });
+                let mut normalized = clauses.to_vec();
+                if all_contextual {
+                    normalized.push(MethodClauseSpec::Terms(Vec::new(), MethodKind::Plain));
+                }
+                normalized
+            }
+        }
     }
 
     fn extension_prefix_clause(
@@ -3059,6 +3330,674 @@ mod tests {
             panic!("expected a method clause");
         };
         assert!(method_type.params[0].erased);
+    }
+
+    #[test]
+    fn primary_constructor_without_arguments_constructs_its_missing_owner() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    Some((tree, definition.rhs))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class = index.symbol_at(source, class_tree.0).unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(class_tree.1).kind else {
+            panic!("expected a class template");
+        };
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        assert_eq!(store.symbols.get(constructor).kind, SymbolKind::Constructor);
+        assert_eq!(*store.symbols.info(class), SymbolInfo::Missing);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected normalized empty constructor clause");
+        };
+        assert_eq!(method_type.kind, MethodKind::Plain);
+        assert!(method_type.params.is_empty());
+        assert_eq!(type_symbol(typer.store(), method_type.result), class);
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn repeated_primary_constructor_completion_returns_the_same_type_id() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.complete_symbol(constructor).unwrap();
+        let second = typer.complete_symbol(constructor).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn implicit_first_constructor_clause_gets_an_empty_plain_clause_before_it() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(implicit context: Int)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(plain) = typer.store().types.get(signature) else {
+            panic!("expected the inserted leading plain clause");
+        };
+        assert_eq!(plain.kind, MethodKind::Plain);
+        assert!(plain.params.is_empty());
+        let Type::Method(implicit) = typer.store().types.get(plain.result) else {
+            panic!("expected the source implicit clause after the inserted clause");
+        };
+        assert_eq!(implicit.kind, MethodKind::Implicit);
+        assert_eq!(implicit.params.len(), 1);
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(implicit.params[0].name.as_name().text()),
+            "context"
+        );
+    }
+
+    #[test]
+    fn all_contextual_constructor_clauses_get_a_trailing_empty_plain_clause() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(using context: Int)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(contextual) = typer.store().types.get(signature) else {
+            panic!("expected the source contextual clause");
+        };
+        assert_eq!(contextual.kind, MethodKind::Contextual);
+        assert_eq!(contextual.params.len(), 1);
+        let Type::Method(plain) = typer.store().types.get(contextual.result) else {
+            panic!("expected the normalized trailing plain clause");
+        };
+        assert_eq!(plain.kind, MethodKind::Plain);
+        assert!(plain.params.is_empty());
+    }
+
+    #[test]
+    fn explicit_empty_constructor_clause_prevents_a_second_normalization_clause() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(using context: Int)()");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let class = store.symbols.get(constructor).owner.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(contextual) = typer.store().types.get(signature) else {
+            panic!("expected the source contextual clause");
+        };
+        assert_eq!(contextual.kind, MethodKind::Contextual);
+        let Type::Method(empty) = typer.store().types.get(contextual.result) else {
+            panic!("expected the explicit empty clause");
+        };
+        assert_eq!(empty.kind, MethodKind::Plain);
+        assert!(empty.params.is_empty());
+        assert_eq!(type_symbol(typer.store(), empty.result), class);
+    }
+
+    #[test]
+    fn primary_constructor_uses_derived_parameter_separate_from_val_field() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(val value: Int)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let parameter_tree = match &parsed.ast.get(template.constructor).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("expected a primary constructor definition"),
+        };
+        let field = index.symbol_at(source, parameter_tree).unwrap();
+        let parameter = index
+            .derived_symbol_at(constructor, source, parameter_tree)
+            .unwrap();
+        let class = store.symbols.get(field).owner.unwrap();
+        assert_ne!(field, parameter);
+        assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected a constructor value clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert_eq!(type_symbol(typer.store(), method_type.result), class);
+    }
+
+    #[test]
+    fn generic_primary_constructor_applies_owner_to_its_derived_type_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A](val value: A)");
+        let (class_tree, template_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    Some((tree, definition.rhs))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class = index.symbol_at(source, class_tree).unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(template_tree).kind else {
+            panic!("expected a class template");
+        };
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(template.constructor).kind
+        else {
+            panic!("expected a primary constructor definition");
+        };
+        let class_parameter = index
+            .symbol_at(source, constructor_definition.type_params[0])
+            .unwrap();
+        let constructor_parameter = index
+            .derived_symbol_at(constructor, source, constructor_definition.type_params[0])
+            .unwrap();
+        let value_parameter_tree = constructor_definition.value_param_clauses[0][0];
+        let value_field = index.symbol_at(source, value_parameter_tree).unwrap();
+        let constructor_value = index
+            .derived_symbol_at(constructor, source, value_parameter_tree)
+            .unwrap();
+        assert_ne!(class_parameter, constructor_parameter);
+        assert_ne!(value_field, constructor_value);
+        assert_eq!(*store.symbols.info(class), SymbolInfo::Missing);
+        assert_eq!(*store.symbols.info(value_field), SymbolInfo::Missing);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("expected the constructor-owned Poly binder");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("expected the primary constructor value clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        let Type::Applied { tycon, args } = typer.store().types.get(method_type.result) else {
+            panic!("expected an applied constructed class result");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), class);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(args[0]),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        let SymbolInfo::Complete(constructor_parameter_info) =
+            *typer.store().symbols.info(constructor_parameter)
+        else {
+            panic!("expected the constructor type parameter to be completed");
+        };
+        assert!(matches!(
+            typer.store().types.get(constructor_parameter_info),
+            Type::Bounds { low, high }
+                if *low == definitions.nothing_type && *high == definitions.any_type
+        ));
+        let SymbolInfo::Complete(constructor_value_info) =
+            *typer.store().symbols.info(constructor_value)
+        else {
+            panic!("expected the constructor value parameter to be completed");
+        };
+        assert_eq!(
+            type_symbol(typer.store(), constructor_value_info),
+            constructor_parameter
+        );
+        assert_eq!(
+            *typer.store().symbols.info(value_field),
+            SymbolInfo::Missing
+        );
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn type_clause_is_kept_outer_when_contextual_constructor_clause_is_normalized() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A](using context: Int)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("expected the constructor type parameter binder");
+        };
+        let Type::Method(contextual) = typer.store().types.get(poly.result) else {
+            panic!("expected the contextual clause after the type clause");
+        };
+        assert_eq!(contextual.kind, MethodKind::Contextual);
+        let Type::Method(plain) = typer.store().types.get(contextual.result) else {
+            panic!("expected normalization to add an empty plain clause");
+        };
+        assert_eq!(plain.kind, MethodKind::Plain);
+        assert!(plain.params.is_empty());
+    }
+
+    #[test]
+    fn object_primary_constructor_result_targets_its_module_class() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("object O");
+        let (object_tree, template_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    Some((tree, definition.template))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let object = index.symbol_at(source, object_tree).unwrap();
+        let object_owner = store.symbols.get(object).owner.unwrap();
+        let module_class = index
+            .derived_symbol_at(object_owner, source, object_tree)
+            .unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(template_tree).kind else {
+            panic!("expected an object template");
+        };
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        assert_eq!(store.symbols.get(constructor).owner, Some(module_class));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected the normalized empty object constructor clause");
+        };
+        assert_eq!(type_symbol(typer.store(), method_type.result), module_class);
+    }
+
+    #[test]
+    fn constructor_with_non_class_like_owner_fails_without_mutation() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        store.symbols.get_mut(constructor).owner = None;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::ConstructorOwnerNotClassLike {
+                constructor: error_constructor,
+                owner: None
+            }) if error_constructor == constructor
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn failed_primary_constructor_parameter_type_rolls_back_everything() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Missing)");
+        let template = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => Some(template),
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let parameter_tree = match &parsed.ast.get(template.constructor).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("expected a primary constructor definition"),
+        };
+        let parameter = index
+            .derived_symbol_at(constructor, source, parameter_tree)
+            .unwrap();
+        let type_tree = match &parsed.ast.get(parameter_tree).kind {
+            TreeKind::ValDef(definition) => definition.tpt,
+            _ => panic!("expected a constructor parameter definition"),
+        };
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::TypeNameNotFound {
+                source: error_source,
+                tree_index,
+                ..
+            }) if error_source == source && tree_index == type_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn constructor_rejects_malformed_precompleted_owner_info() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let (class_tree, template_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    Some((tree, definition.rhs))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class = index.symbol_at(source, class_tree).unwrap();
+        let TreeKind::Template(template) = &parsed.ast.get(template_tree).kind else {
+            panic!("expected a class template");
+        };
+        let constructor = index.symbol_at(source, template.constructor).unwrap();
+        let malformed_info = store
+            .types
+            .alloc(Type::ClassInfo(dotty_core::types::ClassInfo {
+                prefix: definitions.int,
+                class,
+                parents: Vec::new(),
+                declarations: index.scope_of(class).unwrap(),
+                self_type: None,
+            }));
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(malformed_info));
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::MalformedConstructorOwnerInfo {
+                constructor: error_constructor,
+                owner: error_owner,
+                info
+            }) if error_constructor == constructor && error_owner == class && info == malformed_info
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn secondary_constructor_completes_its_own_parameter_clause() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int) { def this(other: Int) = this(other) }");
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
+        let class = store.symbols.get(constructor).owner.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected the secondary constructor value clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert_eq!(type_symbol(typer.store(), method_type.result), class);
+    }
+
+    #[test]
+    fn generic_secondary_constructor_is_deferred_without_constructor_type_params() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A](value: A) { def this(other: A) = this(other) }");
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
+        let owner = store.symbols.get(constructor).owner.unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::GenericSecondaryConstructorDeferred {
+                constructor: error_constructor,
+                owner: error_owner
+            }) if error_constructor == constructor && error_owner == owner
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn secondary_constructor_type_parameters_are_explicitly_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int) { def this[A](other: A) = this(0) }");
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(constructor),
+            Err(TyperError::SecondaryConstructorTypeParametersDeferred {
+                constructor: error_constructor
+            }) if error_constructor == constructor
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(constructor),
+            SymbolInfo::Missing
+        );
     }
 
     #[test]
