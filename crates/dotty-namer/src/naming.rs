@@ -14,7 +14,7 @@ use dotty_core::{
 };
 
 use crate::SourceSemanticIndex;
-use crate::source_index::{SourceContext, SourceContextId};
+use crate::source_index::{SourceContext, SourceContextId, SourceDefinition};
 
 /// Internal structural error encountered while indexing a source tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +28,12 @@ pub enum NamerError {
         owner: SymbolId,
         source: SourceId,
         tree_index: u32,
+    },
+    /// A semantic symbol was assigned conflicting canonical/derived source definitions.
+    ConflictingSourceProvenance {
+        symbol: SymbolId,
+        existing: SourceDefinition,
+        attempted: SourceDefinition,
     },
     /// An extension method was assigned prefix-clause metadata more than once.
     DuplicateExtensionPrefixClauses { method: SymbolId },
@@ -88,6 +94,17 @@ impl fmt::Display for NamerError {
                 "source {} tree {tree_index} already has a derived semantic symbol for owner {}",
                 source.index(),
                 owner.index()
+            ),
+            Self::ConflictingSourceProvenance {
+                symbol,
+                existing,
+                attempted,
+            } => write!(
+                f,
+                "symbol {} already has source provenance {:?}, cannot assign {:?}",
+                symbol.index(),
+                existing,
+                attempted
             ),
             Self::DuplicateExtensionPrefixClauses { method } => write!(
                 f,

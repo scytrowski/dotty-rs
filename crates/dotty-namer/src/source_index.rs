@@ -6,6 +6,29 @@ use dotty_core::{Packages, ScopeId, SemanticStore, SourceId, SymbolId, TreeId, U
 
 use crate::NamerError;
 
+/// Source tree that introduced a semantic identity.
+///
+/// Derived identities, such as constructor parameter copies, point back to
+/// the original source tree while remaining distinct from its canonical
+/// symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceDefinition {
+    /// The canonical identity represented by a source definition tree.
+    Canonical {
+        /// Compilation source containing the tree.
+        source: SourceId,
+        /// Source tree that owns the canonical identity.
+        tree: TreeId<Untyped>,
+    },
+    /// An owner-specific semantic identity derived from a source tree.
+    Derived {
+        /// Compilation source containing the original tree.
+        source: SourceId,
+        /// Original source tree from which the identity was derived.
+        tree: TreeId<Untyped>,
+    },
+}
+
 /// Opaque identifier for an immutable source declaration context.
 ///
 /// IDs are meaningful only in the [`SourceSemanticIndex`] that allocated
@@ -46,6 +69,7 @@ pub struct SourceContext {
 pub struct SourceSemanticIndex {
     symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     derived_symbols_by_owner_and_tree: HashMap<(SymbolId, SourceId, TreeId<Untyped>), SymbolId>,
+    definitions_by_symbol: HashMap<SymbolId, SourceDefinition>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
     source_contexts: Vec<SourceContext>,
@@ -81,6 +105,15 @@ impl SourceSemanticIndex {
             .copied()
     }
 
+    /// Returns the source definition tree for a canonical or derived symbol.
+    ///
+    /// Lookup is O(1). Package symbols are shared across source clauses and
+    /// intentionally have no authoritative reverse provenance. Purely
+    /// synthetic symbols also return `None`.
+    pub fn definition_of(&self, symbol: SymbolId) -> Option<SourceDefinition> {
+        self.definitions_by_symbol.get(&symbol).copied()
+    }
+
     /// Associates a derived declaration identity with its semantic owner.
     ///
     /// The same source tree may have derived identities for different owners,
@@ -102,7 +135,10 @@ impl SourceSemanticIndex {
                 tree_index: tree.index(),
             });
         }
+        let definition = SourceDefinition::Derived { source, tree };
+        self.ensure_source_provenance(symbol, definition)?;
         self.derived_symbols_by_owner_and_tree.insert(key, symbol);
+        self.definitions_by_symbol.insert(symbol, definition);
         Ok(())
     }
 
@@ -377,7 +413,47 @@ impl SourceSemanticIndex {
                 tree_index: tree.index(),
             });
         }
+        let definition = SourceDefinition::Canonical { source, tree };
+        self.ensure_source_provenance(symbol, definition)?;
         self.symbols_by_tree.insert(key, symbol);
+        self.definitions_by_symbol.insert(symbol, definition);
+        Ok(())
+    }
+
+    /// Records a shared package identity without assigning it reverse source
+    /// provenance. Package symbols may be reached from multiple package
+    /// clauses and compilation units, so no one clause is authoritative.
+    pub(crate) fn record_package_symbol(
+        &mut self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+    ) -> Result<(), NamerError> {
+        let key = (source, tree);
+        if self.symbols_by_tree.contains_key(&key) {
+            return Err(NamerError::DuplicateSourceTreeSymbol {
+                source,
+                tree_index: tree.index(),
+            });
+        }
+        self.symbols_by_tree.insert(key, symbol);
+        Ok(())
+    }
+
+    fn ensure_source_provenance(
+        &self,
+        symbol: SymbolId,
+        attempted: SourceDefinition,
+    ) -> Result<(), NamerError> {
+        if let Some(existing) = self.definitions_by_symbol.get(&symbol)
+            && *existing != attempted
+        {
+            return Err(NamerError::ConflictingSourceProvenance {
+                symbol,
+                existing: *existing,
+                attempted,
+            });
+        }
         Ok(())
     }
 
@@ -452,6 +528,117 @@ mod tests {
 
         assert_eq!(index.symbol_at(SourceId::from_index(1), tree), Some(first));
         assert_eq!(index.symbol_at(SourceId::from_index(2), tree), Some(second));
+    }
+
+    #[test]
+    fn canonical_symbol_records_reverse_source_definition() {
+        let mut store = SemanticStore::new();
+        let symbol = symbol(&mut store);
+        let source = SourceId::from_index(3);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index.record_symbol(source, tree, symbol).unwrap();
+
+        assert_eq!(index.symbol_at(source, tree), Some(symbol));
+        assert_eq!(
+            index.definition_of(symbol),
+            Some(SourceDefinition::Canonical { source, tree })
+        );
+    }
+
+    #[test]
+    fn conflicting_canonical_provenance_is_rejected_without_partial_mapping() {
+        let mut store = SemanticStore::new();
+        let symbol = symbol(&mut store);
+        let first_source = SourceId::from_index(4);
+        let attempted_source = SourceId::from_index(5);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+        index.record_symbol(first_source, tree, symbol).unwrap();
+
+        assert_eq!(
+            index.record_symbol(attempted_source, tree, symbol),
+            Err(NamerError::ConflictingSourceProvenance {
+                symbol,
+                existing: SourceDefinition::Canonical {
+                    source: first_source,
+                    tree,
+                },
+                attempted: SourceDefinition::Canonical {
+                    source: attempted_source,
+                    tree,
+                },
+            })
+        );
+        assert_eq!(index.symbol_at(first_source, tree), Some(symbol));
+        assert_eq!(index.symbol_at(attempted_source, tree), None);
+    }
+
+    #[test]
+    fn derived_symbol_records_original_source_definition() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let symbol = symbol(&mut store);
+        let source = SourceId::from_index(6);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_derived_symbol(owner, source, tree, symbol)
+            .unwrap();
+
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(symbol));
+        assert_eq!(
+            index.definition_of(symbol),
+            Some(SourceDefinition::Derived { source, tree })
+        );
+    }
+
+    #[test]
+    fn canonical_symbol_cannot_also_be_recorded_as_derived() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let symbol = symbol(&mut store);
+        let source = SourceId::from_index(7);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+        index.record_symbol(source, tree, symbol).unwrap();
+
+        assert_eq!(
+            index.record_derived_symbol(owner, source, tree, symbol),
+            Err(NamerError::ConflictingSourceProvenance {
+                symbol,
+                existing: SourceDefinition::Canonical { source, tree },
+                attempted: SourceDefinition::Derived { source, tree },
+            })
+        );
+        assert_eq!(index.derived_symbol_at(owner, source, tree), None);
+        assert_eq!(
+            index.definition_of(symbol),
+            Some(SourceDefinition::Canonical { source, tree })
+        );
+    }
+
+    #[test]
+    fn shared_package_mappings_keep_forward_lookup_and_skip_reverse_provenance() {
+        let mut store = SemanticStore::new();
+        let package = symbol(&mut store);
+        let first_source = SourceId::from_index(8);
+        let second_source = SourceId::from_index(9);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+
+        index
+            .record_package_symbol(first_source, tree, package)
+            .unwrap();
+        index
+            .record_package_symbol(second_source, tree, package)
+            .unwrap();
+
+        assert_eq!(index.symbol_at(first_source, tree), Some(package));
+        assert_eq!(index.symbol_at(second_source, tree), Some(package));
+        assert_eq!(index.definition_of(package), None);
     }
 
     #[test]
