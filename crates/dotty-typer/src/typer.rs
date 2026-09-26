@@ -849,6 +849,7 @@ impl<'a> SourceTyper<'a> {
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
+        let mut package_candidates = Vec::new();
         for context_id in &contexts {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -856,36 +857,38 @@ impl<'a> SourceTyper<'a> {
                 .scopes
                 .get(source_context.lexical_scope)
                 .lookup_all(&name);
-            if let Some(symbol) =
+            if self.store.symbols.get(source_context.owner).kind == SymbolKind::Package {
+                let (current_unit, other_units): (Vec<_>, Vec<_>) =
+                    candidates.iter().copied().partition(|symbol| {
+                        self.store.symbols.get(*symbol).origin == SymbolOrigin::Source(self.source)
+                    });
+                if let Some(symbol) =
+                    self.unique_type_candidate(&current_unit, name, tree_index, position)?
+                {
+                    return Ok(Some(symbol));
+                }
+                package_candidates.extend(other_units);
+            } else if let Some(symbol) =
                 self.unique_type_candidate(candidates, name, tree_index, position)?
             {
                 return Ok(Some(symbol));
             }
         }
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-            for context_id in &contexts {
-                let source_context = self.index.source_context(*context_id);
-                if let Some(import_tree) = source_context.import
-                    && let Some(symbol) = self.lookup_imported_symbol(
-                        SourceImport {
-                            tree: import_tree,
-                            context: *context_id,
-                            parent: source_context.parent,
-                        },
-                        name,
-                        true,
-                        selection,
-                        SourceTreeLocation {
-                            tree_index,
-                            position,
-                        },
-                    )?
-                {
-                    return Ok(Some(symbol));
-                }
+            if let Some(symbol) = self.lookup_imports(
+                &contexts,
+                name,
+                true,
+                selection,
+                SourceTreeLocation {
+                    tree_index,
+                    position,
+                },
+            )? {
+                return Ok(Some(symbol));
             }
         }
-        Ok(None)
+        self.unique_type_candidate(&package_candidates, name, tree_index, position)
     }
 
     fn source_context_chain(
@@ -1053,6 +1056,7 @@ impl<'a> SourceTyper<'a> {
         }
         matches.sort_by_key(|symbol| symbol.index());
         matches.dedup();
+        self.deduplicate_import_candidates(&mut matches, type_only);
         if type_only {
             self.unique_type_candidate(&matches, wanted, location.tree_index, location.position)
         } else {
@@ -1090,29 +1094,138 @@ impl<'a> SourceTyper<'a> {
             }
         }
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-            for context_id in &contexts {
-                let source_context = self.index.source_context(*context_id);
-                if let Some(import_tree) = source_context.import
-                    && let Some(symbol) = self.lookup_imported_symbol(
-                        SourceImport {
-                            tree: import_tree,
-                            context: *context_id,
-                            parent: source_context.parent,
-                        },
-                        name,
-                        false,
-                        selection,
-                        SourceTreeLocation {
-                            tree_index: import_tree_index,
-                            position,
-                        },
-                    )?
-                {
-                    return Ok(Some(symbol));
-                }
+            if let Some(symbol) = self.lookup_imports(
+                &contexts,
+                name,
+                false,
+                selection,
+                SourceTreeLocation {
+                    tree_index: import_tree_index,
+                    position,
+                },
+            )? {
+                return Ok(Some(symbol));
             }
         }
         Ok(None)
+    }
+
+    /// Looks up all imports at the same lexical depth together. Imports in one
+    /// scope have equal precedence, so distinct matching symbols are
+    /// ambiguous regardless of their source order.
+    fn lookup_imports(
+        &mut self,
+        contexts: &[SourceContextId],
+        name: dotty_core::Name,
+        type_only: bool,
+        selection: ImportSelection,
+        location: SourceTreeLocation,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let mut scopes: Vec<(dotty_core::ScopeId, Vec<SourceImport>)> = Vec::new();
+        for context_id in contexts {
+            let source_context = self.index.source_context(*context_id);
+            let Some(import_tree) = source_context.import else {
+                continue;
+            };
+            let import = SourceImport {
+                tree: import_tree,
+                context: *context_id,
+                parent: source_context.parent,
+            };
+            if let Some(scope_index) = scopes
+                .iter()
+                .position(|(scope, _)| *scope == source_context.lexical_scope)
+            {
+                scopes[scope_index].1.push(import);
+            } else {
+                scopes.push((source_context.lexical_scope, vec![import]));
+            }
+        }
+        for (_, imports) in scopes {
+            let mut candidates = Vec::new();
+            for source_import in imports {
+                if let Some(symbol) = self.lookup_imported_symbol(
+                    source_import,
+                    name,
+                    type_only,
+                    selection,
+                    location,
+                )? {
+                    candidates.push(symbol);
+                }
+            }
+            candidates.sort_by_key(|symbol| symbol.index());
+            candidates.dedup();
+            self.deduplicate_import_candidates(&mut candidates, type_only);
+            if !candidates.is_empty() {
+                return if type_only {
+                    self.unique_type_candidate(
+                        &candidates,
+                        name,
+                        location.tree_index,
+                        location.position,
+                    )
+                } else {
+                    self.unique_symbol_candidate(
+                        &candidates,
+                        name,
+                        location.tree_index,
+                        location.position,
+                    )
+                };
+            }
+        }
+        Ok(None)
+    }
+
+    /// Returns the underlying symbol for a fully known chain of type aliases.
+    /// Unknown or structurally described aliases remain distinct so lookup
+    /// never guesses that two incomplete types are equivalent.
+    fn imported_type_target(&self, symbol: SymbolId) -> Option<SymbolId> {
+        let mut current = symbol;
+        let mut seen = Vec::new();
+        loop {
+            if seen.contains(&current) {
+                return None;
+            }
+            seen.push(current);
+            if self.store.symbols.get(current).kind != SymbolKind::TypeAlias {
+                return Some(current);
+            }
+            let SymbolInfo::Complete(info) = self.store.symbols.info(current) else {
+                return None;
+            };
+            let Type::AliasingBounds { alias } = self.store.types.get(*info) else {
+                return None;
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(target),
+                ..
+            } = self.store.types.get(*alias)
+            else {
+                return None;
+            };
+            current = *target;
+        }
+    }
+
+    fn deduplicate_import_candidates(&self, candidates: &mut Vec<SymbolId>, type_only: bool) {
+        if !type_only {
+            return;
+        }
+        let mut unique = Vec::with_capacity(candidates.len());
+        for candidate in candidates.iter().copied() {
+            let canonical = self.imported_type_target(candidate);
+            let already_present = canonical.is_some_and(|canonical| {
+                unique
+                    .iter()
+                    .any(|existing| self.imported_type_target(*existing) == Some(canonical))
+            });
+            if !already_present {
+                unique.push(candidate);
+            }
+        }
+        *candidates = unique;
     }
 
     fn unique_scoped_symbol(
@@ -1162,34 +1275,24 @@ impl<'a> SourceTyper<'a> {
             }
         }
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-            for context_id in &contexts {
-                let source_context = self.index.source_context(*context_id);
-                if let Some(import_tree) = source_context.import
-                    && let Some(symbol) = self.lookup_imported_symbol(
-                        SourceImport {
-                            tree: import_tree,
-                            context: *context_id,
-                            parent: source_context.parent,
-                        },
-                        name,
-                        false,
-                        selection,
-                        SourceTreeLocation {
-                            tree_index,
-                            position,
-                        },
-                    )?
-                    && !matches!(
-                        self.store.symbols.get(symbol).kind,
-                        SymbolKind::Class
-                            | SymbolKind::Trait
-                            | SymbolKind::ModuleClass
-                            | SymbolKind::TypeParameter
-                            | SymbolKind::TypeAlias
-                    )
-                {
-                    return Ok(Some(symbol));
-                }
+            if let Some(symbol) = self.lookup_imports(
+                &contexts,
+                name,
+                false,
+                selection,
+                SourceTreeLocation {
+                    tree_index,
+                    position,
+                },
+            )? && !matches!(
+                self.store.symbols.get(symbol).kind,
+                SymbolKind::Class
+                    | SymbolKind::Trait
+                    | SymbolKind::ModuleClass
+                    | SymbolKind::TypeParameter
+                    | SymbolKind::TypeAlias
+            ) {
+                return Ok(Some(symbol));
             }
         }
         Ok(None)
@@ -1423,6 +1526,17 @@ mod tests {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let source = SourceId::from_index(11);
+        let mut packages = Packages::new();
+        let (parsed, index) = parse_and_name_unit(text, source, &mut store, &mut packages);
+        (parsed, store, packages, definitions, index, source)
+    }
+
+    fn parse_and_name_unit(
+        text: &str,
+        source: SourceId,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+    ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
         let scanner = ContextualScanner::new(text).unwrap();
         let parsed = dotty_parser::parse_compilation_unit(
             SourceText::new(text).unwrap(),
@@ -1431,17 +1545,16 @@ mod tests {
             &mut store.names,
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let mut packages = Packages::new();
         let index = name_compilation_unit(
             &parsed.ast,
             parsed.root,
             source,
             "Typer.scala",
-            &mut store,
-            &mut packages,
+            store,
+            packages,
         )
         .unwrap();
-        (parsed, store, packages, definitions, index, source)
+        (parsed, index)
     }
 
     fn val_symbol(
@@ -2646,9 +2759,69 @@ mod tests {
     }
 
     #[test]
-    fn later_wildcard_import_shadows_an_earlier_wildcard_import() {
+    fn conflicting_wildcard_imports_in_one_scope_are_ambiguous() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package first { class C }; package second { class C }; package app { import first.*; import second.*; val x: C = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let (_, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let position = parsed.ast.get(type_tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::AmbiguousTypeName {
+                name,
+                tree_index,
+                position: found_position,
+                ..
+            }) if typer.store().names.resolve(name.text()) == "C"
+                && tree_index == type_tree.index()
+                && found_position == position
+        ));
+    }
+
+    #[test]
+    fn conflicting_explicit_imports_in_one_scope_are_ambiguous() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package first { class C }; package second { class C }; package app { import first.C; import second.C; val x: C = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let (_, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let position = parsed.ast.get(type_tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::AmbiguousTypeName {
+                name,
+                tree_index,
+                position: found_position,
+                ..
+            }) if typer.store().names.resolve(name.text()) == "C"
+                && tree_index == type_tree.index()
+                && found_position == position
+        ));
+    }
+
+    #[test]
+    fn repeated_import_of_the_same_type_in_one_scope_is_not_ambiguous() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class C }; package app { import lib.C; import lib.C; val x: C = 1 }",
         );
         let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
         let expected = parsed
@@ -2656,12 +2829,7 @@ mod tests {
             .iter()
             .find_map(|(tree, node)| match &node.kind {
                 TreeKind::TypeDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "C"
-                        && store
-                            .symbols
-                            .get(index.symbol_at(source, tree).unwrap())
-                            .owner
-                            == packages.symbol(&["second"]) =>
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
                 {
                     index.symbol_at(source, tree)
                 }
@@ -2683,9 +2851,77 @@ mod tests {
     }
 
     #[test]
-    fn later_explicit_import_shadows_an_earlier_explicit_import() {
+    fn wildcard_imports_of_aliases_to_the_same_type_are_not_ambiguous() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package first { class C }; package second { class C }; package app { import first.C; import second.C; val x: C = 1 }",
+            "package base { class C }; package first { type T = base.C }; package second { type T = base.C }; package app { import first.*; import second.*; val x: T = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let aliases: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "T" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(aliases.len(), 2);
+        let base_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        for alias in aliases.iter().copied() {
+            let underlying = store.types.alloc(Type::TypeRef {
+                prefix: definitions.no_prefix,
+                target: TypeRefTarget::Symbol(base_type),
+            });
+            let info = store
+                .types
+                .alloc(Type::AliasingBounds { alias: underlying });
+            store.symbols.set_info(alias, SymbolInfo::Complete(info));
+        }
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert!(aliases.contains(&type_symbol(typer.store(), projected)));
+    }
+
+    #[test]
+    fn explicit_import_precedes_package_type_from_another_source_unit() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let (package_file, package_index) = parse_and_name_unit(
+            "package p { class T }",
+            SourceId::from_index(21),
+            &mut store,
+            &mut packages,
+        );
+        let source = SourceId::from_index(22);
+        let (parsed, index) = parse_and_name_unit(
+            "package q { class T }; package p { import q.T; val x: T = 1 }",
+            source,
+            &mut store,
+            &mut packages,
         );
         let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
         let expected = parsed
@@ -2693,12 +2929,69 @@ mod tests {
             .iter()
             .find_map(|(tree, node)| match &node.kind {
                 TreeKind::TypeDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "C"
+                    if store.names.resolve(definition.name.as_name().text()) == "T"
                         && store
                             .symbols
                             .get(index.symbol_at(source, tree).unwrap())
                             .owner
-                            == packages.symbol(&["second"]) =>
+                            == packages.symbol(&["q"]) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let package_type = package_file
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "T" =>
+                {
+                    package_index.symbol_at(SourceId::from_index(21), tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            store.symbols.get(package_type).origin,
+            SymbolOrigin::Source(SourceId::from_index(21))
+        );
+        assert_eq!(
+            store.symbols.get(package_type).owner,
+            packages.symbol(&["p"])
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), expected);
+    }
+
+    #[test]
+    fn current_unit_package_type_precedes_an_explicit_import() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package first { class T }; package second { class T }; package first { import second.T; val x: T = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let expected = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "T"
+                        && store
+                            .symbols
+                            .get(index.symbol_at(source, tree).unwrap())
+                            .owner
+                            == packages.symbol(&["first"]) =>
                 {
                     index.symbol_at(source, tree)
                 }
