@@ -48,6 +48,12 @@ pub struct Definitions {
     pub boolean: TypeId,
     /// What a JVM `void` return type / Scala `Unit` lowers to.
     pub unit: TypeId,
+    /// The canonical source `Object` reference type.
+    pub object_type: TypeId,
+    /// The canonical source `Any` reference type.
+    pub any_type: TypeId,
+    /// The canonical source `Nothing` reference type.
+    pub nothing_type: TypeId,
 
     /// `java.lang.Object`, the JVM upper bound (`Any`'s reference-type
     /// counterpart, `AnyRef`, is not distinguished from it yet).
@@ -94,6 +100,9 @@ impl Definitions {
         let nothing_class = Self::builtin_symbol(store, "Nothing");
         let and_type = Self::builtin_alias(store, "&");
         let or_type = Self::builtin_alias(store, "|");
+        let object_type = store.types.alloc(Type::type_ref(no_prefix, object_class));
+        let any_type = store.types.alloc(Type::type_ref(no_prefix, any_class));
+        let nothing_type = store.types.alloc(Type::type_ref(no_prefix, nothing_class));
 
         Self {
             no_prefix,
@@ -106,12 +115,47 @@ impl Definitions {
             short,
             boolean,
             unit,
+            object_type,
+            any_type,
+            nothing_type,
             object_class,
             any_class,
             nothing_class,
             and_type,
             or_type,
         }
+    }
+
+    /// Returns the session-canonical type for a source-level builtin name.
+    ///
+    /// Lookup compares interned names and does not depend on builtin symbols
+    /// being entered in a source lexical scope.
+    pub fn source_builtin_type(&self, store: &SemanticStore, name: Name) -> Option<TypeId> {
+        [
+            self.byte,
+            self.char,
+            self.double,
+            self.float,
+            self.int,
+            self.long,
+            self.short,
+            self.boolean,
+            self.unit,
+            self.object_type,
+            self.any_type,
+            self.nothing_type,
+        ]
+        .into_iter()
+        .find(|ty| {
+            let Type::TypeRef {
+                target: crate::types::TypeRefTarget::Symbol(symbol),
+                ..
+            } = store.types.get(*ty)
+            else {
+                return false;
+            };
+            store.symbols.get(*symbol).name == name
+        })
     }
 
     /// Declares [`and_type`](Self::and_type) and [`or_type`](Self::or_type) as
