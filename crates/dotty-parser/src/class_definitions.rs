@@ -651,6 +651,7 @@ where
         };
         self.advance();
         let name = self.parse_type_name();
+        let class_name_end = self.last_real_token_end;
         let owner = if is_case {
             crate::ParamOwner::CaseClass
         } else {
@@ -663,9 +664,8 @@ where
         } else {
             Vec::new()
         };
-        let constructor_metadata_start = self
-            .starts_constructor_modifier()
-            .then_some(self.current().span.start());
+        let constructor_metadata_start =
+            self.starts_constructor_modifier().then_some(class_name_end);
         let constructor_metadata = self.parse_constructor_modifiers();
         self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
             Punctuation::LeftParen,
@@ -1356,9 +1356,9 @@ where
             .next()
             .and_then(|child| self.ast.get(*child).position)
             .map(|position| position.span().range().start());
-        let constructor_start = type_param_start
-            .map(|child_start| child_start.saturating_sub(1))
-            .or(boundary.constructor_metadata_start)
+        let constructor_start = boundary
+            .constructor_metadata_start
+            .or_else(|| type_param_start.map(|child_start| child_start.saturating_sub(1)))
             .or(boundary.parameter_start)
             .or_else(|| value_param_start.map(|child_start| child_start.saturating_sub(1)))
             .or(boundary.parent_start)
@@ -1392,6 +1392,9 @@ where
                     .and_then(|parameter| self.ast.get(*parameter).position)
                     .map(|position| position.span().range().end())
             })
+            .or(boundary
+                .constructor_metadata_start
+                .map(|_| constructor_start))
             .or(boundary.parameter_start)
             .unwrap_or(constructor_start);
         let tpt = self.synthetic_type_tree_at(tpt_start);
@@ -4531,7 +4534,7 @@ mod tests {
                 .unwrap()
                 .span()
                 .range(),
-            dotty_core::TextRange::new(8, 15).unwrap()
+            dotty_core::TextRange::new(7, 15).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
@@ -4629,6 +4632,44 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(qualifier.text()), "pkg");
+    }
+
+    #[test]
+    fn preserves_annotations_before_primary_constructor_access() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C @Ann private ()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 9, 12),
+                token(TokenKind::Keyword(HardKeyword::Private), 13, 20),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 21, 22),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+        let TreeKind::DefDef(constructor) = &parser.ast().get(template.constructor).kind else {
+            panic!("expected primary constructor");
+        };
+        assert_eq!(constructor.metadata.annotations.len(), 1);
+        assert_eq!(
+            constructor.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
