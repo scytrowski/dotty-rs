@@ -263,6 +263,10 @@ fn parses_an_empty_anonymous_template_after_new() {
     assert_eq!(template.parents.len(), 1);
     assert!(template.body.is_empty());
     assert_eq!(
+        parser.ast().get(tpt).position.unwrap().span().range(),
+        TextRange::new(0, 10).unwrap()
+    );
+    assert_eq!(
         parser.ast().get(tree).position.unwrap().span().range(),
         TextRange::new(0, 10).unwrap()
     );
@@ -301,6 +305,10 @@ fn parses_members_in_anonymous_template_bodies_after_new() {
         parser.ast().get(template.body[0]).kind,
         TreeKind::DefDef(_)
     ));
+    assert_eq!(
+        parser.ast().get(tpt).position.unwrap().span().range(),
+        TextRange::new(0, 25).unwrap()
+    );
     assert_eq!(parser.current().kind, TokenKind::Eof);
     assert!(parser.diagnostics().is_empty());
 }
@@ -336,6 +344,63 @@ fn parses_a_template_after_a_constructor_application() {
     ));
     assert_eq!(parser.current().kind, TokenKind::Eof);
     assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn selection_can_follow_an_anonymous_new_template() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo {}.value",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 9, 10),
+            token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+            token(TokenKind::Identifier, 11, 16),
+            token(TokenKind::Eof, 16, 16),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Select(_)));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 16).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn reports_a_missing_anonymous_template_closing_brace_at_eof() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo { def value = 1",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 8, 9),
+            token(TokenKind::Keyword(HardKeyword::Def), 10, 13),
+            token(TokenKind::Identifier, 14, 19),
+            token(TokenKind::Operator, 20, 21),
+            token(TokenKind::IntegerLiteral, 22, 23),
+            token(TokenKind::Eof, 23, 23),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::New(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedToken
+    );
 }
 
 #[test]
