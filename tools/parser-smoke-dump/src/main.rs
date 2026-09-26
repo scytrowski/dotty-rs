@@ -819,8 +819,6 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
         TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
         TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
         TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::If(_) => "If",
@@ -1095,14 +1093,6 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             .chain(bounds.high)
             .chain(bounds.alias)
             .collect(),
-        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context_bounds)) => {
-            let mut children = vec![context_bounds.bounds];
-            children.extend(context_bounds.context_bounds.iter().copied());
-            children
-        }
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(context_bound)) => {
-            vec![context_bound.bound]
-        }
         TreeKind::ByNameTypeTree(by_name) => vec![by_name.result],
         TreeKind::SingletonTypeTree(singleton) => vec![singleton.reference],
         TreeKind::TypeTree(_) => Vec::new(),
