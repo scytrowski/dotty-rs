@@ -720,7 +720,21 @@ impl<'a> SourceTyper<'a> {
                         kind,
                     });
                 };
-                Some(self.type_of_tpt_inner(self_definition.tpt, type_context)?)
+                let Some(type_tree) = self.arena.try_get(self_definition.tpt) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: self_definition.tpt.index(),
+                    });
+                };
+                if matches!(type_tree.kind, TreeKind::TypeTree(_)) {
+                    // `self =>` has a source binder but imposes no additional
+                    // self-type constraint. The parser represents its absent
+                    // type with a synthetic TypeTree; ClassInfo encodes this
+                    // default as `None`.
+                    None
+                } else {
+                    Some(self.type_of_tpt_inner(self_definition.tpt, type_context)?)
+                }
             }
             None => None,
         };
@@ -3197,6 +3211,28 @@ mod tests {
                 .lookup_all(&self_name)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn self_alias_without_a_type_has_no_additional_self_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { self => }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.self_type, None);
     }
 
     #[test]
