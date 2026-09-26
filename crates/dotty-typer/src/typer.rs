@@ -141,10 +141,17 @@ impl<'a> SourceTyper<'a> {
             SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol }),
         }
 
+        self.run_atomic(|typer, info_journal| typer.complete_symbol_inner(symbol, info_journal))
+    }
+
+    fn run_atomic<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
+    ) -> Result<T, TyperError> {
         let checkpoint = self.store.checkpoint();
         let cache_checkpoint = self.type_index.checkpoint();
         let mut info_journal = Vec::new();
-        let result = self.complete_symbol_inner(symbol, &mut info_journal);
+        let result = operation(self, &mut info_journal);
         if result.is_err() {
             for (changed, previous) in info_journal.into_iter().rev() {
                 if self.store.symbols.contains(changed) {
@@ -641,5 +648,56 @@ mod tests {
             typer.source_type_index().type_at(source, value_tpt),
             Some(value_type)
         );
+    }
+
+    #[test]
+    fn failed_transaction_restores_store_symbol_info_and_type_cache() {
+        let (_unused_arena, mut store, packages, definitions) = setup();
+        let source = SourceId::from_index(7);
+        let tree = {
+            let mut arena = AstArena::<Untyped>::new();
+            let tree = arena.alloc(dotty_core::Tree {
+                kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+                position: None,
+                ty: (),
+            });
+            // The transaction only indexes an ID; the caller-owned arena
+            // below must outlive the driver, so return the arena with the ID.
+            (arena, tree)
+        };
+        let (arena, tree_id) = tree;
+        let index = SourceSemanticIndex::new();
+        let symbol = symbol(&mut store, SymbolKind::Value, SymbolInfo::Missing);
+        let before = store.checkpoint();
+        let attempted_type = store.types.alloc(Type::NoType);
+        store.rollback_to(before);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        let result: Result<(), TyperError> = typer.run_atomic(|typer, journal| {
+            let new_type = typer.store.types.alloc(Type::Error(dotty_core::ErrorType {
+                message: typer.store.names.intern("temporary"),
+            }));
+            journal.push((symbol, *typer.store.symbols.info(symbol)));
+            typer
+                .store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(new_type));
+            typer.type_index.insert(source, tree_id, new_type).unwrap();
+            Err(TyperError::UnsupportedSymbolCompletion {
+                symbol,
+                kind: SymbolKind::Value,
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(TyperError::UnsupportedSymbolCompletion { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(symbol), SymbolInfo::Missing);
+        assert_eq!(typer.source_type_index().type_at(source, tree_id), None);
+        drop(typer);
+        assert_eq!(store.types.alloc(Type::NoType), attempted_type);
     }
 }
