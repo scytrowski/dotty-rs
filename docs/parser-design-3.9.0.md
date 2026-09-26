@@ -282,8 +282,11 @@ and semantic visibility checks, remain deferred.
 shape, with a parser-generated `Modifier::PackageObject` preserving the source
 distinction Dotty records with its package flag. Its members use the same
 supported object-body grammar, including braced and scanner-provided indented
-bodies. The parser does not desugar package objects or resolve package scope;
-malformed names recover through the normal object-definition path.
+bodies. Package objects are accepted only at compilation-unit or package-body
+top-stat positions; occurrences in ordinary blocks or templates report an
+unsupported-syntax diagnostic and recover through the object body. The parser
+does not desugar package objects or resolve package scope; malformed names
+recover through the normal object-definition path.
 
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
