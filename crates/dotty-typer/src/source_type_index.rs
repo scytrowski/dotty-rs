@@ -63,4 +63,32 @@ mod tests {
         assert_eq!(index.type_at(source, tree), Some(ty));
         assert_eq!(index.type_at(SourceId::from_index(3), tree), None);
     }
+
+    #[test]
+    fn restoring_a_cache_checkpoint_discards_only_later_entries() {
+        let mut arena = AstArena::<Untyped>::new();
+        let first = arena.alloc(dotty_core::Tree {
+            kind: dotty_core::TreeKind::TypeTree(dotty_core::ast::TypeTree),
+            position: None,
+            ty: (),
+        });
+        let second = arena.alloc(dotty_core::Tree {
+            kind: dotty_core::TreeKind::TypeTree(dotty_core::ast::TypeTree),
+            position: None,
+            ty: (),
+        });
+        let source = SourceId::from_index(2);
+        let mut store = dotty_core::SemanticStore::new();
+        let first_type = store.types.alloc(dotty_core::types::Type::NoPrefix);
+        let second_type = store.types.alloc(dotty_core::types::Type::NoType);
+        let mut index = SourceTypeIndex::default();
+        index.insert(source, first, first_type).unwrap();
+        let mark = index.checkpoint();
+        index.insert(source, second, second_type).unwrap();
+
+        index.restore(mark);
+
+        assert_eq!(index.type_at(source, first), Some(first_type));
+        assert_eq!(index.type_at(source, second), None);
+    }
 }

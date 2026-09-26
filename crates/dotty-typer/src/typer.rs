@@ -21,8 +21,18 @@ pub enum TyperError {
     SourceProvenanceMissing { symbol: SymbolId },
     /// A declaration that needs lexical lookup has no namer context.
     DeclarationContextMissing { symbol: SymbolId },
+    /// A source context ID is outside the naming result that produced it.
+    SourceContextMissing {
+        source: SourceId,
+        tree_index: u32,
+        context_index: u32,
+    },
     /// Completion for this semantic declaration category is not implemented.
     UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
+    /// A deferred completion belongs to a future completion engine.
+    DeferredSymbolCompletion { symbol: SymbolId },
+    /// A previous fatal semantic failure has already been recorded.
+    SymbolAlreadyErrored { symbol: SymbolId },
     /// A source type-tree form is not supported yet.
     UnsupportedTypeTree {
         source: SourceId,
@@ -122,8 +132,13 @@ impl<'a> SourceTyper<'a> {
         if !self.store.symbols.contains(symbol) {
             return Err(TyperError::UnknownSymbol { symbol });
         }
-        if let SymbolInfo::Complete(ty) = *self.store.symbols.info(symbol) {
-            return Ok(ty);
+        match *self.store.symbols.info(symbol) {
+            SymbolInfo::Complete(ty) => return Ok(ty),
+            SymbolInfo::Missing => {}
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol }),
         }
 
         let checkpoint = self.store.checkpoint();
@@ -145,7 +160,7 @@ impl<'a> SourceTyper<'a> {
     fn complete_symbol_inner(
         &mut self,
         symbol: SymbolId,
-        _info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         let kind = self.store.symbols.get(symbol).kind;
         let definition = self
@@ -163,21 +178,21 @@ impl<'a> SourceTyper<'a> {
             return Err(TyperError::DeclarationContextMissing { symbol });
         }
 
-        let Some((_, source_tree)) = self.arena.iter().find(|(id, _)| *id == tree) else {
+        let Some(source_tree) = self.arena.try_get(tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source,
                 tree_index: tree.index(),
             });
         };
-        let valid_shape = match (kind, &source_tree.kind) {
+        let type_tree = match (kind, &source_tree.kind) {
             (
                 SymbolKind::Field
                 | SymbolKind::Value
                 | SymbolKind::Variable
                 | SymbolKind::Parameter,
-                TreeKind::ValDef(_),
-            ) => true,
-            (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => true,
+                TreeKind::ValDef(definition),
+            ) => Some(definition.tpt),
+            (SymbolKind::Method | SymbolKind::Constructor, TreeKind::DefDef(_)) => None,
             (
                 SymbolKind::TypeParameter
                 | SymbolKind::TypeAlias
@@ -185,30 +200,46 @@ impl<'a> SourceTyper<'a> {
                 | SymbolKind::Trait
                 | SymbolKind::ModuleClass,
                 TreeKind::TypeDef(_),
-            ) => true,
+            ) => None,
             // An object term is not a module class, even though both may share
             // the same source `TypeDef` provenance.
-            (SymbolKind::Object, TreeKind::TypeDef(_)) => true,
-            _ => false,
+            (SymbolKind::Object, TreeKind::TypeDef(_)) => None,
+            _ => {
+                return Err(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                });
+            }
         };
-        if !valid_shape {
-            return Err(TyperError::SymbolSourceKindMismatch {
-                source,
-                tree_index: tree.index(),
-                symbol,
-                kind,
-            });
-        }
 
-        // The source syntax is known, but signature completion is staged by
-        // later typer increments. Keep this explicit category dispatch so a
-        // new SymbolKind cannot accidentally become a successful placeholder.
         match kind {
             SymbolKind::Field
             | SymbolKind::Value
             | SymbolKind::Variable
-            | SymbolKind::Parameter
-            | SymbolKind::TypeParameter
+            | SymbolKind::Parameter => {
+                let Some(tpt) = type_tree else {
+                    return Err(TyperError::MalformedSourceAst {
+                        source,
+                        tree_index: tree.index(),
+                        symbol,
+                        kind,
+                    });
+                };
+                let context = self
+                    .index
+                    .declaration_context_of(symbol)
+                    .ok_or(TyperError::DeclarationContextMissing { symbol })?;
+                let ty = self.type_of_tpt(tpt, context)?;
+                let previous = *self.store.symbols.info(symbol);
+                info_journal.push((symbol, previous));
+                self.store
+                    .symbols
+                    .set_info(symbol, SymbolInfo::Complete(ty));
+                Ok(ty)
+            }
+            SymbolKind::TypeParameter
             | SymbolKind::TypeAlias
             | SymbolKind::Method
             | SymbolKind::Constructor
@@ -233,7 +264,7 @@ impl<'a> SourceTyper<'a> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
         }
-        let Some((_, source_tree)) = self.arena.iter().find(|(id, _)| *id == tree) else {
+        let Some(source_tree) = self.arena.try_get(tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
                 tree_index: tree.index(),
@@ -253,7 +284,14 @@ impl<'a> SourceTyper<'a> {
                 tree_kind: "term identifier",
             });
         }
-        let lexical_scope = self.index.source_context(context).lexical_scope;
+        let Some(source_context) = self.index.try_source_context(context) else {
+            return Err(TyperError::SourceContextMissing {
+                source: self.source,
+                tree_index: tree.index(),
+                context_index: context.index(),
+            });
+        };
+        let lexical_scope = source_context.lexical_scope;
         let candidates = self.store.scopes.get(lexical_scope).lookup_all(name);
         let target = match candidates {
             [] => {
@@ -316,7 +354,11 @@ fn tree_kind_name(kind: &TreeKind<Untyped>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_core::{Name, Namespace, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility};
+    use dotty_core::{
+        Name, Namespace, SourceText, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility,
+    };
+    use dotty_lexer::ContextualScanner;
+    use dotty_namer::name_compilation_unit;
 
     fn setup() -> (AstArena<Untyped>, SemanticStore, Packages, Definitions) {
         let arena = AstArena::new();
@@ -339,6 +381,57 @@ mod tests {
             position: None,
             links: SymbolLinks::default(),
         })
+    }
+
+    fn parse_and_name(
+        text: &str,
+    ) -> (
+        dotty_parser::ParseResult,
+        SemanticStore,
+        Packages,
+        Definitions,
+        SourceSemanticIndex,
+        SourceId,
+    ) {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source = SourceId::from_index(11);
+        let scanner = ContextualScanner::new(text).unwrap();
+        let parsed = dotty_parser::parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Typer.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        (parsed, store, packages, definitions, index, source)
+    }
+
+    fn val_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        target: &str,
+    ) -> (SymbolId, TreeId<Untyped>) {
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::ValDef(definition) = &node.kind
+                && store.names.resolve(definition.name.as_name().text()) == target
+            {
+                return (index.symbol_at(source, tree).unwrap(), definition.tpt);
+            }
+        }
+        panic!("source val `{target}` not found");
     }
 
     #[test]
@@ -397,5 +490,156 @@ mod tests {
         ));
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(*typer.store().symbols.info(symbol), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn named_value_completion_projects_and_caches_its_type_tree() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C\nval x: C = 1");
+        let (symbol, tpt) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let completed = typer.complete_symbol(symbol).unwrap();
+        let context = index.declaration_context_of(symbol).unwrap();
+        let projected_again = typer.type_of_tpt(tpt, context).unwrap();
+
+        assert_eq!(completed, projected_again);
+        assert_eq!(
+            typer.source_type_index().type_at(source, tpt),
+            Some(completed)
+        );
+        assert_eq!(
+            *typer.store().symbols.info(symbol),
+            SymbolInfo::Complete(completed)
+        );
+    }
+
+    #[test]
+    fn unsupported_method_signature_fails_without_store_changes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def method: Int = 1");
+        let before = store.checkpoint();
+        let method = index
+            .symbol_at(
+                source,
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(id, node)| matches!(node.kind, TreeKind::DefDef(_)).then_some(id))
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::UnsupportedSymbolCompletion {
+                symbol,
+                kind: SymbolKind::Method
+            }) if symbol == method
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn type_projection_rejects_a_context_from_another_naming_index() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C\nval x: C = 1");
+        let (symbol, tpt) = val_symbol(&parsed, &store, &index, source, "x");
+        let context = index.declaration_context_of(symbol).unwrap();
+        let foreign_index = SourceSemanticIndex::new();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &foreign_index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(tpt, context),
+            Err(TyperError::SourceContextMissing { tree_index, .. }) if tree_index == tpt.index()
+        ));
+    }
+
+    #[test]
+    fn completion_does_not_find_a_definition_by_scanning_the_ast() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("val x: Int = 1");
+        let (symbol, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let empty_index = SourceSemanticIndex::new();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &empty_index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(symbol),
+            Err(TyperError::SourceProvenanceMissing { symbol: found }) if found == symbol
+        ));
+    }
+
+    #[test]
+    fn a_later_failed_completion_keeps_an_earlier_success() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C\nval x: C = 1\ndef method: C = 1");
+        let (value, value_tpt) = val_symbol(&parsed, &store, &index, source, "x");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(&node.kind, TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method")
+                .then_some(id)
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let value_type = typer.complete_symbol(value).unwrap();
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::UnsupportedSymbolCompletion {
+                kind: SymbolKind::Method,
+                ..
+            })
+        ));
+
+        assert_eq!(
+            *typer.store().symbols.info(value),
+            SymbolInfo::Complete(value_type)
+        );
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert_eq!(
+            typer.source_type_index().type_at(source, value_tpt),
+            Some(value_type)
+        );
     }
 }

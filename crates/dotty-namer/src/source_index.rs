@@ -170,6 +170,11 @@ impl SourceSemanticIndex {
             .expect("SourceContextId must be in range for this SourceSemanticIndex")
     }
 
+    /// Looks up a context without panicking when an ID is outside this index.
+    pub fn try_source_context(&self, id: SourceContextId) -> Option<&SourceContext> {
+        self.source_contexts.get(id.index() as usize)
+    }
+
     /// Returns the source declaration context recorded for `symbol`.
     pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.declaration_contexts_by_symbol.get(&symbol).copied()

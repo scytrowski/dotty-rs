@@ -37,6 +37,11 @@ impl<P: AstPhase> AstArena<P> {
         &self.nodes[id.index() as usize]
     }
 
+    /// Looks up a tree ID without panicking when it is outside this arena.
+    pub fn try_get(&self, id: TreeId<P>) -> Option<&Tree<P>> {
+        self.nodes.get(id.index() as usize)
+    }
+
     pub fn get_mut(&mut self, id: TreeId<P>) -> &mut Tree<P> {
         &mut self.nodes[id.index() as usize]
     }
@@ -129,5 +134,12 @@ mod tests {
         arena.get_mut(id).position = None;
 
         assert_eq!(arena.get(id).position, None);
+    }
+
+    #[test]
+    fn try_get_returns_none_for_an_id_outside_the_arena() {
+        let arena = AstArena::<Untyped>::new();
+
+        assert!(arena.try_get(TreeId::new(0)).is_none());
     }
 }

@@ -100,7 +100,9 @@ name = "dotty-typer"
 version = "0.1.0"
 dependencies = [
  "dotty-core",
+ "dotty-lexer",
  "dotty-namer",
+ "dotty-parser",
 ]
 
 [[package]]
