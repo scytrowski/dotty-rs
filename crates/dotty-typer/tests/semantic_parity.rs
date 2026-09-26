@@ -565,9 +565,9 @@ mod tests {
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
         enter_common_classes(&mut store, &mut packages, false);
-        let scanner = ContextualScanner::new(&source_text).unwrap();
+        let scanner = ContextualScanner::new(source_text).unwrap();
         let parsed = parse_compilation_unit(
-            SourceText::new(&source_text).unwrap(),
+            SourceText::new(source_text).unwrap(),
             source,
             scanner,
             &mut store.names,
@@ -919,7 +919,7 @@ mod tests {
     fn source_and_scala_390_tasty_abstract_type_member_info_match() {
         let source_text = "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  trait Box:\n    type Out";
         let (source_store, source_info) =
-            source_type_info_from_source(&source_text, "Box", SymbolKind::Trait, &["Out"]);
+            source_type_info_from_source(source_text, "Box", SymbolKind::Trait, &["Out"]);
         let (tasty_store, tasty_info) =
             tasty_type_info_with_units("Box", &[METHODS_TASTY], SymbolKind::Trait, &["Out"]);
 
