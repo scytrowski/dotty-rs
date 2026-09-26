@@ -1028,7 +1028,8 @@ impl Namer<'_> {
                 expected: "package registry path result",
             });
         };
-        self.index.record_symbol(self.source, tree, leaf.symbol)?;
+        self.index
+            .record_package_symbol(self.source, tree, leaf.symbol)?;
         self.index.record_scope(leaf.symbol, leaf.scope)?;
 
         let source_context = self.child_source_context(leaf.symbol, leaf.scope, parent_context);
@@ -1206,6 +1207,8 @@ impl Namer<'_> {
             position: self.arena.get(tree).position,
             links: SymbolLinks::default(),
         });
+        self.index
+            .record_derived_symbol(owner_context.owner, self.source, tree, symbol)?;
         self.index
             .record_declaration_context(symbol, owner_context.source_context)?;
         self.store

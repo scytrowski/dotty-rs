@@ -3,7 +3,9 @@ use dotty_core::{
     SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
     Visibility,
 };
-use dotty_namer::{NamerError, SourceContextId, SourceSemanticIndex, name_compilation_unit};
+use dotty_namer::{
+    NamerError, SourceContextId, SourceDefinition, SourceSemanticIndex, name_compilation_unit,
+};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 
 struct NamedSource {
@@ -3482,4 +3484,275 @@ fn malformed_extension_prefix_parameter_is_a_structural_namer_error() {
         }
     );
     assert!(packages.get::<&str>(&[]).is_none());
+}
+
+#[test]
+fn parsed_source_symbols_round_trip_to_canonical_definition_and_context() {
+    let named = named_source(
+        "package p\nclass Box[A](val value: A) { def get[B](item: B): B = item }\nobject Utility:\n  val (left, right) = pair",
+        301,
+    );
+    let package = match &named.parsed.ast.get(named.parsed.root).kind {
+        TreeKind::PackageDef(package) => package,
+        _ => panic!("parser should return a PackageDef"),
+    };
+    let class_tree = package.stats[0];
+    let module_tree = package.stats[1];
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    assert_eq!(
+        named.index.definition_of(class_symbol),
+        Some(SourceDefinition::Canonical {
+            source: named.source,
+            tree: class_tree,
+        })
+    );
+
+    let class = match &named.parsed.ast.get(class_tree).kind {
+        TreeKind::TypeDef(class) => class,
+        _ => panic!("Box should be a TypeDef"),
+    };
+    let template = match &named.parsed.ast.get(class.rhs).kind {
+        TreeKind::Template(template) => template,
+        _ => panic!("Box should have a Template"),
+    };
+    let constructor_tree = template.constructor;
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, constructor_tree)
+        .unwrap();
+    assert_eq!(
+        named.index.definition_of(constructor_symbol),
+        Some(SourceDefinition::Canonical {
+            source: named.source,
+            tree: constructor_tree,
+        })
+    );
+
+    let class_type_parameter = match &named.parsed.ast.get(constructor_tree).kind {
+        TreeKind::DefDef(constructor) => constructor.type_params[0],
+        _ => panic!("primary constructor should be a DefDef"),
+    };
+    let constructor_type_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, class_type_parameter)
+        .expect("constructor gets its own type-parameter identity");
+    assert_eq!(
+        named.index.definition_of(constructor_type_parameter),
+        Some(SourceDefinition::Derived {
+            source: named.source,
+            tree: class_type_parameter,
+        })
+    );
+
+    let constructor_value_parameter = match &named.parsed.ast.get(constructor_tree).kind {
+        TreeKind::DefDef(constructor) => constructor.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let field_symbol = named
+        .index
+        .symbol_at(named.source, constructor_value_parameter)
+        .expect("constructor accessor has a canonical field identity");
+    assert_eq!(
+        named.index.definition_of(field_symbol),
+        Some(SourceDefinition::Canonical {
+            source: named.source,
+            tree: constructor_value_parameter,
+        })
+    );
+    let constructor_parameter = named
+        .index
+        .derived_symbol_at(
+            constructor_symbol,
+            named.source,
+            constructor_value_parameter,
+        )
+        .expect("constructor parameter copy has a derived identity");
+    assert_eq!(
+        named.index.definition_of(constructor_parameter),
+        Some(SourceDefinition::Derived {
+            source: named.source,
+            tree: constructor_value_parameter,
+        })
+    );
+
+    let method_tree = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| match &named.parsed.ast.get(*tree).kind {
+            TreeKind::DefDef(definition) => {
+                named.store.names.resolve(definition.name.as_name().text()) == "get"
+            }
+            _ => false,
+        })
+        .expect("Box should contain get");
+    let method_symbol = named.index.symbol_at(named.source, method_tree).unwrap();
+    assert_eq!(
+        named.index.definition_of(method_symbol),
+        Some(SourceDefinition::Canonical {
+            source: named.source,
+            tree: method_tree,
+        })
+    );
+
+    let object_symbol = named.index.symbol_at(named.source, module_tree).unwrap();
+    let object_owner = named.store.symbols.get(object_symbol).owner.unwrap();
+    let module_class = named
+        .index
+        .derived_symbol_at(object_owner, named.source, module_tree)
+        .expect("source object module class is derived from its ModuleDef");
+    assert_eq!(
+        named.index.definition_of(module_class),
+        Some(SourceDefinition::Derived {
+            source: named.source,
+            tree: module_tree,
+        })
+    );
+    assert!(named.index.declaration_context_of(module_class).is_some());
+
+    let pattern_definition = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(_, node)| match &node.kind {
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PatDef(definition)) => {
+                Some(definition)
+            }
+            _ => None,
+        })
+        .expect("Utility should contain a pattern definition");
+    let pattern_bindings = source_pattern_bindings(&named, &pattern_definition.patterns);
+    assert_eq!(pattern_bindings.len(), 2);
+    for (binding_tree, _) in pattern_bindings {
+        let binding = named.index.symbol_at(named.source, binding_tree).unwrap();
+        assert_eq!(
+            named.index.definition_of(binding),
+            Some(SourceDefinition::Canonical {
+                source: named.source,
+                tree: binding_tree,
+            })
+        );
+    }
+
+    for (tree, _) in named.parsed.ast.iter() {
+        let Some(symbol) = named.index.symbol_at(named.source, tree) else {
+            continue;
+        };
+        if named.store.symbols.get(symbol).kind == dotty_core::SymbolKind::Package {
+            assert_eq!(named.index.definition_of(symbol), None);
+            continue;
+        }
+        assert_eq!(
+            named.index.definition_of(symbol),
+            Some(SourceDefinition::Canonical {
+                source: named.source,
+                tree,
+            })
+        );
+        assert!(
+            named.index.declaration_context_of(symbol).is_some(),
+            "source symbol {} should retain its declaration context",
+            symbol.index()
+        );
+    }
+}
+
+#[test]
+fn extension_prefix_copies_reverse_to_their_original_parameter_trees() {
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source(
+        "extension [A](x: A)\n  def id[B](value: B) = value\n  def discard = x",
+        302,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("parser should preserve extension methods");
+    };
+
+    for method_tree in &extension.methods {
+        let method = named.index.symbol_at(named.source, *method_tree).unwrap();
+        for parameter_tree in extension.param_clauses.iter().flatten() {
+            let parameter = named
+                .index
+                .derived_symbol_at(method, named.source, *parameter_tree)
+                .expect("each extension method gets its own prefix parameter copy");
+            assert_eq!(
+                named.index.definition_of(parameter),
+                Some(SourceDefinition::Derived {
+                    source: named.source,
+                    tree: *parameter_tree,
+                })
+            );
+            assert!(named.index.declaration_context_of(parameter).is_some());
+        }
+    }
+}
+
+#[test]
+fn synthetic_source_package_wrapper_symbols_have_no_source_provenance_or_context() {
+    let named = named_source("val answer = 42", 303);
+    let package_symbol = named
+        .index
+        .symbol_at(named.source, named.parsed.root)
+        .unwrap();
+    let package_scope = named.index.scope_of(package_symbol).unwrap();
+    let wrappers = named
+        .store
+        .scopes
+        .get(package_scope)
+        .entered_symbols()
+        .filter(|symbol| {
+            matches!(
+                named.store.symbols.get(*symbol).kind,
+                dotty_core::SymbolKind::Object | dotty_core::SymbolKind::ModuleClass
+            ) && named.store.symbols.get(*symbol).origin == dotty_core::SymbolOrigin::Synthetic
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(wrappers.len(), 2);
+    for wrapper in wrappers {
+        assert_eq!(named.index.definition_of(wrapper), None);
+        assert_eq!(named.index.declaration_context_of(wrapper), None);
+    }
+}
+
+#[test]
+fn shared_package_symbols_have_no_reverse_provenance_across_source_units() {
+    let mut store = SemanticStore::new();
+    let mut packages = Packages::new();
+    let mut shared = Vec::new();
+
+    for (source_index, source_text) in [
+        (304, "package shared\nclass First"),
+        (305, "package shared\nclass Second"),
+    ] {
+        let source = SourceId::from_index(source_index);
+        let scanner = dotty_lexer::ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Shared.scala",
+            &mut store,
+            &mut packages,
+        )
+        .expect("source unit in a shared package should be named");
+        let package = index.symbol_at(source, parsed.root).unwrap();
+        assert_eq!(index.definition_of(package), None);
+        shared.push(package);
+    }
+
+    assert_eq!(shared[0], shared[1]);
 }

@@ -573,6 +573,13 @@ mod tests {
         );
         assert_eq!(index.symbol_at(first_source, tree), Some(symbol));
         assert_eq!(index.symbol_at(attempted_source, tree), None);
+        assert_eq!(
+            index.definition_of(symbol),
+            Some(SourceDefinition::Canonical {
+                source: first_source,
+                tree,
+            })
+        );
     }
 
     #[test]
