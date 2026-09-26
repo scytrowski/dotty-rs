@@ -415,6 +415,9 @@ where
         offset = after_condition;
         loop {
             let kind = self.cursor.lookahead(offset).kind;
+            if kind == TokenKind::XmlStart {
+                return false;
+            }
             if delimiters.is_empty() {
                 if kind == TokenKind::Keyword(terminator) {
                     return true;
@@ -456,9 +459,7 @@ where
 const fn is_control_lookahead_boundary(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Newline
-            | TokenKind::Newlines
-            | TokenKind::Outdent
+        TokenKind::Outdent
             | TokenKind::Eof
             | TokenKind::Punctuation(Punctuation::Semicolon)
             | TokenKind::Keyword(
@@ -475,7 +476,6 @@ const fn is_control_lookahead_boundary(kind: TokenKind) -> bool {
                     | dotty_core::HardKeyword::Throw
                     | dotty_core::HardKeyword::Return
                     | dotty_core::HardKeyword::Match
-                    | dotty_core::HardKeyword::Case
                     | dotty_core::HardKeyword::Val
                     | dotty_core::HardKeyword::Var
                     | dotty_core::HardKeyword::Def
@@ -497,6 +497,8 @@ const fn is_control_lookahead_boundary(kind: TokenKind) -> bool {
                     | dotty_core::HardKeyword::Protected
                     | dotty_core::HardKeyword::Override
             )
+            | TokenKind::CaseClass
+            | TokenKind::CaseObject
     )
 }
 
