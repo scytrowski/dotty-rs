@@ -208,7 +208,8 @@ patterns use the same source-level `Quote` node and `SplicePattern` nodes
 simple selections such as foo.bar and foo.`bar`
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
-new with simple or qualified type names and constructor applications
+new with simple or qualified type names, constructor applications, and
+braced or indented anonymous template bodies after `new`
 simple type applications such as foo[A] and foo[A, B]
 match types with braced type cases, including wildcard cases
 opaque type aliases, including parameterized and bounded aliases

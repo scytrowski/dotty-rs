@@ -30,7 +30,8 @@ with Rust source spans must convert them to UTF-8 byte offsets first.
 
 The default fixtures cover the expression forms currently represented by the Rust
 parser: identifiers, numeric and string literals, `this`, parentheses, the
-empty tuple, tuples, simple selections and applications, `super`, `new`,
+empty tuple, tuples, simple selections and applications, `super`, `new`, and
+braced or indented anonymous template bodies after `new`,
 string interpolations with simple and braced splices,
 simple type applications, applied union/intersection types, repeated suffix
 chains, and brace blocks.

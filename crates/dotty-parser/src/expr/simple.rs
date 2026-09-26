@@ -16,11 +16,16 @@ where
     /// Parses one simple expression and all of its currently supported suffixes.
     pub(crate) fn simple_expr(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        // Constructor argument clauses belong to `new` itself. In particular,
+        // an anonymous template body is a completed `NEW` and cannot acquire
+        // another application suffix in `simple_expr_rest`.
+        let can_apply = self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::New);
         let tree = self.simple_expr_atom(mark);
-        let can_apply = !matches!(
-            self.ast.get(tree).kind,
-            TreeKind::Block(_) | TreeKind::Match(_)
-        );
+        let can_apply = can_apply
+            && !matches!(
+                self.ast.get(tree).kind,
+                TreeKind::Block(_) | TreeKind::Match(_)
+            );
 
         self.simple_expr_rest(mark, tree, can_apply)
     }
@@ -534,6 +539,11 @@ where
 
     fn parse_new(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
+        if self.optional_template_body_starts_here() {
+            let body = self.parse_optional_template_body();
+            return self.new_with_anonymous_template(mark, None, body);
+        }
+
         let type_mark = self.mark();
         let tpt = self.simple_type();
         let tpt = if self
@@ -545,21 +555,36 @@ where
             tpt
         };
         let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
-        if self
-            .cursor
-            .at(TokenKind::Punctuation(Punctuation::LeftParen))
-        {
-            new_tree
-        } else {
-            let constructor = self.constructor_select(new_tree);
+        let constructor_mark = crate::Mark {
+            start: type_mark.start,
+        };
+        let mut constructor = new_tree;
+        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            constructor = self.parse_application(constructor_mark, constructor);
+        }
+        if self.optional_template_body_starts_here() {
+            let body = self.parse_optional_template_body();
+            let parent = self.new_template_parent(constructor).or(Some(tpt));
+            self.new_with_anonymous_template(mark, parent, body)
+        } else if matches!(self.ast.get(constructor).kind, TreeKind::New(_)) {
+            let init = self.constructor_select(constructor);
             self.alloc_from(
                 mark,
                 TreeKind::Apply(Apply {
-                    function: constructor,
+                    function: init,
                     args: Vec::new(),
                     kind: ApplyKind::Regular,
                 }),
             )
+        } else {
+            if let Some(position) = self.ast.get(constructor).position {
+                let end = position.span().range().end();
+                let range =
+                    TextRange::new(mark.start, end).expect("new expression span is ordered");
+                self.ast.get_mut(constructor).position =
+                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            }
+            constructor
         }
     }
 
@@ -648,11 +673,16 @@ where
                 if is_constructor_application {
                     can_apply = false;
                 }
+            } else if self.optional_template_body_starts_here()
+                && let Some(parent) = self.new_template_parent(qualifier)
+            {
+                let body = self.parse_optional_template_body();
+                qualifier = self.new_with_anonymous_template(mark, Some(parent), body);
+                can_apply = false;
             } else if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBrace))
                 && can_apply
-                && !self.is_new_without_template_support(qualifier)
             {
                 let argument = self.parse_block(self.mark());
                 qualifier = self.alloc_from(
@@ -678,14 +708,66 @@ where
         qualifier
     }
 
-    fn is_new_without_template_support(&self, tree: TreeId<Untyped>) -> bool {
-        let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
-            return matches!(self.ast.get(tree).kind, TreeKind::New(_));
-        };
-        let TreeKind::Select(selection) = &self.ast.get(application.function).kind else {
-            return false;
-        };
-        matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_))
+    fn new_template_parent(&mut self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
+        match &self.ast.get(tree).kind {
+            TreeKind::New(new) => Some(new.tpt),
+            TreeKind::Apply(application) => {
+                let function = application.function;
+                let constructor_select = match &self.ast.get(function).kind {
+                    TreeKind::Select(selection)
+                        if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
+                    {
+                        Some(function)
+                    }
+                    _ => self.new_constructor_select_in_application(function),
+                }?;
+
+                if let (Some(function_position), Some(parent_position)) = (
+                    self.ast.get(constructor_select).position,
+                    self.ast.get(tree).position,
+                ) {
+                    let start = function_position.span().range().start();
+                    let end = parent_position.span().range().end();
+                    let range = TextRange::new(start, end).expect("constructor span is ordered");
+                    self.ast.get_mut(tree).position =
+                        Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+                }
+                Some(tree)
+            }
+            _ => None,
+        }
+    }
+
+    fn new_constructor_select_in_application(
+        &self,
+        mut tree: TreeId<Untyped>,
+    ) -> Option<TreeId<Untyped>> {
+        loop {
+            let TreeKind::Apply(application) = &self.ast.get(tree).kind else {
+                return None;
+            };
+            let function = application.function;
+            match &self.ast.get(function).kind {
+                TreeKind::Select(selection)
+                    if matches!(self.ast.get(selection.qualifier).kind, TreeKind::New(_)) =>
+                {
+                    return Some(function);
+                }
+                TreeKind::Apply(_) => tree = function,
+                _ => return None,
+            }
+        }
+    }
+
+    fn new_with_anonymous_template(
+        &mut self,
+        mark: crate::Mark,
+        parent: Option<TreeId<Untyped>>,
+        body: crate::templates::TemplateBodyResult,
+    ) -> TreeId<Untyped> {
+        let template = self.allocate_anonymous_new_template(mark.start, parent, body);
+        self.ast.get_mut(template).position = Some(self.span_from(mark));
+        self.alloc_from(mark, TreeKind::New(New { tpt: template }))
     }
 
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
