@@ -1066,6 +1066,24 @@ where
         }
     }
 
+    pub(crate) fn optional_template_body_starts_here(&mut self) -> bool {
+        let mut lookahead = 0;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::ColonFollow
+                | TokenKind::ColonOp
+                | TokenKind::ColonEol
+                | TokenKind::Indent
+                | TokenKind::Punctuation(Punctuation::LeftBrace)
+        )
+    }
+
     fn consume_newlines_before_template_body(&mut self) {
         let mut count = 0;
         while matches!(

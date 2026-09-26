@@ -314,6 +314,43 @@ fn parses_members_in_anonymous_template_bodies_after_new() {
 }
 
 #[test]
+fn parses_an_indented_anonymous_template_after_new() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new Foo:\n  def value = 1\n",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::ColonEol, 7, 8),
+            token(TokenKind::Indent, 11, 11),
+            token(TokenKind::Keyword(HardKeyword::Def), 11, 14),
+            token(TokenKind::Identifier, 15, 20),
+            token(TokenKind::Operator, 21, 22),
+            token(TokenKind::IntegerLiteral, 23, 24),
+            token(TokenKind::Newline, 24, 25),
+            token(TokenKind::Outdent, 25, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a new expression");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an indented anonymous template body");
+    };
+    assert_eq!(template.body.len(), 1);
+    assert!(matches!(
+        parser.ast().get(template.body[0]).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_a_template_after_a_constructor_application() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

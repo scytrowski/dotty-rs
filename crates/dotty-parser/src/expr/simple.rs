@@ -8,7 +8,6 @@ use dotty_core::{
 
 use crate::Parser;
 use crate::statements::{ParsedStatement, StatementSequenceBoundary};
-use crate::templates::TemplateBody;
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -546,11 +545,11 @@ where
             tpt
         };
         let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
-        if matches!(
-            self.current().kind,
-            TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
-        ) {
+        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
             new_tree
+        } else if self.optional_template_body_starts_here() {
+            let body = self.parse_optional_template_body();
+            self.new_with_anonymous_template(mark, tpt, body)
         } else {
             let constructor = self.constructor_select(new_tree);
             self.alloc_from(
@@ -649,15 +648,11 @@ where
                 if is_constructor_application {
                     can_apply = false;
                 }
-            } else if self
-                .cursor
-                .at(TokenKind::Punctuation(Punctuation::LeftBrace))
+            } else if self.optional_template_body_starts_here()
                 && let Some(parent) = self.new_template_parent(qualifier)
             {
-                let body = self.parse_template_body(TemplateBody::Braced);
-                let template = self.allocate_anonymous_new_template(mark.start, parent, body);
-                self.ast.get_mut(template).position = Some(self.span_from(mark));
-                qualifier = self.alloc_from(mark, TreeKind::New(New { tpt: template }));
+                let body = self.parse_optional_template_body();
+                qualifier = self.new_with_anonymous_template(mark, parent, body);
                 can_apply = false;
             } else if self
                 .cursor
@@ -713,6 +708,17 @@ where
             }
             _ => None,
         }
+    }
+
+    fn new_with_anonymous_template(
+        &mut self,
+        mark: crate::Mark,
+        parent: TreeId<Untyped>,
+        body: crate::templates::TemplateBodyResult,
+    ) -> TreeId<Untyped> {
+        let template = self.allocate_anonymous_new_template(mark.start, parent, body);
+        self.ast.get_mut(template).position = Some(self.span_from(mark));
+        self.alloc_from(mark, TreeKind::New(New { tpt: template }))
     }
 
     fn parse_parens_or_tuple(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
