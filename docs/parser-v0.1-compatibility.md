@@ -153,3 +153,51 @@ failures. This is an aggregate compatibility comparison, not proof that every
 grammar change is correct: `ExpectedType` diagnostic occurrences increased by
 106 and merit future targeted triage. The exact Scala/Rust fixture comparison
 remains separately enforced by `tools/scala-parser-oracle/compare.sh`.
+
+## Corpus rerun after PR #288
+
+Issue #289 reran the same report at dotty-rs commit `5c25649` (main after
+PR #288), against the unchanged Scala 3.9.0 revision
+`777528f19a58e794c9954a42f433373472ec57f8` and the same sorted 1,236-file
+`library/src` + `compiler/src` manifest. The machine-readable report is
+[`parser-post-issue-289-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-289-scala3-3.9.0.json).
+
+| Measure | After #247 (`222dd59`) | After #288 (`5c25649`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 455 (36.81%) | 550 (44.50%) | +95 (+7.69 pp) |
+| Recoverable diagnostics | 781 (63.19%) | 686 (55.50%) | -95 (-7.69 pp) |
+| Hard parser failures | 0 | 0 | 0 |
+| Panics | 0 | 0 | 0 |
+| Hangs | 0 | 0 | 0 |
+| Scanner diagnostics | 17 | 17 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #247 | After #288 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 35,103 | 19,183 | -15,920 |
+| `ExpectedPattern` | 7 | 7 | 0 |
+| `ExpectedToken` | 7,858 | 3,749 | -4,109 |
+| `ExpectedType` | 2,529 | 1,553 | -976 |
+| `UnexpectedToken` | 18,294 | 12,268 | -6,026 |
+| `UnsupportedSyntax` | 4,189 | 7,404 | +3,215 |
+| **Total** | **67,980** | **44,164** | **-23,816 (-35.0%)** |
+
+Three named first-failure buckets disappeared: Scala 2 wildcard-import `_`
+(61 files), legacy `implicit` parameter clauses (31), and unsupported package
+objects (19). The clean-parse increase is 95 rather than 111 because first
+failure buckets classify only the earliest diagnostic in each file; accepting
+that construct can expose a later unsupported construct. Compound template
+self types (7), interleaved type/term clauses (1), and unsupported enum-case
+syntax (5) are unchanged.
+
+The generic first-failure distribution is not uniformly lower: `ExpectedExpression`
+rose from 291 to 310 files, `UnexpectedToken` from 136 to 160, and
+`ExpectedPattern` from 0 to 1; `ExpectedToken` fell 94 to 90 and `ExpectedType`
+fell 136 to 112. These are category counts, not per-file transition data, and
+must not be read as independent syntax regressions. Likewise, the total
+`UnsupportedSyntax` occurrence count increased while total diagnostic
+occurrences fell; occurrence histograms are sensitive to how far parsing
+progresses and are not a standalone coverage score. The stable file outcomes
+show a net 95-file improvement with zero hard failures, panics, or hangs; the
+new generic examples remain useful targets for future corpus triage.

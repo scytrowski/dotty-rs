@@ -86,6 +86,17 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-252-scala3-3.9.0.json
 ```
 
+`parser-post-issue-289-scala3-3.9.0.json` reruns the same parser-only
+measurement at dotty-rs commit `5c25649` (after PR #288), using the same pinned
+Scala revision and 1,236-file manifest. Its before/after comparison is recorded
+in [`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-289-scala3-3.9.0.json
+```
+
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact
 Scala/Rust differential gate for the checked-in fixture corpus. This report is
 the larger source-compatibility measurement and does not weaken that gate.
