@@ -1115,7 +1115,7 @@ where
     /// `TypeTree` placeholder because `RefinedTypeTree` deliberately keeps a
     /// non-optional parent across AST phases. It remains a syntax-only
     /// placeholder; no refinement scope or semantic owner is created here.
-    fn parse_refined_type(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_refined_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let mut tree = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
             self.synthetic_type_tree_at(mark.start())

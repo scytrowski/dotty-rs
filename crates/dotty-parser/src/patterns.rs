@@ -97,7 +97,7 @@ where
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start);
         self.advance();
-        let tpt = self.simple_type();
+        let tpt = self.parse_refined_type();
         let range = TextRange::new(start, self.last_real_token_end)
             .expect("typed pattern span endpoints are ordered");
         self.alloc(
@@ -649,8 +649,161 @@ fn can_start_simple_pattern_at<S: TokenSource>(
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Alternative, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode};
+    use dotty_core::ast::{
+        Alternative, Annotated, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode,
+    };
     use dotty_core::{NameInterner, Punctuation, TextRange};
+
+    fn assert_unchecked_type(
+        tree: &dotty_core::ast::AstArena<Untyped>,
+        tpt: TreeId<Untyped>,
+        names: &NameInterner,
+    ) {
+        let TreeKind::Annotated(Annotated { expr, annotation }) = tree.get(tpt).kind else {
+            panic!("expected the type pattern's type to be Annotated");
+        };
+        let TreeKind::Apply(application) = &tree.get(annotation).kind else {
+            panic!("expected @unchecked to be an annotation application");
+        };
+        let TreeKind::Select(constructor) = tree.get(application.function).kind else {
+            panic!("expected the annotation constructor selection");
+        };
+        let TreeKind::New(new) = tree.get(constructor.qualifier).kind else {
+            panic!("expected a New node for the annotation");
+        };
+        let TreeKind::Ident(annotation_type) = tree.get(new.tpt).kind else {
+            panic!("expected the annotation type name");
+        };
+        assert_eq!(names.resolve(annotation_type.name.text()), "unchecked");
+        assert!(matches!(
+            tree.get(expr).kind,
+            TreeKind::Ident(_) | TreeKind::Select(_)
+        ));
+    }
+
+    #[test]
+    fn parses_unchecked_annotation_on_a_bound_variable_type_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x: T @unchecked",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Identifier, 6, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Typed(typed) = result.ast.get(result.root).kind else {
+            panic!("expected a typed pattern");
+        };
+        assert!(matches!(
+            result.ast.get(typed.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_unchecked_type(&result.ast, typed.tpt, &names);
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_unchecked_annotation_on_a_wildcard_type_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "_: T @unchecked",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Identifier, 6, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Typed(typed) = result.ast.get(result.root).kind else {
+            panic!("expected a typed wildcard pattern");
+        };
+        let TreeKind::Ident(wildcard) = result.ast.get(typed.expr).kind else {
+            panic!("expected the wildcard identifier");
+        };
+        assert_eq!(names.resolve(wildcard.name.text()), "_");
+        assert_unchecked_type(&result.ast, typed.tpt, &names);
+    }
+
+    #[test]
+    fn parses_unchecked_annotation_on_a_qualified_type_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x: pkg.T @unchecked",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 1, 2),
+                token(TokenKind::Identifier, 3, 6),
+                token(TokenKind::Punctuation(Punctuation::Dot), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 10, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Typed(typed) = result.ast.get(result.root).kind else {
+            panic!("expected a typed pattern");
+        };
+        let TreeKind::Annotated(annotated) = result.ast.get(typed.tpt).kind else {
+            panic!("expected an annotated type");
+        };
+        let TreeKind::Select(selection) = result.ast.get(annotated.expr).kind else {
+            panic!("expected the qualified type reference");
+        };
+        assert_eq!(names.resolve(selection.name.text()), "T");
+        assert_unchecked_type(&result.ast, typed.tpt, &names);
+    }
+
+    #[test]
+    fn recovers_from_a_missing_unchecked_annotation_type_at_pattern_end() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x: T @",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::ColonOp, 1, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Typed(_)
+        ));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected an annotation type after `@`"
+        );
+    }
 
     #[test]
     fn quoted_pattern_can_start_an_alternative_after_a_newline() {
