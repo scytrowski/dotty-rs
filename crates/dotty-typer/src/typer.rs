@@ -134,6 +134,12 @@ pub struct SourceTyper<'a> {
     type_index: SourceTypeIndex,
 }
 
+#[derive(Clone, Copy)]
+struct SourceTreeLocation {
+    tree_index: u32,
+    position: Option<SourceSpan>,
+}
+
 impl<'a> SourceTyper<'a> {
     /// Creates a driver using caller-owned, already-bootstrapped definitions.
     pub fn new(
@@ -448,9 +454,11 @@ impl<'a> SourceTyper<'a> {
                     context_id,
                     source_context.parent,
                     name,
-                    tree_index,
                     true,
-                    position,
+                    SourceTreeLocation {
+                        tree_index,
+                        position,
+                    },
                 )?
             {
                 return Ok(Some(symbol));
@@ -466,9 +474,8 @@ impl<'a> SourceTyper<'a> {
         context_id: SourceContextId,
         parent_context: Option<SourceContextId>,
         wanted: dotty_core::Name,
-        tree_index: u32,
         type_only: bool,
-        position: Option<SourceSpan>,
+        location: SourceTreeLocation,
     ) -> Result<Option<SymbolId>, TyperError> {
         let Some(node) = self.arena.try_get(import_tree) else {
             return Err(TyperError::TreeOutsideArena {
@@ -524,7 +531,7 @@ impl<'a> SourceTyper<'a> {
             import.expr,
             qualifier_context,
             import_tree.index(),
-            position,
+            location.position,
         )?
         else {
             return Err(TyperError::ImportQualifierNotFound {
@@ -546,7 +553,7 @@ impl<'a> SourceTyper<'a> {
             } else {
                 let name = if is_wildcard { wanted } else { imported };
                 if let Some(symbol) =
-                    self.unique_scoped_symbol(scope, name, tree_index, position)?
+                    self.unique_scoped_symbol(scope, name, location.tree_index, location.position)?
                 {
                     matches.push(symbol);
                 }
@@ -555,9 +562,9 @@ impl<'a> SourceTyper<'a> {
         matches.sort_by_key(|symbol| symbol.index());
         matches.dedup();
         if type_only {
-            self.unique_type_candidate(&matches, wanted, tree_index, position)
+            self.unique_type_candidate(&matches, wanted, location.tree_index, location.position)
         } else {
-            self.unique_symbol_candidate(&matches, wanted, tree_index, position)
+            self.unique_symbol_candidate(&matches, wanted, location.tree_index, location.position)
         }
     }
 
@@ -636,9 +643,11 @@ impl<'a> SourceTyper<'a> {
                     context_id,
                     source_context.parent,
                     name,
-                    import_tree_index,
                     false,
-                    position,
+                    SourceTreeLocation {
+                        tree_index: import_tree_index,
+                        position,
+                    },
                 )?
             {
                 return Ok(Some(symbol));
