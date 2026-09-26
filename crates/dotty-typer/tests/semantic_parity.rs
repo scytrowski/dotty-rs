@@ -33,6 +33,10 @@ const METHODS_SOURCE: &str =
     include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.scala");
 const METHODS_TASTY: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.tasty");
+const CONSTRUCTORS_SOURCE: &str =
+    include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Constructors.scala");
+const CTOR_PLAIN_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/CtorPlain.tasty");
 
 fn symbol_key(store: &SemanticStore, symbol: SymbolId) -> String {
     let entry = store.symbols.get(symbol);
@@ -386,16 +390,45 @@ fn normalized_class_info(
         })
         .collect::<Vec<_>>();
     declarations.sort();
+    let self_type = match info.self_type {
+        Some(ty) if is_default_module_self(store, info.class, ty) => "ImplicitModuleSelf".into(),
+        Some(ty) => render_type(store, ty, binders, active),
+        None if store.symbols.get(info.class).kind == SymbolKind::ModuleClass => {
+            "ImplicitModuleSelf".into()
+        }
+        None => "None".into(),
+    };
     format!(
         "ClassInfo(class={}, prefix={}, parents=[{}], members=[{}], self={})",
         normalized_symbol_header(store, info.class),
         render_type(store, info.prefix, binders, active),
         parents,
         declarations.join(", "),
-        info.self_type
-            .map(|ty| render_type(store, ty, binders, active))
-            .unwrap_or_else(|| "None".to_owned())
+        self_type
     )
+}
+
+fn is_default_module_self(store: &SemanticStore, class: SymbolId, ty: TypeId) -> bool {
+    let class_entry = store.symbols.get(class);
+    if class_entry.kind != SymbolKind::ModuleClass {
+        return false;
+    }
+    let expected_name = store
+        .names
+        .resolve(class_entry.name.text())
+        .trim_end_matches('$')
+        .to_owned();
+    let Type::TermRef {
+        target: dotty_core::types::TermRefTarget::Symbol(object),
+        ..
+    } = store.types.get(ty)
+    else {
+        return false;
+    };
+    let object_entry = store.symbols.get(*object);
+    object_entry.kind == SymbolKind::Object
+        && object_entry.owner == class_entry.owner
+        && store.names.resolve(object_entry.name.text()) == expected_name
 }
 
 fn normalized_member_infos(store: &SemanticStore, info: &ClassInfo, name: &str) -> Vec<String> {
@@ -416,6 +449,40 @@ fn normalized_member_infos(store: &SemanticStore, info: &ClassInfo, name: &str) 
         .collect::<Vec<_>>();
     members.sort();
     members
+}
+
+fn assert_semantic_parity(path: &str, source: &str, tasty: &str) {
+    if source == tasty {
+        return;
+    }
+
+    let source_chars = source.chars().collect::<Vec<_>>();
+    let tasty_chars = tasty.chars().collect::<Vec<_>>();
+    let first_difference = source_chars
+        .iter()
+        .zip(&tasty_chars)
+        .position(|(source, tasty)| source != tasty)
+        .unwrap_or(source_chars.len().min(tasty_chars.len()));
+    let component = |snapshot: &[char]| {
+        let is_boundary = |ch: char| matches!(ch, ',' | '[' | ']' | '(' | ')');
+        let start = snapshot[..first_difference.min(snapshot.len())]
+            .iter()
+            .rposition(|ch| is_boundary(*ch))
+            .map_or(0, |index| index + 1);
+        let end = snapshot[first_difference.min(snapshot.len())..]
+            .iter()
+            .position(|ch| is_boundary(*ch))
+            .map_or(snapshot.len(), |index| {
+                first_difference.min(snapshot.len()) + index
+            });
+        snapshot[start..end].iter().collect::<String>()
+    };
+
+    panic!(
+        "semantic mismatch at {path}; first differing component near character {first_difference}:\n  source: {:?}\n  TASTy:  {:?}",
+        component(&source_chars),
+        component(&tasty_chars),
+    );
 }
 
 #[cfg(test)]
@@ -738,9 +805,10 @@ mod tests {
             },
             method_name,
         );
-        assert_eq!(
-            source_members, tasty_members,
-            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.Methods.{name}"
+        assert_semantic_parity(
+            &format!("me.cytrowski.tastyfixtures.semantic.Methods.{name}"),
+            &source_members.join("\n"),
+            &tasty_members.join("\n"),
         );
     }
 
@@ -751,10 +819,10 @@ mod tests {
         let (tasty_store, tasty_info) =
             tasty_type_info("InfoParent", INFO_PARENT_TASTY, SymbolKind::Class);
 
-        assert_eq!(
-            normalized_type(&source_store, source_info),
-            normalized_type(&tasty_store, tasty_info),
-            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoParent"
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.InfoParent",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
         );
     }
 
@@ -764,10 +832,10 @@ mod tests {
         let (tasty_store, tasty_info) =
             tasty_type_info("InfoBase", INFO_BASE_TASTY, SymbolKind::Trait);
 
-        assert_eq!(
-            normalized_type(&source_store, source_info),
-            normalized_type(&tasty_store, tasty_info),
-            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoBase"
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.InfoBase",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
         );
     }
 
@@ -798,10 +866,10 @@ mod tests {
             &["value", "Member", "method"],
         );
 
-        assert_eq!(
-            normalized_type(&source_store, source_info),
-            normalized_type(&tasty_store, tasty_info),
-            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoChild"
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.InfoChild",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
         );
     }
 
@@ -817,10 +885,73 @@ mod tests {
             &[],
         );
 
-        assert_eq!(
-            normalized_type(&source_store, source_info),
-            normalized_type(&tasty_store, tasty_info),
-            "semantic mismatch for me.cytrowski.tastyfixtures.semantic.InfoHolder.Nested"
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.InfoHolder.Nested",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
+        );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_module_class_info_match() {
+        let source_text = "package me.cytrowski.tastyfixtures.semantic\nobject InfoHolder:\n  class Nested extends InfoParent[Int]\n  object Inner:\n    val deep: Int = 0";
+        let (source_store, source_info) = source_type_info_from_source(
+            source_text,
+            "InfoHolder",
+            SymbolKind::ModuleClass,
+            &["Inner"],
+        );
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "InfoHolder",
+            &[INFO_PARENT_TASTY, INFO_HOLDER_TASTY],
+            SymbolKind::ModuleClass,
+            &[],
+        );
+
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.InfoHolder$",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
+        );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_abstract_type_member_info_match() {
+        let source_text = "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  trait Box:\n    type Out";
+        let (source_store, source_info) =
+            source_type_info_from_source(&source_text, "Box", SymbolKind::Trait, &["Out"]);
+        let (tasty_store, tasty_info) =
+            tasty_type_info_with_units("Box", &[METHODS_TASTY], SymbolKind::Trait, &["Out"]);
+
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.Methods.Box",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
+        );
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_constructor_class_info_match() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\n{}",
+            CONSTRUCTORS_SOURCE
+                .lines()
+                .find(|line| line.starts_with("class CtorPlain"))
+                .unwrap()
+        );
+        let (source_store, source_info) =
+            source_type_info_from_source(&source_text, "CtorPlain", SymbolKind::Class, &["<init>"]);
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "CtorPlain",
+            &[CTOR_PLAIN_TASTY],
+            SymbolKind::Class,
+            &["<init>"],
+        );
+
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.CtorPlain",
+            &normalized_type(&source_store, source_info),
+            &normalized_type(&tasty_store, tasty_info),
         );
     }
 
@@ -968,6 +1099,16 @@ mod tests {
         assert_ne!(
             normalized_type(&left_store, left),
             normalized_type(&right_store, right)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "first differing component")]
+    fn parity_diagnostic_identifies_the_changed_nested_component() {
+        assert_semantic_parity(
+            "pkg.Owner.method",
+            "Method([Int]) -> String",
+            "Method([Long]) -> String",
         );
     }
 
