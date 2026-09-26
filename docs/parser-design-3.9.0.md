@@ -205,7 +205,10 @@ true, false, null, this
 (expr), (), and (a, b, ...)
 `'{ expr }` and `'[Type]` quotes with braced expression splices; quoted
 patterns use the same source-level `Quote` node and `SplicePattern` nodes
-simple selections such as foo.bar and foo.`bar`
+simple selections such as foo.bar, foo.`bar`, foo.##, and foo.+:
+contextual identifier selectors remain identifiers; `.match` starts a match
+clause rather than forming a `Select`, and reserved operator tokens such as
+bare `=` are not accepted as selector names
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
 new with simple or qualified type names, constructor applications, and
