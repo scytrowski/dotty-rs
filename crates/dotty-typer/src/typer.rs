@@ -1768,6 +1768,44 @@ mod tests {
     }
 
     #[test]
+    fn nested_parenthesized_type_projects_and_caches_each_layer() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("val x: ((Int)) = 1");
+        let (symbol, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut parenthesized = vec![type_tree];
+        let mut inner = type_tree;
+        while let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(parens)) =
+            parsed.ast.get(inner).kind
+        {
+            inner = parens.inner;
+            if matches!(
+                parsed.ast.get(inner).kind,
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(_))
+            ) {
+                parenthesized.push(inner);
+            }
+        }
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(symbol).unwrap();
+
+        assert_eq!(projected, definitions.int);
+        for tree in parenthesized {
+            assert_eq!(
+                typer.source_type_index().type_at(source, tree),
+                Some(projected)
+            );
+        }
+    }
+
+    #[test]
     fn applied_type_projects_constructor_and_arguments_in_source_order() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class F[A, B]; class A; class B; val x: F[A, B] = 1");
@@ -2360,6 +2398,40 @@ mod tests {
     }
 
     #[test]
+    fn imported_type_alias_resolves_without_completing_the_alias() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object Lib { type Alias = Int }; import Lib.Alias; val x: Alias = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let alias = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Alias" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(store.symbols.get(alias).kind, SymbolKind::TypeAlias);
+        assert_eq!(*store.symbols.info(alias), SymbolInfo::Missing);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), alias);
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+    }
+
+    #[test]
     fn renamed_import_does_not_expose_the_original_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }; package app { import lib.{Imported as Alias}; val alias: Alias = 1; val original: Imported = 1 }",
@@ -2401,6 +2473,44 @@ mod tests {
             }) if typer.store().names.resolve(name.text()) == "Imported"
                 && tree_index == original_tpt.index()
                 && position == original_position
+        ));
+    }
+
+    #[test]
+    fn renamed_selector_hides_its_original_from_the_same_wildcard_import() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class Imported }; package app { import lib.{Imported as Alias, *}; val alias: Alias = 1; val original: Imported = 1 }",
+        );
+        let (alias, _) = val_symbol(&parsed, &store, &index, source, "alias");
+        let (original, original_tpt) = val_symbol(&parsed, &store, &index, source, "original");
+        let imported_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Imported" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(alias).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), imported_type);
+        assert!(matches!(
+            typer.complete_symbol(original),
+            Err(TyperError::TypeNameNotFound { tree_index, .. })
+                if tree_index == original_tpt.index()
         ));
     }
 

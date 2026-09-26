@@ -10,3 +10,5 @@ dotty-namer = { path = "../dotty-namer" }
 [dev-dependencies]
 dotty-lexer = { path = "../dotty-lexer" }
 dotty-parser = { path = "../dotty-parser" }
+dotty-tasty = { path = "../dotty-tasty" }
+dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
