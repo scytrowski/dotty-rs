@@ -337,6 +337,12 @@ impl<'a> SourceTyper<'a> {
     }
 
     /// Completes a source declaration, rolling back this call's mutations on failure.
+    ///
+    /// Source classes, traits, and module classes publish [`Type::ClassInfo`]
+    /// using the declaration scope allocated by the namer. Class and module
+    /// classes receive the canonical `java.lang.Object` parent when no real
+    /// class parent is present. Scala 3.9 TASTy also records `Object` as the
+    /// parent of a trait with no explicit parent.
     pub fn complete_symbol(&mut self, symbol: SymbolId) -> Result<TypeId, TyperError> {
         self.run_atomic(|typer, info_journal| {
             if !typer.store.symbols.contains(symbol) {
@@ -672,6 +678,14 @@ impl<'a> SourceTyper<'a> {
                     kind,
                 });
             }
+            if self.store.symbols.get(parameter).owner != Some(symbol) {
+                return Err(TyperError::MalformedSourceAst {
+                    source: self.source,
+                    tree_index: parameter_tree.index(),
+                    symbol,
+                    kind,
+                });
+            }
             if let Some(context) = self.index.declaration_context_of(parameter) {
                 type_context = context;
             }
@@ -682,14 +696,12 @@ impl<'a> SourceTyper<'a> {
         for parent in &template.parents {
             parents.push(self.project_parent_type(*parent, type_context, 0)?);
         }
-        if kind != SymbolKind::Trait {
-            let first_parent_is_trait = parents
-                .first()
-                .and_then(|parent| self.parent_type_symbol(*parent))
-                .is_some_and(|parent| self.store.symbols.get(parent).kind == SymbolKind::Trait);
-            if parents.is_empty() || first_parent_is_trait {
-                parents.insert(0, self.definitions.object_type);
-            }
+        let first_parent_is_trait = parents
+            .first()
+            .and_then(|parent| self.parent_type_symbol(*parent))
+            .is_some_and(|parent| self.store.symbols.get(parent).kind == SymbolKind::Trait);
+        if parents.is_empty() || first_parent_is_trait {
+            parents.insert(0, self.definitions.object_type);
         }
 
         let self_type = match template.self_val {
@@ -755,6 +767,9 @@ impl<'a> SourceTyper<'a> {
                 self.project_parent_type(application.function, context, depth + 1)
             }
             TreeKind::Block(block) => self.project_parent_type(block.expr, context, depth + 1),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.project_parent_type(parens.inner, context, depth + 1)
+            }
             TreeKind::New(new) => self.type_of_tpt_inner(new.tpt, context),
             TreeKind::TypeApply(application) => {
                 let tycon = self.project_parent_type(application.function, context, depth + 1)?;
@@ -2982,10 +2997,10 @@ mod tests {
     }
 
     #[test]
-    fn trait_without_source_parent_matches_scala_390_tasty_oracle() {
+    fn trait_without_source_parent_gets_scala_390_object_parent() {
         // The Scala 3.9.0 ClassInfos.scala oracle fixture declares
-        // `trait InfoBase[A]` without a parent; its TASTy ClassInfo has no
-        // parent entries. Source completion preserves that observed shape.
+        // `trait InfoBase[A]` without a parent; its TASTy ClassInfo has one
+        // parent entry, java.lang.Object. Source completion preserves it.
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("trait T[A]");
         let trait_symbol = class_symbol(&parsed, &store, &index, source, "T");
@@ -3003,7 +3018,297 @@ mod tests {
         let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
             panic!("expected ClassInfo");
         };
-        assert!(info.parents.is_empty());
+        assert_eq!(info.parents, vec![definitions.object_type]);
+    }
+
+    #[test]
+    fn class_completion_leaves_ordinary_members_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val field: Int = 1; def method: Int = 1 }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let field = val_symbol(&parsed, &store, &index, source, "field").0;
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(class).unwrap();
+
+        assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn source_object_module_class_uses_its_template_parents() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait T\nobject O extends T");
+        let trait_symbol = class_symbol(&parsed, &store, &index, source, "T");
+        let (object_tree, object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                    if store.names.resolve(module.name.as_name().text()) == "O" =>
+                {
+                    Some((tree, index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let module_class = index
+            .derived_symbol_at(
+                store.symbols.get(object).owner.unwrap(),
+                source,
+                object_tree,
+            )
+            .unwrap();
+        let module_template = match &parsed.ast.get(object_tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => module.template,
+            _ => unreachable!(),
+        };
+        let scope = index.scope_of(module_class).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(module_class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ModuleClass ClassInfo");
+        };
+        assert_eq!(info.class, module_class);
+        assert_eq!(info.declarations, scope);
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(info.parents[0], definitions.object_type);
+        assert_eq!(type_symbol(typer.store(), info.parents[1]), trait_symbol);
+        assert_eq!(*typer.store().symbols.info(object), SymbolInfo::Missing);
+        assert!(matches!(
+            parsed.ast.get(module_template).kind,
+            TreeKind::Template(_)
+        ));
+    }
+
+    #[test]
+    fn failed_class_parent_projection_rolls_back_header_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A] extends MissingParent");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "A"
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let parent_name = Name::new(store.names.intern("MissingParent"), Namespace::Type);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let error = typer.complete_symbol(class).unwrap_err();
+
+        assert!(matches!(
+            error,
+            TyperError::TypeNameNotFound { name, .. } if name == parent_name
+        ));
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn failed_self_type_projection_leaves_class_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C:\n  self: MissingSelf =>\n");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let self_name = Name::new(store.names.intern("MissingSelf"), Namespace::Type);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let error = typer.complete_symbol(class).unwrap_err();
+
+        assert!(matches!(
+            error,
+            TyperError::TypeNameNotFound { name, .. } if name == self_name
+        ));
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn repeated_class_completion_reuses_its_published_info() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.complete_symbol(class).unwrap();
+        let second = typer.complete_symbol(class).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn class_completion_rejects_non_class_existing_info() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let malformed = store.types.alloc(Type::NoType);
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(malformed));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == class && info == malformed
+        ));
+    }
+
+    #[test]
+    fn class_completion_rejects_existing_info_for_another_class() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C; class Other");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let scope = index.scope_of(class).unwrap();
+        let malformed = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: other,
+            parents: vec![definitions.object_type],
+            declarations: scope,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(malformed));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == class && info == malformed
+        ));
+    }
+
+    #[test]
+    fn class_completion_rejects_existing_info_with_noncanonical_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let scope = index.scope_of(class).unwrap();
+        let malformed = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.object_type,
+            class,
+            parents: vec![definitions.object_type],
+            declarations: scope,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(malformed));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == class && info == malformed
+        ));
+    }
+
+    #[test]
+    fn class_completion_rejects_existing_info_with_another_declaration_scope() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let malformed_scope = store.scopes.alloc(dotty_core::Scope::new(Some(class)));
+        let malformed = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: vec![definitions.object_type],
+            declarations: malformed_scope,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(malformed));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == class && info == malformed
+        ));
     }
 
     #[test]
