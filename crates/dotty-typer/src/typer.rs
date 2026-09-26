@@ -204,13 +204,16 @@ impl<'a> SourceTyper<'a> {
                 SymbolKind::TypeParameter
                 | SymbolKind::TypeAlias
                 | SymbolKind::Class
-                | SymbolKind::Trait
-                | SymbolKind::ModuleClass,
+                | SymbolKind::Trait,
                 TreeKind::TypeDef(_),
             ) => None,
-            // An object term is not a module class, even though both may share
-            // the same source `TypeDef` provenance.
-            (SymbolKind::Object, TreeKind::TypeDef(_)) => None,
+            // Namer records both object term and derived module class against
+            // the original parser-only `ModuleDef`; keep their semantic
+            // dispatch distinct even though their source tree is shared.
+            (
+                SymbolKind::Object | SymbolKind::ModuleClass,
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(_)),
+            ) => None,
             _ => {
                 return Err(TyperError::SymbolSourceKindMismatch {
                     source,
@@ -648,6 +651,52 @@ mod tests {
             typer.source_type_index().type_at(source, value_tpt),
             Some(value_type)
         );
+    }
+
+    #[test]
+    fn object_term_and_derived_module_class_keep_distinct_dispatch() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("object O");
+        let (tree, object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(
+                    node.kind,
+                    TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(_))
+                )
+                .then(|| (tree, index.symbol_at(source, tree).unwrap()))
+            })
+            .unwrap();
+        let owner = store.symbols.get(object).owner.unwrap();
+        let module_class = index.derived_symbol_at(owner, source, tree).unwrap();
+        assert_eq!(store.symbols.get(object).kind, SymbolKind::Object);
+        assert_eq!(
+            store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(object),
+            Err(TyperError::UnsupportedSymbolCompletion {
+                kind: SymbolKind::Object,
+                ..
+            })
+        ));
+        assert!(matches!(
+            typer.complete_symbol(module_class),
+            Err(TyperError::UnsupportedSymbolCompletion {
+                kind: SymbolKind::ModuleClass,
+                ..
+            })
+        ));
     }
 
     #[test]
