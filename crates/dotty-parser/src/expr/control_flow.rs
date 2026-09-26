@@ -110,8 +110,9 @@ where
     }
 
     pub(super) fn parse_try_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let body_feedback = self.observe_indented_body();
         self.advance();
-        let expr = self.parse_try_body();
+        let expr = self.parse_try_body(body_feedback);
 
         let handler = if self.accept_layout_keyword(dotty_core::HardKeyword::Catch) {
             if self.catch_starts_case_handler() {
@@ -144,7 +145,7 @@ where
         )
     }
 
-    fn parse_try_body(&mut self) -> TreeId<Untyped> {
+    fn parse_try_body(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
         let mut lookahead = 0;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -155,7 +156,11 @@ where
 
         if self.cursor.lookahead(lookahead).kind == TokenKind::Indent {
             self.consume_control_newlines();
-            self.parse_indented_block()
+            if feedback_opened {
+                self.parse_feedback_indented_block()
+            } else {
+                self.parse_indented_block()
+            }
         } else {
             self.parse_layout_expression("expected an expression after `try`")
         }
