@@ -103,6 +103,8 @@ dependencies = [
  "dotty-lexer",
  "dotty-namer",
  "dotty-parser",
+ "dotty-tasty",
+ "dotty-tasty-unpickler",
 ]
 
 [[package]]
