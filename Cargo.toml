@@ -14,6 +14,7 @@ members = [
     "crates/dotty-tasty-unpickler",
     "crates/dotty-parser",
     "crates/dotty-namer",
+    "crates/dotty-typer",
     "tools/parser-smoke-dump",
     "tools/parser-corpus-report",
 ]
@@ -29,3 +30,5 @@ dotty-core = { path = "crates/dotty-core" }
 dotty-classloader = { path = "crates/dotty-classloader" }
 dotty-tasty-unpickler = { path = "crates/dotty-tasty-unpickler" }
 dotty-parser = { path = "crates/dotty-parser" }
+dotty-namer = { path = "crates/dotty-namer" }
+dotty-typer = { path = "crates/dotty-typer" }

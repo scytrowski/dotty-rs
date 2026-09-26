@@ -18,6 +18,9 @@ pub use dotty_core::core;
 /// Scala 3.9.0 source parser infrastructure and parser-facing AST APIs.
 pub use dotty_parser as parser;
 
+/// Source declaration signature completion.
+pub use dotty_typer as typer;
+
 /// Classpath loading APIs, unifying TASTy and class file entries.
 pub use dotty_classloader::classloader;
 

@@ -1,0 +1,8 @@
+[package]
+name = "dotty-typer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotty-core = { path = "../dotty-core" }
+dotty-namer = { path = "../dotty-namer" }

@@ -9,9 +9,11 @@ dependencies = [
  "dotty-classfile",
  "dotty-classloader",
  "dotty-core",
+ "dotty-namer",
  "dotty-parser",
  "dotty-tasty",
  "dotty-tasty-unpickler",
+ "dotty-typer",
 ]
 
 [[package]]
@@ -91,6 +93,14 @@ version = "0.1.0"
 dependencies = [
  "dotty-core",
  "dotty-tasty",
+]
+
+[[package]]
+name = "dotty-typer"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "dotty-namer",
 ]
 
 [[package]]
