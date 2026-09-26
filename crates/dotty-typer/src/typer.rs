@@ -894,18 +894,18 @@ impl<'a> SourceTyper<'a> {
         }) else {
             return Err(TyperError::ConstructorOwnerNotClassLike { constructor, owner });
         };
-        if let SymbolInfo::Complete(info) = *self.store.symbols.info(owner) {
-            if !matches!(
+        if let SymbolInfo::Complete(info) = *self.store.symbols.info(owner)
+            && !matches!(
                 self.store.types.get(info),
                 Type::ClassInfo(class_info)
                     if class_info.class == owner && class_info.prefix == self.definitions.no_prefix
-            ) {
-                return Err(TyperError::MalformedConstructorOwnerInfo {
-                    constructor,
-                    owner,
-                    info,
-                });
-            }
+            )
+        {
+            return Err(TyperError::MalformedConstructorOwnerInfo {
+                constructor,
+                owner,
+                info,
+            });
         }
         Ok(owner)
     }
