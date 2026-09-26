@@ -5,8 +5,9 @@ use std::fmt;
 use dotty_core::ast::{Ident, TreeKind, UntypedNode};
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo,
-    SymbolKind, TreeId, TypeId, Untyped,
+    AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
+    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo, SymbolKind,
+    SymbolResolver, TreeId, TypeId, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
@@ -93,6 +94,12 @@ pub enum TyperError {
         kind: SymbolKind,
         position: Option<SourceSpan>,
     },
+    /// The external semantic symbol resolver could not answer soundly.
+    SymbolResolution {
+        source: SourceId,
+        tree_index: u32,
+        error: ResolutionError,
+    },
     /// The lexical scope exposes multiple possible type declarations.
     AmbiguousTypeName {
         source: SourceId,
@@ -131,6 +138,7 @@ pub struct SourceTyper<'a> {
     store: &'a mut SemanticStore,
     definitions: Definitions,
     packages: &'a Packages,
+    resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
 }
 
@@ -138,6 +146,76 @@ pub struct SourceTyper<'a> {
 struct SourceTreeLocation {
     tree_index: u32,
     position: Option<SourceSpan>,
+}
+
+/// Resolves source-written type names without making the type-tree dispatcher
+/// depend on the details of lexical scopes, imports, or semantic lookups.
+struct SourceNameResolver<'typer, 'store> {
+    typer: &'typer mut SourceTyper<'store>,
+}
+
+impl SourceNameResolver<'_, '_> {
+    fn resolve_type_name(
+        &mut self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        location: SourceTreeLocation,
+    ) -> Result<TypeId, TyperError> {
+        let target =
+            self.typer
+                .lookup_type_symbol(name, context, location.tree_index, location.position)?;
+        if let Some(target) = target {
+            let prefix = self.typer.type_symbol_prefix(target);
+            return Ok(self.typer.store.types.alloc(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(target),
+            }));
+        }
+        if let Some(builtin) = self
+            .typer
+            .definitions
+            .source_builtin_type(self.typer.store, name)
+        {
+            return Ok(builtin);
+        }
+        if let Some(symbol) = self.typer.lookup_term_candidate_for_type_name(
+            name,
+            context,
+            location.tree_index,
+            location.position,
+        )? {
+            return Err(TyperError::WrongTypeNameKind {
+                source: self.typer.source,
+                tree_index: location.tree_index,
+                name,
+                symbol,
+                kind: self.typer.store.symbols.get(symbol).kind,
+                position: location.position,
+            });
+        }
+        Err(TyperError::TypeNameNotFound {
+            source: self.typer.source,
+            tree_index: location.tree_index,
+            name,
+            position: location.position,
+        })
+    }
+
+    fn resolve_type_member(
+        &mut self,
+        qualifier_tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        location: SourceTreeLocation,
+    ) -> Result<TypeId, TyperError> {
+        self.typer.type_of_selected_tpt(
+            qualifier_tree,
+            name,
+            context,
+            location.tree_index,
+            location.position,
+        )
+    }
 }
 
 impl<'a> SourceTyper<'a> {
@@ -157,8 +235,18 @@ impl<'a> SourceTyper<'a> {
             store,
             definitions,
             packages,
+            resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
         }
+    }
+
+    /// Uses an external semantic resolver after source and session lookup.
+    ///
+    /// The resolver supplies symbols already present in the semantic store;
+    /// it does not perform classpath IO through the typer.
+    pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver + 'a>) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Returns this driver's source type cache.
@@ -377,6 +465,26 @@ impl<'a> SourceTyper<'a> {
             }
             return Ok(ty);
         }
+        if let TreeKind::Select(select) = &source_tree.kind {
+            let ty = SourceNameResolver { typer: self }.resolve_type_member(
+                select.qualifier,
+                select.name,
+                context,
+                SourceTreeLocation {
+                    tree_index: tree.index(),
+                    position: source_tree.position,
+                },
+            )?;
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
         let TreeKind::Ident(Ident { name, .. }) = &source_tree.kind else {
             return Err(TyperError::UnsupportedTypeTree {
                 source: self.source,
@@ -399,42 +507,14 @@ impl<'a> SourceTyper<'a> {
             });
         }
         let position = source_tree.position;
-        let target = self.lookup_type_symbol(*name, context, tree.index(), position)?;
-        let ty = match target {
-            Some(target) => {
-                let prefix = self.type_symbol_prefix(target);
-                self.store.types.alloc(Type::TypeRef {
-                    prefix,
-                    target: TypeRefTarget::Symbol(target),
-                })
-            }
-            None => {
-                if let Some(builtin) = self.definitions.source_builtin_type(self.store, *name) {
-                    builtin
-                } else if let Some(symbol) = self.lookup_term_candidate_for_type_name(
-                    *name,
-                    context,
-                    tree.index(),
-                    position,
-                )? {
-                    return Err(TyperError::WrongTypeNameKind {
-                        source: self.source,
-                        tree_index: tree.index(),
-                        name: *name,
-                        symbol,
-                        kind: self.store.symbols.get(symbol).kind,
-                        position,
-                    });
-                } else {
-                    return Err(TyperError::TypeNameNotFound {
-                        source: self.source,
-                        tree_index: tree.index(),
-                        name: *name,
-                        position,
-                    });
-                }
-            }
-        };
+        let ty = SourceNameResolver { typer: self }.resolve_type_name(
+            *name,
+            context,
+            SourceTreeLocation {
+                tree_index: tree.index(),
+                position,
+            },
+        )?;
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {
                 source: self.source,
@@ -450,13 +530,277 @@ impl<'a> SourceTyper<'a> {
         let Some(owner) = self.store.symbols.get(symbol).owner else {
             return self.definitions.no_prefix;
         };
-        if matches!(
-            self.store.symbols.get(owner).kind,
-            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-        ) {
-            self.store.types.alloc(Type::ThisType { class: owner })
-        } else {
-            self.definitions.no_prefix
+        match self.store.symbols.get(owner).kind {
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
+                self.store.types.alloc(Type::ThisType { class: owner })
+            }
+            SymbolKind::Package => self.package_type_prefix(owner),
+            _ => self.definitions.no_prefix,
+        }
+    }
+
+    fn package_type_prefix(&mut self, package: SymbolId) -> TypeId {
+        self.store.types.alloc(Type::TypeRef {
+            prefix: self.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(package),
+        })
+    }
+
+    fn type_of_selected_tpt(
+        &mut self,
+        qualifier_tree: TreeId<Untyped>,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<TypeId, TyperError> {
+        if !name.is_type() {
+            return Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index,
+                tree_kind: "term selection",
+            });
+        }
+        let Some(qualifier) =
+            self.resolve_qualifier_symbol(qualifier_tree, context, tree_index, position)?
+        else {
+            return Err(TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index,
+                name,
+                position,
+            });
+        };
+        let scope = self.scope_of(qualifier);
+        if let Some(scope) = scope {
+            let candidates = self.store.scopes.get(scope).lookup_all(&name);
+            if let Some(symbol) =
+                self.unique_type_candidate(candidates, name, tree_index, position)?
+            {
+                let prefix = self.type_symbol_prefix(symbol);
+                return Ok(self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                }));
+            }
+            let term_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Term);
+            if let Some(symbol) = self.unique_symbol_candidate(
+                self.store.scopes.get(scope).lookup_all(&term_name),
+                name,
+                tree_index,
+                position,
+            )? {
+                return Err(TyperError::WrongTypeNameKind {
+                    source: self.source,
+                    tree_index,
+                    name,
+                    symbol,
+                    kind: self.store.symbols.get(symbol).kind,
+                    position,
+                });
+            }
+        }
+        let prefix = self.type_prefix_for_qualifier(qualifier);
+        let request = MemberRequest {
+            prefix,
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let external = self
+            .resolver
+            .resolve_member(self.store, &request)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?;
+        if let Some(symbol) = external {
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            if matches!(
+                self.store.symbols.get(symbol).kind,
+                SymbolKind::Class
+                    | SymbolKind::Trait
+                    | SymbolKind::ModuleClass
+                    | SymbolKind::TypeParameter
+                    | SymbolKind::TypeAlias
+            ) {
+                let prefix = self.type_symbol_prefix(symbol);
+                return Ok(self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                }));
+            }
+            return Err(TyperError::WrongTypeNameKind {
+                source: self.source,
+                tree_index,
+                name,
+                symbol,
+                kind: self.store.symbols.get(symbol).kind,
+                position,
+            });
+        }
+        Err(TyperError::TypeNameNotFound {
+            source: self.source,
+            tree_index,
+            name,
+            position,
+        })
+    }
+
+    fn resolve_qualifier_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        match &node.kind {
+            TreeKind::Ident(ident) => {
+                if let Some(symbol) =
+                    self.lookup_context_symbol(ident.name, context, tree_index, position)?
+                {
+                    return Ok(Some(symbol));
+                }
+                let segment = self.store.names.resolve(ident.name.text()).to_owned();
+                self.resolve_external_package(&[segment], tree_index)
+            }
+            TreeKind::Select(select) => {
+                let Some(qualifier) =
+                    self.resolve_qualifier_symbol(select.qualifier, context, tree_index, position)?
+                else {
+                    return Ok(None);
+                };
+                let scope = self.scope_of(qualifier);
+                if let Some(scope) = scope
+                    && let Some(symbol) =
+                        self.unique_scoped_symbol(scope, select.name, tree_index, position)?
+                {
+                    return Ok(Some(symbol));
+                }
+                if self.store.symbols.get(qualifier).kind == SymbolKind::Package {
+                    let mut path = self.package_path(qualifier);
+                    path.push(self.store.names.resolve(select.name.text()).to_owned());
+                    if let Some(package) = self.resolve_external_package(&path, tree_index)? {
+                        return Ok(Some(package));
+                    }
+                }
+                let prefix = self.type_prefix_for_qualifier(qualifier);
+                let request = MemberRequest {
+                    prefix,
+                    name: select.name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })
+            }
+            _ => Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index,
+                tree_kind: tree_kind_name(&node.kind),
+            }),
+        }
+    }
+
+    fn resolve_external_package(
+        &mut self,
+        path: &[String],
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let segments: Vec<_> = path.iter().map(String::as_str).collect();
+        let package = self
+            .resolver
+            .resolve_package(self.store, &segments)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?;
+        if let Some(symbol) = package {
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            if self.store.symbols.get(symbol).kind != SymbolKind::Package {
+                return Err(TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error: ResolutionError::Malformed {
+                        reason: "package resolution returned a non-package symbol".to_owned(),
+                    },
+                });
+            }
+        }
+        Ok(package)
+    }
+
+    fn package_path(&self, package: SymbolId) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut current = Some(package);
+        while let Some(symbol) = current {
+            let entry = self.store.symbols.get(symbol);
+            if entry.kind != SymbolKind::Package {
+                break;
+            }
+            let name = self.store.names.resolve(entry.name.text());
+            if !name.is_empty() {
+                path.push(name.to_owned());
+            }
+            current = entry.owner;
+        }
+        path.reverse();
+        path
+    }
+
+    fn type_prefix_for_qualifier(&mut self, symbol: SymbolId) -> TypeId {
+        match self.store.symbols.get(symbol).kind {
+            SymbolKind::Package => self.package_type_prefix(symbol),
+            SymbolKind::Object => {
+                let owner = self.store.symbols.get(symbol).owner;
+                let module_class = owner
+                    .and_then(|owner| self.index.definition_of(symbol).map(|_| owner))
+                    .and_then(|owner| {
+                        self.index
+                            .definition_of(symbol)
+                            .and_then(|definition| match definition {
+                                SourceDefinition::Canonical { source, tree }
+                                | SourceDefinition::Derived { source, tree }
+                                    if source == self.source =>
+                                {
+                                    self.index.derived_symbol_at(owner, source, tree)
+                                }
+                                _ => None,
+                            })
+                    });
+                if let Some(module_class) = module_class {
+                    self.store.types.alloc(Type::ThisType {
+                        class: module_class,
+                    })
+                } else {
+                    self.definitions.no_prefix
+                }
+            }
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
+                let prefix = self.type_symbol_prefix(symbol);
+                self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                })
+            }
+            _ => self.definitions.no_prefix,
         }
     }
 
@@ -842,6 +1186,11 @@ impl<'a> SourceTyper<'a> {
         {
             return Some(scope);
         }
+        if let SymbolInfo::Complete(ty) = self.store.symbols.get(symbol).info
+            && let Type::ClassInfo(info) = self.store.types.get(ty)
+        {
+            return Some(info.declarations);
+        }
         let semantic = self.store.symbols.get(symbol);
         if semantic.kind != SymbolKind::Object {
             return None;
@@ -854,9 +1203,10 @@ impl<'a> SourceTyper<'a> {
             return None;
         }
         let module_class = self.index.derived_symbol_at(owner, source, tree)?;
-        (self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass)
-            .then(|| self.index.scope_of(module_class))
-            .flatten()
+        if self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass {
+            return self.index.scope_of(module_class);
+        }
+        None
     }
 
     /// Exposes the shared semantic store after the driver is no longer needed.
@@ -893,6 +1243,36 @@ mod tests {
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
+    use std::{cell::RefCell, rc::Rc};
+
+    struct ScriptedResolver {
+        member: Option<SymbolId>,
+        package: Option<SymbolId>,
+        member_requests: Rc<RefCell<Vec<dotty_core::Name>>>,
+        package_requests: Rc<RefCell<Vec<Vec<String>>>>,
+    }
+
+    impl SymbolResolver for ScriptedResolver {
+        fn resolve_member(
+            &mut self,
+            _store: &SemanticStore,
+            request: &MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.member_requests.borrow_mut().push(request.name);
+            Ok(self.member)
+        }
+
+        fn resolve_package(
+            &mut self,
+            _store: &SemanticStore,
+            path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.package_requests
+                .borrow_mut()
+                .push(path.iter().map(|segment| (*segment).to_owned()).collect());
+            Ok(self.package)
+        }
+    }
 
     fn setup() -> (AstArena<Untyped>, SemanticStore, Packages, Definitions) {
         let arena = AstArena::new();
@@ -1407,6 +1787,7 @@ mod tests {
         };
         let constructor = applied.tpt;
         let first_argument = applied.args[0];
+        let context = index.declaration_context_of(value).unwrap();
         let before = store.checkpoint();
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -1418,7 +1799,7 @@ mod tests {
         );
 
         assert!(matches!(
-            typer.complete_symbol(value),
+            typer.type_of_tpt(type_tree, context),
             Err(TyperError::TypeNameNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "Missing"
         ));
@@ -1567,6 +1948,203 @@ mod tests {
             typer.store().types.get(*prefix),
             &Type::ThisType { class: owner }
         );
+    }
+
+    #[test]
+    fn qualified_inner_type_resolves_through_source_class_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner }; val x: Outer.Inner = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut outer = None;
+        let mut inner = None;
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::TypeDef(definition) = &node.kind {
+                match store.names.resolve(definition.name.as_name().text()) {
+                    "Outer" => outer = index.symbol_at(source, tree),
+                    "Inner" => inner = index.symbol_at(source, tree),
+                    _ => {}
+                }
+            }
+        }
+        let outer = outer.unwrap();
+        let inner = inner.unwrap();
+        assert_eq!(*store.symbols.info(outer), SymbolInfo::Missing);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), inner);
+        let Type::TypeRef { prefix, .. } = typer.store().types.get(projected) else {
+            panic!("expected a qualified type reference")
+        };
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::ThisType { class: outer }
+        );
+        assert_eq!(*typer.store().symbols.info(outer), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn package_qualified_type_uses_the_canonical_package_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { class C }; package use { val x: p.C = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let package = packages.symbol(&["p"]).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), class);
+        let Type::TypeRef { prefix, .. } = typer.store().types.get(projected) else {
+            panic!("expected a package-qualified type reference")
+        };
+        let Type::TypeRef {
+            prefix: package_prefix,
+            target: TypeRefTarget::Symbol(package_target),
+        } = typer.store().types.get(*prefix)
+        else {
+            panic!("expected the canonical package reference prefix")
+        };
+        assert_eq!(*package_prefix, definitions.no_prefix);
+        assert_eq!(*package_target, package);
+    }
+
+    #[test]
+    fn external_member_resolver_runs_only_after_source_lookup_misses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Outer { class Local }; val local: Outer.Local = 1; val ext: Outer.External = 1",
+        );
+        let (local, _) = val_symbol(&parsed, &store, &index, source, "local");
+        let (external, _) = val_symbol(&parsed, &store, &index, source, "ext");
+        let local_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Local" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let package_requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            package: None,
+            member_requests: Rc::clone(&requests),
+            package_requests,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let local_projected = typer.complete_symbol(local).unwrap();
+        let external_projected = typer.complete_symbol(external).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), local_projected), local_type);
+        assert_eq!(
+            type_symbol(typer.store(), external_projected),
+            external_type
+        );
+        assert_eq!(requests.borrow().len(), 1);
+        assert_eq!(
+            typer.store().names.resolve(requests.borrow()[0].text()),
+            "External"
+        );
+    }
+
+    #[test]
+    fn external_package_and_member_resolvers_supply_unknown_qualifiers() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("val x: p.C = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let package_name = store.names.intern("p");
+        let package = store.symbols.alloc(dotty_core::Symbol {
+            name: Name::new(package_name, Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        store.symbols.get_mut(external_type).owner = Some(package);
+        let member_requests = Rc::new(RefCell::new(Vec::new()));
+        let package_requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            package: Some(package),
+            member_requests: Rc::clone(&member_requests),
+            package_requests: Rc::clone(&package_requests),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), external_type);
+        assert_eq!(*package_requests.borrow(), vec![vec!["p".to_owned()]]);
+        assert_eq!(member_requests.borrow().len(), 1);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(found_package),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(match typer.store().types.get(projected) {
+                Type::TypeRef { prefix, .. } => *prefix,
+                _ => panic!("expected a type reference"),
+            })
+        else {
+            panic!("expected the external package prefix")
+        };
+        assert_eq!(*found_package, package);
     }
 
     #[test]
