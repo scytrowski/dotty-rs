@@ -320,10 +320,13 @@ impl<'a> SourceTyper<'a> {
         }
         let target = self.lookup_type_symbol(*name, context, tree.index())?;
         let ty = match target {
-            Some(target) => self.store.types.alloc(Type::TypeRef {
-                prefix: self.definitions.no_prefix,
-                target: TypeRefTarget::Symbol(target),
-            }),
+            Some(target) => {
+                let prefix = self.type_symbol_prefix(target);
+                self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(target),
+                })
+            }
             None => self
                 .definitions
                 .source_builtin_type(self.store, *name)
@@ -342,6 +345,20 @@ impl<'a> SourceTyper<'a> {
             });
         }
         Ok(ty)
+    }
+
+    fn type_symbol_prefix(&mut self, symbol: SymbolId) -> TypeId {
+        let Some(owner) = self.store.symbols.get(symbol).owner else {
+            return self.definitions.no_prefix;
+        };
+        if matches!(
+            self.store.symbols.get(owner).kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            self.store.types.alloc(Type::ThisType { class: owner })
+        } else {
+            self.definitions.no_prefix
+        }
     }
 
     fn lookup_type_symbol(
@@ -925,6 +942,85 @@ mod tests {
         let projected = typer.complete_symbol(value).unwrap();
 
         assert_eq!(type_symbol(typer.store(), projected), outer);
+    }
+
+    #[test]
+    fn member_type_reference_uses_the_enclosing_class_this_type_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner; val x: Inner = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let inner = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Inner" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let owner = store.symbols.get(inner).owner.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        let Type::TypeRef { prefix, target } = typer.store().types.get(projected) else {
+            panic!("expected a TypeRef for the member type")
+        };
+        assert_eq!(*target, TypeRefTarget::Symbol(inner));
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::ThisType { class: owner }
+        );
+    }
+
+    #[test]
+    fn member_type_reference_in_an_object_uses_its_module_class_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object O { class Inner; val x: Inner = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let inner = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Inner" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let owner = store.symbols.get(inner).owner.unwrap();
+        assert_eq!(store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        let Type::TypeRef { prefix, target } = typer.store().types.get(projected) else {
+            panic!("expected a TypeRef for the member type")
+        };
+        assert_eq!(*target, TypeRefTarget::Symbol(inner));
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::ThisType { class: owner }
+        );
     }
 
     #[test]
