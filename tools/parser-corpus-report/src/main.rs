@@ -655,7 +655,6 @@ fn collect_deferred_features(
         "case_class_synthetic_apis",
         "context_bound_evidence_synthesis",
         "export_forwarders",
-        "package_objects_blocked_by_parser",
         "derives_clauses",
         "local_definitions",
         "source_annotations",
@@ -788,14 +787,6 @@ fn collect_deferred_features(
         if diagnostic.kind == "UnsupportedSyntax" {
             let bucket = format!("parser_blocked: {}", normalize_message(&diagnostic.message));
             record(&mut features, &bucket, 1, |_| false);
-            if diagnostic.message.contains("package objects") {
-                record(
-                    &mut features,
-                    "package_objects_blocked_by_parser",
-                    1,
-                    |_| false,
-                );
-            }
         }
     }
 
@@ -888,7 +879,6 @@ fn build_report(
                 "case_class_synthetic_apis",
                 "context_bound_evidence_synthesis",
                 "export_forwarders",
-                "package_objects_blocked_by_parser",
                 "derives_clauses",
                 "local_definitions",
                 "source_annotations",
@@ -931,7 +921,6 @@ fn build_report(
                 bucket.materialized_occurrences += counts.materialized;
                 if matches!(&outcome.namer, Some(NamerOutcome::Success { .. }))
                     && !name.starts_with("parser_blocked:")
-                    && name != "package_objects_blocked_by_parser"
                 {
                     bucket.deferred_occurrences += counts.occurrences - counts.materialized;
                 }
@@ -1411,15 +1400,14 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inventory_counts_package_objects_blocked_by_parser() {
+    fn package_objects_are_no_longer_counted_as_parser_blockers() {
         let parsed = parse_source("package object syntax { val x = 1 }", "package.scala", true);
-        let package_objects = parsed
-            .deferred_features
-            .get("package_objects_blocked_by_parser")
-            .expect("package object parser blocker counted");
-
-        assert_eq!(package_objects.occurrences, 1);
-        assert_eq!(package_objects.materialized, 0);
+        assert!(parsed.diagnostics.is_empty());
+        assert!(
+            !parsed
+                .deferred_features
+                .contains_key("package_objects_blocked_by_parser")
+        );
     }
 
     #[test]

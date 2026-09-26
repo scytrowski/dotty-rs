@@ -8,6 +8,7 @@ pub enum Location {
     InGuard,
     InPatternArgs,
     InBlock,
+    InPackageBody,
     Elsewhere,
 }
 

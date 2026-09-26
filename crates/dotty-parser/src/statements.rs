@@ -262,6 +262,7 @@ where
     pub(crate) fn parse_top_level_sequence(
         &mut self,
         boundary: StatementSequenceBoundary,
+        location: Location,
     ) -> Vec<TreeId<Untyped>> {
         let mut statements = Vec::new();
         let mut end_marker_seen = false;
@@ -279,10 +280,6 @@ where
             }
             end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
-            let location = match boundary {
-                StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
-                StatementSequenceBoundary::Block(_) => Location::InBlock,
-            };
             match self.parse_top_level_statement(location) {
                 ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => {
                     statements.push(tree)

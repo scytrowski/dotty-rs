@@ -41,6 +41,12 @@ pub enum Modifier {
     /// identity separate from the `Case` modifier used by case classes and
     /// case objects.
     EnumCase,
+    /// Parser-level distinction for a `package object` source definition.
+    ///
+    /// Dotty represents this source form as a `ModuleDef` with its internal
+    /// package flag set. This marker preserves that distinction without
+    /// introducing a separate module AST node or performing desugaring.
+    PackageObject,
     /// Parser-level role for a constructor parameter that contributes an
     /// accessor on its owning class.
     ///
@@ -170,5 +176,11 @@ mod tests {
     fn enum_case_is_distinct_from_case_definition_metadata() {
         assert_ne!(Modifier::EnumCase, Modifier::Case);
         assert_ne!(Modifier::EnumCase, Modifier::Enum);
+    }
+
+    #[test]
+    fn package_object_is_a_distinct_parser_level_module_marker() {
+        assert_ne!(Modifier::PackageObject, Modifier::EnumCase);
+        assert_ne!(Modifier::PackageObject, Modifier::Case);
     }
 }

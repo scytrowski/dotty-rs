@@ -99,7 +99,10 @@ where
     /// Parses one source compilation unit into its source-level package root.
     pub fn source_compilation_unit(mut self) -> ParseResult {
         let unit_mark = self.mark();
-        let stats = self.parse_top_level_sequence(StatementSequenceBoundary::CompilationUnit);
+        let stats = self.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
 
         self.report_escaping_placeholders();
         let root =
