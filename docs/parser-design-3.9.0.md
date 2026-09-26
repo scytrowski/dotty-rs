@@ -656,8 +656,9 @@ template semantics, legacy given syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including
-patterns, optional guards, and expression bodies. Case bodies are represented
-as source-level `Block` nodes, and extractor-looking source patterns remain
+patterns, optional guards (including line breaks between a pattern and its
+`if` guard), and expression bodies. Case bodies are represented as source-level
+`Block` nodes, and extractor-looking source patterns remain
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
 and pattern semantics remain future work.
 

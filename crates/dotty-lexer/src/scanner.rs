@@ -387,6 +387,11 @@ fn build_tokens(
                     blank_line,
                     previous_end,
                 );
+                let case_guard_candidate = raw.kind == RawTokenKind::Keyword(HardKeyword::If)
+                    && indentation_stack
+                        .last()
+                        .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+                    && !current_case_has_arrow(source, &tokens);
 
                 if has_line_break && layout_enabled {
                     let mut closed_same_indent_case = false;
@@ -407,6 +412,7 @@ fn build_tokens(
                                 previous_opens_indentation,
                                 current_kind: raw.kind,
                                 leading_infix,
+                                case_guard_candidate,
                                 offset: raw.span.start(),
                             },
                         )?;
@@ -598,6 +604,7 @@ struct IndentationTransition<'a> {
     previous_opens_indentation: bool,
     current_kind: RawTokenKind,
     leading_infix: bool,
+    case_guard_candidate: bool,
     offset: u32,
 }
 
@@ -612,6 +619,7 @@ fn adjust_indentation(
         previous_opens_indentation,
         current_kind,
         leading_infix,
+        case_guard_candidate,
         offset,
     } = transition;
     let mut closed_same_indent_case = false;
@@ -627,6 +635,7 @@ fn adjust_indentation(
                 TextRange::new(offset, offset)?,
             ));
         } else if current_kind != RawTokenKind::Keyword(HardKeyword::Case)
+            && !case_guard_candidate
             && stack
                 .last()
                 .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
@@ -664,6 +673,7 @@ fn adjust_indentation(
         if current.is_prefix_of(indentation) {
             if current == *indentation
                 && current_kind != RawTokenKind::Keyword(HardKeyword::Case)
+                && !case_guard_candidate
                 && stack
                     .last()
                     .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
@@ -698,6 +708,20 @@ fn opens_same_indent_case_region(
             RawTokenKind::Keyword(HardKeyword::Case)
         )
     )
+}
+
+fn current_case_has_arrow(source: &str, tokens: &[Token]) -> bool {
+    let Some(case_index) = tokens
+        .iter()
+        .rposition(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+    else {
+        return false;
+    };
+
+    tokens[case_index + 1..].iter().any(|token| {
+        token.kind == TokenKind::Operator
+            && source.get(token.span.start() as usize..token.span.end() as usize) == Some("=>")
+    })
 }
 
 fn close_regions_after_delimiter(
@@ -3377,6 +3401,51 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn keeps_a_case_region_open_for_a_guard_at_case_indentation() {
+        assert_eq!(
+            kinds("value match\n  case first\n  if ready =>\n    one\n  case second => two\nafter"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Match),
+                TokenKind::Indent,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::If),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Indent,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Case),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Outdent,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn closes_a_case_region_before_an_if_after_its_body() {
+        let token_kinds = kinds("value match\ncase first => done\nif ready then next");
+        let outdent = token_kinds
+            .iter()
+            .position(|kind| *kind == TokenKind::Outdent)
+            .expect("expected the case region to close");
+        let if_token = token_kinds
+            .iter()
+            .position(|kind| *kind == TokenKind::Keyword(HardKeyword::If))
+            .expect("expected following if expression");
+
+        assert!(outdent < if_token);
     }
 
     #[test]
