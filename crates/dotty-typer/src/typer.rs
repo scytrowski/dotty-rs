@@ -4,8 +4,8 @@ use std::fmt;
 
 use dotty_core::ast::{Ident, TreeKind, TypeBoundsTree, UntypedNode};
 use dotty_core::types::{
-    MethodKind, MethodParamSpec, Type, TypeParamSpec, TypeRefTarget, method_type_from_symbols,
-    poly_type_from_symbols,
+    ClassInfo, MethodKind, MethodParamSpec, Type, TypeParamSpec, TypeRefTarget,
+    method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
@@ -49,6 +49,12 @@ pub enum TyperError {
     },
     /// Completion for this semantic declaration category is not implemented.
     UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
+    /// A source class-like declaration has no declaration scope from naming.
+    MissingClassScope { symbol: SymbolId },
+    /// A class-like symbol already contains an incompatible complete type.
+    MalformedClassInfo { symbol: SymbolId, info: TypeId },
+    /// A template parent is not a type or a supported constructor-call shape.
+    MalformedClassParent { source: SourceId, tree_index: u32 },
     /// Higher-kinded source type parameter completion is deferred.
     HigherKindedTypeParameterDeferred { symbol: SymbolId, tree_index: u32 },
     /// Higher-kinded source type alias completion is deferred.
@@ -337,7 +343,15 @@ impl<'a> SourceTyper<'a> {
                 return Err(TyperError::UnknownSymbol { symbol });
             }
             match *typer.store.symbols.info(symbol) {
-                SymbolInfo::Complete(ty) => return Ok(ty),
+                SymbolInfo::Complete(ty) => {
+                    if matches!(
+                        typer.store.symbols.get(symbol).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    ) {
+                        typer.validate_existing_class_info(symbol, ty)?;
+                    }
+                    return Ok(ty);
+                }
                 SymbolInfo::Missing => {}
                 SymbolInfo::Deferred(_) => {
                     return Err(TyperError::DeferredSymbolCompletion { symbol });
@@ -524,12 +538,261 @@ impl<'a> SourceTyper<'a> {
                 Ok(info)
             }
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
-                Err(TyperError::UnsupportedSymbolCompletion { symbol, kind })
+                self.complete_class_info(symbol, kind, tree, info_journal)
             }
             SymbolKind::Object => Err(TyperError::UnsupportedSymbolCompletion { symbol, kind }),
             SymbolKind::Package | SymbolKind::Local => {
                 Err(TyperError::UnsupportedSymbolCompletion { symbol, kind })
             }
+        }
+    }
+
+    fn validate_existing_class_info(&self, symbol: SymbolId, ty: TypeId) -> Result<(), TyperError> {
+        let Some(scope) = self.index.scope_of(symbol) else {
+            return Err(TyperError::MissingClassScope { symbol });
+        };
+        match self.store.types.get(ty) {
+            Type::ClassInfo(info)
+                if info.class == symbol
+                    && info.prefix == self.definitions.no_prefix
+                    && info.declarations == scope =>
+            {
+                Ok(())
+            }
+            _ => Err(TyperError::MalformedClassInfo { symbol, info: ty }),
+        }
+    }
+
+    fn complete_class_info(
+        &mut self,
+        symbol: SymbolId,
+        kind: SymbolKind,
+        source_tree: TreeId<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let source_node = self
+            .arena
+            .try_get(source_tree)
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: source_tree.index(),
+            })?;
+        let template = match (kind, &source_node.kind) {
+            (SymbolKind::Class | SymbolKind::Trait, TreeKind::TypeDef(definition)) => {
+                let Some(node) = self.arena.try_get(definition.rhs) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: definition.rhs.index(),
+                    });
+                };
+                let TreeKind::Template(template) = &node.kind else {
+                    return Err(TyperError::MalformedSourceAst {
+                        source: self.source,
+                        tree_index: definition.rhs.index(),
+                        symbol,
+                        kind,
+                    });
+                };
+                template.clone()
+            }
+            (SymbolKind::ModuleClass, TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))) => {
+                let Some(node) = self.arena.try_get(module.template) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: module.template.index(),
+                    });
+                };
+                let TreeKind::Template(template) = &node.kind else {
+                    return Err(TyperError::MalformedSourceAst {
+                        source: self.source,
+                        tree_index: module.template.index(),
+                        symbol,
+                        kind,
+                    });
+                };
+                template.clone()
+            }
+            _ => {
+                return Err(TyperError::SymbolSourceKindMismatch {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    symbol,
+                    kind,
+                });
+            }
+        };
+
+        let class_context = self
+            .index
+            .declaration_context_of(symbol)
+            .ok_or(TyperError::DeclarationContextMissing { symbol })?;
+        let constructor_node =
+            self.arena
+                .try_get(template.constructor)
+                .ok_or(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: template.constructor.index(),
+                })?;
+        let TreeKind::DefDef(constructor) = &constructor_node.kind else {
+            return Err(TyperError::MalformedSourceAst {
+                source: self.source,
+                tree_index: template.constructor.index(),
+                symbol,
+                kind,
+            });
+        };
+
+        let mut type_context = class_context;
+        for parameter_tree in &constructor.type_params {
+            let Some(parameter_node) = self.arena.try_get(*parameter_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: parameter_tree.index(),
+                });
+            };
+            if !matches!(parameter_node.kind, TreeKind::TypeDef(_)) {
+                return Err(TyperError::MalformedSourceAst {
+                    source: self.source,
+                    tree_index: parameter_tree.index(),
+                    symbol,
+                    kind,
+                });
+            }
+            let parameter = self.index.symbol_at(self.source, *parameter_tree).ok_or(
+                TyperError::MethodParameterSymbolMissing {
+                    method: symbol,
+                    parameter_tree_index: parameter_tree.index(),
+                },
+            )?;
+            if self.store.symbols.get(parameter).kind != SymbolKind::TypeParameter {
+                return Err(TyperError::MalformedSourceAst {
+                    source: self.source,
+                    tree_index: parameter_tree.index(),
+                    symbol,
+                    kind,
+                });
+            }
+            if let Some(context) = self.index.declaration_context_of(parameter) {
+                type_context = context;
+            }
+            self.complete_signature_parameter(parameter, info_journal)?;
+        }
+
+        let mut parents = Vec::with_capacity(template.parents.len().max(1));
+        for parent in &template.parents {
+            parents.push(self.project_parent_type(*parent, type_context, 0)?);
+        }
+        if kind != SymbolKind::Trait {
+            let first_parent_is_trait = parents
+                .first()
+                .and_then(|parent| self.parent_type_symbol(*parent))
+                .is_some_and(|parent| self.store.symbols.get(parent).kind == SymbolKind::Trait);
+            if parents.is_empty() || first_parent_is_trait {
+                parents.insert(0, self.definitions.object_type);
+            }
+        }
+
+        let self_type = match template.self_val {
+            Some(self_tree) => {
+                let Some(node) = self.arena.try_get(self_tree) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: self_tree.index(),
+                    });
+                };
+                let TreeKind::ValDef(self_definition) = &node.kind else {
+                    return Err(TyperError::MalformedSourceAst {
+                        source: self.source,
+                        tree_index: self_tree.index(),
+                        symbol,
+                        kind,
+                    });
+                };
+                Some(self.type_of_tpt_inner(self_definition.tpt, type_context)?)
+            }
+            None => None,
+        };
+
+        let declarations = self
+            .index
+            .scope_of(symbol)
+            .ok_or(TyperError::MissingClassScope { symbol })?;
+        let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: self.definitions.no_prefix,
+            class: symbol,
+            parents,
+            declarations,
+            self_type,
+        }));
+        let previous = *self.store.symbols.info(symbol);
+        info_journal.push((symbol, previous));
+        self.store
+            .symbols
+            .set_info(symbol, SymbolInfo::Complete(info));
+        Ok(info)
+    }
+
+    fn project_parent_type(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        depth: usize,
+    ) -> Result<TypeId, TyperError> {
+        if depth > 256 {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        }
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        match &node.kind {
+            TreeKind::Apply(application) => {
+                self.project_parent_type(application.function, context, depth + 1)
+            }
+            TreeKind::Block(block) => self.project_parent_type(block.expr, context, depth + 1),
+            TreeKind::New(new) => self.type_of_tpt_inner(new.tpt, context),
+            TreeKind::TypeApply(application) => {
+                let tycon = self.project_parent_type(application.function, context, depth + 1)?;
+                if matches!(self.store.types.get(tycon), Type::Applied { .. }) {
+                    return Ok(tycon);
+                }
+                let mut args = Vec::with_capacity(application.args.len());
+                for argument in &application.args {
+                    args.push(self.type_of_tpt_inner(*argument, context)?);
+                }
+                Ok(self.store.types.alloc(Type::Applied { tycon, args }))
+            }
+            TreeKind::Select(selection)
+                if self.store.names.resolve(selection.name.text()) == "<init>" =>
+            {
+                let Some(qualifier) = self.arena.try_get(selection.qualifier) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: selection.qualifier.index(),
+                    });
+                };
+                let TreeKind::New(new) = &qualifier.kind else {
+                    return Err(TyperError::MalformedClassParent {
+                        source: self.source,
+                        tree_index: tree.index(),
+                    });
+                };
+                self.type_of_tpt_inner(new.tpt, context)
+            }
+            _ => self.type_of_tpt_inner(tree, context),
+        }
+    }
+
+    fn parent_type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
+        match self.store.types.get(ty) {
+            Type::TypeRef { target, .. } => target.symbol(),
+            Type::Applied { tycon, .. } => self.parent_type_symbol(*tycon),
+            _ => None,
         }
     }
 
@@ -2436,6 +2699,32 @@ mod tests {
             .unwrap_or_else(|| panic!("source type parameter `{name}` not found"))
     }
 
+    fn class_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name =>
+                {
+                    index.symbol_at(source, tree).filter(|symbol| {
+                        matches!(
+                            store.symbols.get(*symbol).kind,
+                            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                        )
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source class-like symbol `{name}` not found"))
+    }
+
     fn type_alias_symbol(
         parsed: &dotty_parser::ParseResult,
         store: &SemanticStore,
@@ -2485,6 +2774,236 @@ mod tests {
         let typer = SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
         assert_eq!(typer.definitions.int, definitions.int);
+    }
+
+    #[test]
+    fn empty_class_publishes_class_info_with_its_existing_scope_and_object_parent() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let scope = index.scope_of(class).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.class, class);
+        assert_eq!(info.prefix, definitions.no_prefix);
+        assert_eq!(info.declarations, scope);
+        assert_eq!(info.parents, vec![definitions.object_type]);
+        assert_eq!(info.self_type, None);
+    }
+
+    #[test]
+    fn explicit_class_parent_is_preserved() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base; class Child extends Base");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let child_info = typer.complete_symbol(child).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(child_info) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.parents.len(), 1);
+        assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+    }
+
+    #[test]
+    fn class_with_trait_only_parent_gets_object_as_its_real_class_parent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait T; class C extends T");
+        let trait_symbol = class_symbol(&parsed, &store, &index, source, "T");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(info.parents[0], definitions.object_type);
+        assert_eq!(type_symbol(typer.store(), info.parents[1]), trait_symbol);
+    }
+
+    #[test]
+    fn class_type_parameters_complete_before_generic_parent_projection() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base[A]; class Child[A] extends Base[A]");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "A"
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                                && store.symbols.get(symbol).owner == Some(child)
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(child).unwrap();
+
+        assert!(matches!(
+            *typer.store().symbols.info(child_parameter),
+            SymbolInfo::Complete(_)
+        ));
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        let Type::Applied { tycon, args } = typer.store().types.get(info.parents[0]) else {
+            panic!("expected applied generic parent");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), base);
+        assert_eq!(args.len(), 1);
+        assert_eq!(type_symbol(typer.store(), args[0]), child_parameter);
+    }
+
+    #[test]
+    fn constructor_arguments_do_not_change_class_parent_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base(x: Int); class Child extends Base(1)");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(child).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.parents.len(), 1);
+        assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+    }
+
+    #[test]
+    fn explicit_self_type_is_projected_without_adding_a_self_member() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait SelfType\n\nclass C:\n  self: SelfType =>\n");
+        let self_type = class_symbol(&parsed, &store, &index, source, "SelfType");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let declaration_scope = index.scope_of(class).unwrap();
+        let self_name = Name::new(store.names.intern("self"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(
+            type_symbol(typer.store(), info.self_type.unwrap()),
+            self_type
+        );
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(declaration_scope)
+                .lookup_all(&self_name)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nested_class_uses_normalized_no_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner }");
+        let inner = class_symbol(&parsed, &store, &index, source, "Inner");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(inner).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.prefix, definitions.no_prefix);
+    }
+
+    #[test]
+    fn trait_without_source_parent_matches_scala_390_tasty_oracle() {
+        // The Scala 3.9.0 ClassInfos.scala oracle fixture declares
+        // `trait InfoBase[A]` without a parent; its TASTy ClassInfo has no
+        // parent entries. Source completion preserves that observed shape.
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait T[A]");
+        let trait_symbol = class_symbol(&parsed, &store, &index, source, "T");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(trait_symbol).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert!(info.parents.is_empty());
     }
 
     #[test]
@@ -6074,13 +6593,14 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            typer.complete_symbol(module_class),
-            Err(TyperError::UnsupportedSymbolCompletion {
-                kind: SymbolKind::ModuleClass,
-                ..
-            })
-        ));
+        let scope = index.scope_of(module_class).unwrap();
+        let info_id = typer.complete_symbol(module_class).unwrap();
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ModuleClass ClassInfo");
+        };
+        assert_eq!(info.class, module_class);
+        assert_eq!(info.declarations, scope);
+        assert_eq!(info.parents, vec![definitions.object_type]);
     }
 
     #[test]
