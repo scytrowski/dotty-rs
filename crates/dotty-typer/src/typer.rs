@@ -27,6 +27,22 @@ pub enum TyperError {
         tree_index: u32,
         context_index: u32,
     },
+    /// The type name may come from an import form not supported by this pass.
+    UnsupportedImportContext {
+        source: SourceId,
+        context_index: u32,
+        import_tree_index: u32,
+    },
+    /// An import qualifier does not resolve to an entered package or scope.
+    ImportQualifierNotFound {
+        source: SourceId,
+        import_tree_index: u32,
+    },
+    /// An import tree has an unexpected AST shape or stale child reference.
+    MalformedSourceImport {
+        source: SourceId,
+        import_tree_index: u32,
+    },
     /// Completion for this semantic declaration category is not implemented.
     UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
     /// A deferred completion belongs to a future completion engine.
@@ -295,17 +311,20 @@ impl<'a> SourceTyper<'a> {
                 tree_kind: "term identifier",
             });
         }
-        let Some(source_context) = self.index.try_source_context(context) else {
+        if self.index.try_source_context(context).is_none() {
             return Err(TyperError::SourceContextMissing {
                 source: self.source,
                 tree_index: tree.index(),
                 context_index: context.index(),
             });
-        };
-        let lexical_scope = source_context.lexical_scope;
-        let candidates = self.store.scopes.get(lexical_scope).lookup_all(name);
-        let ty = match candidates {
-            [] => self
+        }
+        let target = self.lookup_type_symbol(*name, context, tree.index())?;
+        let ty = match target {
+            Some(target) => self.store.types.alloc(Type::TypeRef {
+                prefix: self.definitions.no_prefix,
+                target: TypeRefTarget::Symbol(target),
+            }),
+            None => self
                 .definitions
                 .source_builtin_type(self.store, *name)
                 .ok_or(TyperError::TypeNameNotFound {
@@ -313,17 +332,6 @@ impl<'a> SourceTyper<'a> {
                     tree_index: tree.index(),
                     name: *name,
                 })?,
-            [target] => self.store.types.alloc(Type::TypeRef {
-                prefix: self.definitions.no_prefix,
-                target: TypeRefTarget::Symbol(*target),
-            }),
-            _ => {
-                return Err(TyperError::AmbiguousTypeName {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: *name,
-                });
-            }
         };
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {
@@ -334,6 +342,272 @@ impl<'a> SourceTyper<'a> {
             });
         }
         Ok(ty)
+    }
+
+    fn lookup_type_symbol(
+        &self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let mut current = Some(context);
+        while let Some(context_id) = current {
+            let Some(source_context) = self.index.try_source_context(context_id) else {
+                return Err(TyperError::SourceContextMissing {
+                    source: self.source,
+                    tree_index,
+                    context_index: context_id.index(),
+                });
+            };
+            let candidates = self
+                .store
+                .scopes
+                .get(source_context.lexical_scope)
+                .lookup_all(&name);
+            if let Some(symbol) = self.unique_type_candidate(candidates, name, tree_index)? {
+                return Ok(Some(symbol));
+            }
+            if let Some(import_tree) = source_context.import
+                && let Some(symbol) = self.lookup_imported_type(
+                    import_tree,
+                    context_id,
+                    source_context.parent,
+                    name,
+                    tree_index,
+                )?
+            {
+                return Ok(Some(symbol));
+            }
+            current = source_context.parent;
+        }
+        Ok(None)
+    }
+
+    fn lookup_imported_type(
+        &self,
+        import_tree: TreeId<Untyped>,
+        context_id: SourceContextId,
+        parent_context: Option<SourceContextId>,
+        wanted: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let Some(node) = self.arena.try_get(import_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: import_tree.index(),
+            });
+        };
+        let TreeKind::Import(import) = &node.kind else {
+            return Err(TyperError::MalformedSourceImport {
+                source: self.source,
+                import_tree_index: import_tree.index(),
+            });
+        };
+
+        let wildcard = self.store.names.get("*");
+        let hidden = self.store.names.get("_");
+        let mut relevant = Vec::new();
+        for selector in &import.selectors {
+            if Some(selector.imported.text()) == wildcard {
+                relevant.push((selector.imported, true));
+                continue;
+            }
+            if selector.bound.is_some() {
+                continue;
+            }
+            let public_name = if let Some(renamed) = selector.renamed {
+                let Some(rename_tree) = self.arena.try_get(renamed) else {
+                    return Err(TyperError::MalformedSourceImport {
+                        source: self.source,
+                        import_tree_index: import_tree.index(),
+                    });
+                };
+                let TreeKind::Ident(ident) = &rename_tree.kind else {
+                    return Err(TyperError::MalformedSourceImport {
+                        source: self.source,
+                        import_tree_index: import_tree.index(),
+                    });
+                };
+                ident.name.text()
+            } else {
+                selector.imported.text()
+            };
+            if public_name == wanted.text() && Some(public_name) != hidden {
+                relevant.push((selector.imported, false));
+            }
+        }
+        if relevant.is_empty() {
+            return Ok(None);
+        }
+
+        let qualifier_context = parent_context.unwrap_or(context_id);
+        let Some(scope) =
+            self.import_qualifier_scope(import.expr, qualifier_context, import_tree.index())?
+        else {
+            return Err(TyperError::ImportQualifierNotFound {
+                source: self.source,
+                import_tree_index: import_tree.index(),
+            });
+        };
+        let mut matches = Vec::new();
+        for (imported, is_wildcard) in relevant {
+            let candidates = if is_wildcard {
+                self.store.scopes.get(scope).lookup_all(&wanted)
+            } else {
+                let imported_type =
+                    dotty_core::Name::new(imported.text(), dotty_core::Namespace::Type);
+                self.store.scopes.get(scope).lookup_all(&imported_type)
+            };
+            matches.extend_from_slice(candidates);
+        }
+        matches.sort_by_key(|symbol| symbol.index());
+        matches.dedup();
+        self.unique_type_candidate(&matches, wanted, tree_index)
+    }
+
+    fn import_qualifier_scope(
+        &self,
+        qualifier: TreeId<Untyped>,
+        context: SourceContextId,
+        import_tree_index: u32,
+    ) -> Result<Option<dotty_core::ScopeId>, TyperError> {
+        let mut selections = Vec::new();
+        let mut cursor = qualifier;
+        let root_name = loop {
+            let Some(node) = self.arena.try_get(cursor) else {
+                return Err(TyperError::MalformedSourceImport {
+                    source: self.source,
+                    import_tree_index: cursor.index(),
+                });
+            };
+            match &node.kind {
+                TreeKind::Ident(ident) => break ident.name,
+                TreeKind::Select(select) => {
+                    selections.push(select.name);
+                    cursor = select.qualifier;
+                }
+                _ => {
+                    return Err(TyperError::UnsupportedImportContext {
+                        source: self.source,
+                        context_index: context.index(),
+                        import_tree_index: cursor.index(),
+                    });
+                }
+            }
+        };
+        let mut symbol = self.lookup_context_symbol(root_name, context, import_tree_index)?;
+        for selection in selections.into_iter().rev() {
+            let Some(current_symbol) = symbol else {
+                return Ok(None);
+            };
+            let Some(scope) = self.scope_of(current_symbol) else {
+                return Ok(None);
+            };
+            symbol = self.unique_scoped_symbol(scope, selection, import_tree_index)?;
+        }
+        Ok(symbol.and_then(|symbol| self.scope_of(symbol)))
+    }
+
+    fn lookup_context_symbol(
+        &self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        import_tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let mut current = Some(context);
+        while let Some(context_id) = current {
+            let Some(source_context) = self.index.try_source_context(context_id) else {
+                return Err(TyperError::SourceContextMissing {
+                    source: self.source,
+                    tree_index: import_tree_index,
+                    context_index: context_id.index(),
+                });
+            };
+            if let Some(symbol) =
+                self.unique_scoped_symbol(source_context.lexical_scope, name, import_tree_index)?
+            {
+                return Ok(Some(symbol));
+            }
+            if let Some(import_tree) = source_context.import
+                && let Some(symbol) = self.lookup_imported_type(
+                    import_tree,
+                    context_id,
+                    source_context.parent,
+                    name,
+                    import_tree_index,
+                )?
+            {
+                return Ok(Some(symbol));
+            }
+            current = source_context.parent;
+        }
+        Ok(None)
+    }
+
+    fn unique_scoped_symbol(
+        &self,
+        scope: dotty_core::ScopeId,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let direct = self.store.scopes.get(scope).lookup_all(&name);
+        if !direct.is_empty() {
+            return self.unique_type_candidate(direct, name, tree_index);
+        }
+        let alternate = dotty_core::Name::new(
+            name.text(),
+            match name.namespace() {
+                dotty_core::Namespace::Term => dotty_core::Namespace::Type,
+                dotty_core::Namespace::Type => dotty_core::Namespace::Term,
+            },
+        );
+        self.unique_type_candidate(
+            self.store.scopes.get(scope).lookup_all(&alternate),
+            name,
+            tree_index,
+        )
+    }
+
+    fn unique_type_candidate(
+        &self,
+        candidates: &[SymbolId],
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        match candidates {
+            [] => Ok(None),
+            [symbol] => Ok(Some(*symbol)),
+            _ => Err(TyperError::AmbiguousTypeName {
+                source: self.source,
+                tree_index,
+                name,
+            }),
+        }
+    }
+
+    fn scope_of(&self, symbol: SymbolId) -> Option<dotty_core::ScopeId> {
+        if let Some(scope) = self
+            .packages
+            .scope_of(symbol)
+            .or_else(|| self.index.scope_of(symbol))
+        {
+            return Some(scope);
+        }
+        let semantic = self.store.symbols.get(symbol);
+        if semantic.kind != SymbolKind::Object {
+            return None;
+        }
+        let owner = semantic.owner?;
+        let SourceDefinition::Canonical { source, tree } = self.index.definition_of(symbol)? else {
+            return None;
+        };
+        if source != self.source {
+            return None;
+        }
+        let module_class = self.index.derived_symbol_at(owner, source, tree)?;
+        (self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass)
+            .then(|| self.index.scope_of(module_class))
+            .flatten()
     }
 
     /// Exposes the shared semantic store after the driver is no longer needed.
@@ -445,6 +719,16 @@ mod tests {
         panic!("source val `{target}` not found");
     }
 
+    fn type_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
+        match store.types.get(ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a symbol TypeRef, got {other:?}"),
+        }
+    }
+
     fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
         let text = format!("val x: {name} = 1");
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
@@ -549,10 +833,264 @@ mod tests {
     }
 
     #[test]
+    fn nested_type_lookup_walks_to_the_enclosing_declaration_context() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner { val x: Outer = 1 } }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let outer = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Outer" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), outer);
+    }
+
+    #[test]
+    fn innermost_type_declaration_shadows_an_enclosing_name() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class T; class Outer { class T; val x: T = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let outer = store.symbols.get(value).owner.unwrap();
+        let inner_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "T" =>
+                {
+                    let symbol = index.symbol_at(source, tree)?;
+                    (store.symbols.get(symbol).owner == Some(outer)).then_some(symbol)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), inner_type);
+    }
+
+    #[test]
+    fn explicit_package_import_resolves_a_type_name() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class Imported }\npackage app { import lib.Imported; val x: Imported = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let imported_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Imported" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), imported_type);
+    }
+
+    #[test]
+    fn wildcard_package_import_resolves_a_type_name() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let imported_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Imported" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), imported_type);
+    }
+
+    #[test]
+    fn renamed_package_import_resolves_the_alias() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class Imported }\npackage app { import lib.{Imported as Alias}; val x: Alias = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let imported_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Imported" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), imported_type);
+    }
+
+    #[test]
+    fn later_import_qualifier_can_use_an_earlier_type_alias() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package lib { class Imported { class Nested } }\npackage app { import lib.Imported as Alias; import Alias.Nested; val x: Nested = 1 }",
+        );
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let nested_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Nested" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), nested_type);
+    }
+
+    #[test]
+    fn wildcard_import_from_an_object_uses_its_namer_module_class_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object Lib { class Imported }\nimport Lib.*\nval x: Imported = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let imported_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Imported" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), imported_type);
+    }
+
+    #[test]
     fn primitive_int_annotation_uses_the_bootstrapped_type() {
         let (ty, definitions) = complete_builtin_annotation("Int");
 
         assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
+    fn lexical_type_named_int_shadows_the_builtin() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Int; val x: Int = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let local_int = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Int" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), local_int);
     }
 
     #[test]
