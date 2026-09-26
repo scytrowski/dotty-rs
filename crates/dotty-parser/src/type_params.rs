@@ -266,7 +266,7 @@ where
                 crate::Mark {
                     start: self
                         .ast
-                        .get(context_bounds[0])
+                        .get(bounds)
                         .position
                         .map(|position| position.span().range().start())
                         .unwrap_or(mark.start),
@@ -1143,6 +1143,61 @@ mod tests {
         assert_eq!(
             parser.ast().get(rhs).position.unwrap().span().range(),
             TextRange::new(3, 20).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn context_bounds_span_includes_explicit_lower_and_upper_bounds() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A >: Low <: High: Show]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(3, 5).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 6, 9),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(10, 12).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::ColonFollow, 17, 18),
+                token(TokenKind::Identifier, 19, 23),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let params = parser.parse_type_param_clause(ParamOwner::Def);
+        let TreeKind::TypeDef(TypeDef { rhs, .. }) = parser.ast().get(params[0]).kind else {
+            panic!("expected a type parameter");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ContextBounds(ref context_bounds)) =
+            parser.ast().get(rhs).kind
+        else {
+            panic!("expected context bounds");
+        };
+
+        assert_eq!(
+            parser.ast().get(rhs).position.unwrap().span().range(),
+            TextRange::new(3, 23).unwrap()
+        );
+        assert_eq!(
+            parser
+                .ast()
+                .get(context_bounds.bounds)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(3, 17).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
