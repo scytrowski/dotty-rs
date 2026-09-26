@@ -1055,7 +1055,8 @@ mod tests {
         else {
             panic!("expected parsed try tree with a handler");
         };
-        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(expr).kind else {
+        let try_body = expr;
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(try_body).kind else {
             panic!("expected the indented try body to remain a block");
         };
 
@@ -1065,6 +1066,10 @@ mod tests {
             TreeKind::ValDef(_)
         ));
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            parser.ast().get(try_body).position.unwrap().span().range(),
+            dotty_core::TextRange::new(6, 27).unwrap()
+        );
         assert!(matches!(parser.ast().get(handler).kind, TreeKind::Apply(_)));
         assert!(finalizer.is_none());
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -1169,6 +1174,38 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_when_an_indented_try_body_reaches_eof_without_an_outdent() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try\n  val value = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Indent, 6, 6),
+                token(TokenKind::Keyword(HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::IntegerLiteral, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry { expr, .. })) =
+            parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree");
+        };
+
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Block(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.message() == "expected an outdent to close an indented block"
+        }));
     }
 
     #[test]
