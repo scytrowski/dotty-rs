@@ -1390,6 +1390,37 @@ mod tests {
     }
 
     #[test]
+    fn inner_term_name_does_not_shadow_an_enclosing_type_name() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class T; class Outer { object T; val x: T = 1 }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let enclosing_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "T" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), enclosing_type);
+    }
+
+    #[test]
     fn explicit_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.Imported; val x: Imported = 1 }",
