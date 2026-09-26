@@ -311,6 +311,14 @@ impl<'a> SourceTyper<'a> {
         tree: TreeId<Untyped>,
         context: SourceContextId,
     ) -> Result<TypeId, TyperError> {
+        self.run_atomic(|typer, _| typer.type_of_tpt_inner(tree, context))
+    }
+
+    fn type_of_tpt_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+    ) -> Result<TypeId, TyperError> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
         }
@@ -328,7 +336,37 @@ impl<'a> SourceTyper<'a> {
             });
         }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source_tree.kind {
-            let ty = self.type_of_tpt(parens.inner, context)?;
+            let ty = self.type_of_tpt_inner(parens.inner, context)?;
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
+        if let TreeKind::ByNameTypeTree(by_name) = &source_tree.kind {
+            let result = self.type_of_tpt_inner(by_name.result, context)?;
+            let ty = self.store.types.alloc(Type::ByName { result });
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
+        if let TreeKind::AppliedTypeTree(applied) = &source_tree.kind {
+            let tycon = self.type_of_tpt_inner(applied.tpt, context)?;
+            let mut args = Vec::with_capacity(applied.args.len());
+            for argument in &applied.args {
+                args.push(self.type_of_tpt_inner(*argument, context)?);
+            }
+            let ty = self.store.types.alloc(Type::Applied { tycon, args });
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
                 return Err(TyperError::DuplicateSourceTypeCacheEntry {
                     source: self.source,
@@ -1294,6 +1332,103 @@ mod tests {
         assert_eq!(
             typer.source_type_index().type_at(source, inner),
             Some(projected)
+        );
+    }
+
+    #[test]
+    fn applied_type_projects_constructor_and_arguments_in_source_order() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class F[A, B]; class A; class B; val x: F[A, B] = 1");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
+        let mut expected = Vec::new();
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                continue;
+            };
+            let name = store.names.resolve(definition.name.as_name().text());
+            if matches!(name, "F" | "A" | "B") {
+                let symbol = index.symbol_at(source, tree).unwrap();
+                if store.symbols.get(symbol).kind == SymbolKind::Class {
+                    expected.push((name.to_owned(), symbol));
+                }
+            }
+        }
+        let find_symbol = |name| expected.iter().find(|(found, _)| found == name).unwrap().1;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
+            panic!("expected an applied type")
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), find_symbol("F"));
+        assert_eq!(args.len(), 2);
+        assert_eq!(type_symbol(typer.store(), args[0]), find_symbol("A"));
+        assert_eq!(type_symbol(typer.store(), args[1]), find_symbol("B"));
+    }
+
+    #[test]
+    fn by_name_type_projects_its_result_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def f(x: => Int): Unit = ()");
+        let (parameter, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let context = index.declaration_context_of(parameter).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        let Type::ByName { result } = typer.store().types.get(projected) else {
+            panic!("expected a by-name type")
+        };
+        assert_eq!(*result, definitions.int);
+    }
+
+    #[test]
+    fn failed_applied_type_projection_rolls_back_types_and_cache_entries() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class F[A]; class A; val x: F[A, Missing] = 1");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let TreeKind::AppliedTypeTree(applied) = &parsed.ast.get(type_tree).kind else {
+            panic!("expected an applied type tree")
+        };
+        let constructor = applied.tpt;
+        let first_argument = applied.args[0];
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
+        ));
+
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+        assert_eq!(typer.source_type_index().type_at(source, constructor), None);
+        assert_eq!(
+            typer.source_type_index().type_at(source, first_argument),
+            None
         );
     }
 
