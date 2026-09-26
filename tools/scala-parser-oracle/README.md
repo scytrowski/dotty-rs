@@ -113,7 +113,9 @@ Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, object, and enum nodes; primary
 constructor clauses; simple parent applications, including parameterized enum
 case parents and ordered parent lists; and braced or indented
-template bodies. They also cover source annotations, hard and supported soft
+template bodies. Type-parameter context-bound fixtures cover method, class,
+case-class, given, and extension owners, explicit bounds, multiple braced
+bounds, and `as` aliases. They also cover source annotations, hard and supported soft
 modifiers, and qualified visibility. The normalized definition metadata
 compares modifier order, visibility, visibility qualifiers, and annotation
 trees; `ModuleDef.metadata` is included just like metadata on the other

@@ -274,6 +274,18 @@ fn render_tree(
                 ));
             }
         }
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(context_bound)) => {
+            fields.push(format!(
+                "\"parameter\":{}",
+                quote(names.resolve(context_bound.parameter.as_name().text()))
+            ));
+            if let Some(name) = context_bound.name {
+                fields.push(format!(
+                    "\"name\":{}",
+                    quote(names.resolve(name.as_name().text()))
+                ));
+            }
+        }
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => {
             fields.push(format!(
                 "\"name\":{}",
@@ -794,6 +806,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => "PatDef",
         TreeKind::TypeDef(_) => "TypeDef",
         TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
+        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
         TreeKind::Template(template)
             if !template.metadata.derives.is_empty() || !template.metadata.uses.is_empty() =>
         {
@@ -805,8 +819,6 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
         TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
         TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(_)) => "ContextBounds",
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => "ContextBoundTypeTree",
         TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
         TreeKind::TypeTree(_) => "TypeTree",
         TreeKind::If(_) => "If",
@@ -1038,6 +1050,12 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children.extend(refined.refinements.iter().copied());
             children
         }
+        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => {
+            let mut children = vec![bounds.bounds];
+            children.extend(bounds.context_bounds.iter().copied());
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(bound)) => vec![bound.bound],
         TreeKind::Template(template) => {
             let mut children = Vec::with_capacity(
                 1 + template.parents.len()
@@ -1075,14 +1093,6 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             .chain(bounds.high)
             .chain(bounds.alias)
             .collect(),
-        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(context_bounds)) => {
-            let mut children = vec![context_bounds.bounds];
-            children.extend(context_bounds.context_bounds.iter().copied());
-            children
-        }
-        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(context_bound)) => {
-            vec![context_bound.bound]
-        }
         TreeKind::ByNameTypeTree(by_name) => vec![by_name.result],
         TreeKind::SingletonTypeTree(singleton) => vec![singleton.reference],
         TreeKind::TypeTree(_) => Vec::new(),
