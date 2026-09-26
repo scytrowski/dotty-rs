@@ -273,6 +273,22 @@ where
         self.observe(ScannerEvent::Indented);
     }
 
+    /// Requests an indentation token after the current body introducer and
+    /// reports whether scanner feedback inserted one. An already-present
+    /// eager `Indent` belongs to the scanner's ordinary layout pass.
+    pub(crate) fn observe_indented_body(&mut self) -> bool {
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        let already_indented = self.cursor.lookahead(lookahead).kind == TokenKind::Indent;
+        self.observe_indented();
+        !already_indented && self.cursor.lookahead(lookahead).kind == TokenKind::Indent
+    }
+
     /// Tells the scanner that an indented region was exited.
     pub fn observe_outdented(&mut self) {
         self.observe(ScannerEvent::Outdented);

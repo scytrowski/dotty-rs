@@ -425,11 +425,31 @@ where
         &mut self,
         end: TokenKind,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        self.parse_expression_block_body_with_boundary(StatementSequenceBoundary::Block(end))
+    }
+
+    pub(crate) fn parse_feedback_expression_block_body(
+        &mut self,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        self.parse_expression_block_body_with_boundary(StatementSequenceBoundary::FeedbackBlock(
+            TokenKind::Outdent,
+        ))
+    }
+
+    fn parse_expression_block_body_with_boundary(
+        &mut self,
+        boundary: StatementSequenceBoundary,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         self.with_enum_body(false, |parser| {
             parser.with_placeholder_scope(|parser| {
-                parser.with_block_end(Some(end), |parser| {
-                    parser.parse_statement_sequence(StatementSequenceBoundary::Block(end))
-                })
+                parser.with_block_end(
+                    match boundary {
+                        StatementSequenceBoundary::Block(end)
+                        | StatementSequenceBoundary::FeedbackBlock(end) => Some(end),
+                        StatementSequenceBoundary::CompilationUnit => None,
+                    },
+                    |parser| parser.parse_statement_sequence(boundary),
+                )
             })
         })
     }

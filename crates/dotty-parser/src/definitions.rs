@@ -92,8 +92,9 @@ where
         let rhs = if has_interleaved_type_params {
             None
         } else if is_bare_assignment(self) {
+            let feedback_opened = self.observe_indented_body();
             self.advance();
-            Some(self.parse_method_rhs(location))
+            Some(self.parse_method_rhs(location, feedback_opened))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
         } else {
@@ -118,11 +119,15 @@ where
         ParsedStatement::Definition(definition)
     }
 
-    fn parse_method_rhs(&mut self, location: Location) -> TreeId<Untyped> {
+    fn parse_method_rhs(&mut self, location: Location, feedback_opened: bool) -> TreeId<Untyped> {
         self.consume_control_newlines();
         self.with_secondary_constructor_allowed(false, |parser| {
             if parser.current().kind == TokenKind::Indent {
-                parser.parse_indented_block()
+                if feedback_opened {
+                    parser.parse_feedback_indented_block()
+                } else {
+                    parser.parse_indented_block()
+                }
             } else {
                 parser.with_location(location, |parser| parser.expr())
             }
