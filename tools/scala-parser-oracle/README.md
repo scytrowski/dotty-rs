@@ -120,9 +120,13 @@ trees; `ModuleDef.metadata` is included just like metadata on the other
 definition nodes. The renderer exposes the source-level `Trait` and `Enum`
 distinctions,
 modern `given` aliases and structural templates, and `ExtMethods` parameter
-clauses with method/export children. Anonymous given names remain empty rather
-than being replaced with synthetic names; anonymous `using` type parameters use
-Dotty's deterministic `x$N` names. Given fixtures also cover `GivenType`
+clauses with method/export children. Parameter fixtures also compare inline
+modifiers on method, constructor, given, and extension parameters, including
+named `using` clauses, while preserving `inline` as an ordinary name before
+`:`. Anonymous given names remain
+empty rather than being replaced with synthetic names; anonymous `using` type
+parameters use Dotty's deterministic `x$N` names. Given fixtures also cover
+`GivenType`
 condition chains, parenthesized anonymous context types, constructor parents,
 and comma- or `with`-separated structural parent lists. Extension fixtures cover generic and
 `using` prefixes, receiver ordering, braced/indented bodies, rejection of a
