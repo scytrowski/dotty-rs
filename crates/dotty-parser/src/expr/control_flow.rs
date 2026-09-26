@@ -111,7 +111,7 @@ where
 
     pub(super) fn parse_try_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
-        let expr = self.parse_layout_expression("expected an expression after `try`");
+        let expr = self.parse_try_body();
 
         let handler = if self.accept_layout_keyword(dotty_core::HardKeyword::Catch) {
             if self.catch_starts_case_handler() {
@@ -142,6 +142,23 @@ where
                 finalizer,
             })),
         )
+    }
+
+    fn parse_try_body(&mut self) -> TreeId<Untyped> {
+        let mut lookahead = 0;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+
+        if self.cursor.lookahead(lookahead).kind == TokenKind::Indent {
+            self.consume_control_newlines();
+            self.parse_indented_block()
+        } else {
+            self.parse_layout_expression("expected an expression after `try`")
+        }
     }
 
     pub(super) fn parse_return_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -1000,6 +1017,56 @@ mod tests {
         };
 
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Apply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_try_body_with_local_definitions_as_an_expression_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try\n  val value = 1\n  value\ncatch recover()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Indent, 6, 6),
+                token(TokenKind::Keyword(HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::IntegerLiteral, 18, 19),
+                token(TokenKind::Newline, 19, 20),
+                token(TokenKind::Identifier, 22, 27),
+                token(TokenKind::Outdent, 27, 27),
+                token(TokenKind::Keyword(HardKeyword::Catch), 28, 33),
+                token(TokenKind::Identifier, 34, 41),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 41, 42),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 42, 43),
+                token(TokenKind::Eof, 43, 43),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            expr,
+            handler: Some(handler),
+            finalizer,
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected parsed try tree with a handler");
+        };
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(expr).kind else {
+            panic!("expected the indented try body to remain a block");
+        };
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(matches!(parser.ast().get(handler).kind, TreeKind::Apply(_)));
+        assert!(finalizer.is_none());
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
