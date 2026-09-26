@@ -18,6 +18,7 @@ pub(crate) enum ParsedStatement {
 pub(crate) enum StatementSequenceBoundary {
     CompilationUnit,
     Block(TokenKind),
+    FeedbackBlock(TokenKind),
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -177,6 +178,7 @@ where
                     && matches!(
                         boundary,
                         StatementSequenceBoundary::Block(TokenKind::Outdent)
+                            | StatementSequenceBoundary::FeedbackBlock(TokenKind::Outdent)
                     )
                 {
                     return self.finish_statement_sequence(statements);
@@ -192,7 +194,8 @@ where
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
-                StatementSequenceBoundary::Block(_) => Location::InBlock,
+                StatementSequenceBoundary::Block(_)
+                | StatementSequenceBoundary::FeedbackBlock(_) => Location::InBlock,
             };
             statements.push(self.parse_statement(location));
 
@@ -206,6 +209,9 @@ where
                         StatementSequenceBoundary::Block(_) => {
                             "parser made no progress while parsing a block"
                         }
+                        StatementSequenceBoundary::FeedbackBlock(_) => {
+                            "parser made no progress while parsing a block"
+                        }
                     },
                 );
                 let recovery_checkpoint = self.cursor.checkpoint();
@@ -213,6 +219,16 @@ where
                 if !self.cursor.progressed_since(recovery_checkpoint) {
                     break;
                 }
+            }
+
+            if matches!(boundary, StatementSequenceBoundary::FeedbackBlock(_))
+                && self.current().kind != TokenKind::Outdent
+            {
+                // A feedback-opened body inside braces cannot rely on the
+                // scanner's ordinary indentation stack to emit its closing
+                // token. Ask before the statement-sequence loop decides
+                // whether the following token belongs to this body.
+                self.observe_outdented();
             }
 
             if self.is_sequence_separator(boundary) {
@@ -229,6 +245,9 @@ where
                         StatementSequenceBoundary::Block(_) => {
                             "expected a block statement separator"
                         }
+                        StatementSequenceBoundary::FeedbackBlock(_) => {
+                            "expected a block statement separator"
+                        }
                     },
                 );
                 self.recover_until(RecoverySet::Statement);
@@ -242,6 +261,7 @@ where
                     && matches!(
                         boundary,
                         StatementSequenceBoundary::Block(TokenKind::Outdent)
+                            | StatementSequenceBoundary::FeedbackBlock(TokenKind::Outdent)
                     )
                 {
                     return self.finish_statement_sequence(statements);
@@ -379,6 +399,11 @@ where
                     || self.current().kind == TokenKind::Eof
                     || (self.context.case_body && self.is_case_body_terminator())
             }
+            StatementSequenceBoundary::FeedbackBlock(end) => {
+                self.current().kind == end
+                    || self.current().kind == TokenKind::Eof
+                    || (self.context.case_body && self.is_case_body_terminator())
+            }
         }
     }
 
@@ -387,7 +412,9 @@ where
             StatementSequenceBoundary::CompilationUnit => {
                 is_statement_separator(self.current().kind)
             }
-            StatementSequenceBoundary::Block(_) => is_block_separator(self.current().kind),
+            StatementSequenceBoundary::Block(_) | StatementSequenceBoundary::FeedbackBlock(_) => {
+                is_block_separator(self.current().kind)
+            }
         }
     }
 

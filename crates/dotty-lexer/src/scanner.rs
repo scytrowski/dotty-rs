@@ -198,10 +198,25 @@ impl ContextualScanner {
             return false;
         }
         if self.tokens[index].kind != TokenKind::Eof {
-            let Some(indent_index) = self.tokens[..index]
-                .iter()
-                .rposition(|token| token.kind == TokenKind::Indent)
-            else {
+            let mut closed_regions = 0usize;
+            let indent_index =
+                self.tokens[..index]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(token_index, token)| match token.kind {
+                        TokenKind::Outdent => {
+                            closed_regions = closed_regions.saturating_add(1);
+                            None
+                        }
+                        TokenKind::Indent if closed_regions > 0 => {
+                            closed_regions -= 1;
+                            None
+                        }
+                        TokenKind::Indent => Some(token_index),
+                        _ => None,
+                    });
+            let Some(indent_index) = indent_index else {
                 return false;
             };
             let region_indent =
@@ -2136,6 +2151,132 @@ mod tests {
     }
 
     #[test]
+    fn parser_feedback_opens_indentation_inside_a_braced_scope() {
+        let source = "{\n  if ready then\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Val)
+        );
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn parser_feedback_closes_braced_indentation_before_the_closing_brace() {
+        let source = "{\n  if ready then\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+
+        while scanner.current().kind != TokenKind::Punctuation(Punctuation::RightBrace) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
+    }
+
+    #[test]
+    fn parser_feedback_opens_indented_method_rhs_inside_a_braced_scope() {
+        let source = "{\n  def method =\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Operator
+            || scanner
+                .source
+                .get(scanner.current().span.start() as usize..scanner.current().span.end() as usize)
+                != Some("=")
+        {
+            scanner.advance();
+        }
+
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Val)
+        );
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn parser_feedback_does_not_open_an_aligned_body_inside_braces() {
+        let source = "{\n  if ready then\n  val x = 1\n  x\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_ne!(scanner.lookahead(1).kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn nested_braced_feedback_only_closes_the_innermost_indented_body() {
+        let source =
+            "{\n  if a then\n    if b then\n      inner\n    first\n  else\n    fallback\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let mut opened = 0;
+        while opened < 2 {
+            if scanner.current().kind == TokenKind::Keyword(HardKeyword::Then) {
+                scanner.observe(ScannerEvent::Indented);
+                opened += 1;
+            }
+            scanner.advance();
+        }
+        while scanner.current().kind != TokenKind::Identifier
+            || source
+                .get(scanner.current().span.start() as usize..scanner.current().span.end() as usize)
+                != Some("first")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::Outdented);
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        scanner.advance();
+        assert_eq!(
+            source.get(
+                scanner.current().span.start() as usize..scanner.current().span.end() as usize
+            ),
+            Some("first")
+        );
+
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Else) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Else)
+        );
+    }
+
+    #[test]
     fn parser_feedback_closes_nested_indentation_regions_in_order() {
         let mut scanner =
             ContextualScanner::new("root:\n  child:\n    leaf\nback").expect("source scans");
@@ -2416,49 +2557,22 @@ mod tests {
     }
 
     #[test]
-    fn parser_outdent_closes_a_feedback_region_after_an_automatic_nested_region() {
-        let mut scanner = ContextualScanner::new("root:\n  if ready then\n    leaf\n  back")
+    fn parser_outdent_closes_a_feedback_region_at_else_after_an_automatic_nested_body() {
+        let mut scanner = ContextualScanner::new("root:\n  if ready then\n    leaf\nelse\n  back")
             .expect("source scans");
         scanner.advance();
         scanner.observe(ScannerEvent::ColonEol { in_template: false });
         scanner.observe(ScannerEvent::Indented);
 
-        while scanner.current().kind != TokenKind::Identifier
-            || scanner
-                .tokens()
-                .get(scanner.current_index())
-                .and_then(|token| {
-                    scanner
-                        .source
-                        .get(token.span.start() as usize..token.span.end() as usize)
-                })
-                != Some("back")
-        {
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Else) {
             scanner.advance();
         }
         scanner.observe(ScannerEvent::Outdented);
 
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
         assert_eq!(
-            scanner
-                .tokens()
-                .iter()
-                .map(|token| token.kind)
-                .collect::<Vec<_>>(),
-            vec![
-                TokenKind::Identifier,
-                TokenKind::ColonEol,
-                TokenKind::Indent,
-                TokenKind::Keyword(HardKeyword::If),
-                TokenKind::Identifier,
-                TokenKind::Keyword(HardKeyword::Then),
-                TokenKind::Indent,
-                TokenKind::Identifier,
-                TokenKind::Outdent,
-                TokenKind::Newline,
-                TokenKind::Outdent,
-                TokenKind::Identifier,
-                TokenKind::Eof,
-            ]
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Else)
         );
     }
 

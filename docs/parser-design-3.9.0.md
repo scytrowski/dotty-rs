@@ -105,6 +105,16 @@ eager indentation, the parser requests the case-region indent after `match`
 and requests its outdent before parsing the following sibling statement or
 closing delimiter.
 
+For supported method RHSs and `if`/`while` bodies, the parser likewise asks
+the scanner for an indentation region at `=`, `then`, `else`, or `do` when the
+source continues on a more-indented line inside braces. These regions use the
+shared expression-block statement sequence, so local definitions remain in
+`Block.stats` and the final expression remains `Block.expr`. The sequence asks
+for an outdent before it can mistake an enclosing `else`, closing brace, or
+following member for another body statement. This is limited to those body
+owners; the parser does not infer indentation or enable general layout inside
+braced scopes.
+
 The scanner classifies line-final `end name` forms as `EndMarker` tokens. At
 statement-sequence boundaries the parser consumes the marker and its target
 only when the target matches the last parsed construct (`end if`, `end while`,
@@ -230,7 +240,8 @@ feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
 named arguments in ordinary and `using` lists in the narrow bare-identifier form
 the initial `if` and `while` expression forms, including Scala 2-compatible
-parenthesized conditions with braced branches
+parenthesized conditions with braced branches, and indented method/control-flow
+bodies containing supported local definitions inside braced scopes
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form

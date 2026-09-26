@@ -13,20 +13,28 @@ where
         let parenthesized_condition =
             self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
         let cond = self.parse_control_condition(dotty_core::HardKeyword::Then);
-        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
-            self.advance();
-        } else if !parenthesized_condition {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `then` after if condition",
-            );
-        }
-        let then_branch = self.parse_control_body();
-        let else_branch = if let Some(separator_end) = self.accept_else_after_optional_separator() {
+        let then_body_feedback =
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
+                let feedback = self.observe_indented_body();
+                self.advance();
+                feedback
+            } else if !parenthesized_condition {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `then` after if condition",
+                );
+                false
+            } else {
+                false
+            };
+        let then_branch = self.parse_control_body(then_body_feedback);
+        let else_branch = if let Some((separator_end, body_feedback)) =
+            self.accept_else_after_optional_separator()
+        {
             if let Some(separator_end) = separator_end {
                 self.extend_tree_end(then_branch, separator_end);
             }
-            self.parse_control_body()
+            self.parse_control_body(body_feedback)
         } else {
             self.synthetic_unit_at(self.last_real_token_end)
         };
@@ -41,7 +49,7 @@ where
         )
     }
 
-    fn accept_else_after_optional_separator(&mut self) -> Option<Option<u32>> {
+    fn accept_else_after_optional_separator(&mut self) -> Option<(Option<u32>, bool)> {
         let mut lookahead = 0;
         let mut separator_end = None;
         loop {
@@ -63,8 +71,9 @@ where
         while is_else_separator(self.current().kind) {
             self.advance();
         }
+        let body_feedback = self.observe_indented_body();
         self.advance();
-        Some(separator_end)
+        Some((separator_end, body_feedback))
     }
 
     pub(super) fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -72,15 +81,21 @@ where
         let parenthesized_condition =
             self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
         let cond = self.parse_control_condition(dotty_core::HardKeyword::Do);
-        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
-            self.advance();
-        } else if !parenthesized_condition {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `do` after while condition",
-            );
-        }
-        let body = self.parse_control_body();
+        let body_feedback =
+            if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
+                let feedback = self.observe_indented_body();
+                self.advance();
+                feedback
+            } else if !parenthesized_condition {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected `do` after while condition",
+                );
+                false
+            } else {
+                false
+            };
+        let body = self.parse_control_body(body_feedback);
 
         self.alloc_from(mark, TreeKind::While(While { cond, body }))
     }
@@ -137,10 +152,19 @@ where
         self.alloc_from(mark, TreeKind::Return(Return { expr, from: None }))
     }
 
-    fn parse_control_body(&mut self) -> TreeId<Untyped> {
+    fn parse_control_body(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
+        let feedback_opened = feedback_opened
+            || (matches!(
+                self.current().kind,
+                TokenKind::Newline | TokenKind::Newlines
+            ) && self.observe_indented_body());
         self.consume_control_newlines();
         if self.current().kind == TokenKind::Indent {
-            return self.parse_indented_block();
+            return if feedback_opened {
+                self.parse_feedback_indented_block()
+            } else {
+                self.parse_indented_block()
+            };
         }
         self.expr()
     }
@@ -319,14 +343,18 @@ where
         self.parse_indented_block_with_feedback(false)
     }
 
-    pub(super) fn parse_feedback_indented_block(&mut self) -> TreeId<Untyped> {
+    pub(crate) fn parse_feedback_indented_block(&mut self) -> TreeId<Untyped> {
         self.parse_indented_block_with_feedback(true)
     }
 
     fn parse_indented_block_with_feedback(&mut self, feedback_outdent: bool) -> TreeId<Untyped> {
         self.advance();
         let mark = self.mark();
-        let (stats, expr) = self.parse_expression_block_body(TokenKind::Outdent);
+        let (stats, expr) = if feedback_outdent {
+            self.parse_feedback_expression_block_body()
+        } else {
+            self.parse_expression_block_body(TokenKind::Outdent)
+        };
         if feedback_outdent && !self.cursor.at(TokenKind::Outdent) {
             self.observe_outdented();
         }
