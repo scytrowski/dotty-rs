@@ -201,3 +201,48 @@ occurrences fell; occurrence histograms are sensitive to how far parsing
 progresses and are not a standalone coverage score. The stable file outcomes
 show a net 95-file improvement with zero hard failures, panics, or hangs; the
 new generic examples remain useful targets for future corpus triage.
+
+## Corpus rerun after PR #308
+
+Issue #309 reran the same report at dotty-rs commit `5ced54d` (main after
+PR #308), against the unchanged Scala 3.9.0 revision
+`777528f19a58e794c9954a42f433373472ec57f8` and sorted 1,236-file
+`library/src` + `compiler/src` corpus. The machine-readable report is
+[`parser-post-issue-308-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-308-scala3-3.9.0.json).
+
+| Measure | After #288 (`5c25649`) | After #308 (`5ced54d`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 550 (44.50%) | 600 (48.54%) | +50 (+4.05 pp) |
+| Recoverable diagnostics | 686 (55.50%) | 636 (51.46%) | -50 (-4.05 pp) |
+| Hard parser failures | 0 | 0 | 0 |
+| Panics | 0 | 0 | 0 |
+| Hangs | 0 | 0 | 0 |
+| Scanner diagnostics | 17 | 17 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #288 | After #308 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 19,183 | 16,879 | -2,304 |
+| `ExpectedPattern` | 7 | 7 | 0 |
+| `ExpectedToken` | 3,749 | 2,511 | -1,238 |
+| `ExpectedType` | 1,553 | 1,264 | -289 |
+| `UnexpectedToken` | 12,268 | 10,418 | -1,850 |
+| `UnsupportedSyntax` | 7,404 | 6,347 | -1,057 |
+| **Total** | **44,164** | **37,426** | **-6,738 (-15.3%)** |
+
+The largest remaining first-failure category is `ExpectedExpression` (378
+files), followed by `ExpectedType` (118), `UnexpectedToken` (71), and
+`ExpectedToken` (54). Named unsupported buckets are unchanged: compound
+template self types (7 files), unsupported enum-case syntax (5), and
+interleaved type/term parameter clauses (1). The increase in
+`ExpectedExpression` first failures (310 to 378) is a category shift, not
+evidence by itself of a regression: first-failure histograms do not identify
+per-file transitions, while clean parses increased by 50 and
+`UnexpectedToken`/`ExpectedToken` buckets fell by 89/36. Diagnostic occurrence
+counts fell in every category except `ExpectedPattern`, which was flat.
+
+Coverage now reaches 600 of 1,236 files (48.54%) with no hard failures,
+panics, or hangs. The next useful investigation is to split the large generic
+`ExpectedExpression` and `ExpectedType` buckets into concrete syntax families;
+representative paths are evidence for triage, not diagnoses of those buckets.
