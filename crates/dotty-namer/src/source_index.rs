@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use dotty_core::{ScopeId, SemanticStore, SourceId, SymbolId, TreeId, Untyped};
+use dotty_core::{Packages, ScopeId, SemanticStore, SourceId, SymbolId, TreeId, Untyped};
 
 use crate::NamerError;
 
@@ -144,7 +144,7 @@ impl SourceSemanticIndex {
     /// This is intended for tests, corpus audits, and debug tooling. Naming
     /// does not call it automatically, so production source naming does not
     /// pay for a second graph traversal.
-    pub fn validate(&self, store: &SemanticStore) -> Vec<String> {
+    pub fn validate(&self, store: &SemanticStore, packages: &Packages) -> Vec<String> {
         let mut violations = Vec::new();
         for ((source, tree), symbol) in &self.symbols_by_tree {
             if !store.symbols.contains(*symbol) {
@@ -154,6 +154,29 @@ impl SourceSemanticIndex {
                     tree.index(),
                     symbol.index()
                 ));
+                continue;
+            }
+            let semantic = store.symbols.get(*symbol);
+            if matches!(
+                semantic.kind,
+                dotty_core::SymbolKind::Class
+                    | dotty_core::SymbolKind::Trait
+                    | dotty_core::SymbolKind::ModuleClass
+            ) && !self.scopes_by_owner.contains_key(symbol)
+            {
+                violations.push(format!(
+                    "class-like symbol {} has no indexed declaration scope",
+                    symbol.index()
+                ));
+            }
+            if semantic.kind == dotty_core::SymbolKind::Package {
+                let indexed_scope = self.scopes_by_owner.get(symbol).copied();
+                if packages.scope_of(*symbol) != indexed_scope {
+                    violations.push(format!(
+                        "package symbol {} does not reuse its Packages scope",
+                        symbol.index()
+                    ));
+                }
             }
         }
 
@@ -503,7 +526,7 @@ mod tests {
         });
         index.record_declaration_context(member, context).unwrap();
 
-        assert!(index.validate(&store).is_empty());
+        assert!(index.validate(&store, &Packages::new()).is_empty());
     }
 
     #[test]
@@ -520,7 +543,7 @@ mod tests {
         let mut index = SourceSemanticIndex::new();
         index.record_scope(owner, scope).unwrap();
 
-        let violations = index.validate(&store);
+        let violations = index.validate(&store, &Packages::new());
 
         assert!(
             violations
@@ -531,6 +554,56 @@ mod tests {
             violations
                 .iter()
                 .any(|violation| violation.contains("is not owned by scope owner"))
+        );
+    }
+
+    #[test]
+    fn validation_requires_class_like_symbols_to_have_a_declaration_scope() {
+        let mut store = SemanticStore::new();
+        let class_name = store.names.intern("C");
+        let class = store.symbols.alloc(Symbol {
+            name: *dotty_core::TypeName::new(class_name).as_name(),
+            owner: None,
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), class)
+            .unwrap();
+
+        let violations = index.validate(&store, &Packages::new());
+
+        assert!(violations.iter().any(|violation| {
+            violation.contains("class-like symbol")
+                && violation.contains("no indexed declaration scope")
+        }));
+    }
+
+    #[test]
+    fn validation_requires_package_scopes_to_come_from_the_shared_registry() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let package = packages.enter(&mut store, SymbolOrigin::Synthetic, &["p"])[0];
+        let unrelated_scope = store.scopes.alloc(Scope::new(Some(package.symbol)));
+        let mut index = SourceSemanticIndex::new();
+        index
+            .record_symbol(SourceId::from_index(1), tree_id(), package.symbol)
+            .unwrap();
+        index.record_scope(package.symbol, unrelated_scope).unwrap();
+
+        let violations = index.validate(&store, &packages);
+
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("does not reuse its Packages scope"))
         );
     }
 
