@@ -55,6 +55,12 @@ pub enum TyperError {
     MalformedClassInfo { symbol: SymbolId, info: TypeId },
     /// A template parent is not a type or a supported constructor-call shape.
     MalformedClassParent { source: SourceId, tree_index: u32 },
+    /// A projected parent does not resolve to a class or trait declaration.
+    UnresolvedParentClassKind {
+        source: SourceId,
+        tree_index: u32,
+        symbol: Option<SymbolId>,
+    },
     /// Higher-kinded source type parameter completion is deferred.
     HigherKindedTypeParameterDeferred { symbol: SymbolId, tree_index: u32 },
     /// Higher-kinded source type alias completion is deferred.
@@ -696,10 +702,12 @@ impl<'a> SourceTyper<'a> {
         for parent in &template.parents {
             parents.push(self.project_parent_type(*parent, type_context, 0)?);
         }
-        let first_parent_is_trait = parents
-            .first()
-            .and_then(|parent| self.parent_type_symbol(*parent))
-            .is_some_and(|parent| self.store.symbols.get(parent).kind == SymbolKind::Trait);
+        let first_parent_is_trait = match (parents.first(), template.parents.first()) {
+            (Some(parent_type), Some(parent_tree)) => {
+                self.parent_is_trait(*parent_type, parent_tree.index(), info_journal)?
+            }
+            _ => false,
+        };
         if parents.is_empty() || first_parent_is_trait {
             parents.insert(0, self.definitions.object_type);
         }
@@ -877,6 +885,91 @@ impl<'a> SourceTyper<'a> {
             Type::Applied { tycon, .. } => self.parent_type_symbol(*tycon),
             _ => None,
         }
+    }
+
+    fn parent_is_trait(
+        &mut self,
+        ty: TypeId,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let mut current_type = ty;
+        let mut visited = Vec::new();
+        for _ in 0..256 {
+            let symbol = self.parent_type_symbol(current_type);
+            let Some(symbol) = symbol else {
+                return Err(TyperError::UnresolvedParentClassKind {
+                    source: self.source,
+                    tree_index,
+                    symbol: None,
+                });
+            };
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            if visited.contains(&symbol) {
+                return Err(TyperError::UnresolvedParentClassKind {
+                    source: self.source,
+                    tree_index,
+                    symbol: Some(symbol),
+                });
+            }
+            visited.push(symbol);
+            match self.store.symbols.get(symbol).kind {
+                SymbolKind::Trait => return Ok(true),
+                SymbolKind::Class | SymbolKind::ModuleClass => return Ok(false),
+                SymbolKind::TypeAlias => {
+                    let alias_info = match *self.store.symbols.info(symbol) {
+                        SymbolInfo::Complete(info) => info,
+                        SymbolInfo::Missing
+                            if self.index.definition_of(symbol).is_some_and(|definition| {
+                                matches!(
+                                    definition,
+                                    SourceDefinition::Canonical { source, .. }
+                                        | SourceDefinition::Derived { source, .. }
+                                        if source == self.source
+                                )
+                            }) =>
+                        {
+                            self.complete_symbol_inner(symbol, info_journal)?
+                        }
+                        SymbolInfo::Missing => {
+                            return Err(TyperError::UnresolvedParentClassKind {
+                                source: self.source,
+                                tree_index,
+                                symbol: Some(symbol),
+                            });
+                        }
+                        SymbolInfo::Deferred(_) => {
+                            return Err(TyperError::DeferredSymbolCompletion { symbol });
+                        }
+                        SymbolInfo::Error => {
+                            return Err(TyperError::SymbolAlreadyErrored { symbol });
+                        }
+                    };
+                    let Type::AliasingBounds { alias } = self.store.types.get(alias_info) else {
+                        return Err(TyperError::UnresolvedParentClassKind {
+                            source: self.source,
+                            tree_index,
+                            symbol: Some(symbol),
+                        });
+                    };
+                    current_type = *alias;
+                }
+                _ => {
+                    return Err(TyperError::UnresolvedParentClassKind {
+                        source: self.source,
+                        tree_index,
+                        symbol: Some(symbol),
+                    });
+                }
+            }
+        }
+        Err(TyperError::UnresolvedParentClassKind {
+            source: self.source,
+            tree_index,
+            symbol: self.parent_type_symbol(current_type),
+        })
     }
 
     fn complete_type_alias(
@@ -2932,6 +3025,103 @@ mod tests {
         assert_eq!(info.parents.len(), 2);
         assert_eq!(info.parents[0], definitions.object_type);
         assert_eq!(type_symbol(typer.store(), info.parents[1]), trait_symbol);
+    }
+
+    #[test]
+    fn trait_alias_parent_gets_object_before_the_alias_reference() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait T\nobject O { type Alias = T; class C extends Alias }");
+        let trait_symbol = class_symbol(&parsed, &store, &index, source, "T");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        assert!(matches!(
+            *typer.store().symbols.info(alias),
+            SymbolInfo::Complete(info)
+                if matches!(typer.store().types.get(info), Type::AliasingBounds { alias: target }
+                    if type_symbol(typer.store(), *target) == trait_symbol)
+        ));
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.parents.len(), 2);
+        assert_eq!(info.parents[0], definitions.object_type);
+        assert_eq!(type_symbol(typer.store(), info.parents[1]), alias);
+    }
+
+    #[test]
+    fn class_alias_parent_does_not_get_an_unneeded_object_parent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base\nobject O { type Alias = Base; class C extends Alias }");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info_id = typer.complete_symbol(class).unwrap();
+
+        let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+            panic!("expected ClassInfo");
+        };
+        assert_eq!(info.parents.len(), 1);
+        assert_eq!(type_symbol(typer.store(), info.parents[0]), alias);
+    }
+
+    #[test]
+    fn type_parameter_parent_with_unknown_class_kind_is_deferred_explicitly() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A] extends A");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let parent_tree_index = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(identifier)
+                    if identifier.name.is_type()
+                        && store.names.resolve(identifier.name.text()) == "A" =>
+                {
+                    Some(tree.index())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::UnresolvedParentClassKind {
+                source: error_source,
+                tree_index,
+                symbol: Some(error_symbol),
+            }) if error_source == source
+                && tree_index == parent_tree_index
+                && error_symbol == parameter
+        ));
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
     }
 
     #[test]
