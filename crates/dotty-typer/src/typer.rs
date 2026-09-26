@@ -6,8 +6,8 @@ use dotty_core::ast::{Ident, TreeKind, TypeBoundsTree, UntypedNode};
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
-    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
+    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
@@ -48,6 +48,16 @@ pub enum TyperError {
     UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
     /// Higher-kinded source type parameter completion is deferred.
     HigherKindedTypeParameterDeferred { symbol: SymbolId, tree_index: u32 },
+    /// Higher-kinded source type alias completion is deferred.
+    HigherKindedTypeAliasDeferred { symbol: SymbolId, tree_index: u32 },
+    /// A type alias RHS cannot be represented by source alias bounds.
+    InvalidCompletedBounds {
+        source: SourceId,
+        tree_index: u32,
+        ty: TypeId,
+    },
+    /// Opaque alias completion is deferred until opaque visibility is modeled.
+    OpaqueAliasDeferred { symbol: SymbolId, tree_index: u32 },
     /// A deferred completion belongs to a future completion engine.
     DeferredSymbolCompletion { symbol: SymbolId },
     /// A previous fatal semantic failure has already been recorded.
@@ -409,8 +419,20 @@ impl<'a> SourceTyper<'a> {
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
                 self.complete_type_parameter(symbol, rhs, context, info_journal)
             }
-            SymbolKind::TypeAlias
-            | SymbolKind::Method
+            SymbolKind::TypeAlias => {
+                let rhs = type_definition_rhs.ok_or(TyperError::SymbolSourceKindMismatch {
+                    source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind,
+                })?;
+                let context = self
+                    .index
+                    .declaration_context_of(symbol)
+                    .ok_or(TyperError::DeclarationContextMissing { symbol })?;
+                self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
+            }
+            SymbolKind::Method
             | SymbolKind::Constructor
             | SymbolKind::Class
             | SymbolKind::Trait
@@ -422,6 +444,74 @@ impl<'a> SourceTyper<'a> {
                 Err(TyperError::UnsupportedSymbolCompletion { symbol, kind })
             }
         }
+    }
+
+    fn complete_type_alias(
+        &mut self,
+        symbol: SymbolId,
+        rhs: TreeId<Untyped>,
+        declaration_tree_index: u32,
+        context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(SymbolFlags::OPAQUE)
+        {
+            return Err(TyperError::OpaqueAliasDeferred {
+                symbol,
+                tree_index: declaration_tree_index,
+            });
+        }
+        let Some(rhs_node) = self.arena.try_get(rhs) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: rhs.index(),
+            });
+        };
+        let info = match &rhs_node.kind {
+            TreeKind::LambdaTypeTree(_) => {
+                return Err(TyperError::HigherKindedTypeAliasDeferred {
+                    symbol,
+                    tree_index: rhs.index(),
+                });
+            }
+            TreeKind::TypeBoundsTree(bounds) => {
+                let bounds = *bounds;
+                if let Some(alias) = bounds.alias {
+                    let projected = self.type_of_tpt_inner(alias, context)?;
+                    self.alias_bounds_for_type(projected, alias.index())?
+                } else {
+                    self.project_type_bounds(&bounds, context)?
+                }
+            }
+            _ => {
+                let projected = self.type_of_tpt_inner(rhs, context)?;
+                self.alias_bounds_for_type(projected, rhs.index())?
+            }
+        };
+        let previous = *self.store.symbols.info(symbol);
+        info_journal.push((symbol, previous));
+        self.store
+            .symbols
+            .set_info(symbol, SymbolInfo::Complete(info));
+        Ok(info)
+    }
+
+    /// Source-side equivalent of Dotty's `toBounds`: genuine bounds and
+    /// aliases keep their distinction, ordinary types become aliases, and
+    /// methodic/by-name types are rejected.
+    fn alias_bounds_for_type(&mut self, ty: TypeId, tree_index: u32) -> Result<TypeId, TyperError> {
+        dotty_core::types::to_bounds(&mut self.store.types, ty).map_err(|_| {
+            TyperError::InvalidCompletedBounds {
+                source: self.source,
+                tree_index,
+                ty,
+            }
+        })
     }
 
     fn complete_type_parameter(
@@ -1709,6 +1799,30 @@ mod tests {
             .unwrap_or_else(|| panic!("source type parameter `{name}` not found"))
     }
 
+    fn type_alias_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).kind == SymbolKind::TypeAlias
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source type alias `{name}` not found"))
+    }
+
     fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
         let text = format!("val x: {name} = 1");
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
@@ -1935,6 +2049,188 @@ mod tests {
                 if symbol == parameter && tree_index == rhs.index()
         ));
         assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn source_type_alias_completes_to_aliasing_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("type Alias = Int");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(alias).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::AliasingBounds { alias } if *alias == definitions.int
+        ));
+    }
+
+    #[test]
+    fn source_abstract_type_completes_to_plain_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class L; class H; type Abstract >: L <: H");
+        let abstract_type = type_alias_symbol(&parsed, &store, &index, source, "Abstract");
+        let bound_symbol = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let expected_low = bound_symbol("L");
+        let expected_high = bound_symbol("H");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let info = typer.complete_symbol(abstract_type).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Bounds { low, high }
+                if type_symbol(typer.store(), *low) == expected_low
+                    && type_symbol(typer.store(), *high) == expected_high
+        ));
+    }
+
+    #[test]
+    fn opaque_source_type_alias_is_deferred_and_stays_missing() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("opaque type Secret = Int");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Secret");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(alias).unwrap() else {
+            panic!("canonical source type alias expected");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::OpaqueAliasDeferred { symbol, tree_index })
+                if symbol == alias && tree_index == tree.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn to_bounds_preserves_existing_aliasing_bounds_id() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let existing = store.types.alloc(Type::AliasingBounds {
+            alias: definitions.int,
+        });
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let actual = typer.alias_bounds_for_type(existing, 14).unwrap();
+
+        assert_eq!(actual, existing);
+    }
+
+    #[test]
+    fn to_bounds_rejects_by_name_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let by_name = store.types.alloc(Type::ByName {
+            result: definitions.int,
+        });
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(by_name, 14),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 14, ty, .. })
+                if ty == by_name
+        ));
+    }
+
+    #[test]
+    fn to_bounds_rejects_method_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let method = store
+            .types
+            .alloc(Type::Method(dotty_core::types::MethodType {
+                params: Vec::new(),
+                result: definitions.int,
+                kind: dotty_core::types::MethodKind::Plain,
+            }));
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(method, 19),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 19, ty, .. })
+                if ty == method
+        ));
+    }
+
+    #[test]
+    fn to_bounds_rejects_polymorphic_types_with_exact_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let poly = store.types.alloc(Type::Poly(dotty_core::types::PolyType {
+            params: Vec::new(),
+            result: definitions.int,
+        }));
+        let mut typer = SourceTyper::new(
+            &arena,
+            SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.alias_bounds_for_type(poly, 23),
+            Err(TyperError::InvalidCompletedBounds { tree_index: 23, ty, .. })
+                if ty == poly
+        ));
     }
 
     #[test]
