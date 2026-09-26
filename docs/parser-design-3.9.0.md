@@ -148,6 +148,7 @@ The supported source-unit grammar is intentionally small:
 ```text
 CompilationUnit -> { package QualId [body] } TopStatSeq
 TopStat         -> package QualId body
+                 | package object objectDef
                  | import ImportExpr {',' ImportExpr}
                  | export ImportExpr {',' ImportExpr}
                  | supported top-level definition
@@ -169,9 +170,8 @@ legacy `_` spelling and preserve the same wildcard selector in the source AST.
 In default Scala 3.9 mode `_` has no parser diagnostic; Dotty's
 `ImportWildcard` migration warning/error is gated on `future-migration`/`future`
 source versions, which the current parser does not configure. Arbitrary
-top-level expressions and
-package objects remain unsupported; imports and exports are also retained as
-statements inside supported blocks and templates.
+top-level expressions remain unsupported; imports and exports are also
+retained as statements inside supported blocks and templates.
 
 Value definitions are preserved as statements in this root: simple identifiers use
 `ValDef` (with `Modifier::Var` for `var`), while non-simple left-hand sides use
@@ -277,6 +277,14 @@ parents. `derives` and ordered `uses` are parsed at enum/template level. Direct 
 is attached to the existing `ModuleDef`, `PatDef`, or `TypeDef` shape without
 introducing a new enum-case node. Annotations or modifiers after the case name,
 and semantic visibility checks, remain deferred.
+
+`package object name` is parsed as the existing `ModuleDef(Template(...))`
+shape, with a parser-generated `Modifier::PackageObject` preserving the source
+distinction Dotty records with its package flag. Its members use the same
+supported object-body grammar, including braced and scanner-provided indented
+bodies. The parser does not desugar package objects or resolve package scope;
+malformed names recover through the normal object-definition path.
+
 Constructor parameters preserve Dotty's parser-level role combinations:
 explicit `val`/`var` parameters are accessors, while plain class and later
 case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed

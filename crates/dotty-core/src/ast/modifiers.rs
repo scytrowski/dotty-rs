@@ -177,4 +177,10 @@ mod tests {
         assert_ne!(Modifier::EnumCase, Modifier::Case);
         assert_ne!(Modifier::EnumCase, Modifier::Enum);
     }
+
+    #[test]
+    fn package_object_is_a_distinct_parser_level_module_marker() {
+        assert_ne!(Modifier::PackageObject, Modifier::EnumCase);
+        assert_ne!(Modifier::PackageObject, Modifier::Case);
+    }
 }
