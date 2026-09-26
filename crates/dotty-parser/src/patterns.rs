@@ -342,8 +342,11 @@ where
     ) -> TreeId<Untyped> {
         loop {
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
-                let Ok(name) = self.intern_current_term_name() else {
+                let Some((name, backquoted)) = self.current_selector_name() else {
+                    self.report(
+                        crate::ParseDiagnosticKind::ExpectedToken,
+                        "expected a selector after `.` in pattern",
+                    );
                     return tree;
                 };
                 self.advance();
@@ -351,7 +354,7 @@ where
                     mark,
                     TreeKind::Select(Select {
                         qualifier: tree,
-                        name: *name.as_name(),
+                        name,
                         backquoted,
                     }),
                 );
@@ -850,6 +853,29 @@ mod tests {
             result.ast.get(result.root).position.unwrap().span().range(),
             TextRange::new(0, 1).unwrap()
         );
+    }
+
+    #[test]
+    fn parses_a_symbolic_name_after_a_pattern_selection_dot() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "x.##",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::Dot), 1, 2),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Eof, 4, 4),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::Select(selection) = result.ast.get(result.root).kind else {
+            panic!("expected a symbolic pattern selection");
+        };
+        assert_eq!(names.resolve(selection.name.text()), "##");
+        assert!(!selection.backquoted);
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
