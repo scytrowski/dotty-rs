@@ -2136,6 +2136,73 @@ mod tests {
     }
 
     #[test]
+    fn parser_feedback_opens_indentation_inside_a_braced_scope() {
+        let source = "{\n  if ready then\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Val)
+        );
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn parser_feedback_closes_braced_indentation_before_the_closing_brace() {
+        let source = "{\n  if ready then\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Indented);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+
+        while scanner.current().kind != TokenKind::Punctuation(Punctuation::RightBrace) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
+    }
+
+    #[test]
+    fn parser_feedback_opens_indented_method_rhs_inside_a_braced_scope() {
+        let source = "{\n  def method =\n    val x = 1\n    x\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Operator
+            || scanner
+                .source
+                .get(scanner.current().span.start() as usize..scanner.current().span.end() as usize)
+                != Some("=")
+        {
+            scanner.advance();
+        }
+
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Val)
+        );
+
+        scanner.observe(ScannerEvent::Indented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+    }
+
+    #[test]
     fn parser_feedback_closes_nested_indentation_regions_in_order() {
         let mut scanner =
             ContextualScanner::new("root:\n  child:\n    leaf\nback").expect("source scans");
