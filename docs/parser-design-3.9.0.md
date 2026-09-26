@@ -243,6 +243,9 @@ the initial `if` and `while` expression forms, including Scala 2-compatible
 parenthesized conditions with braced branches, and indented method/control-flow
 bodies containing supported local definitions inside braced scopes
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
+including indented `try` bodies with local definitions represented in a shared
+expression `Block`, including scanner-feedback regions nested in braces, with
+`catch`/`finally` kept outside the body boundary
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
 braced partial-function literals (`{ case ... }`), including as a braced
