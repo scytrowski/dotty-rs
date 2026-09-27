@@ -253,6 +253,8 @@ braced partial-function literals (`{ case ... }`), including as a braced
 application argument
 for-comprehensions with generators, case generators, aliases, guards, and
 `yield`/`do` bodies
+final `expr*` splices in parenthesized argument lists, normalized as
+`Typed(expr, _*)`; experimental multiple-spread syntax is not enabled
 simple `val`/`var` definitions with inferred or explicit types, declarations
 without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
@@ -426,9 +428,10 @@ metadata
 ```
 
 The implemented selections and applications are only the simple-expression
-subset above. Full selection/application grammar, including advanced argument
-forms, named/using argument validation, and the remaining colon-argument
-forms, remains future work. Likewise, the type parser currently handles
+subset above. Full selection/application grammar, named/using argument
+validation, and the remaining colon-argument forms remain future work. The
+vararg-splice subset is limited to a final argument under the default Scala
+3.9 feature policy. Likewise, the type parser currently handles
 simple, recursively applied, projected, annotated, refined, parenthesized, and tuple type names needed by
 these ascriptions, type applications, and type-definition bounds, plus
 Scala 3.9 `InfixType` expressions with generic symbolic and identifier
