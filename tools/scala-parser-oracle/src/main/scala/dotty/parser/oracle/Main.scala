@@ -2,6 +2,7 @@ package dotty.parser.oracle
 
 import java.nio.file.{Files, Paths}
 
+import dotty.tools.dotc.CompilationUnit
 import dotty.tools.dotc.core.Contexts.ContextBase
 import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
@@ -46,7 +47,9 @@ object Main:
     val source = Files.readString(sourcePath)
     val sourceFile = SourceFile.virtual(sourcePath.toString, source)
     val context = (new ContextBase).initialCtx
-    val parser = new Parsers.Parser(sourceFile)(using context)
+    val unit = CompilationUnit(sourceFile, mustExist = false)(using context)
+    val unitContext = context.fresh.setCompilationUnit(unit)
+    val parser = new Parsers.Parser(sourceFile)(using unitContext)
     val tree = mode match
       case "pattern" => parser.pattern()
       case "compilation" => parser.compilationUnit()

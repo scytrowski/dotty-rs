@@ -19,6 +19,9 @@ The batch manifest contains one tab-separated `mode` and absolute source path
 per line. `compare.sh` uses this mode automatically: Scala parses the whole
 corpus in one JVM, while the Rust dump tool is built and run once. This avoids
 restarting sbt, Scala, Cargo, and Python for every fixture.
+Each Scala fixture is attached to a fresh `CompilationUnit`, so source-level
+language imports and other per-unit parser features cannot leak to later
+fixtures in the batch.
 
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
