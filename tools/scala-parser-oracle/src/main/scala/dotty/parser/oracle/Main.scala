@@ -219,7 +219,11 @@ object Main:
         childTrees(tree).flatMap: child =>
           if child.getClass.getSimpleName.stripSuffix("$") == "Thicket" then childTrees(child)
           else child :: Nil
-      else childTrees(tree)
+      else tree match
+        case application: dotty.tools.dotc.ast.Trees.Apply[?] =>
+          childTrees(tree).filterNot: child =>
+            application.args.lastOption.contains(child) && isTrailingCommaPlaceholder(child, source)
+        case _ => childTrees(tree)
     val operatorIndex = normalizedKind match
       case "PrefixOp"  => Some(0)
       case "InfixOp"   => Some(1)
@@ -391,6 +395,23 @@ object Main:
     val start = math.max(0, math.min(tree.span.start, source.length))
     val end = math.max(start, math.min(tree.span.end, source.length))
     source.substring(start, end)
+
+  // Dotty's generic commaSeparated helper parses one extra, zero-width `???`
+  // tree when an application ends in a trailing comma. It is a parser
+  // placeholder at the closing delimiter, not a source argument. Normalize
+  // only that final synthetic child; explicit `???` arguments retain a span.
+  private def isTrailingCommaPlaceholder(
+      tree: dotty.tools.dotc.ast.Trees.Tree[?],
+      source: String
+  ): Boolean =
+    val isQuestionMarkSelect = tree match
+      case select: dotty.tools.dotc.ast.Trees.Select[?] => select.name.toString == "???"
+      case _ => false
+    if !isQuestionMarkSelect || !tree.span.exists || tree.span.start != tree.span.end then
+      return false
+    val offset = tree.span.start
+    offset > 0 && offset < source.length && source.charAt(offset) == ')' &&
+      source.substring(0, offset).reverse.dropWhile(_.isWhitespace).headOption.contains(',')
 
   private def operatorName(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
     slice(tree, source) match

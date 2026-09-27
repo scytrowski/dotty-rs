@@ -97,10 +97,6 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedExpression,
-                        "expected an argument after `,`",
-                    );
                     self.advance();
                     break;
                 }
@@ -255,6 +251,61 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_a_trailing_comma_after_an_application_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(a,)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Comma), 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        assert_eq!(application.args.len(), 1);
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn missing_argument_before_a_nonfinal_comma_is_still_diagnosed() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(a,,b)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::Comma), 3, 4),
+                token(TokenKind::Punctuation(Punctuation::Comma), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == crate::ParseDiagnosticKind::ExpectedExpression
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
