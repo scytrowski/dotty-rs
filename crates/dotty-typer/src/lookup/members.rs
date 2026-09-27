@@ -99,6 +99,37 @@ impl SourceTyper<'_> {
         receiver: TypeId,
         name: Name,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
+        let store_checkpoint = self.store.checkpoint();
+        let checkpoint = self.type_index.checkpoint();
+        let mut journal = Vec::new();
+        let result = self.lookup_members_inner(receiver, name, &mut journal);
+        if result.is_err() {
+            for (symbol, previous) in journal.into_iter().rev() {
+                if self.store.symbols.contains(symbol) {
+                    self.store.symbols.set_info(symbol, previous);
+                }
+            }
+            self.store.rollback_to(store_checkpoint);
+            self.type_index.restore(checkpoint);
+        }
+        result
+    }
+
+    pub(in crate::typer) fn lookup_members_journaled(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
+        self.lookup_members_inner(receiver, name, journal)
+    }
+
+    fn lookup_members_inner(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
         let receiver_view = TypeNormalizer::new(self.store)
             .normalize_for_lookup(receiver)
             .map_err(MemberLookupError::TypeNormalization)?;
@@ -114,7 +145,7 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
 
         while let Some(pending) = queue.pop_front() {
-            let info = self.class_info(pending.symbol)?;
+            let info = self.class_info(pending.symbol, journal)?;
             let direct = self.direct_candidates(
                 pending.symbol,
                 pending.receiver_view,
@@ -163,14 +194,18 @@ impl SourceTyper<'_> {
         Ok(candidates)
     }
 
-    fn class_info(&mut self, symbol: SymbolId) -> Result<ClassInfo, MemberLookupError> {
+    fn class_info(
+        &mut self,
+        symbol: SymbolId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ClassInfo, MemberLookupError> {
         if !self.store.symbols.contains(symbol) {
             return Err(MemberLookupError::UnknownClassSymbol { symbol });
         }
         if matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
             && self.is_current_source_symbol(symbol)
         {
-            self.complete_symbol(symbol)
+            self.complete_symbol_inner(symbol, journal)
                 .map_err(|error| MemberLookupError::SourceClassCompletion { symbol, error })?;
         }
         let info_type = match *self.store.symbols.info(symbol) {

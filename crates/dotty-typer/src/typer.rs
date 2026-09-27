@@ -295,6 +295,23 @@ pub enum TyperError {
         symbol: SymbolId,
         kind: SymbolKind,
     },
+    /// No member with this term name exists on the receiver.
+    MemberNotFound {
+        source: SourceId,
+        tree_index: u32,
+        receiver: TypeId,
+        name: dotty_core::Name,
+    },
+    /// Several member candidates remain after lookup; overload resolution is deferred.
+    OverloadedSelectionDeferred {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::Name,
+    },
+    /// A type selection is outside expression typing.
+    TypeSelectionInExpression { source: SourceId, tree_index: u32 },
+    /// Member discovery failed with a typed lookup error.
+    MemberLookup(Box<MemberLookupError>),
     /// The source expression form is outside this issue's supported subset.
     UnsupportedExpression {
         source: SourceId,
@@ -555,6 +572,50 @@ impl<'a> SourceTyper<'a> {
                         source_tree.position,
                     ),
                 )
+            }
+            TreeKind::Select(selection) => {
+                if !selection.name.is_term() {
+                    return Err(TyperError::TypeSelectionInExpression {
+                        source: self.source,
+                        tree_index: tree.index(),
+                    });
+                }
+                let qualifier = self.type_expression_inner(
+                    selection.qualifier,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let receiver = self.typed_arena.get(qualifier).ty;
+                let candidates = self
+                    .lookup_members_journaled(receiver, selection.name, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                let candidate = match candidates.as_slice() {
+                    [] => {
+                        return Err(TyperError::MemberNotFound {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            receiver,
+                            name: selection.name,
+                        });
+                    }
+                    [candidate] => candidate,
+                    _ => {
+                        return Err(TyperError::OverloadedSelectionDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            name: selection.name,
+                        });
+                    }
+                };
+                let ty = self.member_type_on_journaled(candidate, info_journal)?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).select(
+                    qualifier,
+                    selection.name,
+                    selection.backquoted,
+                    ty,
+                    source_tree.position,
+                ))
             }
             _ => Err(TyperError::UnsupportedExpression {
                 source: self.source,
@@ -3391,6 +3452,83 @@ mod tests {
             typer.typed_ast().get(typed).ty,
             definitions,
         )
+    }
+
+    fn type_synthetic_literal(
+        value: dotty_core::Constant,
+    ) -> (dotty_core::Constant, TypeId, Definitions) {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 0 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        parsed.ast.get_mut(rhs).kind = TreeKind::Literal(dotty_core::ast::Literal {
+            value: value.clone(),
+        });
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed literal node")
+        };
+        (
+            literal.value.clone(),
+            typer.typed_ast().get(typed).ty,
+            definitions,
+        )
+    }
+
+    fn type_method_rhs(
+        source_text: &str,
+        method_name: &str,
+    ) -> Result<(TreeKind<Typed>, TypeId, Type, Definitions), TyperError> {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+        let parameter_context = parsed.ast.iter().find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            if store.names.resolve(definition.name.as_name().text()) == method_name {
+                return None;
+            }
+            let symbol = index.symbol_at(source, tree)?;
+            (store.symbols.get(symbol).kind == SymbolKind::Parameter
+                && store.symbols.get(symbol).owner == Some(method))
+            .then(|| index.declaration_context_of(symbol))
+            .flatten()
+        });
+        let context = ExpressionContext {
+            lexical: parameter_context.unwrap_or_else(|| {
+                index
+                    .declaration_context_of(method)
+                    .expect("test method should have a declaration context")
+            }),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let typed = typer.type_expression(rhs, context)?;
+        let node = typer.typed_ast().get(typed);
+        Ok((
+            node.kind.clone(),
+            node.ty,
+            typer.store().types.get(node.ty).clone(),
+            definitions,
+        ))
     }
 
     fn type_symbol(store: &SemanticStore, ty: TypeId) -> SymbolId {
@@ -9166,6 +9304,22 @@ mod tests {
     }
 
     #[test]
+    fn byte_constant_uses_the_byte_type() {
+        let (value, ty, definitions) = type_synthetic_literal(dotty_core::Constant::Byte(7));
+
+        assert_eq!(value, dotty_core::Constant::Byte(7));
+        assert_eq!(ty, definitions.byte);
+    }
+
+    #[test]
+    fn short_constant_uses_the_short_type() {
+        let (value, ty, definitions) = type_synthetic_literal(dotty_core::Constant::Short(7));
+
+        assert_eq!(value, dotty_core::Constant::Short(7));
+        assert_eq!(ty, definitions.short);
+    }
+
+    #[test]
     fn bare_this_gets_the_nearest_enclosing_class_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value = this }");
@@ -9360,6 +9514,168 @@ mod tests {
     }
 
     #[test]
+    fn direct_field_selection_produces_a_typed_select() {
+        let (kind, ty_id, _, definitions) = type_method_rhs(
+            "class C { val value: Int = 1; def use: Int = this.value }",
+            "use",
+        )
+        .unwrap();
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert_eq!(ty_id, definitions.int);
+    }
+
+    #[test]
+    fn direct_unique_method_selection_keeps_the_methodic_type() {
+        let (kind, _, ty, _) = type_method_rhs(
+            "class C { def get(): Int = 1; def use: Int = this.get }",
+            "use",
+        )
+        .unwrap();
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert!(matches!(ty, Type::Method(_) | Type::Poly(_)), "{ty:?}");
+    }
+
+    #[test]
+    fn inherited_unique_member_selection_finds_the_parent_field() {
+        let (kind, ty, _, definitions) = type_method_rhs(
+            "class Parent { val value: Int }; class Child extends Parent; class Use { def use(child: Child): Int = child.value }",
+            "use",
+        )
+        .unwrap();
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
+    fn generic_receiver_selection_substitutes_its_type_argument() {
+        let source_text = "class Text; class Box[A] { val value: A }; class Use { def use(box: Box[Text]): Text = box.value }";
+        let (kind, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
+        let (parsed, store, _, _, index, source) = parse_and_name(source_text);
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert!(matches!(
+            ty,
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if symbol == text
+        ));
+    }
+
+    #[test]
+    fn generic_inherited_selection_substitutes_through_the_parent_view() {
+        let source_text = "class Text; class Parent[A] { val value: A }; class Child[B] extends Parent[B]; class Use { def use(child: Child[Text]): Text = child.value }";
+        let (kind, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
+        let (parsed, store, _, _, index, source) = parse_and_name(source_text);
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert!(matches!(
+            ty,
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if symbol == text
+        ));
+    }
+
+    #[test]
+    fn missing_member_is_a_typed_expression_error() {
+        let source_text = "class C { def use: Int = this.missing }";
+        let (parsed, store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut store = store;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let class_info = typer.complete_symbol(class).unwrap();
+        let Type::ClassInfo(info) = typer.store.types.get_mut(class_info) else {
+            panic!("expected a completed ClassInfo")
+        };
+        // Give this regression a fully known, parentless lookup graph so the
+        // empty result is conclusive rather than blocked by builtin Object.
+        info.parents.clear();
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(result, Err(TyperError::MemberNotFound { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn overloaded_selection_is_deferred_without_allocating_a_typed_result() {
+        let source_text = "class C { def item(x: Int): Int = x; def item(x: String): Int = 1; def use: Int = this.item }";
+        let (parsed, store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut store = store;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadedSelectionDeferred { .. })
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.source_typed_index().len(), 0);
+    }
+
+    #[test]
+    fn failed_selection_rolls_back_child_ast_index_and_source_completion() {
+        let source_text = "class C { def item(x: Int): Int = x; def item(x: String): Int = 1; def use: Int = this.item }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let store_checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadedSelectionDeferred { .. })
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.source_typed_index().len(), 0);
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+    }
+
+    #[test]
     fn unique_method_identifier_keeps_its_method_type_without_applying_it() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def method(param: Int): Int = param; def use: Int = method }",
@@ -9433,6 +9749,104 @@ mod tests {
         assert!(matches!(
             typer.type_expression(rhs, context),
             Err(TyperError::TermNameNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn object_term_identifier_resolves_to_an_explicit_deferred_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object O; class C { def use: Any = O }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ObjectTermReferenceDeferred { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_selection_indexes_its_qualifier_and_preserves_source_positions() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1; def use: Int = this.value }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let source_position = parsed.ast.get(rhs).position;
+        let TreeKind::Select(source_select) = &parsed.ast.get(rhs).kind else {
+            panic!("expected source selection")
+        };
+        let source_qualifier = source_select.qualifier;
+        let qualifier_position = parsed.ast.get(source_qualifier).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_select = typer.type_expression(rhs, context).unwrap();
+        let typed_qualifier = typer
+            .source_typed_index()
+            .get(source, source_qualifier)
+            .expect("typed qualifier should be indexed");
+
+        assert_eq!(
+            typer.source_typed_index().get(source, rhs),
+            Some(typed_select)
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_select).position,
+            source_position
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_qualifier).position,
+            qualifier_position
+        );
+        for (_, tree) in typer.typed_ast().iter() {
+            assert!(typer.store().types.contains(tree.ty));
+        }
+    }
+
+    #[test]
+    fn application_expression_is_explicitly_unsupported_in_this_slice() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = method(1) }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnsupportedExpression {
+                expression_kind: "expression or declaration tree",
+                ..
+            })
         ));
     }
 
