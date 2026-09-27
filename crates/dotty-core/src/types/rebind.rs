@@ -1,4 +1,4 @@
-//! Rebinding a [`TypeLambda`] to a fresh binder.
+//! Rebinding semantic type graphs and substituting exact type symbols.
 //!
 //! A binder's identity is the [`TypeId`] it is stored under, and every
 //! `ParamRef` inside it names that id. Changing something about a binder, such
@@ -162,6 +162,11 @@ pub fn substitute_type_symbols(
         }
     }
 
+    let symbols: HashSet<_> = substitutions.iter().map(|(symbol, _)| *symbol).collect();
+    if !contains_substituted_symbol(store, root, &symbols)? {
+        return Ok(root);
+    }
+
     let checkpoint = store.checkpoint();
     let mut rebinder = Rebinder::new(store);
     rebinder.replacements.extend(substitutions.iter().copied());
@@ -170,6 +175,188 @@ pub fn substitute_type_symbols(
         rebinder.store.rollback_to(checkpoint);
     }
     result
+}
+
+/// Scans without allocating so a graph with no relevant symbol keeps its
+/// exact root `TypeId`, including binder-shaped roots. Unlike the reachability
+/// scan for recursive binders, this refuses unguarded cycles: `ParamRef` and
+/// `RecThis` are binder edges represented as leaves in the semantic graph.
+fn contains_substituted_symbol(
+    store: &SemanticStore,
+    root: TypeId,
+    symbols: &HashSet<SymbolId>,
+) -> Result<bool, TypeRebindError> {
+    fn visit(
+        store: &SemanticStore,
+        id: TypeId,
+        symbols: &HashSet<SymbolId>,
+        memo: &mut HashMap<TypeId, bool>,
+        active: &mut HashSet<TypeId>,
+        depth: usize,
+    ) -> Result<bool, TypeRebindError> {
+        if let Some(found) = memo.get(&id) {
+            return Ok(*found);
+        }
+        if !store.types.contains(id) {
+            return Err(TypeRebindError::InvalidType { id });
+        }
+        if !store.types.is_filled(id) {
+            return Err(TypeRebindError::UnfilledType { id });
+        }
+        if !active.insert(id) {
+            return Err(TypeRebindError::CyclicType { id });
+        }
+        if depth >= MAX_DEPTH {
+            active.remove(&id);
+            return Err(TypeRebindError::TooDeep { id });
+        }
+
+        let ty = store.types.get(id).clone();
+        let mut children = Vec::new();
+        let directly_substituted = match ty {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }
+            | Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if symbols.contains(&symbol) => true,
+            Type::NoType | Type::Error(_) | Type::NoPrefix | Type::ThisType { .. } => false,
+            Type::Constant(Constant::Class(class)) => {
+                children.push(class);
+                false
+            }
+            Type::Constant(_) | Type::ParamRef { .. } | Type::RecThis { .. } => false,
+            Type::TermRef { prefix, .. } | Type::TypeRef { prefix, .. } => {
+                children.push(prefix);
+                false
+            }
+            Type::SuperType {
+                this_type,
+                super_type,
+            } => {
+                children.extend([this_type, super_type]);
+                false
+            }
+            Type::Applied { tycon, args } => {
+                children.push(tycon);
+                children.extend(args);
+                false
+            }
+            Type::Bounds { low, high } => {
+                children.extend([low, high]);
+                false
+            }
+            Type::AliasingBounds { alias } => {
+                children.push(alias);
+                false
+            }
+            Type::ByName { result } => {
+                children.push(result);
+                false
+            }
+            Type::Flexible { underlying } => {
+                children.push(underlying);
+                false
+            }
+            Type::And { left, right } | Type::Or { left, right } => {
+                children.extend([left, right]);
+                false
+            }
+            Type::Refined { parent, info, .. } => {
+                children.extend([parent, info]);
+                false
+            }
+            Type::Recursive { parent } => {
+                children.push(parent);
+                false
+            }
+            Type::Method(method) => {
+                children.extend(method.params.into_iter().map(|param| param.ty));
+                children.push(method.result);
+                false
+            }
+            Type::Poly(poly) => {
+                children.extend(poly.params.into_iter().map(|param| param.bounds));
+                children.push(poly.result);
+                false
+            }
+            Type::TypeLambda(lambda) => {
+                children.extend(lambda.params.into_iter().map(|param| param.bounds));
+                children.push(lambda.result);
+                false
+            }
+            Type::Match(MatchType {
+                bound,
+                scrutinee,
+                cases,
+            }) => {
+                children.extend([bound, scrutinee]);
+                children.extend(cases);
+                false
+            }
+            Type::MatchCase { pattern, result } => {
+                children.extend([pattern, result]);
+                false
+            }
+            Type::Annotated {
+                underlying,
+                annotation,
+            } => {
+                children.push(underlying);
+                let annotation = store.annotations.get(annotation);
+                children.push(annotation.ty);
+                if let AnnotationArguments::Known(arguments) = &annotation.arguments {
+                    for argument in arguments {
+                        if let AnnotationValue::Constant(Constant::Class(class)) = &argument.value {
+                            children.push(*class);
+                        }
+                    }
+                }
+                false
+            }
+            Type::Wildcard { bounds } => {
+                children.push(bounds);
+                false
+            }
+            Type::JavaArray { element } => {
+                children.push(element);
+                false
+            }
+            Type::ClassInfo(info) => {
+                children.push(info.prefix);
+                children.extend(info.parents);
+                children.extend(info.self_type);
+                false
+            }
+        };
+
+        if directly_substituted {
+            active.remove(&id);
+            memo.insert(id, true);
+            return Ok(true);
+        }
+        for child in children {
+            if visit(store, child, symbols, memo, active, depth + 1)? {
+                active.remove(&id);
+                memo.insert(id, true);
+                return Ok(true);
+            }
+        }
+        active.remove(&id);
+        memo.insert(id, false);
+        Ok(false)
+    }
+
+    visit(
+        store,
+        root,
+        symbols,
+        &mut HashMap::new(),
+        &mut HashSet::new(),
+        0,
+    )
 }
 
 impl std::error::Error for TypeRebindError {}
@@ -2514,6 +2701,26 @@ mod tests {
     }
 
     #[test]
+    fn substitution_reuses_an_unchanged_binder_graph() {
+        let mut f = Fixture::new();
+        let method = f.store.types.alloc(Type::Method(MethodType {
+            params: vec![MethodParam {
+                name: TermName::new(f.store.names.intern("x")),
+                ty: f.leaf,
+                erased: false,
+                varargs: false,
+            }],
+            result: f.leaf,
+            kind: MethodKind::Plain,
+        }));
+
+        let result =
+            substitute_type_symbols(&mut f.store, method, &[(SymbolId::new(45), f.leaf)]).unwrap();
+
+        assert_eq!(result, method);
+    }
+
+    #[test]
     fn substitution_preserves_paramrefs_inside_a_copied_method_binder() {
         let mut f = Fixture::new();
         let class_parameter = SymbolId::new(50);
@@ -2584,6 +2791,22 @@ mod tests {
             Err(TypeRebindError::DuplicateSubstitutionSymbol { symbol })
         );
         assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn substitution_reports_out_of_range_type_ids() {
+        let mut f = Fixture::new();
+        let invalid = TypeId::new(u32::MAX);
+        let symbol = SymbolId::new(80);
+
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, invalid, &[]),
+            Err(TypeRebindError::InvalidType { id: invalid })
+        );
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, f.leaf, &[(symbol, invalid)]),
+            Err(TypeRebindError::InvalidType { id: invalid })
+        );
     }
 
     fn dotty_core_test_name(f: &mut Fixture, text: &str) -> Name {
