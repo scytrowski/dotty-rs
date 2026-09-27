@@ -395,7 +395,77 @@ const fn is_self_colon(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{HardKeyword, NameInterner, TreeKind};
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{
+        HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
+        TokenSource, TreeKind,
+    };
+
+    struct YieldTemplateTokenSource {
+        tokens: Vec<Token>,
+        index: usize,
+        tuple_line_outdents: usize,
+        yield_body_outdent: bool,
+    }
+
+    impl TokenSource for YieldTemplateTokenSource {
+        fn current(&self) -> &Token {
+            &self.tokens[self.index.min(self.tokens.len() - 1)]
+        }
+
+        fn position(&self) -> usize {
+            self.index
+        }
+
+        fn advance(&mut self) {
+            self.index = (self.index + 1).min(self.tokens.len() - 1);
+        }
+
+        fn lookahead(&mut self, offset: usize) -> &Token {
+            &self.tokens[(self.index + offset).min(self.tokens.len() - 1)]
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            match event {
+                ScannerEvent::Indented
+                    if self.current().kind != TokenKind::Indent
+                        && self.lookahead(1).kind != TokenKind::Indent =>
+                {
+                    let offset = self.current().span.end();
+                    self.tokens.insert(
+                        self.index + 1,
+                        Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
+                    );
+                }
+                ScannerEvent::Outdented if self.current().kind == TokenKind::Newline => {
+                    // The first feedback closes the indented method RHS; the
+                    // second closes its enclosing anonymous template. The
+                    // outer yield block is at the same indentation as the
+                    // tuple and must remain open for that final expression.
+                    if self.tuple_line_outdents < 2 {
+                        let offset = self.current().span.start();
+                        self.tokens.insert(
+                            self.index,
+                            Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                        );
+                        self.tuple_line_outdents += 1;
+                    }
+                }
+                ScannerEvent::Outdented
+                    if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace)
+                        && !self.yield_body_outdent =>
+                {
+                    let offset = self.current().span.start();
+                    self.tokens.insert(
+                        self.index,
+                        Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                    );
+                    self.yield_body_outdent = true;
+                }
+                _ => {}
+            }
+        }
+    }
 
     fn source_token(
         source: &str,
@@ -441,6 +511,54 @@ mod tests {
             "}",
             0,
         ));
+        tokens.push(token(
+            TokenKind::Eof,
+            source.len() as u32,
+            source.len() as u32,
+        ));
+        tokens
+    }
+
+    fn yield_template_tokens(source: &str) -> Vec<Token> {
+        let source_token = |kind, text: &str, occurrence| {
+            let (start, found) = source
+                .match_indices(text)
+                .nth(occurrence)
+                .expect("test token text exists in source");
+            token(kind, start as u32, (start + found.len()) as u32)
+        };
+        let mut tokens = vec![
+            source_token(TokenKind::Punctuation(Punctuation::LeftBrace), "{", 0),
+            source_token(TokenKind::Keyword(HardKeyword::For), "for", 0),
+            source_token(TokenKind::Identifier, "x", 0),
+            source_token(TokenKind::Operator, "<-", 0),
+            source_token(TokenKind::Identifier, "values", 0),
+            source_token(TokenKind::Keyword(HardKeyword::Yield), "yield", 0),
+            source_token(TokenKind::Keyword(HardKeyword::Val), "val", 0),
+            source_token(TokenKind::Identifier, "cleanup", 0),
+            source_token(TokenKind::Operator, "=", 0),
+            source_token(TokenKind::Keyword(HardKeyword::New), "new", 0),
+            source_token(TokenKind::Identifier, "C", 0),
+            source_token(TokenKind::ColonEol, ":", 0),
+            source_token(TokenKind::Keyword(HardKeyword::Def), "def", 0),
+            source_token(TokenKind::Identifier, "transform", 0),
+            source_token(TokenKind::Operator, "=", 1),
+            source_token(TokenKind::Identifier, "item", 0),
+            token(TokenKind::Newline, 0, 0),
+            source_token(TokenKind::Punctuation(Punctuation::LeftParen), "(", 0),
+            source_token(TokenKind::Identifier, "x", 1),
+            source_token(TokenKind::Punctuation(Punctuation::Comma), ",", 0),
+            source_token(TokenKind::Identifier, "y", 0),
+            source_token(TokenKind::Punctuation(Punctuation::RightParen), ")", 0),
+            source_token(TokenKind::Punctuation(Punctuation::RightBrace), "}", 0),
+        ];
+        let tuple_start = source.find("(x, y)").unwrap() as u32;
+        let newline_index = 16;
+        tokens[newline_index] = token(
+            TokenKind::Newline,
+            source.find("item").unwrap() as u32 + 4,
+            tuple_start,
+        );
         tokens.push(token(
             TokenKind::Eof,
             source.len() as u32,
@@ -509,6 +627,44 @@ mod tests {
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nested_method_outdent_closes_new_template_before_yield_tuple() {
+        let source = "{\n  for x <- values yield\n    val cleanup = new C:\n      def transform =\n        item\n    (x, y)\n}";
+        let tokens = YieldTemplateTokenSource {
+            tokens: yield_template_tokens(source),
+            index: 0,
+            tuple_line_outdents: 0,
+            yield_body_outdent: false,
+        };
+        let mut names = NameInterner::new();
+        let parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            tokens,
+            &mut names,
+        );
+
+        let result = parser.parse_expression_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Block(outer) = &result.ast.get(result.root).kind else {
+            panic!("expected outer block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_yield)) =
+            &result.ast.get(outer.expr).kind
+        else {
+            panic!("expected a for/yield expression");
+        };
+        let TreeKind::Block(body) = &result.ast.get(for_yield.body).kind else {
+            panic!("expected a multi-statement yield body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(body.expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
     }
 
     #[test]
