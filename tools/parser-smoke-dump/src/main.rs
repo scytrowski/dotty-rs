@@ -1279,3 +1279,52 @@ fn quote(value: impl AsRef<str>) -> String {
     }
     format!("\"{escaped}\"")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::ast::UntypedNode;
+
+    #[test]
+    fn parses_yield_tail_after_nested_anonymous_template() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/for-yield-anonymous-template-tail.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("fixture should scan cleanly");
+        let source_text = SourceText::new(&source).expect("fixture source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Block(outer) = &result.ast.get(result.root).kind else {
+            panic!("expected outer braced block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_yield)) =
+            &result.ast.get(outer.expr).kind
+        else {
+            panic!("expected a for/yield expression");
+        };
+        let TreeKind::Block(body) = &result.ast.get(for_yield.body).kind else {
+            panic!("expected a multi-statement yield body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(body.expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
+        let TreeKind::ValDef(cleanup) = &result.ast.get(body.stats[0]).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            result.ast.get(cleanup.rhs.unwrap()).kind,
+            TreeKind::New(_)
+        ));
+    }
+}
