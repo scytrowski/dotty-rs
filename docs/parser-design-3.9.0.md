@@ -906,10 +906,17 @@ issues. The post-#186–#193 Parser v0.1 measurement is recorded in
 failures, panics, or hangs. The comparison, remaining syntax dispositions,
 and evidence-based exit criteria are documented in
 [`parser-v0.1-compatibility.md`](parser-v0.1-compatibility.md).
-The latest rerun after PR #308 is recorded in
+An earlier rerun after PR #308 is recorded in
 `tools/parser-corpus-report/parser-post-issue-308-scala3-3.9.0.json`: 600 of
 1,236 files parse without diagnostics (48.54%), with zero hard failures,
 panics, or hangs.
+
+The latest rerun, after PRs #371, #373, #375, #377, and #378, is recorded in
+`tools/parser-corpus-report/parser-post-issue-379-scala3-3.9.0.json`: 908 of
+1,236 files parse without diagnostics (73.46%), with zero hard failures,
+panics, or hangs. See
+[`parser-v0.1-compatibility.md`](parser-v0.1-compatibility.md) for the
+comparison and failure-bucket analysis.
 
 ## Extension rule
 

@@ -387,3 +387,47 @@ data. The next broad target remains the 148 `ExpectedExpression` first
 failures in the capture-disabled cohort; for capture-enabled files, investigate
 the remaining 41 `ExpectedType` first failures. The audit document records the
 syntax-level caveats and concrete next-step interpretation.
+
+## Corpus rerun after PRs #371, #373, #375, #377, and #378
+
+Issue #379 reran the same source corpus at `dotty-rs` revision
+`e6cc85b06082850ca52855bb510500f66535c200` (main after PR #378), with the
+unchanged Scala 3.9.0 revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The deterministic report is
+[`parser-post-issue-379-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-379-scala3-3.9.0.json).
+
+| Measure | After #351 (`d2f71001`) | After #378 (`e6cc85b0`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 797 (64.48%) | 908 (73.46%) | +111 (+8.98 pp) |
+| Recoverable diagnostics | 439 (35.52%) | 328 (26.54%) | -111 (-8.98 pp) |
+| Hard parser failures / panics / hangs | 0 / 0 / 0 | 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #351 | After #378 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 3,742 | 3,091 | -651 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 1,083 | 1,071 | -12 |
+| `ExpectedType` | 609 | 428 | -181 |
+| `UnexpectedToken` | 3,300 | 2,837 | -463 |
+| `UnsupportedSyntax` | 1,729 | 1,644 | -85 |
+| **Total** | **10,468** | **9,076** | **-1,392 (-13.3%)** |
+
+Both effective capture-checking cohorts improved: the disabled cohort went
+from 649 to 720 clean files (+71 of 994), and the enabled cohort from 148 to
+188 (+40 of 242). These are aggregate results across all changes since PR
+#351; they do not attribute each newly clean file to a specific PR.
+
+The largest reductions in first-failure files were `ExpectedType` (108 to 54),
+`ExpectedExpression` (171 to 121), and `UnexpectedToken` (97 to 76).
+`ExpectedToken` rose from 54 to 66, while the unsupported enum-case bucket rose
+from 6 to 7 and a refinement-declaration unsupported bucket appeared with one
+file. A first-failure histogram records only the earliest diagnostic per
+file: these increases can reflect later failures becoming visible after an
+earlier one was fixed, and are not by themselves evidence of regressions.
+The largest current first-failure buckets are `ExpectedExpression` (121),
+`UnexpectedToken` (76), `ExpectedToken` (66), and `ExpectedType` (54), with
+their representative paths in the JSON report. Hard failures, process
+failures, panics, and hangs remain zero.
