@@ -23,8 +23,8 @@ mod types;
 
 pub use source_type_index::SourceTypeIndex;
 pub use typer::{
-    MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MemberCandidate, MemberLookupError,
-    SourceTyper, TypeRelationError, TyperError,
+    MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MemberCandidate,
+    MemberLookupError, SourceTyper, TypeRelationError, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,

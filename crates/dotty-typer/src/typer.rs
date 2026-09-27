@@ -24,7 +24,7 @@ mod substitution;
 mod subtype;
 
 pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
-pub use subtype::{MAX_TYPE_RELATION_DEPTH, TypeRelationError};
+pub use subtype::{MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, TypeRelationError};
 
 /// A recoverable failure while projecting or completing source semantics.
 #[derive(Debug)]
@@ -3102,7 +3102,158 @@ mod tests {
             &packages,
         );
 
+        typer.complete_symbol(a).unwrap();
+        typer.complete_symbol(b).unwrap();
         assert!(!typer.is_subtype(a_type, b_type).unwrap());
+    }
+
+    #[test]
+    fn source_class_conforms_to_direct_parent_after_explicit_completion() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent; class Child extends Parent");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_type = nominal_type_ref(&mut store, definitions, child);
+        let parent_type = nominal_type_ref(&mut store, definitions, parent);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(child).unwrap();
+        typer.complete_symbol(parent).unwrap();
+        assert!(typer.is_subtype(child_type, parent_type).unwrap());
+    }
+
+    #[test]
+    fn source_class_conforms_to_trait_parent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait Parent; class Child extends Parent");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_type = nominal_type_ref(&mut store, definitions, child);
+        let parent_type = nominal_type_ref(&mut store, definitions, parent);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(child).unwrap();
+        typer.complete_symbol(parent).unwrap();
+        assert!(typer.is_subtype(child_type, parent_type).unwrap());
+    }
+
+    #[test]
+    fn source_class_conforms_to_multilevel_parent() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Grandparent; class Parent extends Grandparent; class Child extends Parent",
+        );
+        let grandparent = class_symbol(&parsed, &store, &index, source, "Grandparent");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_type = nominal_type_ref(&mut store, definitions, child);
+        let grandparent_type = nominal_type_ref(&mut store, definitions, grandparent);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(child).unwrap();
+        typer.complete_symbol(parent).unwrap();
+        typer.complete_symbol(grandparent).unwrap();
+        assert!(typer.is_subtype(child_type, grandparent_type).unwrap());
+    }
+
+    #[test]
+    fn instantiated_parent_view_preserves_generic_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent[A]; class Child[B] extends Parent[B]");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_type = applied_class_type(&mut store, definitions, child, &[definitions.int]);
+        let parent_type = applied_class_type(&mut store, definitions, parent, &[definitions.int]);
+        let wrong_parent_type =
+            applied_class_type(&mut store, definitions, parent, &[definitions.boolean]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(child).unwrap();
+        typer.complete_symbol(parent).unwrap();
+        assert!(typer.is_subtype(child_type, parent_type).unwrap());
+        assert!(!typer.is_subtype(child_type, wrong_parent_type).unwrap());
+    }
+
+    #[test]
+    fn missing_class_info_is_reported_without_implicit_completion() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; class B");
+        let a = class_symbol(&parsed, &store, &index, source, "A");
+        let b = class_symbol(&parsed, &store, &index, source, "B");
+        let a_type = nominal_type_ref(&mut store, definitions, a);
+        let b_type = nominal_type_ref(&mut store, definitions, b);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.is_subtype(a_type, b_type),
+            Err(TypeRelationError::ClassInfoUnavailable {
+                symbol,
+                state: crate::types::SymbolInfoState::Missing,
+            }) if symbol == a
+        ));
+        assert!(matches!(*typer.store.symbols.info(a), SymbolInfo::Missing));
+        assert!(matches!(*typer.store.symbols.info(b), SymbolInfo::Missing));
+    }
+
+    #[test]
+    fn inheritance_cycles_are_reported_for_unrelated_targets() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A extends B; class B extends A; class C");
+        let a = class_symbol(&parsed, &store, &index, source, "A");
+        let b = class_symbol(&parsed, &store, &index, source, "B");
+        let c = class_symbol(&parsed, &store, &index, source, "C");
+        let a_type = nominal_type_ref(&mut store, definitions, a);
+        let c_type = nominal_type_ref(&mut store, definitions, c);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(a).unwrap();
+        typer.complete_symbol(b).unwrap();
+        typer.complete_symbol(c).unwrap();
+        assert!(matches!(
+            typer.is_subtype(a_type, c_type),
+            Err(TypeRelationError::InheritanceCycle { symbol }) if symbol == a
+        ));
     }
 
     #[test]
@@ -3144,6 +3295,23 @@ mod tests {
 
         assert!(typer.is_subtype(int_box, same_int_box).unwrap());
         assert!(!typer.is_subtype(int_box, any_box).unwrap());
+    }
+
+    #[test]
+    fn external_applied_generic_subtyping_is_explicitly_deferred() {
+        let (arena, mut store, packages, definitions) = setup();
+        let external = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let applied = applied_class_type(&mut store, definitions, external, &[definitions.int]);
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.is_subtype(applied, definitions.int),
+            Err(TypeRelationError::ExternalGenericInstantiationDeferred { class })
+                if class == external
+        ));
     }
 
     #[test]

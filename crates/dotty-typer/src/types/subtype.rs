@@ -1,16 +1,18 @@
 //! Bounded nominal subtyping and conformance over the supported source types.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use dotty_core::types::{Type, TypeRefTarget};
-use dotty_core::{ScopeId, SymbolId, SymbolKind, TypeId};
+use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
+use dotty_core::{ScopeId, SymbolId, SymbolInfo, SymbolKind, TypeId};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
 
 /// Maximum parent edges followed by one nominal relation request.
 pub const MAX_TYPE_RELATION_DEPTH: usize = 256;
+/// Maximum distinct instantiated parent views inspected by one relation.
+pub const MAX_TYPE_RELATION_VIEWS: usize = 4096;
 
 /// A malformed or unsupported semantic type relation.
 #[derive(Debug)]
@@ -40,6 +42,8 @@ pub enum TypeRelationError {
     },
     /// ClassInfo points at a declaration scope outside the scope arena.
     InvalidDeclarationScope { symbol: SymbolId, scope: ScopeId },
+    /// A parent entry does not designate a class-like type.
+    MalformedParentType { ty: TypeId },
     /// A source class's parent view could not be instantiated.
     ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
     /// An external applied generic class has no modeled parameter order.
@@ -90,14 +94,16 @@ impl SourceTyper<'_> {
 
 struct TypeRelation<'typer, 'store> {
     typer: &'typer mut SourceTyper<'store>,
-    equivalent_pairs: HashSet<(TypeId, TypeId)>,
+    equivalent_pairs: HashMap<(TypeId, TypeId), bool>,
+    active_equivalent_pairs: HashSet<(TypeId, TypeId)>,
 }
 
 impl<'typer, 'store> TypeRelation<'typer, 'store> {
     fn new(typer: &'typer mut SourceTyper<'store>) -> Self {
         Self {
             typer,
-            equivalent_pairs: HashSet::new(),
+            equivalent_pairs: HashMap::new(),
+            active_equivalent_pairs: HashSet::new(),
         }
     }
 
@@ -149,9 +155,25 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             return Ok(class == expected_class);
         }
 
-        // The nominal graph walk is added in the inheritance increment. Until
-        // then unrelated, supported classes are a sound negative answer.
-        Ok(false)
+        let found_view = self.class_view(found)?;
+        let expected_view = self.class_view(expected)?;
+        self.reject_unmodeled_external_generic(&found_view)?;
+        self.reject_unmodeled_external_generic(&expected_view)?;
+        self.check_view_arity(&found_view, &expected_view, found, expected)?;
+        if found_view.class == expected_view.class {
+            return self.equivalent_class_views(&found_view, &expected_view, 0);
+        }
+        self.inherited_subtype(found_view, expected_view, expected)
+    }
+
+    fn reject_unmodeled_external_generic(&self, view: &ClassView) -> Result<(), TypeRelationError> {
+        if view.applied && !view.args.is_empty() && !self.typer.is_current_source_symbol(view.class)
+        {
+            return Err(TypeRelationError::ExternalGenericInstantiationDeferred {
+                class: view.class,
+            });
+        }
+        Ok(())
     }
 
     fn normalize(&self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
@@ -178,6 +200,244 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 ..
             }) if *found == symbol
         )
+    }
+
+    fn class_view(&self, ty: TypeId) -> Result<ClassView, TypeRelationError> {
+        let ty = self.normalize(ty)?;
+        let (tycon, args, applied) = match self.type_at(ty)? {
+            Type::Applied { tycon, args } => (*tycon, args.clone(), true),
+            _ => (ty, Vec::new(), false),
+        };
+        let tycon = self.normalize(tycon)?;
+        let class = match self.type_at(tycon)? {
+            Type::ThisType { class } => *class,
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            _ => {
+                return Err(TypeRelationError::UnsupportedType {
+                    found: ty,
+                    expected: ty,
+                });
+            }
+        };
+        self.ensure_class_symbol(class)?;
+        Ok(ClassView {
+            ty,
+            class,
+            args,
+            applied,
+        })
+    }
+
+    fn check_view_arity(
+        &self,
+        left: &ClassView,
+        right: &ClassView,
+        found: TypeId,
+        expected: TypeId,
+    ) -> Result<(), TypeRelationError> {
+        if left.class == right.class && left.applied != right.applied {
+            return Err(TypeRelationError::UnsupportedType { found, expected });
+        }
+        if left.class == right.class && left.applied && left.args.len() != right.args.len() {
+            return Err(TypeRelationError::UnsupportedType { found, expected });
+        }
+        Ok(())
+    }
+
+    fn inherited_subtype(
+        &mut self,
+        found: ClassView,
+        expected: ClassView,
+        expected_type: TypeId,
+    ) -> Result<bool, TypeRelationError> {
+        let found_class = found.class;
+        let found_type_id = found.ty;
+        let mut queue = VecDeque::from([PendingView {
+            view: found,
+            depth: 0,
+            path: vec![found_class],
+        }]);
+        let mut visited = vec![(found_class, found_type_id)];
+
+        while let Some(pending) = queue.pop_front() {
+            let info = self.class_info(pending.view.class)?;
+            if info.parents.is_empty() {
+                continue;
+            }
+            if pending.depth >= MAX_TYPE_RELATION_DEPTH {
+                return Err(TypeRelationError::TooDeep);
+            }
+            for parent in info.parents {
+                let parent = self
+                    .typer
+                    .adapt_parent_view(pending.view.class, pending.view.ty, parent)
+                    .map_err(|error| match error {
+                        TyperError::ExternalGenericInstantiationDeferred { class } => {
+                            TypeRelationError::ExternalGenericInstantiationDeferred { class }
+                        }
+                        other => TypeRelationError::ParentTypeAdaptation {
+                            symbol: pending.view.class,
+                            error: other,
+                        },
+                    })?;
+                let parent_view = self.class_view(parent).map_err(|error| match error {
+                    TypeRelationError::UnsupportedType { .. } => {
+                        TypeRelationError::MalformedParentType { ty: parent }
+                    }
+                    other => other,
+                })?;
+
+                if parent_view.class == expected.class {
+                    self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
+                    if self.equivalent_class_views(&parent_view, &expected, 0)? {
+                        return Ok(true);
+                    }
+                }
+
+                if pending.path.contains(&parent_view.class) {
+                    return Err(TypeRelationError::InheritanceCycle {
+                        symbol: parent_view.class,
+                    });
+                }
+                if matches!(
+                    parent_view.class,
+                    class if class == self.typer.definitions.object_class
+                        || class == self.typer.definitions.any_class
+                        || class == self.typer.definitions.nothing_class
+                ) {
+                    continue;
+                }
+                if pending.depth + 1 > MAX_TYPE_RELATION_DEPTH {
+                    return Err(TypeRelationError::TooDeep);
+                }
+
+                let mut duplicate = false;
+                for (class, view) in &visited {
+                    if *class == parent_view.class {
+                        let previous = self.class_view(*view)?;
+                        if self.equivalent_class_views(&previous, &parent_view, 0)? {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                }
+                if duplicate {
+                    continue;
+                }
+                if visited.len() >= MAX_TYPE_RELATION_VIEWS {
+                    return Err(TypeRelationError::TooManyParentViews);
+                }
+                visited.push((parent_view.class, parent_view.ty));
+                let mut path = pending.path.clone();
+                path.push(parent_view.class);
+                queue.push_back(PendingView {
+                    view: parent_view,
+                    depth: pending.depth + 1,
+                    path,
+                });
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn equivalent_class_views(
+        &mut self,
+        left: &ClassView,
+        right: &ClassView,
+        depth: usize,
+    ) -> Result<bool, TypeRelationError> {
+        if left.class != right.class || left.applied != right.applied {
+            return Ok(false);
+        }
+        if left.args.len() != right.args.len() {
+            return Err(TypeRelationError::UnsupportedType {
+                found: left.ty,
+                expected: right.ty,
+            });
+        }
+        for (left, right) in left.args.iter().zip(&right.args) {
+            if !self.equivalent(*left, *right, depth + 1)? {
+                return Ok(false);
+            }
+        }
+
+        let declaration = self.typer.store.symbols.get(left.class);
+        let nested = declaration.owner.is_some_and(|owner| {
+            self.typer.store.symbols.contains(owner)
+                && matches!(
+                    self.typer.store.symbols.get(owner).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                )
+        });
+        if !nested {
+            return Ok(true);
+        }
+        let left_constructor = self.type_constructor(left.ty)?;
+        let right_constructor = self.type_constructor(right.ty)?;
+        self.equivalent(left_constructor, right_constructor, depth + 1)
+    }
+
+    fn type_constructor(&self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
+        match self.type_at(ty)? {
+            Type::Applied { tycon, .. } => Ok(*tycon),
+            _ => Ok(ty),
+        }
+    }
+
+    fn class_info(&self, symbol: SymbolId) -> Result<ClassInfo, TypeRelationError> {
+        if !self.typer.store.symbols.contains(symbol) {
+            return Err(TypeRelationError::UnknownClassSymbol { symbol });
+        }
+        let info_type = match *self.typer.store.symbols.info(symbol) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => {
+                return Err(TypeRelationError::ClassInfoUnavailable {
+                    symbol,
+                    state: SymbolInfoState::Missing,
+                });
+            }
+            SymbolInfo::Deferred(_) => {
+                return Err(TypeRelationError::ClassInfoUnavailable {
+                    symbol,
+                    state: SymbolInfoState::Deferred,
+                });
+            }
+            SymbolInfo::Error => {
+                return Err(TypeRelationError::ClassInfoUnavailable {
+                    symbol,
+                    state: SymbolInfoState::Error,
+                });
+            }
+        };
+        let Some(info_node) = self.typer.store.types.try_get(info_type) else {
+            return Err(TypeRelationError::InvalidClassInfoType {
+                symbol,
+                info: info_type,
+            });
+        };
+        let Type::ClassInfo(info) = info_node else {
+            return Err(TypeRelationError::ClassInfoNotClassInfo {
+                symbol,
+                info: info_type,
+            });
+        };
+        if info.class != symbol {
+            return Err(TypeRelationError::MalformedClassInfoIdentity {
+                symbol,
+                recorded_class: info.class,
+            });
+        }
+        if !self.typer.store.scopes.contains(info.declarations) {
+            return Err(TypeRelationError::InvalidDeclarationScope {
+                symbol,
+                scope: info.declarations,
+            });
+        }
+        Ok(info.clone())
     }
 
     fn validate_supported(
@@ -303,12 +563,16 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if left == right {
             return Ok(true);
         }
-        if !self.equivalent_pairs.insert((left, right)) {
+        let pair = (left, right);
+        if let Some(equivalent) = self.equivalent_pairs.get(&pair) {
+            return Ok(*equivalent);
+        }
+        if !self.active_equivalent_pairs.insert(pair) {
             return Ok(true);
         }
         let left_node = self.type_at(left)?.clone();
         let right_node = self.type_at(right)?.clone();
-        match (left_node, right_node) {
+        let result: Result<bool, TypeRelationError> = (|| match (left_node, right_node) {
             (Type::NoPrefix, Type::NoPrefix) => Ok(true),
             (
                 Type::TypeRef {
@@ -366,6 +630,25 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 self.equivalent(left, right, depth + 1)
             }
             _ => Ok(false),
+        })();
+        self.active_equivalent_pairs.remove(&pair);
+        if let Ok(equivalent) = result {
+            self.equivalent_pairs.insert(pair, equivalent);
         }
+        result
     }
+}
+
+#[derive(Clone)]
+struct ClassView {
+    ty: TypeId,
+    class: SymbolId,
+    args: Vec<TypeId>,
+    applied: bool,
+}
+
+struct PendingView {
+    view: ClassView,
+    depth: usize,
+    path: Vec<SymbolId>,
 }
