@@ -27,11 +27,18 @@ impl<'a> TypedAstBuilder<'a> {
     }
 
     pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
+        self.ident_with_backquoted(name, false, ty, position)
+    }
+
+    pub fn ident_with_backquoted(
+        &mut self,
+        name: Name,
+        backquoted: bool,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
-            kind: TreeKind::Ident(Ident {
-                name,
-                backquoted: false,
-            }),
+            kind: TreeKind::Ident(Ident { name, backquoted }),
             position,
             ty,
         })
