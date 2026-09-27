@@ -318,6 +318,8 @@ pub enum TyperError {
         tree_index: u32,
         expression_kind: &'static str,
     },
+    /// The semantic type is not yet supported by expression widening.
+    ExpressionTypeCannotBeWidened { ty: TypeId },
 }
 
 impl fmt::Display for TyperError {
@@ -516,6 +518,43 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
+    /// Returns the value type represented by a typed expression's own type.
+    ///
+    /// Literal expressions preserve their exact `Type::Constant` type in the
+    /// typed AST; consumers use this operation when they need the canonical
+    /// builtin value type. Reference widening is added as supported by the
+    /// current typer slice.
+    pub fn widen_expression_type(&self, ty: TypeId) -> Result<TypeId, TyperError> {
+        let Some(expression_type) = self.store.types.try_get(ty) else {
+            return Err(TyperError::TypeNormalization(
+                if self.store.types.contains(ty) {
+                    crate::types::TypeNormalizeError::UnfilledType { ty }
+                } else {
+                    crate::types::TypeNormalizeError::InvalidType { ty }
+                },
+            ));
+        };
+        use dotty_core::Constant;
+        match expression_type {
+            Type::Constant(value) => match value {
+                Constant::Unit => Ok(self.definitions.unit),
+                Constant::Boolean(_) => Ok(self.definitions.boolean),
+                Constant::Byte(_) => Ok(self.definitions.byte),
+                Constant::Short(_) => Ok(self.definitions.short),
+                Constant::Char(_) => Ok(self.definitions.char),
+                Constant::Int(_) => Ok(self.definitions.int),
+                Constant::Long(_) => Ok(self.definitions.long),
+                Constant::FloatBits(_) => Ok(self.definitions.float),
+                Constant::DoubleBits(_) => Ok(self.definitions.double),
+                Constant::String(_)
+                | Constant::StringUtf16(_)
+                | Constant::Null
+                | Constant::Class(_) => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
+            },
+            _ => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
+        }
+    }
+
     fn type_expression_inner(
         &mut self,
         tree: TreeId<Untyped>,
@@ -534,7 +573,11 @@ impl<'a> SourceTyper<'a> {
         };
         let typed = match source_tree.kind {
             TreeKind::Literal(literal) => {
-                let ty = self.literal_type(&literal.value, tree.index())?;
+                self.literal_type(&literal.value, tree.index())?;
+                let ty = self
+                    .store
+                    .types
+                    .alloc(Type::Constant(literal.value.clone()));
                 Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(
                     literal.value,
                     ty,
@@ -542,7 +585,8 @@ impl<'a> SourceTyper<'a> {
                 ))
             }
             TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
-                let (value, ty) = self.type_number_literal(number, tree.index())?;
+                let value = self.type_number_literal(number, tree.index())?;
+                let ty = self.store.types.alloc(Type::Constant(value.clone()));
                 Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(
                     value,
                     ty,
@@ -831,7 +875,7 @@ impl<'a> SourceTyper<'a> {
         &self,
         number: NumberLiteral,
         tree_index: u32,
-    ) -> Result<(dotty_core::Constant, TypeId), TyperError> {
+    ) -> Result<dotty_core::Constant, TyperError> {
         use dotty_core::Constant;
         let spelling = self.store.names.resolve(number.text).to_owned();
         let digits = spelling.replace('_', "");
@@ -852,7 +896,7 @@ impl<'a> SourceTyper<'a> {
                     None
                 };
                 parsed
-                    .map(|value| (Constant::Int(value), self.definitions.int))
+                    .map(Constant::Int)
                     .ok_or(TyperError::IntegerLiteralOutOfRange {
                         source: self.source,
                         tree_index,
@@ -863,7 +907,7 @@ impl<'a> SourceTyper<'a> {
                 .parse::<f64>()
                 .ok()
                 .filter(|value| value.is_finite())
-                .map(|value| (Constant::double(value), self.definitions.double))
+                .map(Constant::double)
                 .ok_or(TyperError::FloatingLiteralInvalid {
                     source: self.source,
                     tree_index,
@@ -3433,7 +3477,7 @@ mod tests {
         panic!("source method `{target}` not found");
     }
 
-    fn type_value_rhs(source_text: &str) -> (dotty_core::Constant, TypeId, Definitions) {
+    fn type_value_rhs(source_text: &str) -> (dotty_core::Constant, Type, TypeId, Definitions) {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
         let context = ExpressionContext {
@@ -3452,16 +3496,20 @@ mod tests {
         let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed literal node")
         };
-        (
-            literal.value.clone(),
-            typer.typed_ast().get(typed).ty,
-            definitions,
-        )
+        let own_type = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed).ty)
+            .clone();
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap();
+        (literal.value.clone(), own_type, widened, definitions)
     }
 
     fn type_synthetic_literal(
         value: dotty_core::Constant,
-    ) -> (dotty_core::Constant, TypeId, Definitions) {
+    ) -> (dotty_core::Constant, Type, TypeId, Definitions) {
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value = 0 }");
         let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
@@ -3484,11 +3532,15 @@ mod tests {
         let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed literal node")
         };
-        (
-            literal.value.clone(),
-            typer.typed_ast().get(typed).ty,
-            definitions,
-        )
+        let own_type = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed).ty)
+            .clone();
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap();
+        (literal.value.clone(), own_type, widened, definitions)
     }
 
     fn type_method_rhs(
@@ -9265,7 +9317,15 @@ mod tests {
                 value: dotty_core::Constant::Boolean(true)
             })
         );
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+        let own_type = typer.typed_ast().get(typed).ty;
+        assert!(matches!(
+            typer.store().types.get(own_type),
+            Type::Constant(dotty_core::Constant::Boolean(true))
+        ));
+        assert_eq!(
+            typer.widen_expression_type(own_type).unwrap(),
+            definitions.boolean
+        );
     }
 
     #[test]
@@ -9295,7 +9355,7 @@ mod tests {
         ];
 
         for (source_text, expected_value, type_case) in cases {
-            let (value, ty, definitions) = type_value_rhs(source_text);
+            let (value, own_type, ty, definitions) = type_value_rhs(source_text);
             let expected_type = match type_case {
                 0 => definitions.char,
                 1 => definitions.long,
@@ -9304,23 +9364,28 @@ mod tests {
                 _ => definitions.unit,
             };
             assert_eq!(value, expected_value, "{source_text}");
+            assert_eq!(own_type, Type::Constant(value.clone()), "{source_text}");
             assert_eq!(ty, expected_type, "{source_text}");
         }
     }
 
     #[test]
     fn byte_constant_uses_the_byte_type() {
-        let (value, ty, definitions) = type_synthetic_literal(dotty_core::Constant::Byte(7));
+        let (value, own_type, ty, definitions) =
+            type_synthetic_literal(dotty_core::Constant::Byte(7));
 
         assert_eq!(value, dotty_core::Constant::Byte(7));
+        assert_eq!(own_type, Type::Constant(value.clone()));
         assert_eq!(ty, definitions.byte);
     }
 
     #[test]
     fn short_constant_uses_the_short_type() {
-        let (value, ty, definitions) = type_synthetic_literal(dotty_core::Constant::Short(7));
+        let (value, own_type, ty, definitions) =
+            type_synthetic_literal(dotty_core::Constant::Short(7));
 
         assert_eq!(value, dotty_core::Constant::Short(7));
+        assert_eq!(own_type, Type::Constant(value.clone()));
         assert_eq!(ty, definitions.short);
     }
 
@@ -9930,17 +9995,29 @@ mod tests {
                 value: dotty_core::Constant::Int(42)
             })
         );
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            &Type::Constant(dotty_core::Constant::Int(42))
+        );
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
     fn largest_positive_int_literal_and_separators_are_preserved() {
-        let (value, ty, definitions) = type_value_rhs("class C { val value = 2147483647 }");
+        let (value, own_type, ty, definitions) =
+            type_value_rhs("class C { val value = 2147483647 }");
         assert_eq!(value, dotty_core::Constant::Int(i32::MAX));
+        assert_eq!(own_type, Type::Constant(value.clone()));
         assert_eq!(ty, definitions.int);
 
-        let (value, ty, definitions) = type_value_rhs("class C { val value = 4_2 }");
+        let (value, own_type, ty, definitions) = type_value_rhs("class C { val value = 4_2 }");
         assert_eq!(value, dotty_core::Constant::Int(42));
+        assert_eq!(own_type, Type::Constant(value.clone()));
         assert_eq!(ty, definitions.int);
     }
 
@@ -9998,7 +10075,16 @@ mod tests {
                 value: dotty_core::Constant::Int(10)
             })
         );
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            &Type::Constant(dotty_core::Constant::Int(10))
+        );
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
@@ -10059,7 +10145,16 @@ mod tests {
                     value: dotty_core::Constant::double(expected)
                 })
             );
-            assert_eq!(typer.typed_ast().get(typed).ty, definitions.double);
+            assert_eq!(
+                typer.store().types.get(typer.typed_ast().get(typed).ty),
+                &Type::Constant(dotty_core::Constant::double(expected))
+            );
+            assert_eq!(
+                typer
+                    .widen_expression_type(typer.typed_ast().get(typed).ty)
+                    .unwrap(),
+                definitions.double
+            );
         }
     }
 
