@@ -3300,6 +3300,24 @@ mod tests {
     }
 
     #[test]
+    fn class_reference_does_not_conform_to_its_this_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let this = store.types.alloc(Type::ThisType { class });
+        let class_type = nominal_type_ref(&mut store, definitions, class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.is_subtype(class_type, this).unwrap());
+    }
+
+    #[test]
     fn invariant_applied_types_accept_equivalent_arguments_only() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Box[A]");

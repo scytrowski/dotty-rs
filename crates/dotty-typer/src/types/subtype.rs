@@ -367,6 +367,19 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             }
         }
 
+        let left_constructor = self.type_constructor(left.ty)?;
+        let right_constructor = self.type_constructor(right.ty)?;
+        match (
+            self.type_at(left_constructor)?,
+            self.type_at(right_constructor)?,
+        ) {
+            (Type::ThisType { class: left }, Type::ThisType { class: right }) => {
+                return Ok(left == right);
+            }
+            (Type::TypeRef { .. }, Type::TypeRef { .. }) => {}
+            _ => return Ok(false),
+        }
+
         let declaration = self.typer.store.symbols.get(left.class);
         let nested = declaration.owner.is_some_and(|owner| {
             self.typer.store.symbols.contains(owner)
@@ -378,8 +391,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if !nested {
             return Ok(true);
         }
-        let left_constructor = self.type_constructor(left.ty)?;
-        let right_constructor = self.type_constructor(right.ty)?;
         self.equivalent(left_constructor, right_constructor, depth + 1)
     }
 
