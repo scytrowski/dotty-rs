@@ -38,6 +38,191 @@ fn parses_an_identifier_with_its_source_span() {
 }
 
 #[test]
+fn parses_a_character_literal_expression_with_its_source_span() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'a'",
+        vec![
+            token(TokenKind::CharLiteral, 0, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x61)
+        })
+    ));
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 3).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn decodes_an_escaped_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        r#"'\n'"#,
+        vec![
+            token(TokenKind::CharLiteral, 0, 4),
+            token(TokenKind::Eof, 4, 4),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x0a)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn decodes_a_unicode_escape_in_a_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        r#"'\u0041'"#,
+        vec![
+            token(TokenKind::CharLiteral, 0, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x41)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_character_literal_as_an_application_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "f('x')",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+            token(TokenKind::CharLiteral, 2, 5),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Apply(ref application) = parser.ast().get(id).kind else {
+        panic!("expected application expression");
+    };
+    assert_eq!(application.args.len(), 1);
+    assert!(matches!(
+        parser.ast().get(application.args[0]).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x78)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_a_character_literal_as_a_block_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ 'x' }",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::CharLiteral, 2, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 6, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Block(ref block) = parser.ast().get(id).kind else {
+        panic!("expected block expression");
+    };
+    assert!(block.stats.is_empty());
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Char(0x78)
+        })
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn recovers_from_an_empty_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "''",
+        vec![
+            token(TokenKind::CharLiteral, 0, 2),
+            token(TokenKind::Eof, 2, 2),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(error))
+            if error.kind == dotty_core::ast::ErrorNodeKind::MissingExpression
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedExpression
+    );
+}
+
+#[test]
+fn recovers_from_an_unterminated_character_literal_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "'a",
+        vec![
+            token(TokenKind::CharLiteral, 0, 2),
+            token(TokenKind::Eof, 2, 2),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(error))
+            if error.kind == dotty_core::ast::ErrorNodeKind::MissingExpression
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedExpression
+    );
+}
+
+#[test]
 fn postfix_expression_entry_preserves_simple_expression_behavior() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
