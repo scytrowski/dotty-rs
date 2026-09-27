@@ -129,6 +129,60 @@ impl<'a> TypeNormalizer<'a> {
         Err(TypeNormalizeError::TooDeep)
     }
 
+    /// Replaces a top-level reference to a value-like term with its complete
+    /// symbol info. The referenced symbol is never completed by this method.
+    ///
+    /// Only `Field`, `Value`, `Variable`, and `Parameter` symbols are widened;
+    /// methods, constructors, objects, packages, locals, and name targets need
+    /// different typing rules and are rejected.
+    pub fn widen_term_ref(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        if !self.store.types.is_filled(ty) {
+            return Err(TypeNormalizeError::UnfilledType { ty });
+        }
+        let Type::TermRef { target, .. } = self.store.types.get(ty) else {
+            return Err(TypeNormalizeError::NotTermRef { ty });
+        };
+        let symbol = match target {
+            dotty_core::types::TermRefTarget::Name(_) => {
+                return Err(TypeNormalizeError::NameTargetCannotBeWidened { ty });
+            }
+            dotty_core::types::TermRefTarget::Symbol(symbol) => *symbol,
+        };
+        if !self.store.symbols.contains(symbol) {
+            return Err(TypeNormalizeError::UnknownSymbol { symbol });
+        }
+        let declaration = self.store.symbols.get(symbol);
+        if !matches!(
+            declaration.kind,
+            SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable | SymbolKind::Parameter
+        ) {
+            return Err(TypeNormalizeError::TermRefKindCannotBeWidened {
+                symbol,
+                kind: declaration.kind,
+            });
+        }
+        match declaration.info {
+            SymbolInfo::Complete(info) => {
+                if !self.store.types.is_filled(info) {
+                    return Err(TypeNormalizeError::UnfilledType { ty: info });
+                }
+                Ok(info)
+            }
+            SymbolInfo::Missing => Err(TypeNormalizeError::TermRefInfoIncomplete {
+                symbol,
+                state: SymbolInfoState::Missing,
+            }),
+            SymbolInfo::Deferred(_) => Err(TypeNormalizeError::TermRefInfoIncomplete {
+                symbol,
+                state: SymbolInfoState::Deferred,
+            }),
+            SymbolInfo::Error => Err(TypeNormalizeError::TermRefInfoIncomplete {
+                symbol,
+                state: SymbolInfoState::Error,
+            }),
+        }
+    }
+
     fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {
         if !self.store.types.is_filled(ty) {
             return Err(TypeNormalizeError::UnfilledType { ty });
@@ -416,6 +470,217 @@ mod tests {
         assert_eq!(
             TypeNormalizer::new(&w.store).dealias_top(reference),
             Ok(reference)
+        );
+    }
+
+    fn term_ref(w: &mut World, symbol: SymbolId) -> TypeId {
+        w.store.types.alloc(Type::TermRef {
+            prefix: w.prefix,
+            target: TermRefTarget::Symbol(symbol),
+        })
+    }
+
+    #[test]
+    fn widens_a_complete_field_reference_without_allocating() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "field",
+            SymbolKind::Field,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+        let marker = w.store.types.alloc(Type::NoType);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Ok(info)
+        );
+        assert_eq!(
+            w.store.types.alloc(Type::NoType).index(),
+            marker.index() + 1
+        );
+    }
+
+    #[test]
+    fn widens_a_complete_value_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "value",
+            SymbolKind::Value,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Ok(info)
+        );
+    }
+
+    #[test]
+    fn widens_a_complete_variable_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "variable",
+            SymbolKind::Variable,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Ok(info)
+        );
+    }
+
+    #[test]
+    fn widens_a_complete_parameter_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "parameter",
+            SymbolKind::Parameter,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Ok(info)
+        );
+    }
+
+    #[test]
+    fn does_not_widen_a_method_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "method",
+            SymbolKind::Method,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Err(TypeNormalizeError::TermRefKindCannotBeWidened {
+                symbol,
+                kind: SymbolKind::Method
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_widen_an_object_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "object",
+            SymbolKind::Object,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Err(TypeNormalizeError::TermRefKindCannotBeWidened {
+                symbol,
+                kind: SymbolKind::Object
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_widen_a_constructor_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "<init>",
+            SymbolKind::Constructor,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Err(TypeNormalizeError::TermRefKindCannotBeWidened {
+                symbol,
+                kind: SymbolKind::Constructor
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_widen_a_package_reference() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "package",
+            SymbolKind::Package,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = term_ref(&mut w, symbol);
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Err(TypeNormalizeError::TermRefKindCannotBeWidened {
+                symbol,
+                kind: SymbolKind::Package
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_widen_a_name_target() {
+        let mut w = World::new();
+        let name = dotty_core::TermName::new(w.store.names.intern("member"));
+        let reference = w.store.types.alloc(Type::TermRef {
+            prefix: w.prefix,
+            target: TermRefTarget::Name(name),
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            Err(TypeNormalizeError::NameTargetCannotBeWidened { ty: reference })
+        );
+    }
+
+    #[test]
+    fn reports_missing_and_error_term_info_without_completing_symbols() {
+        for info in [SymbolInfo::Missing, SymbolInfo::Error] {
+            let mut w = World::new();
+            let symbol = w.symbol("value", SymbolKind::Value, SymbolFlags::EMPTY, info);
+            let reference = term_ref(&mut w, symbol);
+            let state = match info {
+                SymbolInfo::Missing => SymbolInfoState::Missing,
+                SymbolInfo::Error => SymbolInfoState::Error,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                TypeNormalizer::new(&w.store).widen_term_ref(reference),
+                Err(TypeNormalizeError::TermRefInfoIncomplete { symbol, state })
+            );
+            assert_eq!(*w.store.symbols.info(symbol), info);
+        }
+    }
+
+    #[test]
+    fn rejects_non_term_ref_types_for_widening() {
+        let mut w = World::new();
+        let ty = w.store.types.alloc(Type::NoType);
+        assert_eq!(
+            TypeNormalizer::new(&w.store).widen_term_ref(ty),
+            Err(TypeNormalizeError::NotTermRef { ty })
         );
     }
 }
