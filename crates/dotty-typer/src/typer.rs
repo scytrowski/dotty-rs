@@ -324,6 +324,12 @@ pub enum TyperError {
     TermReferenceCannotBeWidened { symbol: SymbolId, kind: SymbolKind },
     /// The receiver prefix does not contain the referenced member symbol.
     TermReferencePrefixMismatch { symbol: SymbolId, prefix: TypeId },
+    /// A selection qualifier cannot be preserved as a stable reference path.
+    UnstableSelectionPrefix {
+        source: SourceId,
+        tree_index: u32,
+        qualifier_type: TypeId,
+    },
 }
 
 impl fmt::Display for TyperError {
@@ -708,6 +714,7 @@ impl<'a> SourceTyper<'a> {
                     new_mappings,
                 )?;
                 let receiver_type = self.typed_arena.get(qualifier).ty;
+                self.require_stable_selection_prefix(receiver_type, tree.index())?;
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let candidates = self
@@ -731,7 +738,10 @@ impl<'a> SourceTyper<'a> {
                         });
                     }
                 };
-                let ty = self.member_type_on_journaled(candidate, info_journal)?;
+                let ty = self.store.types.alloc(Type::TermRef {
+                    prefix: receiver_type,
+                    target: TermRefTarget::Symbol(candidate.symbol),
+                });
                 Ok(TypedAstBuilder::new(&mut self.typed_arena).select(
                     qualifier,
                     selection.name,
@@ -793,6 +803,36 @@ impl<'a> SourceTyper<'a> {
             qualifier,
             owner: expression_owner,
         })
+    }
+
+    fn require_stable_selection_prefix(
+        &self,
+        qualifier_type: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let stable = match self.store.types.try_get(qualifier_type) {
+            Some(Type::ThisType { .. } | Type::Constant(_)) => true,
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol) => {
+                let declaration = self.store.symbols.get(*symbol);
+                matches!(
+                    declaration.kind,
+                    SymbolKind::Parameter | SymbolKind::Field | SymbolKind::Value
+                ) && !declaration.flags.contains(SymbolFlags::MUTABLE)
+            }
+            _ => false,
+        };
+        if stable {
+            Ok(())
+        } else {
+            Err(TyperError::UnstableSelectionPrefix {
+                source: self.source,
+                tree_index,
+                qualifier_type,
+            })
+        }
     }
 
     fn resolve_expression_term(
@@ -3700,11 +3740,7 @@ mod tests {
         let node = typer.typed_ast().get(typed);
         let kind = node.kind.clone();
         let own_type_id = node.ty;
-        let widened_id = if matches!(kind, TreeKind::Select(_)) {
-            own_type_id
-        } else {
-            typer.widen_expression_type(own_type_id)?
-        };
+        let widened_id = typer.widen_expression_type(own_type_id)?;
         Ok((
             kind,
             typer.store().types.get(own_type_id).clone(),
@@ -9860,6 +9896,141 @@ mod tests {
 
         assert!(matches!(kind, TreeKind::Select(_)));
         assert_eq!(widened, definitions.int);
+    }
+
+    #[test]
+    fn this_selection_keeps_the_exact_field_and_this_type_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1; def use: Int = this.value }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
+            panic!("source RHS should be a selection")
+        };
+        let source_qualifier = selection.qualifier;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_select = typer.type_expression(rhs, context).unwrap();
+        let typed_qualifier = typer
+            .source_typed_index()
+            .get(source, source_qualifier)
+            .unwrap();
+        let qualifier_type = typer.typed_ast().get(typed_qualifier).ty;
+        let Type::TermRef { prefix, target } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_select).ty)
+        else {
+            panic!("selection should retain a term reference")
+        };
+
+        assert_eq!(*prefix, qualifier_type);
+        assert!(matches!(
+            typer.store().types.get(*prefix),
+            Type::ThisType { class: actual } if *actual == class
+        ));
+        assert_eq!(*target, TermRefTarget::Symbol(field));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_select).ty)
+                .unwrap(),
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn stable_local_selection_keeps_the_qualifier_reference_path() {
+        let source_text = "class Text; class Box[A] { val value: A }; class Use { def use(box: Box[Text]): Text = box.value }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let box_parameter = val_symbol(&parsed, &store, &index, source, "box").0;
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(box_parameter).unwrap(),
+            owner: method,
+        };
+        let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
+            panic!("source RHS should be a selection")
+        };
+        let source_qualifier = selection.qualifier;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_select = typer.type_expression(rhs, context).unwrap();
+        let typed_qualifier = typer
+            .source_typed_index()
+            .get(source, source_qualifier)
+            .unwrap();
+        let qualifier_type = typer.typed_ast().get(typed_qualifier).ty;
+        let Type::TermRef { prefix, target } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_select).ty)
+        else {
+            panic!("selection should retain a term reference")
+        };
+        assert_eq!(*prefix, qualifier_type);
+        assert!(matches!(
+            typer.store().types.get(*prefix),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == box_parameter
+        ));
+        assert_eq!(*target, TermRefTarget::Symbol(field));
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed_select).ty)
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(widened),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == text
+        ));
+    }
+
+    #[test]
+    fn unstable_selection_prefix_fails_atomically() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box { val value: Int = 1 }; class Use { var box: Box = null; def use: Int = box.value }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let store_checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnstableSelectionPrefix { .. })
+        ));
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.source_typed_index().len(), 0);
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
     }
 
     #[test]
