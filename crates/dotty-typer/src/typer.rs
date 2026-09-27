@@ -3282,6 +3282,36 @@ mod tests {
     }
 
     #[test]
+    fn cycle_across_deduplicated_parent_branches_is_reported() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A extends B, C; class B extends C; class C extends B; class Unrelated",
+        );
+        let a = class_symbol(&parsed, &store, &index, source, "A");
+        let b = class_symbol(&parsed, &store, &index, source, "B");
+        let c = class_symbol(&parsed, &store, &index, source, "C");
+        let unrelated = class_symbol(&parsed, &store, &index, source, "Unrelated");
+        let a_type = nominal_type_ref(&mut store, definitions, a);
+        let unrelated_type = nominal_type_ref(&mut store, definitions, unrelated);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(a).unwrap();
+        typer.complete_symbol(b).unwrap();
+        typer.complete_symbol(c).unwrap();
+        typer.complete_symbol(unrelated).unwrap();
+        assert!(matches!(
+            typer.is_subtype(a_type, unrelated_type),
+            Err(TypeRelationError::InheritanceCycle { symbol }) if symbol == b || symbol == c
+        ));
+    }
+
+    #[test]
     fn this_type_conforms_to_its_own_class_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");

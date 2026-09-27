@@ -1,6 +1,6 @@
 //! Bounded nominal subtyping and conformance over the supported source types.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
@@ -11,7 +11,7 @@ use crate::{SourceTyper, TyperError};
 
 /// Maximum parent edges followed by one nominal relation request.
 pub const MAX_TYPE_RELATION_DEPTH: usize = 256;
-/// Maximum distinct instantiated parent views inspected by one relation.
+/// Maximum instantiated parent views inspected by one relation.
 pub const MAX_TYPE_RELATION_VIEWS: usize = 4096;
 
 /// A malformed or unsupported semantic type relation.
@@ -254,16 +254,15 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         expected_type: TypeId,
     ) -> Result<bool, TypeRelationError> {
         let found_class = found.class;
-        let found_type_id = found.ty;
-        let mut queue = VecDeque::from([PendingView {
+        let mut pending_views = vec![PendingView {
             view: found,
             depth: 0,
             path: vec![found_class],
-        }]);
-        let mut visited = vec![(found_class, found_type_id)];
+        }];
+        let mut inspected_views = 1;
         let mut matched_expected = false;
 
-        while let Some(pending) = queue.pop_front() {
+        while let Some(pending) = pending_views.pop() {
             let info = self.class_info(pending.view.class)?;
             if info.parents.is_empty() {
                 continue;
@@ -271,6 +270,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             if pending.depth >= MAX_TYPE_RELATION_DEPTH {
                 return Err(TypeRelationError::TooDeep);
             }
+            let mut children = Vec::new();
             for parent in info.parents {
                 let parent = self
                     .typer
@@ -316,31 +316,19 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                     return Err(TypeRelationError::TooDeep);
                 }
 
-                let mut duplicate = false;
-                for (class, view) in &visited {
-                    if *class == parent_view.class {
-                        let previous = self.class_view(*view)?;
-                        if self.equivalent_class_views(&previous, &parent_view, 0)? {
-                            duplicate = true;
-                            break;
-                        }
-                    }
-                }
-                if duplicate {
-                    continue;
-                }
-                if visited.len() >= MAX_TYPE_RELATION_VIEWS {
+                if inspected_views >= MAX_TYPE_RELATION_VIEWS {
                     return Err(TypeRelationError::TooManyParentViews);
                 }
-                visited.push((parent_view.class, parent_view.ty));
+                inspected_views += 1;
                 let mut path = pending.path.clone();
                 path.push(parent_view.class);
-                queue.push_back(PendingView {
+                children.push(PendingView {
                     view: parent_view,
                     depth: pending.depth + 1,
                     path,
                 });
             }
+            pending_views.extend(children.into_iter().rev());
         }
 
         Ok(matched_expected)
