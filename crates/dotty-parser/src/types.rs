@@ -1,7 +1,7 @@
 use dotty_core::ast::{
-    Annotated, ByNameTypeTree, CaseDef, Function, FunctionWithMods, Ident, LambdaTypeTree,
-    MatchTypeTree, Modifier, Modifiers, NamedArg, Parens, PolyFunction, RefinedTypeTree, Select,
-    Super, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    Annotated, AppliedTypeTree, ByNameTypeTree, CaseDef, Function, FunctionWithMods, Ident,
+    LambdaTypeTree, MatchTypeTree, Modifier, Modifiers, NamedArg, New, Parens, PolyFunction,
+    RefinedTypeTree, Select, SingletonTypeTree, Super, Tuple, TypeBoundsTree, UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, HardKeyword, Name, Punctuation, SourceSpan, Span, TokenKind, TreeId, TreeKind,
@@ -1133,6 +1133,351 @@ where
                 }),
             );
         }
+
+        if self.features().capture_checking
+            && self.current_text_is("^")
+            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::LeftBrace)
+        {
+            self.advance();
+            let captures = self.parse_capture_set();
+            tree = self.make_capture_retaining(mark, tree, Some(captures));
+        }
+        tree
+    }
+
+    /// Parses Dotty's capture-set source grammar. The returned references are
+    /// source trees; semantic capability resolution remains a later phase.
+    fn parse_capture_set(&mut self) -> Vec<TreeId<Untyped>> {
+        self.expect(TokenKind::Punctuation(Punctuation::LeftBrace));
+        let mut captures = Vec::new();
+
+        if self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+            return captures;
+        }
+
+        loop {
+            if self.can_start_capture_ref() {
+                captures.push(self.parse_capture_ref());
+            } else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a capture reference",
+                );
+                if self.current().kind != TokenKind::Eof
+                    && self.current().kind != TokenKind::Punctuation(Punctuation::RightBrace)
+                {
+                    self.advance();
+                }
+            }
+
+            if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a capture reference after `,`",
+                    );
+                    self.advance();
+                    break;
+                }
+                continue;
+            }
+
+            if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `,` or `}` after a capture reference",
+                );
+                while !matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBrace)
+                        | TokenKind::Eof
+                ) {
+                    let checkpoint = self.cursor.checkpoint();
+                    self.advance();
+                    if !self.cursor.progressed_since(checkpoint) {
+                        break;
+                    }
+                }
+                if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
+                    continue;
+                }
+                self.accept(TokenKind::Punctuation(Punctuation::RightBrace));
+            }
+            break;
+        }
+
+        captures
+    }
+
+    fn can_start_capture_ref(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
+        )
+    }
+
+    fn parse_capture_ref(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut reference = self.parse_simple_capture_ref();
+
+        loop {
+            if self.current().kind == TokenKind::Operator && self.current_text_is("*") {
+                self.advance();
+                let annotation = self.make_capture_marker_annotation(
+                    mark,
+                    &["scala", "annotation", "internal", "reachCapability"],
+                    None,
+                );
+                reference = self.alloc_from(
+                    mark,
+                    TreeKind::Annotated(Annotated {
+                        expr: reference,
+                        annotation,
+                    }),
+                );
+                continue;
+            }
+
+            if self.current().kind != TokenKind::Punctuation(Punctuation::Dot) {
+                break;
+            }
+
+            if self.is_capture_only_filter() {
+                self.advance();
+                self.advance();
+                self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
+                let filter = match self.parse_qualified_reference(ReferenceNamespace::Type) {
+                    Ok(filter) => filter,
+                    Err(_) => {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedType,
+                            "expected a qualified type in capture filter",
+                        );
+                        self.error_type(self.current_span())
+                    }
+                };
+                self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
+                let annotation = self.make_capture_marker_annotation(
+                    mark,
+                    &["scala", "annotation", "internal", "onlyCapability"],
+                    Some(filter),
+                );
+                reference = self.alloc_from(
+                    mark,
+                    TreeKind::Annotated(Annotated {
+                        expr: reference,
+                        annotation,
+                    }),
+                );
+                continue;
+            }
+
+            self.advance();
+            let Some((name, backquoted)) = self.current_selector_name() else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a capture reference after `.`",
+                );
+                break;
+            };
+            self.advance();
+            reference = self.alloc_from(
+                mark,
+                TreeKind::Select(Select {
+                    qualifier: reference,
+                    name,
+                    backquoted,
+                }),
+            );
+        }
+
+        reference
+    }
+
+    fn parse_simple_capture_ref(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let current_kind = self.current().kind;
+        match current_kind {
+            TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
+            | TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+                if self.capture_ref_starts_this_or_super() =>
+            {
+                self.parse_this_or_super_reference(mark)
+                    .unwrap_or_else(|_| {
+                        self.report(
+                            ParseDiagnosticKind::ExpectedType,
+                            "expected a capture reference",
+                        );
+                        self.error_type(self.current_span())
+                    })
+            }
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+                let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+                let name = self.intern_current_term_name();
+                let Ok(name) = name else {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a capture reference",
+                    );
+                    return self.error_type(self.current_span());
+                };
+                self.advance();
+                self.alloc_from(
+                    mark,
+                    TreeKind::Ident(Ident {
+                        name: *name.as_name(),
+                        backquoted,
+                    }),
+                )
+            }
+            _ => {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a capture reference",
+                );
+                self.error_type(self.current_span())
+            }
+        }
+    }
+
+    fn capture_ref_starts_this_or_super(&mut self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
+        ) || matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+            && matches!(
+                self.cursor.lookahead(2).kind,
+                TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
+            )
+    }
+
+    fn is_capture_only_filter(&mut self) -> bool {
+        let selector = self.cursor.lookahead(1).clone();
+        let left_bracket = self.cursor.lookahead(2).clone();
+        selector.kind == TokenKind::Identifier
+            && self.token_text(&selector).ok() == Some("only")
+            && left_bracket.kind == TokenKind::Punctuation(Punctuation::LeftBracket)
+    }
+
+    fn make_capture_retaining(
+        &mut self,
+        mark: crate::Mark,
+        parent: TreeId<Untyped>,
+        captures: Option<Vec<TreeId<Untyped>>>,
+    ) -> TreeId<Untyped> {
+        let annotation_name = if captures.is_some() {
+            "retains"
+        } else {
+            "retainsCap"
+        };
+        let annotation_type = self.type_name_path(&["scala", "annotation", annotation_name]);
+        let annotation_type = if let Some(captures) = captures {
+            if captures.is_empty() {
+                let nothing = self.type_name_path(&["scala", "Nothing"]);
+                self.alloc_from(
+                    mark,
+                    TreeKind::AppliedTypeTree(AppliedTypeTree {
+                        tpt: annotation_type,
+                        args: vec![nothing],
+                    }),
+                )
+            } else {
+                let mut capture_types = captures
+                    .into_iter()
+                    .map(|reference| {
+                        self.alloc_from(
+                            mark,
+                            TreeKind::SingletonTypeTree(SingletonTypeTree { reference }),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut capture_type = capture_types.remove(0);
+                for next in capture_types {
+                    let or_type = self.type_name_path(&["scala", "|"]);
+                    capture_type = self.alloc_from(
+                        mark,
+                        TreeKind::AppliedTypeTree(AppliedTypeTree {
+                            tpt: or_type,
+                            args: vec![capture_type, next],
+                        }),
+                    );
+                }
+                self.alloc_from(
+                    mark,
+                    TreeKind::AppliedTypeTree(AppliedTypeTree {
+                        tpt: annotation_type,
+                        args: vec![capture_type],
+                    }),
+                )
+            }
+        } else {
+            annotation_type
+        };
+        let annotation = self.alloc_from(
+            mark,
+            TreeKind::New(New {
+                tpt: annotation_type,
+            }),
+        );
+        self.alloc_from(
+            mark,
+            TreeKind::Annotated(Annotated {
+                expr: parent,
+                annotation,
+            }),
+        )
+    }
+
+    fn make_capture_marker_annotation(
+        &mut self,
+        mark: crate::Mark,
+        path: &[&str],
+        argument: Option<TreeId<Untyped>>,
+    ) -> TreeId<Untyped> {
+        let tpt = self.type_name_path(path);
+        let tpt = argument.map_or(tpt, |argument| {
+            self.alloc_from(
+                mark,
+                TreeKind::AppliedTypeTree(AppliedTypeTree {
+                    tpt,
+                    args: vec![argument],
+                }),
+            )
+        });
+        self.alloc_from(mark, TreeKind::New(New { tpt }))
+    }
+
+    fn type_name_path(&mut self, segments: &[&str]) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let mut segments = segments.iter();
+        let Some(first) = segments.next() else {
+            return self.error_type(self.current_span());
+        };
+        let name = dotty_core::TypeName::new(self.names.intern(first));
+        let mut tree = self.alloc_from(
+            mark,
+            TreeKind::Ident(Ident {
+                name: *name.as_name(),
+                backquoted: false,
+            }),
+        );
+        for segment in segments {
+            let name = dotty_core::TypeName::new(self.names.intern(segment));
+            tree = self.alloc_from(
+                mark,
+                TreeKind::Select(Select {
+                    qualifier: tree,
+                    name: *name.as_name(),
+                    backquoted: false,
+                }),
+            );
+        }
         tree
     }
 
@@ -2016,6 +2361,305 @@ mod tests {
         MatchTypeTree, RefinedTypeTree, Select, Super, This, TypeDef, ValDef,
     };
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
+
+    fn capture_type_tokens(source: &str) -> Vec<dotty_core::Token> {
+        let mut tokens = Vec::new();
+        let bytes = source.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if bytes[offset].is_ascii_whitespace() {
+                offset += 1;
+                continue;
+            }
+            let start = offset;
+            let kind = match bytes[offset] {
+                b'.' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::Dot)
+                }
+                b'{' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::LeftBrace)
+                }
+                b'}' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::RightBrace)
+                }
+                b'[' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::LeftBracket)
+                }
+                b']' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::RightBracket)
+                }
+                b',' => {
+                    offset += 1;
+                    TokenKind::Punctuation(Punctuation::Comma)
+                }
+                b'^' | b'*' => {
+                    offset += 1;
+                    TokenKind::Operator
+                }
+                _ => {
+                    offset += 1;
+                    while offset < bytes.len()
+                        && !bytes[offset].is_ascii_whitespace()
+                        && !b".{}[],^*".contains(&bytes[offset])
+                    {
+                        offset += 1;
+                    }
+                    TokenKind::Identifier
+                }
+            };
+            tokens.push(token(kind, start as u32, offset as u32));
+        }
+        tokens.push(token(
+            TokenKind::Eof,
+            source.len() as u32,
+            source.len() as u32,
+        ));
+        tokens
+    }
+
+    fn parser_for_capture_type<'src, 'names>(
+        source: &'src str,
+        names: &'names mut NameInterner,
+        enabled: bool,
+    ) -> crate::Parser<'src, 'names, crate::compilation_unit::tests::VecTokenSource> {
+        parser_for(source, capture_type_tokens(source), names).with_features(
+            crate::ParserFeatures {
+                capture_checking: enabled,
+                ..crate::ParserFeatures::default()
+            },
+        )
+    }
+
+    fn tree_name<'a>(
+        tree_id: dotty_core::TreeId<Untyped>,
+        parser: &'a crate::Parser<'_, '_, crate::compilation_unit::tests::VecTokenSource>,
+    ) -> Option<&'a str> {
+        match &parser.ast().get(tree_id).kind {
+            TreeKind::Ident(ident) => Some(parser.names.resolve(ident.name.text())),
+            _ => None,
+        }
+    }
+
+    fn type_path_text(
+        tree_id: dotty_core::TreeId<Untyped>,
+        parser: &crate::Parser<'_, '_, crate::compilation_unit::tests::VecTokenSource>,
+    ) -> Option<String> {
+        match &parser.ast().get(tree_id).kind {
+            TreeKind::Ident(ident) => Some(parser.names.resolve(ident.name.text()).to_owned()),
+            TreeKind::Select(selection) => Some(format!(
+                "{}.{}",
+                type_path_text(selection.qualifier, parser)?,
+                parser.names.resolve(selection.name.text())
+            )),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parses_an_explicit_capture_set_as_a_retains_annotation() {
+        let source = "T^{a}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected a capture-retaining annotated type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected Dotty's source-level annotation constructor");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("expected the retains annotation to carry a capture type");
+        };
+        assert_eq!(
+            type_path_text(retains.tpt, &parser).as_deref(),
+            Some("scala.annotation.retains")
+        );
+        assert_eq!(retains.args.len(), 1);
+        let TreeKind::SingletonTypeTree(capture) = parser.ast().get(retains.args[0]).kind else {
+            panic!("expected the capture reference to be a singleton type");
+        };
+        let TreeKind::Ident(reference) = parser.ast().get(capture.reference).kind else {
+            panic!("expected a term reference inside the singleton type");
+        };
+        assert!(reference.name.is_term());
+        assert_eq!(parser.names.resolve(reference.name.text()), "a");
+        assert_eq!(parser.diagnostics().len(), 0);
+        assert_eq!(
+            parser.ast().get(tree).position.unwrap().span().range(),
+            TextRange::new(0, 5).unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_explicit_capture_set_uses_nothing_in_retains() {
+        let source = "T^{}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected an annotated type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected an annotation constructor");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("an explicit empty set still uses `retains[Nothing]`");
+        };
+        assert_eq!(
+            type_path_text(retains.tpt, &parser).as_deref(),
+            Some("scala.annotation.retains")
+        );
+        assert_eq!(
+            type_path_text(retains.args[0], &parser).as_deref(),
+            Some("scala.Nothing")
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_set_references_are_combined_with_the_scala_or_type() {
+        let source = "T^{a,b}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected an annotated type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected an annotation constructor");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("expected `retains` to have one type argument");
+        };
+        let TreeKind::AppliedTypeTree(or_type) = &parser.ast().get(retains.args[0]).kind else {
+            panic!("expected the capture references to form an Or type");
+        };
+        assert_eq!(
+            type_path_text(or_type.tpt, &parser).as_deref(),
+            Some("scala.|")
+        );
+        assert_eq!(or_type.args.len(), 2);
+        for (index, expected) in ["a", "b"].into_iter().enumerate() {
+            let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(or_type.args[index]).kind
+            else {
+                panic!("expected a singleton capture type");
+            };
+            assert_eq!(tree_name(singleton.reference, &parser), Some(expected));
+        }
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn qualified_capture_references_keep_term_names_on_every_segment() {
+        let source = "T^{pkg.cap}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected a retained type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected an annotation constructor");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("expected an applied retains annotation");
+        };
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(retains.args[0]).kind else {
+            panic!("expected a singleton capture type");
+        };
+        let TreeKind::Select(selection) = parser.ast().get(singleton.reference).kind else {
+            panic!("expected a qualified term reference");
+        };
+        assert!(selection.name.is_term());
+        assert_eq!(parser.names.resolve(selection.name.text()), "cap");
+        let TreeKind::Ident(qualifier) = parser.ast().get(selection.qualifier).kind else {
+            panic!("expected a simple term qualifier");
+        };
+        assert!(qualifier.name.is_term());
+        assert_eq!(parser.names.resolve(qualifier.name.text()), "pkg");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reach_capture_marker_wraps_its_reference_in_the_dotty_annotation() {
+        let source = "T^{a*}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected a retained type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected a retains annotation");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("expected an applied retains annotation");
+        };
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(retains.args[0]).kind else {
+            panic!("expected one singleton capture");
+        };
+        let TreeKind::Annotated(reach) = parser.ast().get(singleton.reference).kind else {
+            panic!("expected the reach marker on the source reference");
+        };
+        let TreeKind::New(reach_new) = parser.ast().get(reach.annotation).kind else {
+            panic!("expected a reach annotation constructor");
+        };
+        assert_eq!(
+            type_path_text(reach_new.tpt, &parser).as_deref(),
+            Some("scala.annotation.internal.reachCapability")
+        );
+        assert_eq!(tree_name(reach.expr, &parser), Some("a"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_only_filter_keeps_its_type_argument_in_the_annotation_tree() {
+        let source = "T^{a.only[pkg.Q]}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected a retained type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected a retains annotation");
+        };
+        let TreeKind::AppliedTypeTree(retains) = &parser.ast().get(new.tpt).kind else {
+            panic!("expected an applied retains annotation");
+        };
+        let TreeKind::SingletonTypeTree(singleton) = parser.ast().get(retains.args[0]).kind else {
+            panic!("expected a singleton capture");
+        };
+        let TreeKind::Annotated(only) = parser.ast().get(singleton.reference).kind else {
+            panic!("expected the only filter on the source reference");
+        };
+        let TreeKind::New(only_new) = parser.ast().get(only.annotation).kind else {
+            panic!("expected an only-capability constructor");
+        };
+        let TreeKind::AppliedTypeTree(only_type) = &parser.ast().get(only_new.tpt).kind else {
+            panic!("expected the only filter type argument");
+        };
+        assert_eq!(
+            type_path_text(only_type.tpt, &parser).as_deref(),
+            Some("scala.annotation.internal.onlyCapability")
+        );
+        assert_eq!(
+            type_path_text(only_type.args[0], &parser).as_deref(),
+            Some("pkg.Q")
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
 
     #[test]
     fn parses_a_braced_match_type_with_ordered_cases() {
