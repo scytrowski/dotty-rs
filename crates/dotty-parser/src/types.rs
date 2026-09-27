@@ -1136,13 +1136,49 @@ where
 
         if self.features().capture_checking
             && self.current_text_is("^")
-            && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::LeftBrace)
+            && self.is_capture_up_arrow()
         {
             self.advance();
-            let captures = self.parse_capture_set();
-            tree = self.make_capture_retaining(mark, tree, Some(captures));
+            let captures = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace)
+            {
+                Some(self.parse_capture_set())
+            } else {
+                None
+            };
+            tree = self.make_capture_retaining(mark, tree, captures);
         }
         tree
+    }
+
+    /// Mirrors Dotty 3.9's `isCaptureUpArrow`: a caret starts a capture
+    /// suffix before a braced set, a pure-function arrow, a physical newline,
+    /// or a token that cannot begin the next infix-type operand. Otherwise it
+    /// remains an ordinary right-associative type operator.
+    fn is_capture_up_arrow(&mut self) -> bool {
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        let next = self.cursor.lookahead(lookahead).clone();
+        if next.kind == TokenKind::Punctuation(Punctuation::LeftBrace)
+            || matches!(self.token_text(&next).ok(), Some("->" | "?->"))
+            || self.physical_line_break_between(self.current().span.end(), next.span.start())
+        {
+            return true;
+        }
+
+        !self.can_start_type_operand(&next)
+    }
+
+    fn physical_line_break_between(&self, start: u32, end: u32) -> bool {
+        self.source
+            .as_str()
+            .get(start as usize..end as usize)
+            .map(|text| text.chars().any(dotty_core::is_line_break_char))
+            .unwrap_or(true)
     }
 
     /// Parses Dotty's capture-set source grammar. The returned references are
@@ -1937,11 +1973,13 @@ where
             | TokenKind::Keyword(HardKeyword::True)
             | TokenKind::Keyword(HardKeyword::False)
             | TokenKind::Keyword(HardKeyword::Null)
+            | TokenKind::Keyword(HardKeyword::This | HardKeyword::Super)
             | TokenKind::Punctuation(Punctuation::LeftParen) => true,
+            TokenKind::Punctuation(Punctuation::LeftBrace) => true,
             TokenKind::Operator => self
                 .token_text(token)
                 .ok()
-                .is_some_and(|text| matches!(text, "-" | "?")),
+                .is_some_and(|text| matches!(text, "-" | "?" | "@")),
             _ => false,
         }
     }
@@ -2659,6 +2697,75 @@ mod tests {
             Some("pkg.Q")
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn unbraced_capture_suffix_uses_the_empty_capture_marker() {
+        let source = "T^";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::Annotated(annotated) = parser.ast().get(tree).kind else {
+            panic!("expected a capture-retaining type");
+        };
+        let TreeKind::New(new) = parser.ast().get(annotated.annotation).kind else {
+            panic!("expected the empty capture annotation constructor");
+        };
+        assert_eq!(
+            type_path_text(new.tpt, &parser).as_deref(),
+            Some("scala.annotation.retainsCap")
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn caret_followed_by_a_same_line_type_remains_an_infix_type_operator() {
+        let source = "T^B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(tree).kind
+        else {
+            panic!("expected `^` to remain an infix type operator");
+        };
+        assert_eq!(parser.names.resolve(infix.op.text()), "^");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn caret_before_a_physical_newline_starts_a_capture_suffix() {
+        let source = "T^\nB";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert_eq!(parser.current_text().unwrap(), "B");
+    }
+
+    #[test]
+    fn feature_disabled_caret_brace_is_not_lowered_as_a_capture_suffix() {
+        let source = "T^{a}";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, false);
+
+        let tree = parser.type_expr();
+
+        assert!(!matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(parser.diagnostics().iter().all(|diagnostic| {
+            !diagnostic
+                .message()
+                .contains("capture checking is not enabled")
+        }));
     }
 
     #[test]
