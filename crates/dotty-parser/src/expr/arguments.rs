@@ -145,3 +145,154 @@ where
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compilation_unit::tests::{parser_for, token};
+    use dotty_core::NameInterner;
+    use dotty_core::ast::UntypedNode;
+
+    #[test]
+    fn parses_a_final_argument_splice_as_typed_wildcard_star() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(args*)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        let [argument] = application.args.as_slice() else {
+            panic!("expected one argument");
+        };
+        let TreeKind::Typed(typed) = &parser.ast().get(*argument).kind else {
+            panic!("expected a typed vararg splice");
+        };
+        let TreeKind::Ident(wildcard_star) = &parser.ast().get(typed.tpt).kind else {
+            panic!("expected the wildcard-star type marker");
+        };
+        assert_eq!(parser.names.resolve(wildcard_star.name.text()), "_*");
+        assert_eq!(
+            parser.ast().get(typed.tpt).position.unwrap().span().range(),
+            dotty_core::TextRange::new(6, 7).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(*argument).position.unwrap().span().range(),
+            dotty_core::TextRange::new(2, 7).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_splice_after_earlier_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(head, tail*)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        assert_eq!(application.args.len(), 2);
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(application.args[1]).kind,
+            TreeKind::Typed(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_multiplication_in_an_argument_as_an_infix_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(a * b)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_a_nonfinal_splice_without_consuming_the_next_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(values*, other)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 8),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        assert_eq!(application.args.len(), 2);
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(application.args[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("must come last in a parameter list")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+}
