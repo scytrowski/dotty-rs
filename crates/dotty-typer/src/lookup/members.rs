@@ -83,10 +83,15 @@ impl From<TypeNormalizeError> for MemberLookupError {
 }
 
 impl SourceTyper<'_> {
-    /// Finds every direct declaration matching `name` on `receiver`.
+    /// Finds every matching declaration on `receiver` or its nominal parents.
     ///
-    /// This initial lookup step preserves every symbol from the exact scope
-    /// bucket, in insertion order; it does not choose or merge overloads.
+    /// Direct declaration buckets hide inherited buckets on the same branch.
+    /// Every bucket preserves its scope insertion order; candidates are ordered
+    /// by inheritance depth and then by parent traversal order. Exact repeated
+    /// symbols reached through a diamond are returned once. This does not
+    /// choose or merge overloads. Missing classes from this source unit are
+    /// completed through `complete_symbol`; external symbols are never loaded
+    /// from a classpath here.
     pub fn lookup_members(
         &mut self,
         receiver: TypeId,
@@ -154,6 +159,12 @@ impl SourceTyper<'_> {
         if !self.store.symbols.contains(symbol) {
             return Err(MemberLookupError::UnknownClassSymbol { symbol });
         }
+        if matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
+            && self.is_current_source_symbol(symbol)
+        {
+            self.complete_symbol(symbol)
+                .map_err(|error| MemberLookupError::SourceClassCompletion { symbol, error })?;
+        }
         let info_type = match *self.store.symbols.info(symbol) {
             SymbolInfo::Complete(info) => info,
             SymbolInfo::Missing => {
@@ -200,6 +211,15 @@ impl SourceTyper<'_> {
             });
         }
         Ok(info.clone())
+    }
+
+    fn is_current_source_symbol(&self, symbol: SymbolId) -> bool {
+        self.index
+            .definition_of(symbol)
+            .is_some_and(|definition| match definition {
+                dotty_namer::SourceDefinition::Canonical { source, .. }
+                | dotty_namer::SourceDefinition::Derived { source, .. } => source == self.source,
+            })
     }
 
     fn direct_candidates(
@@ -279,6 +299,12 @@ fn class_symbol_for_type(
                 ..
             } => return validate_class_symbol(store, *symbol, ty, is_parent),
             Type::Applied { tycon, .. } => {
+                // Keep the application intact while extracting its class
+                // owner. In particular, do not open an applied type alias
+                // after dropping the arguments needed for substitution.
+                TypeNormalizer::new(store)
+                    .dealias_top(current)
+                    .map_err(MemberLookupError::TypeNormalization)?;
                 current = *tycon;
                 let dealiased = TypeNormalizer::new(store)
                     .normalize_for_lookup(current)
@@ -616,6 +642,68 @@ mod tests {
 
         let candidates = w.lookup(receiver, name).unwrap();
         assert_eq!(candidates[0].receiver_view, receiver);
+    }
+
+    #[test]
+    fn generic_parent_view_is_preserved_without_substitution() {
+        let mut w = World::new();
+        let base = w.class("Base");
+        let base_scope = w.scope(base);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(base_scope).enter(name, field);
+        w.publish_class(base, base_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let tycon = w.class_ref(base);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied_parent = w.store.types.alloc(Type::Applied {
+            tycon,
+            args: vec![argument],
+        });
+        w.publish_class(child, child_scope, vec![applied_parent]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(candidates[0].receiver_view, applied_parent);
+        assert_eq!(candidates[0].inheritance_depth, 1);
+    }
+
+    #[test]
+    fn applied_alias_parent_is_not_opened_without_substitution() {
+        let mut w = World::new();
+        let class = w.class("Base");
+        let class_ref = w.class_ref(class);
+        let bounds = w
+            .store
+            .types
+            .alloc(Type::AliasingBounds { alias: class_ref });
+        let alias = w.symbol(
+            "Alias",
+            Namespace::Type,
+            SymbolKind::TypeAlias,
+            SymbolInfo::Complete(bounds),
+        );
+        let alias_ref = w.class_ref(alias);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied_alias = w.store.types.alloc(Type::Applied {
+            tycon: alias_ref,
+            args: vec![argument],
+        });
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(applied_alias, name),
+            Err(MemberLookupError::TypeNormalization(
+                TypeNormalizeError::AliasRequiresSubstitution { symbol }
+            )) if symbol == alias
+        ));
     }
 
     #[test]
@@ -983,6 +1071,53 @@ mod tests {
     }
 
     #[test]
+    fn intersection_receivers_are_explicitly_unsupported() {
+        let mut w = World::new();
+        let left = w.store.types.alloc(Type::NoType);
+        let right = w.store.types.alloc(Type::NoType);
+        let intersection = w.store.types.alloc(Type::And { left, right });
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(intersection, name),
+            Err(MemberLookupError::UnsupportedReceiverType { ty }) if ty == intersection
+        ));
+    }
+
+    #[test]
+    fn match_type_receivers_are_explicitly_unsupported() {
+        let mut w = World::new();
+        let match_type = w
+            .store
+            .types
+            .alloc(Type::Match(dotty_core::types::MatchType {
+                bound: w.definitions.no_prefix,
+                scrutinee: w.definitions.no_prefix,
+                cases: Vec::new(),
+            }));
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(match_type, name),
+            Err(MemberLookupError::UnsupportedReceiverType { ty }) if ty == match_type
+        ));
+    }
+
+    #[test]
+    fn recursive_receivers_are_explicitly_unsupported() {
+        let mut w = World::new();
+        let recursive = w.store.types.alloc(Type::Recursive {
+            parent: w.definitions.no_prefix,
+        });
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(recursive, name),
+            Err(MemberLookupError::UnsupportedReceiverType { ty }) if ty == recursive
+        ));
+    }
+
+    #[test]
     fn refinement_parent_is_rejected_as_malformed() {
         let mut w = World::new();
         let class = w.class("C");
@@ -1017,6 +1152,104 @@ mod tests {
         assert!(matches!(
             w.lookup(receiver, name),
             Err(MemberLookupError::ReceiverNotClassLike { ty }) if ty == receiver
+        ));
+    }
+
+    #[test]
+    fn external_missing_class_info_is_an_explicit_error() {
+        let mut w = World::new();
+        let class = w.class("External");
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::ClassInfoUnavailable { symbol, state: SymbolInfoState::Missing }) if symbol == class
+        ));
+    }
+
+    #[test]
+    fn errored_external_class_info_is_an_explicit_error() {
+        let mut w = World::new();
+        let class = w.symbol(
+            "External",
+            Namespace::Type,
+            SymbolKind::Class,
+            SymbolInfo::Error,
+        );
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::ClassInfoUnavailable { symbol, state: SymbolInfoState::Error }) if symbol == class
+        ));
+    }
+
+    #[test]
+    fn a_complete_non_class_info_is_rejected() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let class = w.symbol(
+            "C",
+            Namespace::Type,
+            SymbolKind::Class,
+            SymbolInfo::Complete(info),
+        );
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::ClassInfoNotClassInfo { symbol, info: found }) if symbol == class && found == info
+        ));
+    }
+
+    #[test]
+    fn a_class_info_with_the_wrong_class_identity_is_rejected() {
+        let mut w = World::new();
+        let class = w.class("C");
+        let other = w.class("Other");
+        let scope = w.scope(class);
+        let info = w.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: w.definitions.no_prefix,
+            class: other,
+            parents: Vec::new(),
+            declarations: scope,
+            self_type: None,
+        }));
+        w.store.symbols.set_info(class, SymbolInfo::Complete(info));
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::MalformedClassInfoIdentity { symbol, recorded_class }) if symbol == class && recorded_class == other
+        ));
+    }
+
+    #[test]
+    fn an_invalid_declaration_scope_is_rejected() {
+        let mut w = World::new();
+        let class = w.class("C");
+        let mut foreign_store = SemanticStore::new();
+        let foreign_scope = foreign_store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(class)));
+        let info = w.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: w.definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: foreign_scope,
+            self_type: None,
+        }));
+        w.store.symbols.set_info(class, SymbolInfo::Complete(info));
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::InvalidDeclarationScope { symbol, scope }) if symbol == class && scope == foreign_scope
         ));
     }
 }

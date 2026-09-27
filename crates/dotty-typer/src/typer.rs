@@ -2990,6 +2990,70 @@ mod tests {
     }
 
     #[test]
+    fn member_lookup_completes_a_missing_class_from_the_current_source() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1 }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        assert_eq!(*store.symbols.info(class), SymbolInfo::Missing);
+        let name = Name::new(store.names.intern("value"), Namespace::Term);
+        let scope = index.scope_of(class).unwrap();
+        let field = store.scopes.get(scope).lookup(&name).unwrap();
+        let receiver = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer.lookup_members(receiver, name).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol, field);
+        assert_eq!(candidates[0].declaring_class, class);
+        assert!(matches!(
+            *typer.store().symbols.info(class),
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn member_lookup_completes_a_missing_current_source_parent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Base { val value: Int = 1 }; class Child extends Base");
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let name = Name::new(store.names.intern("value"), Namespace::Term);
+        let base_scope = index.scope_of(base).unwrap();
+        let field = store.scopes.get(base_scope).lookup(&name).unwrap();
+        let receiver = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(child),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer.lookup_members(receiver, name).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol, field);
+        assert_eq!(candidates[0].declaring_class, base);
+        assert!(matches!(
+            *typer.store().symbols.info(base),
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
     fn explicit_class_parent_is_preserved() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Base; class Child extends Base");
