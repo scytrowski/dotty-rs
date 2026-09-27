@@ -1165,9 +1165,24 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<SymbolId, TyperError> {
+        let candidates = self.expression_term_candidates(name, context, tree_index, position)?;
+        self.unique_expression_term(&candidates, name, tree_index, position)
+    }
+
+    /// Resolves the highest-precedence lexical/import bucket without choosing
+    /// among method overloads. Ordinary expression references continue to use
+    /// `resolve_expression_term` and defer when that bucket has several
+    /// methods; Apply uses the full bucket for applicability filtering.
+    fn expression_term_candidates(
+        &mut self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
-        for context_id in contexts {
-            let source_context = self.index.source_context(context_id);
+        for context_id in &contexts {
+            let source_context = self.index.source_context(*context_id);
             let candidates = self
                 .store
                 .scopes
@@ -1175,11 +1190,11 @@ impl<'a> SourceTyper<'a> {
                 .lookup_all(&name)
                 .to_vec();
             if !candidates.is_empty() {
-                return self.unique_expression_term(&candidates, name, tree_index, position);
+                return Ok(candidates);
             }
             for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-                match self.lookup_imports(
-                    &[context_id],
+                let candidates = self.lookup_import_candidates(
+                    &[*context_id],
                     name,
                     false,
                     selection,
@@ -1187,17 +1202,9 @@ impl<'a> SourceTyper<'a> {
                         tree_index,
                         position,
                     },
-                ) {
-                    Ok(Some(symbol)) => return Ok(symbol),
-                    Ok(None) => {}
-                    Err(TyperError::AmbiguousTypeName { .. }) => {
-                        return Err(TyperError::OverloadedReferenceDeferred {
-                            source: self.source,
-                            tree_index,
-                            name,
-                        });
-                    }
-                    Err(error) => return Err(error),
+                )?;
+                if !candidates.is_empty() {
+                    return Ok(candidates);
                 }
             }
         }
@@ -3367,14 +3374,14 @@ impl<'a> SourceTyper<'a> {
         Ok(contexts)
     }
 
-    fn lookup_imported_symbol(
+    fn lookup_imported_symbols(
         &mut self,
         source_import: SourceImport,
         wanted: dotty_core::Name,
         type_only: bool,
         selection: ImportSelection,
         location: SourceTreeLocation,
-    ) -> Result<Option<SymbolId>, TyperError> {
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let Some(node) = self.arena.try_get(source_import.tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
@@ -3447,7 +3454,7 @@ impl<'a> SourceTyper<'a> {
             }
         }
         if relevant.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let qualifier_context = source_import.parent.unwrap_or(source_import.context);
@@ -3479,11 +3486,10 @@ impl<'a> SourceTyper<'a> {
                     let candidates = self.store.scopes.get(*scope).lookup_all(&name);
                     found_locally |= !candidates.is_empty();
                     matches.extend_from_slice(candidates);
-                } else if let Some(symbol) =
-                    self.unique_scoped_symbol(*scope, name, location.tree_index, location.position)?
-                {
-                    found_locally = true;
-                    matches.push(symbol);
+                } else {
+                    let candidates = self.scoped_symbols(*scope, name);
+                    found_locally |= !candidates.is_empty();
+                    matches.extend(candidates);
                 }
             }
             if !found_locally {
@@ -3513,9 +3519,12 @@ impl<'a> SourceTyper<'a> {
         matches.dedup();
         self.deduplicate_import_candidates(&mut matches, type_only);
         if type_only {
-            self.unique_type_candidate(&matches, wanted, location.tree_index, location.position)
+            Ok(self
+                .unique_type_candidate(&matches, wanted, location.tree_index, location.position)?
+                .into_iter()
+                .collect())
         } else {
-            self.unique_symbol_candidate(&matches, wanted, location.tree_index, location.position)
+            Ok(matches)
         }
     }
 
@@ -3576,6 +3585,26 @@ impl<'a> SourceTyper<'a> {
         selection: ImportSelection,
         location: SourceTreeLocation,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates =
+            self.lookup_import_candidates(contexts, name, type_only, selection, location)?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        if type_only {
+            self.unique_type_candidate(&candidates, name, location.tree_index, location.position)
+        } else {
+            self.unique_symbol_candidate(&candidates, name, location.tree_index, location.position)
+        }
+    }
+
+    fn lookup_import_candidates(
+        &mut self,
+        contexts: &[SourceContextId],
+        name: dotty_core::Name,
+        type_only: bool,
+        selection: ImportSelection,
+        location: SourceTreeLocation,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let mut scopes: Vec<(dotty_core::ScopeId, Vec<SourceImport>)> = Vec::new();
         for context_id in contexts {
             let source_context = self.index.source_context(*context_id);
@@ -3599,38 +3628,22 @@ impl<'a> SourceTyper<'a> {
         for (_, imports) in scopes {
             let mut candidates = Vec::new();
             for source_import in imports {
-                if let Some(symbol) = self.lookup_imported_symbol(
+                candidates.extend(self.lookup_imported_symbols(
                     source_import,
                     name,
                     type_only,
                     selection,
                     location,
-                )? {
-                    candidates.push(symbol);
-                }
+                )?);
             }
             candidates.sort_by_key(|symbol| symbol.index());
             candidates.dedup();
             self.deduplicate_import_candidates(&mut candidates, type_only);
             if !candidates.is_empty() {
-                return if type_only {
-                    self.unique_type_candidate(
-                        &candidates,
-                        name,
-                        location.tree_index,
-                        location.position,
-                    )
-                } else {
-                    self.unique_symbol_candidate(
-                        &candidates,
-                        name,
-                        location.tree_index,
-                        location.position,
-                    )
-                };
+                return Ok(candidates);
             }
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Returns the underlying symbol for a fully known chain of type aliases.
@@ -3690,9 +3703,14 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates = self.scoped_symbols(scope, name);
+        self.unique_symbol_candidate(&candidates, name, tree_index, position)
+    }
+
+    fn scoped_symbols(&self, scope: dotty_core::ScopeId, name: dotty_core::Name) -> Vec<SymbolId> {
         let direct = self.store.scopes.get(scope).lookup_all(&name);
         if !direct.is_empty() {
-            return self.unique_symbol_candidate(direct, name, tree_index, position);
+            return direct.to_vec();
         }
         let alternate = dotty_core::Name::new(
             name.text(),
@@ -3701,12 +3719,7 @@ impl<'a> SourceTyper<'a> {
                 dotty_core::Namespace::Type => dotty_core::Namespace::Term,
             },
         );
-        self.unique_symbol_candidate(
-            self.store.scopes.get(scope).lookup_all(&alternate),
-            name,
-            tree_index,
-            position,
-        )
+        self.store.scopes.get(scope).lookup_all(&alternate).to_vec()
     }
 
     fn lookup_term_candidate_for_type_name(
@@ -10950,6 +10963,39 @@ mod tests {
             Err(TyperError::OverloadedReferenceDeferred { .. })
         ));
         assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn application_lookup_retains_the_full_lexical_overload_bucket() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(x: Int): Int = x; def method(x: String): Int = 1; def use: Int = method }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let name = Name::new(store.names.get("method").unwrap(), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer
+            .expression_term_candidates(name, context.lexical, rhs.index(), None)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_ne!(candidates[0], candidates[1]);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| typer.store().symbols.get(*candidate).kind == SymbolKind::Method)
+        );
     }
 
     #[test]
