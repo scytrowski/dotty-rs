@@ -138,7 +138,11 @@ where
                 }
             }
 
-            if closing == TokenKind::Outdent && !ended_nested_indented_body {
+            if closing == TokenKind::Outdent {
+                // A nested method/body parser may already have consumed its
+                // own Outdent. Re-check before consuming the following
+                // newline, or the template's closing Outdent can be delayed
+                // until after the next enclosing statement.
                 self.feedback_template_outdent(&body_indent);
             }
             if self.is_template_separator(self.current().kind) {
