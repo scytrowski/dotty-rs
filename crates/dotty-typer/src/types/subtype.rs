@@ -261,6 +261,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             path: vec![found_class],
         }]);
         let mut visited = vec![(found_class, found_type_id)];
+        let mut matched_expected = false;
 
         while let Some(pending) = queue.pop_front() {
             let info = self.class_info(pending.view.class)?;
@@ -290,18 +291,19 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                     other => other,
                 })?;
 
-                if parent_view.class == expected.class {
-                    self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
-                    if self.equivalent_class_views(&parent_view, &expected, 0)? {
-                        return Ok(true);
-                    }
-                }
-
                 if pending.path.contains(&parent_view.class) {
                     return Err(TypeRelationError::InheritanceCycle {
                         symbol: parent_view.class,
                     });
                 }
+
+                if parent_view.class == expected.class {
+                    self.check_view_arity(&parent_view, &expected, parent, expected_type)?;
+                    if self.equivalent_class_views(&parent_view, &expected, 0)? {
+                        matched_expected = true;
+                    }
+                }
+
                 if matches!(
                     parent_view.class,
                     class if class == self.typer.definitions.object_class
@@ -341,7 +343,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             }
         }
 
-        Ok(false)
+        Ok(matched_expected)
     }
 
     fn equivalent_class_views(

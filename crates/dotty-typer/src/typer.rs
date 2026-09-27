@@ -3257,6 +3257,31 @@ mod tests {
     }
 
     #[test]
+    fn matching_parent_does_not_hide_a_cycle_closing_through_that_parent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A extends B; class B extends A");
+        let a = class_symbol(&parsed, &store, &index, source, "A");
+        let b = class_symbol(&parsed, &store, &index, source, "B");
+        let b_type = nominal_type_ref(&mut store, definitions, b);
+        let a_type = nominal_type_ref(&mut store, definitions, a);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(a).unwrap();
+        typer.complete_symbol(b).unwrap();
+        assert!(matches!(
+            typer.is_subtype(b_type, a_type),
+            Err(TypeRelationError::InheritanceCycle { symbol }) if symbol == b
+        ));
+    }
+
+    #[test]
     fn this_type_conforms_to_its_own_class_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");
