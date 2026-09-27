@@ -95,9 +95,8 @@ impl<'a> TypeNormalizer<'a> {
     ) -> Result<(TypeId, usize), TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
-        let mut links = 0;
 
-        for _ in 0..=budget {
+        for links in 0..=budget {
             if !self.store.types.is_filled(current) {
                 return Err(TypeNormalizeError::UnfilledType { ty: current });
             }
@@ -139,7 +138,6 @@ impl<'a> TypeNormalizer<'a> {
             }
             visited.push(symbol);
             current = next;
-            links += 1;
         }
 
         Err(TypeNormalizeError::TooDeep)
@@ -507,6 +505,17 @@ mod tests {
             TypeNormalizer::new(&w.store).dealias_top(outer),
             Err(TypeNormalizeError::TooDeep)
         );
+    }
+
+    #[test]
+    fn accepts_alias_chains_at_the_normalization_limit() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let mut current = leaf;
+        for index in 0..MAX_TYPE_NORMALIZATION_DEPTH {
+            current = w.alias(&format!("A{index}"), current, SymbolFlags::EMPTY).1;
+        }
+        assert_eq!(TypeNormalizer::new(&w.store).dealias_top(current), Ok(leaf));
     }
 
     #[test]
