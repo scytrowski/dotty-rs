@@ -1,0 +1,102 @@
+{
+  "schema_version": 2,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 30,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 758,
+  "files_parsed_with_recoverable_diagnostics": 478,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 13,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 4496,
+    "ExpectedPattern": 5,
+    "ExpectedToken": 1740,
+    "ExpectedType": 1273,
+    "UnexpectedToken": 4697,
+    "UnsupportedSyntax": 2522
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 163,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+        "compiler/src/dotty/tools/backend/jvm/CodeGen.scala",
+        "compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala",
+        "compiler/src/dotty/tools/backend/jvm/PostProcessor.scala"
+      ]
+    },
+    "ExpectedPattern": {
+      "count": 2,
+      "examples": [
+        "compiler/src/dotty/tools/debug/ResolveReflectEval.scala",
+        "compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 57,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala",
+        "compiler/src/dotty/tools/dotc/classpath/FileUtils.scala",
+        "compiler/src/dotty/tools/dotc/config/Settings.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 150,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/OptimizerSettings.scala",
+        "compiler/src/dotty/tools/backend/sjs/ScopedVar.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 92,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+        "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala"
+      ]
+    },
+    "UnsupportedSyntax: compound template self types are not supported yet": {
+      "count": 7,
+      "examples": [
+        "library/src/scala/PartialFunction.scala",
+        "library/src/scala/collection/IndexedSeq.scala",
+        "library/src/scala/collection/IterableOnce.scala",
+        "library/src/scala/collection/Iterator.scala",
+        "library/src/scala/collection/Seq.scala"
+      ]
+    },
+    "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "UnsupportedSyntax: unsupported enum case syntax": {
+      "count": 6,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        "compiler/src/dotty/tools/dotc/profile/Profiler.scala",
+        "compiler/src/dotty/tools/dotc/reporting/ErrorMessageID.scala"
+      ]
+    }
+  }
+}

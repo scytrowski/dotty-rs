@@ -281,7 +281,7 @@ occurrences roughly halved. The first-failure buckets shifted as follows:
 from 118 to 146 and `UnexpectedToken` from 71 to 123; `ExpectedToken` moved
 from 54 to 59. These are category-level counts, not per-file transition data,
 so increases are not proof of regressions: as earlier failures are removed,
-parsing can reach later syntax in the same files. The current largest buckets
+parsing can reach later syntax in the same files. At that point the largest buckets
 are `ExpectedExpression` (176), `ExpectedType` (146), and `UnexpectedToken`
 (123). Representative leads include backend builder files for expression
 failures, `GenericSignatureVisitor.scala` / `SymbolUtils.scala` for type
@@ -294,3 +294,44 @@ The named unsupported first-failure buckets are compound template self types
 three largest generic buckets into concrete grammar families rather than
 broadening grammar based only on these labels. Despite the remaining
 diagnostics, the run had zero hard failures, panics, or hangs.
+
+## Corpus rerun after PRs #340–#341
+
+Issue #342 reran the same measurement at dotty-rs commit
+`87b309d2` (main after PR #340, including PR #341), using the unchanged Scala
+3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8` and the same sorted 1,236-file
+`library/src` + `compiler/src` corpus. The deterministic report is
+[`parser-post-issue-342-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-342-scala3-3.9.0.json).
+
+| Measure | After #321 (`3cd9089`) | After #340–#341 (`87b309d2`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 715 (57.85%) | 758 (61.33%) | +43 (+3.48 pp) |
+| Recoverable diagnostics | 521 (42.15%) | 478 (38.67%) | -43 (-3.48 pp) |
+| Hard parser failures | 0 | 0 | 0 |
+| Panics / hangs | 0 / 0 | 0 / 0 | unchanged |
+| Scanner diagnostics | 17 | 13 | -4 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #321 | After #340–#341 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 5,982 | 4,496 | -1,486 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 1,966 | 1,740 | -226 |
+| `ExpectedType` | 1,282 | 1,273 | -9 |
+| `UnexpectedToken` | 6,048 | 4,697 | -1,351 |
+| `UnsupportedSyntax` | 3,276 | 2,522 | -754 |
+| **Total** | **18,559** | **14,733** | **-3,826 (-20.6%)** |
+
+The latest run adds 43 clean files and reduces recoverable files by the same
+amount. Diagnostic occurrences decrease in every bucket except that
+`ExpectedPattern` is unchanged. The largest raw reductions are
+`ExpectedExpression` (-1,486) and `UnexpectedToken` (-1,351); these are
+aggregate changes across all parser work since #321 and do not attribute the
+gain to one individual PR. First-failure counts now stand at 163
+`ExpectedExpression`, 150 `ExpectedType`, 92 `UnexpectedToken`, and 57
+`ExpectedToken` files. The `ExpectedType` first-failure bucket increased by
+four, which is not by itself evidence of regressions: this report does not
+track per-file transitions, and removing earlier failures can expose later
+ones. Hard failures, process failures, panics, and hangs remain zero; the
+Scala oracle still returns all 1,236 results with 30 existing exceptions.
