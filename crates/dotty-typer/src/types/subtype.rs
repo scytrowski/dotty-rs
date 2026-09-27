@@ -147,12 +147,13 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if let (
             Type::ThisType { class },
             Type::TypeRef {
+                prefix,
                 target: TypeRefTarget::Symbol(expected_class),
-                ..
             },
         ) = (&found_node, &expected_node)
         {
-            return Ok(class == expected_class);
+            return Ok(class == expected_class
+                && self.this_type_reference_prefix_matches(*class, *prefix)?);
         }
 
         let found_view = self.class_view(found)?;
@@ -174,6 +175,81 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             });
         }
         Ok(())
+    }
+
+    fn this_type_reference_prefix_matches(
+        &self,
+        class: SymbolId,
+        prefix: TypeId,
+    ) -> Result<bool, TypeRelationError> {
+        let declaration = self.typer.store.symbols.get(class);
+        if declaration.owner.is_some_and(|owner| {
+            self.typer.store.symbols.contains(owner)
+                && matches!(
+                    self.typer.store.symbols.get(owner).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                )
+        }) {
+            // `ThisType` carries no enclosing-instance path, so a nested class
+            // reference cannot be proven to select the same outer instance.
+            return Ok(false);
+        }
+
+        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
+            return Ok(true);
+        }
+        let Some(owner) = declaration.owner else {
+            return Ok(false);
+        };
+        if !self.typer.store.symbols.contains(owner)
+            || self.typer.store.symbols.get(owner).kind != SymbolKind::Package
+        {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.type_at(prefix)?,
+            Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(package),
+            } if *package == owner && self.is_canonical_package_prefix(owner, *package_prefix, 0)?
+        ))
+    }
+
+    fn is_canonical_package_prefix(
+        &self,
+        package: SymbolId,
+        prefix: TypeId,
+        depth: usize,
+    ) -> Result<bool, TypeRelationError> {
+        if depth >= MAX_TYPE_RELATION_DEPTH {
+            return Err(TypeRelationError::TooDeep);
+        }
+        if !self.typer.store.symbols.contains(package)
+            || self.typer.store.symbols.get(package).kind != SymbolKind::Package
+        {
+            return Ok(false);
+        }
+        let declaration = self.typer.store.symbols.get(package);
+        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
+            return Ok(true);
+        }
+        let Some(owner) = declaration.owner else {
+            return Ok(false);
+        };
+        if !self.typer.store.symbols.contains(owner)
+            || self.typer.store.symbols.get(owner).kind != SymbolKind::Package
+        {
+            return Ok(false);
+        }
+        match self.type_at(prefix)? {
+            Type::TypeRef {
+                prefix: parent_prefix,
+                target: TypeRefTarget::Symbol(parent_package),
+            } if *parent_package == owner => {
+                self.is_canonical_package_prefix(owner, *parent_prefix, depth + 1)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn normalize(&self, ty: TypeId) -> Result<TypeId, TypeRelationError> {

@@ -3410,6 +3410,50 @@ mod tests {
     }
 
     #[test]
+    fn this_type_conforms_to_its_class_with_a_canonical_package_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { class C; val value: C = 1 }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let this = store.types.alloc(Type::ThisType { class });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let class_type = typer.complete_symbol(value).unwrap();
+        assert!(typer.is_subtype(this, class_type).unwrap());
+    }
+
+    #[test]
+    fn nested_this_type_does_not_conform_through_a_different_outer_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner }; class Other");
+        let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let inner = class_symbol(&parsed, &store, &index, source, "Inner");
+        let this_inner = store.types.alloc(Type::ThisType { class: inner });
+        let other_prefix = store.types.alloc(Type::ThisType { class: other });
+        let inner_through_other = store.types.alloc(Type::type_ref(other_prefix, inner));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.is_subtype(this_inner, inner_through_other).unwrap());
+        assert_ne!(typer.store.symbols.get(inner).owner, Some(other));
+        assert_eq!(typer.store.symbols.get(inner).owner, Some(outer));
+    }
+
+    #[test]
     fn class_reference_does_not_conform_to_its_this_type() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");
