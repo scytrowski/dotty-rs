@@ -246,3 +246,51 @@ Coverage now reaches 600 of 1,236 files (48.54%) with no hard failures,
 panics, or hangs. The next useful investigation is to split the large generic
 `ExpectedExpression` and `ExpectedType` buckets into concrete syntax families;
 representative paths are evidence for triage, not diagnoses of those buckets.
+
+## Corpus rerun after PR #321
+
+Issue #323 reran the same measurement at `dotty-rs` commit `3cd9089` (main
+after PR #321), against the unchanged Scala 3.9.0 revision
+`777528f19a58e794c9954a42f433373472ec57f8` and sorted 1,236-file
+`library/src` + `compiler/src` corpus. The deterministic report is
+[`parser-post-issue-323-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-323-scala3-3.9.0.json).
+
+| Measure | After #308 (`5ced54d`) | After #321 (`3cd9089`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 600 (48.54%) | 715 (57.85%) | +115 (+9.30 pp) |
+| Recoverable diagnostics | 636 (51.46%) | 521 (42.15%) | -115 (-9.30 pp) |
+| Hard parser failures | 0 | 0 | 0 |
+| Panics / hangs | 0 / 0 | 0 / 0 | unchanged |
+| Scanner diagnostics | 17 | 17 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #308 | After #321 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 16,879 | 5,982 | -10,897 |
+| `ExpectedPattern` | 7 | 5 | -2 |
+| `ExpectedToken` | 2,511 | 1,966 | -545 |
+| `ExpectedType` | 1,264 | 1,282 | +18 |
+| `UnexpectedToken` | 10,418 | 6,048 | -4,370 |
+| `UnsupportedSyntax` | 6,347 | 3,276 | -3,071 |
+| **Total** | **37,426** | **18,559** | **-18,867 (-50.4%)** |
+
+Clean coverage rose by 9.30 percentage points, and total diagnostic
+occurrences roughly halved. The first-failure buckets shifted as follows:
+`ExpectedExpression` fell from 378 to 176 files, while `ExpectedType` rose
+from 118 to 146 and `UnexpectedToken` from 71 to 123; `ExpectedToken` moved
+from 54 to 59. These are category-level counts, not per-file transition data,
+so increases are not proof of regressions: as earlier failures are removed,
+parsing can reach later syntax in the same files. The current largest buckets
+are `ExpectedExpression` (176), `ExpectedType` (146), and `UnexpectedToken`
+(123). Representative leads include backend builder files for expression
+failures, `GenericSignatureVisitor.scala` / `SymbolUtils.scala` for type
+failures, and `MainGenericCompiler.scala` / backend files for unexpected
+tokens; these paths need reduction before attributing a syntax family.
+
+The named unsupported first-failure buckets are compound template self types
+(7 files), interleaved type/term parameter clauses (1), extension body syntax
+(1), and enum-case syntax (6). Next, prioritize reducing samples from the
+three largest generic buckets into concrete grammar families rather than
+broadening grammar based only on these labels. Despite the remaining
+diagnostics, the run had zero hard failures, panics, or hangs.
