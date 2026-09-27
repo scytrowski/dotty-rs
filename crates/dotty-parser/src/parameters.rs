@@ -6,7 +6,7 @@
 //! delimiter and recovery logic.
 
 use dotty_core::ast::{ByNameTypeTree, Modifier, Modifiers, ValDef};
-use dotty_core::{Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{Punctuation, SourceSpan, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::names::synthetic_term_param_name;
 use crate::{ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
@@ -72,13 +72,15 @@ where
         num_lead_params: usize,
     ) -> Vec<TreeId<Untyped>> {
         let is_implicit = self.current_is_implicit_parameter_clause();
-        self.parse_term_param_clause_with_policy(
-            owner,
-            first_ordinary_clause,
-            is_using,
-            is_implicit,
-            num_lead_params,
-        )
+        self.with_param_owner(Some(owner), |parser| {
+            parser.parse_term_param_clause_with_policy(
+                owner,
+                first_ordinary_clause,
+                is_using,
+                is_implicit,
+                num_lead_params,
+            )
+        })
     }
 
     /// Consumes layout separators only when they lead to the requested
@@ -308,10 +310,10 @@ where
                         );
                     }
                     parser.advance();
-                    let result = parser.type_expr();
+                    let result = parser.parse_parameter_type();
                     parser.alloc_from(mark, TreeKind::ByNameTypeTree(ByNameTypeTree { result }))
                 } else {
-                    parser.type_expr()
+                    parser.parse_parameter_type()
                 }
             })
         } else {
@@ -321,6 +323,21 @@ where
             );
             self.error_type(self.current_span())
         };
+        if matches!(
+            &self.ast.get(tpt).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PostfixOp(_))
+        ) && metadata
+            .modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
+            && let Some(position) = self.ast.get(tpt).position
+        {
+            self.report_at(
+                ParseDiagnosticKind::UnexpectedToken,
+                SourceSpan::new(self.source_id, position.span()),
+                "repeated parameters are not allowed in `given` or `implicit` clauses",
+            );
+        }
         let rhs = if is_bare_assignment(self) {
             self.advance();
             Some(self.with_location(crate::Location::InArgs, |parser| parser.expr()))
@@ -688,6 +705,233 @@ mod tests {
         assert_eq!(parser.names.resolve(first_name.as_name().text()), "x");
         assert_eq!(parser.names.resolve(second_name.as_name().text()), "y");
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_repeated_parameter_type_as_a_postfix_star_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(xs: A*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 3),
+                token(TokenKind::ColonFollow, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected parameter ValDef");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(repeated)) =
+            &parser.ast().get(parameter.tpt).kind
+        else {
+            panic!("expected repeated parameter type to be a PostfixOp");
+        };
+
+        assert_eq!(parser.names.resolve(repeated.op.text()), "*");
+        assert_eq!(
+            parser
+                .ast()
+                .get(repeated.operand)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .start(),
+            5
+        );
+        assert_eq!(
+            parser
+                .ast()
+                .get(parameter.tpt)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            7
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_repeated_applied_parameter_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(xs: List[A]*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 3),
+                token(TokenKind::ColonFollow, 3, 4),
+                token(TokenKind::Identifier, 5, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected parameter ValDef");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(repeated)) =
+            &parser.ast().get(parameter.tpt).kind
+        else {
+            panic!("expected repeated parameter type to be a PostfixOp");
+        };
+
+        assert!(matches!(
+            parser.ast().get(repeated.operand).kind,
+            TreeKind::AppliedTypeTree(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn preserves_and_diagnoses_repeated_types_in_named_given_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(xs: A*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 3),
+                token(TokenKind::ColonFollow, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let clause = parser.parse_single_term_param_clause(ParamOwner::Given, true, false, 0);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clause[0]).kind else {
+            panic!("expected named given parameter ValDef");
+        };
+
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+        ));
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
+                && diagnostic
+                    .message()
+                    .contains("not allowed in `given` or `implicit`")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_repeated_types_in_legacy_implicit_parameter_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(implicit xs: A*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 9),
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected implicit parameter ValDef");
+        };
+
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+        ));
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Implicit));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
+                && diagnostic
+                    .message()
+                    .contains("not allowed in `given` or `implicit`")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_a_followed_star_as_an_infix_type_operator_in_a_parameter_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: A * B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected parameter ValDef");
+        };
+
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_repeated_parameter_that_is_not_last_in_its_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(xs: A*, y: B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 3),
+                token(TokenKind::ColonFollow, 3, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::ColonFollow, 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 2);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
+                && diagnostic.message().contains("must come last")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
