@@ -601,9 +601,13 @@ impl<'a> SourceTyper<'a> {
                 let kind = self.store.symbols.get(symbol).kind;
                 if kind == SymbolKind::Object {
                     let module_class = self.source_module_class_of_object(symbol)?;
-                    let prefix = self.type_symbol_prefix(module_class);
+                    let module_prefix = if prefix == self.definitions.no_prefix {
+                        self.type_symbol_prefix(module_class)
+                    } else {
+                        prefix
+                    };
                     return Ok(self.store.types.alloc(Type::TypeRef {
-                        prefix,
+                        prefix: module_prefix,
                         target: TypeRefTarget::Symbol(module_class),
                     }));
                 }
@@ -10725,6 +10729,70 @@ mod tests {
         assert_eq!(
             typer.store().symbols.get(module_class).kind,
             SymbolKind::ModuleClass
+        );
+    }
+
+    #[test]
+    fn nested_object_selection_retains_the_concrete_receiver_prefix() {
+        let source_text = "class Outer { object Nested { val value: Int = 1 } }; class Use { def use(outer: Outer): Int = outer.Nested.value }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = val_symbol(&parsed, &store, &index, source, "outer").0;
+        let lexical = index.declaration_context_of(parameter).unwrap();
+        let context = ExpressionContext {
+            lexical,
+            owner: method,
+        };
+        let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
+            panic!("source RHS should be a selection")
+        };
+        let object_selection_tree = selection.qualifier;
+        let TreeKind::Select(object_selection) = &parsed.ast.get(object_selection_tree).kind else {
+            panic!("outer selection qualifier should be a selection")
+        };
+        let receiver_tree = object_selection.qualifier;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let receiver = typer
+            .source_typed_index()
+            .get(source, receiver_tree)
+            .unwrap();
+        let receiver_type = typer.typed_ast().get(receiver).ty;
+        assert!(matches!(
+            typer.store().types.get(receiver_type),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        let object_selection = typer
+            .source_typed_index()
+            .get(source, object_selection_tree)
+            .unwrap();
+        let object_type = typer.typed_ast().get(object_selection).ty;
+        let widened_object = typer.widen_expression_type(object_type).unwrap();
+        let Type::TypeRef { prefix, target } = typer.store().types.get(widened_object) else {
+            panic!("nested object should widen to a module-class reference")
+        };
+        assert_eq!(*prefix, receiver_type);
+        let module_class = match target {
+            TypeRefTarget::Symbol(symbol) => *symbol,
+            _ => panic!("nested object module class should be a symbol reference"),
+        };
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
         );
     }
 
