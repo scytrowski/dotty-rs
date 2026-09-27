@@ -2,7 +2,9 @@
 
 use std::fmt;
 
-use dotty_core::ast::{Ident, TreeKind, TypeBoundsTree, UntypedNode};
+use dotty_core::ast::{
+    Ident, NumberKind, NumberLiteral, TreeKind, TypeBoundsTree, TypedAstBuilder, UntypedNode,
+};
 use dotty_core::types::{
     ClassInfo, MethodKind, MethodParamSpec, Type, TypeParamSpec, TypeRefTarget,
     method_type_from_symbols, poly_type_from_symbols,
@@ -228,6 +230,35 @@ pub enum TyperError {
     TypeSubstitution(dotty_core::TypeRebindError),
     /// Receiver normalization failed before a nominal view could be read.
     TypeNormalization(crate::types::TypeNormalizeError),
+    /// A source tree already has a different typed replacement recorded.
+    ConflictingTypedExpression {
+        source: SourceId,
+        tree_index: u32,
+        existing: u32,
+        attempted: u32,
+    },
+    /// String constants do not have a canonical source type in this session yet.
+    StringLiteralTypingDeferred { source: SourceId, tree_index: u32 },
+    /// Null constants do not have a canonical source type in this session yet.
+    NullLiteralTypingDeferred { source: SourceId, tree_index: u32 },
+    /// An integer spelling is invalid or outside the supported Scala Int range.
+    IntegerLiteralOutOfRange {
+        source: SourceId,
+        tree_index: u32,
+        spelling: String,
+    },
+    /// A decimal or exponent literal is not representable as an IEEE Double.
+    FloatingLiteralInvalid {
+        source: SourceId,
+        tree_index: u32,
+        spelling: String,
+    },
+    /// The source expression form is outside this issue's supported subset.
+    UnsupportedExpression {
+        source: SourceId,
+        tree_index: u32,
+        expression_kind: &'static str,
+    },
 }
 
 impl fmt::Display for TyperError {
@@ -237,6 +268,13 @@ impl fmt::Display for TyperError {
 }
 
 impl std::error::Error for TyperError {}
+
+/// The lexical source scope and semantic owner used to type an expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpressionContext {
+    pub lexical: SourceContextId,
+    pub owner: SymbolId,
+}
 
 /// Completes source declaration signatures against a shared semantic session.
 pub struct SourceTyper<'a> {
@@ -378,6 +416,148 @@ impl<'a> SourceTyper<'a> {
     pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver + 'a>) -> Self {
         self.resolver = resolver;
         self
+    }
+
+    /// Types one supported source expression into this driver's typed arena.
+    /// Repeated typing of a source tree returns its existing typed identity.
+    /// Failed attempts roll back typed nodes and semantic type allocations.
+    pub fn type_expression(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return Ok(typed);
+        }
+        let ast_checkpoint = self.typed_arena.checkpoint();
+        let store_checkpoint = self.store.checkpoint();
+        let result = self.type_expression_inner(tree, context);
+        match result {
+            Ok(typed) => {
+                if let Err(error) = self.typed_index.insert(self.source, tree, typed) {
+                    self.typed_arena.rollback_to(ast_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::ConflictingTypedExpression {
+                        source: error.source,
+                        tree_index: error.untyped.index(),
+                        existing: error.existing.index(),
+                        attempted: error.attempted.index(),
+                    });
+                }
+                Ok(typed)
+            }
+            Err(error) => {
+                self.typed_arena.rollback_to(ast_checkpoint);
+                self.store.rollback_to(store_checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn type_expression_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        _context: ExpressionContext,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(source_tree) = self.arena.try_get(tree).cloned() else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let (value, ty) = match source_tree.kind {
+            TreeKind::Literal(literal) => {
+                let ty = self.literal_type(&literal.value, tree.index())?;
+                (literal.value, ty)
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
+                self.type_number_literal(number, tree.index())?
+            }
+            _ => {
+                return Err(TyperError::UnsupportedExpression {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    expression_kind: tree_kind_name(&source_tree.kind),
+                });
+            }
+        };
+        Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(value, ty, source_tree.position))
+    }
+
+    fn literal_type(
+        &self,
+        value: &dotty_core::Constant,
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        use dotty_core::Constant;
+        match value {
+            Constant::Unit => Ok(self.definitions.unit),
+            Constant::Boolean(_) => Ok(self.definitions.boolean),
+            Constant::Byte(_) => Ok(self.definitions.byte),
+            Constant::Short(_) => Ok(self.definitions.short),
+            Constant::Char(_) => Ok(self.definitions.char),
+            Constant::Int(_) => Ok(self.definitions.int),
+            Constant::Long(_) => Ok(self.definitions.long),
+            Constant::FloatBits(_) => Ok(self.definitions.float),
+            Constant::DoubleBits(_) => Ok(self.definitions.double),
+            Constant::String(_) | Constant::StringUtf16(_) => {
+                Err(TyperError::StringLiteralTypingDeferred {
+                    source: self.source,
+                    tree_index,
+                })
+            }
+            Constant::Null => Err(TyperError::NullLiteralTypingDeferred {
+                source: self.source,
+                tree_index,
+            }),
+            Constant::Class(_) => Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index,
+                expression_kind: "class constant",
+            }),
+        }
+    }
+
+    fn type_number_literal(
+        &self,
+        number: NumberLiteral,
+        tree_index: u32,
+    ) -> Result<(dotty_core::Constant, TypeId), TyperError> {
+        use dotty_core::Constant;
+        let spelling = self.store.names.resolve(number.text).to_owned();
+        let digits = spelling.replace('_', "");
+        match number.kind {
+            NumberKind::Whole(radix) => {
+                let unsigned = digits
+                    .strip_prefix("0x")
+                    .or_else(|| digits.strip_prefix("0X"))
+                    .or_else(|| digits.strip_prefix("0b"))
+                    .or_else(|| digits.strip_prefix("0B"));
+                let parsed = if radix == 10 {
+                    digits.parse::<i32>().ok()
+                } else {
+                    unsigned
+                        .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                        .map(|bits| bits as i32)
+                };
+                parsed
+                    .map(|value| (Constant::Int(value), self.definitions.int))
+                    .ok_or(TyperError::IntegerLiteralOutOfRange {
+                        source: self.source,
+                        tree_index,
+                        spelling,
+                    })
+            }
+            NumberKind::Decimal | NumberKind::Floating => digits
+                .parse::<f64>()
+                .ok()
+                .map(|value| (Constant::double(value), self.definitions.double))
+                .ok_or(TyperError::FloatingLiteralInvalid {
+                    source: self.source,
+                    tree_index,
+                    spelling,
+                }),
+        }
     }
 
     /// Returns this driver's source type cache.
@@ -2895,6 +3075,27 @@ mod tests {
                 && store.names.resolve(definition.name.as_name().text()) == target
             {
                 return (index.symbol_at(source, tree).unwrap(), definition.tpt);
+            }
+        }
+        panic!("source val `{target}` not found");
+    }
+
+    fn val_definition_and_rhs(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        target: &str,
+    ) -> (SymbolId, TreeId<Untyped>, TreeId<Untyped>) {
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::ValDef(definition) = &node.kind
+                && store.names.resolve(definition.name.as_name().text()) == target
+            {
+                return (
+                    index.symbol_at(source, tree).unwrap(),
+                    tree,
+                    definition.rhs.expect("test val should have an rhs"),
+                );
             }
         }
         panic!("source val `{target}` not found");
@@ -8601,5 +8802,242 @@ mod tests {
         assert_eq!(typer.source_type_index().type_at(source, tree_id), None);
         drop(typer);
         assert_eq!(store.types.alloc(Type::NoType), attempted_type);
+    }
+
+    #[test]
+    fn boolean_literal_becomes_a_typed_literal_with_the_boolean_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Boolean = true }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Boolean(true)
+            })
+        );
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+    }
+
+    #[test]
+    fn numeric_literal_42_becomes_an_int_constant() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 42 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(42)
+            })
+        );
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn hexadecimal_integer_literal_preserves_radix_bits() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 0xffffffff }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(-1)
+            })
+        );
+    }
+
+    #[test]
+    fn binary_integer_literal_preserves_radix_value() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 0b1010 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(10)
+            })
+        );
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn typing_a_literal_twice_reuses_its_typed_tree_and_position() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 42 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let source_position = parsed.ast.get(rhs).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.type_expression(rhs, context).unwrap();
+        let second = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(typer.typed_ast().get(first).position, source_position);
+        assert_eq!(typer.typed_ast().iter().count(), 1);
+        assert_eq!(typer.source_typed_index().len(), 1);
+    }
+
+    #[test]
+    fn decimal_and_exponent_literals_become_double_constants() {
+        for (source_text, expected) in [
+            ("class C { val value = 1.25 }", 1.25_f64),
+            ("class C { val value = 1e2 }", 100.0_f64),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(symbol).unwrap(),
+                owner: store.symbols.get(symbol).owner.unwrap(),
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            let typed = typer.type_expression(rhs, context).unwrap();
+
+            assert_eq!(
+                typer.typed_ast().get(typed).kind,
+                TreeKind::Literal(dotty_core::ast::Literal {
+                    value: dotty_core::Constant::double(expected)
+                })
+            );
+            assert_eq!(typer.typed_ast().get(typed).ty, definitions.double);
+        }
+    }
+
+    #[test]
+    fn out_of_range_decimal_integer_returns_a_typed_error_without_allocations() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 2147483648 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_before = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::IntegerLiteralOutOfRange { spelling, .. }) if spelling == "2147483648"
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.source_typed_index().len(), 0);
+        assert_eq!(typer.store().checkpoint(), store_before);
+    }
+
+    #[test]
+    fn unsupported_string_and_null_literals_have_dedicated_errors() {
+        for (source_text, expected_error) in [
+            ("class C { val value = \"text\" }", "string"),
+            ("class C { val value = null }", "null"),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(symbol).unwrap(),
+                owner: store.symbols.get(symbol).owner.unwrap(),
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let result = typer.type_expression(rhs, context);
+
+            match (expected_error, result) {
+                ("string", Err(TyperError::StringLiteralTypingDeferred { .. }))
+                | ("null", Err(TyperError::NullLiteralTypingDeferred { .. })) => {}
+                (variant, other) => panic!("expected {variant} literal deferral, got {other:?}"),
+            }
+            assert!(typer.typed_ast().iter().next().is_none());
+        }
     }
 }
