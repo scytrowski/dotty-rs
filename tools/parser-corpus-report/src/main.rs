@@ -30,6 +30,16 @@ struct Options {
     namer: bool,
 }
 
+struct ReportMetadata<'a> {
+    roots: &'a [PathBuf],
+    source_version: Option<String>,
+    source_revision: Option<String>,
+    parser_revision: Option<String>,
+    oracle_files: Option<usize>,
+    oracle_failures: Option<usize>,
+    collect_namer: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct Report {
     schema_version: u32,
@@ -204,13 +214,15 @@ fn main() {
     let outcomes = parse_files(&files, &options.roots, options.timeout, options.namer);
     let report = build_report(
         &outcomes,
-        &options.roots,
-        options.source_version,
-        options.source_revision,
-        options.parser_revision,
-        options.oracle_files,
-        options.oracle_failures,
-        options.namer,
+        ReportMetadata {
+            roots: &options.roots,
+            source_version: options.source_version,
+            source_revision: options.source_revision,
+            parser_revision: options.parser_revision,
+            oracle_files: options.oracle_files,
+            oracle_failures: options.oracle_failures,
+            collect_namer: options.namer,
+        },
     );
 
     if let Some(output) = options.output
@@ -962,24 +974,15 @@ fn root_label(root: &Path) -> String {
     name.to_owned()
 }
 
-fn build_report(
-    outcomes: &[FileOutcome],
-    roots: &[PathBuf],
-    source_version: Option<String>,
-    source_revision: Option<String>,
-    parser_revision: Option<String>,
-    oracle_files: Option<usize>,
-    oracle_failures: Option<usize>,
-    collect_namer: bool,
-) -> Report {
+fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
         schema_version: 4,
-        corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
-        source_version,
-        source_revision,
-        parser_revision,
-        scala_oracle_files: oracle_files,
-        scala_oracle_failures: oracle_failures,
+        corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
+        source_version: metadata.source_version,
+        source_revision: metadata.source_revision,
+        parser_revision: metadata.parser_revision,
+        scala_oracle_files: metadata.oracle_files,
+        scala_oracle_failures: metadata.oracle_failures,
         files_attempted: outcomes.len(),
         files_parsed_without_diagnostics: 0,
         files_parsed_with_recoverable_diagnostics: 0,
@@ -991,8 +994,8 @@ fn build_report(
         diagnostic_histogram: BTreeMap::new(),
         first_failure_histogram: BTreeMap::new(),
         capture_checking_cohorts: BTreeMap::new(),
-        namer: collect_namer.then(NamerReport::default),
-        deferred_features: collect_namer.then(|| {
+        namer: metadata.collect_namer.then(NamerReport::default),
+        deferred_features: metadata.collect_namer.then(|| {
             [
                 "enum_definitions",
                 "enum_cases",
@@ -1425,6 +1428,18 @@ fn print_summary(report: &Report) {
 mod tests {
     use super::*;
 
+    fn test_report_metadata(collect_namer: bool) -> ReportMetadata<'static> {
+        ReportMetadata {
+            roots: &[],
+            source_version: None,
+            source_revision: None,
+            parser_revision: None,
+            oracle_files: None,
+            oracle_failures: None,
+            collect_namer,
+        }
+    }
+
     #[test]
     fn discovers_scala_files_in_sorted_order() {
         let root = unique_temp_dir("discover");
@@ -1706,7 +1721,7 @@ mod tests {
                 has_parser_capture_syntax: false,
             },
         ];
-        let report = build_report(&outcomes, &[], None, None, None, None, None, true);
+        let report = build_report(&outcomes, test_report_metadata(true));
         assert!(
             report
                 .deferred_features
@@ -1785,7 +1800,7 @@ mod tests {
             process_failure("unknown.scala".to_owned(), "WorkerError", "failed"),
         ];
 
-        let report = build_report(&outcomes, &[], None, None, None, None, None, false);
+        let report = build_report(&outcomes, test_report_metadata(false));
 
         assert_eq!(report.capture_checking_cohorts["enabled"].files, 1);
         assert_eq!(report.capture_checking_cohorts["enabled"].clean, 1);
@@ -1845,7 +1860,7 @@ mod tests {
             "WorkerProtocol",
             "invalid worker output",
         );
-        let report = build_report(&[outcome], &[], None, None, None, None, None, false);
+        let report = build_report(&[outcome], test_report_metadata(false));
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.process_failures, 1);
@@ -1869,7 +1884,7 @@ mod tests {
             has_caret_operator_token: false,
             has_parser_capture_syntax: false,
         };
-        let report = build_report(&[outcome], &[], None, None, None, None, None, false);
+        let report = build_report(&[outcome], test_report_metadata(false));
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.panics, 1);
@@ -1880,13 +1895,15 @@ mod tests {
         let roots = vec![PathBuf::from("/tmp/scala3/library/src")];
         let report = build_report(
             &[],
-            &roots,
-            Some("3.9.0".to_owned()),
-            Some("revision".to_owned()),
-            Some("parser revision".to_owned()),
-            Some(12),
-            Some(1),
-            false,
+            ReportMetadata {
+                roots: &roots,
+                source_version: Some("3.9.0".to_owned()),
+                source_revision: Some("revision".to_owned()),
+                parser_revision: Some("parser revision".to_owned()),
+                oracle_files: Some(12),
+                oracle_failures: Some(1),
+                collect_namer: false,
+            },
         );
 
         assert_eq!(report.corpus_roots, vec!["library/src"]);
