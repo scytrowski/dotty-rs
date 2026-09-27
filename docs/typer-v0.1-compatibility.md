@@ -27,11 +27,11 @@ The suite currently compares plain and generic classes, traits, class
 parameters/accessors, explicit superclass and applied generic parents, explicit
 self types, nested classes, aliases, and explicit method signatures. Method
 cases cover polymorphic binders and `ParamRef`, empty and multiple clauses,
-contextual clauses, and overloads. Module classes include nested modules; the
-constructor fixture compares a completed primary-constructor signature. An
-ID-independence test constructs the same class graph with different arena and
-scope allocation, and negative tests prove that parent and parameter-reference
-changes are detected.
+contextual clauses, overloads, and an extension method. Module classes include
+nested modules; the constructor fixture compares a completed primary-
+constructor signature. An ID-independence test constructs the same class graph
+with different arena and scope allocation, and negative tests prove that parent
+and parameter-reference changes are detected.
 
 A mismatch reports the normalized semantic path and the first differing
 normalized component from each frontend. Builtin package-prefix normalization
@@ -48,6 +48,8 @@ For the tested subset, source Typer completion currently supports:
 - class parameters with explicit types, including `val` accessors;
 - method signatures with explicit parameter and result types, polymorphic
   binders, multiple term clauses, empty clauses, and `using` clauses;
+- extension-method signatures whose receiver and declared signature are
+  supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
 - class header completion as `ClassInfo`, including its parent list, declared
   members, prefix, and explicit self type where supplied.
@@ -73,9 +75,7 @@ are ready:
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
 - annotations not represented by the current source typer;
-- advanced parent feasibility and compiler-generated wrapper members;
-- extension-method parity. The typer can complete supported extension
-  signatures, but this gate still needs an adjacent source/TASTy fixture pair.
+- advanced parent feasibility and compiler-generated wrapper members.
 
 Scala 3.9 TASTy records inferred/default module self references that source
 `ClassInfo` completion does not yet synthesize. For module classes only, the

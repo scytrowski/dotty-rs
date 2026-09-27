@@ -37,6 +37,8 @@ const CONSTRUCTORS_SOURCE: &str =
     include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Constructors.scala");
 const CTOR_PLAIN_TASTY: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/CtorPlain.tasty");
+const EXTENSION_PARITY_TASTY: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/ExtensionParity.tasty");
 
 fn symbol_key(store: &SemanticStore, symbol: SymbolId) -> String {
     let entry = store.symbols.get(symbol);
@@ -115,6 +117,24 @@ fn package_prefix(store: &SemanticStore, ty: TypeId) -> Option<String> {
     (store.symbols.get(package).kind == SymbolKind::Package).then(|| symbol_key(store, package))
 }
 
+fn is_builtin_prefix_normalization_target(target: &str) -> bool {
+    matches!(
+        target,
+        "Package:java/Package:lang/Type:Object:Class"
+            | "Package:scala/Type:Any:Class"
+            | "Package:scala/Type:Nothing:Class"
+            | "Package:scala/Type:Boolean:Class"
+            | "Package:scala/Type:Byte:Class"
+            | "Package:scala/Type:Char:Class"
+            | "Package:scala/Type:Double:Class"
+            | "Package:scala/Type:Float:Class"
+            | "Package:scala/Type:Int:Class"
+            | "Package:scala/Type:Long:Class"
+            | "Package:scala/Type:Short:Class"
+            | "Package:scala/Type:Unit:Class"
+    )
+}
+
 fn render_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -152,9 +172,7 @@ fn render_type(
                     format!("name:{}", store.names.resolve(name.as_name().text()))
                 }
             };
-            let prefix = if target == "Package:java/Package:lang/Type:Object:Class"
-                || target.starts_with("Package:scala/Type:")
-            {
+            let prefix = if is_builtin_prefix_normalization_target(&target) {
                 // The source Typer uses canonical no-prefix builtin types,
                 // while Scala 3.9 TASTy writes them through scala/java.lang
                 // package prefixes. Normalize this named builtin family.
@@ -984,6 +1002,45 @@ mod tests {
     }
 
     #[test]
+    fn source_and_scala_390_tasty_extension_method_signature_matches() {
+        let source_text = "package me.cytrowski.tastyfixtures.semantic\nclass ExtensionParity:\n  extension (value: Int)\n    def doubled: Int = value * 2";
+        let (source_store, source_info) = source_type_info_from_source(
+            source_text,
+            "ExtensionParity",
+            SymbolKind::Class,
+            &["doubled"],
+        );
+        let (tasty_store, tasty_info) = tasty_type_info_with_units(
+            "ExtensionParity",
+            &[EXTENSION_PARITY_TASTY],
+            SymbolKind::Class,
+            &["doubled"],
+        );
+        let source_members = normalized_member_infos(
+            &source_store,
+            match source_store.types.get(source_info) {
+                Type::ClassInfo(info) => info,
+                other => panic!("expected source ClassInfo, got {other:?}"),
+            },
+            "doubled",
+        );
+        let tasty_members = normalized_member_infos(
+            &tasty_store,
+            match tasty_store.types.get(tasty_info) {
+                Type::ClassInfo(info) => info,
+                other => panic!("expected TASTy ClassInfo, got {other:?}"),
+            },
+            "doubled",
+        );
+
+        assert_semantic_parity(
+            "me.cytrowski.tastyfixtures.semantic.ExtensionParity.doubled",
+            &source_members.join("\n"),
+            &tasty_members.join("\n"),
+        );
+    }
+
+    #[test]
     fn source_and_scala_390_tasty_overloads_keep_distinct_signatures() {
         let overloads = METHODS_SOURCE
             .lines()
@@ -1099,6 +1156,51 @@ mod tests {
         assert_ne!(
             normalized_type(&left_store, left),
             normalized_type(&right_store, right)
+        );
+    }
+
+    #[test]
+    fn custom_type_in_scala_package_keeps_its_prefix() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let package_name = store.names.intern("scala");
+        let package = store.symbols.alloc(Symbol {
+            name: Name::new(package_name, Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let custom_name = store.names.intern("Custom");
+        let custom = store.symbols.alloc(Symbol {
+            name: Name::new(custom_name, Namespace::Type),
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let prefix = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(package),
+        });
+        let custom_type = store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(custom),
+        });
+
+        assert_eq!(
+            normalized_type(&store, custom_type),
+            "TypeRef(PackagePrefix(Package:scala), Package:scala/Type:Custom:Class)"
         );
     }
 
