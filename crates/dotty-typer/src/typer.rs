@@ -18,6 +18,8 @@ use crate::SourceTypeIndex;
 
 #[path = "lookup/mod.rs"]
 mod lookup;
+#[path = "substitution.rs"]
+mod substitution;
 
 pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
 
@@ -194,6 +196,35 @@ pub enum TyperError {
         tree_index: u32,
         error: dotty_core::TypeRebindError,
     },
+    /// A source class has no canonical AST provenance from which to recover
+    /// its class type-parameter order.
+    SourceClassTypeParametersProvenanceMissing { symbol: SymbolId },
+    /// The source class, template, or primary constructor has an invalid AST
+    /// shape for class type-parameter recovery.
+    MalformedSourceClassTypeParameters { class: SymbolId, tree_index: u32 },
+    /// A class type-parameter tree has no canonical symbol mapping.
+    ClassTypeParameterSymbolMissing { class: SymbolId, tree_index: u32 },
+    /// A receiver's nominal constructor differs from the expected class.
+    ReceiverDoesNotDenoteExpectedClass {
+        expected: SymbolId,
+        actual: Option<SymbolId>,
+    },
+    /// The arguments on a source receiver do not match its source class arity.
+    ReceiverGenericArityMismatch {
+        class: SymbolId,
+        expected: usize,
+        actual: usize,
+    },
+    /// A generic source class was used without receiver type arguments.
+    RawGenericSourceReceiverUnsupported { class: SymbolId, expected: usize },
+    /// External generic argument order is not modeled yet.
+    ExternalGenericInstantiationDeferred { class: SymbolId },
+    /// A completed member info could not be obtained for adaptation.
+    MemberTypeUnavailable { symbol: SymbolId },
+    /// The bounded, symbol-exact semantic substitution failed.
+    TypeSubstitution(dotty_core::TypeRebindError),
+    /// Receiver normalization failed before a nominal view could be read.
+    TypeNormalization(crate::types::TypeNormalizeError),
 }
 
 impl fmt::Display for TyperError {
@@ -2862,6 +2893,47 @@ mod tests {
         }
     }
 
+    fn applied_class_type(
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        class: SymbolId,
+        arguments: &[TypeId],
+    ) -> TypeId {
+        let tycon = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        store.types.alloc(Type::Applied {
+            tycon,
+            args: arguments.to_vec(),
+        })
+    }
+
+    fn nominal_type_ref(
+        store: &mut SemanticStore,
+        definitions: Definitions,
+        class: SymbolId,
+    ) -> TypeId {
+        store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        })
+    }
+
+    fn candidate_for(
+        typer: &mut SourceTyper<'_>,
+        receiver: TypeId,
+        class: SymbolId,
+        name: Name,
+    ) -> MemberCandidate {
+        typer
+            .lookup_members(receiver, name)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.declaring_class == class)
+            .unwrap()
+    }
+
     fn type_parameter_symbol(
         parsed: &dotty_parser::ParseResult,
         store: &SemanticStore,
@@ -3018,6 +3090,232 @@ mod tests {
         assert!(matches!(
             *typer.store().symbols.info(class),
             SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn generic_method_result_is_adapted_to_the_receiver_argument() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { def get: A = null }; class Text");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
+        let canonical_parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        assert_eq!(
+            store.symbols.get(canonical_parameter).owner,
+            Some(box_class)
+        );
+        let name = Name::new(store.names.intern("get"), Namespace::Term);
+        let get = store
+            .scopes
+            .get(index.scope_of(box_class).unwrap())
+            .lookup(&name)
+            .unwrap();
+        let text_ty = nominal_type_ref(&mut store, definitions, text_class);
+        let receiver = applied_class_type(&mut store, definitions, box_class, &[text_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, box_class, name);
+        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), adapted), text_class);
+        let SymbolInfo::Complete(declaration) = *typer.store().symbols.info(get) else {
+            panic!("member signature should be completed")
+        };
+        assert_eq!(type_symbol(typer.store(), declaration), canonical_parameter);
+    }
+
+    #[test]
+    fn generic_field_type_is_adapted_without_changing_its_declaration() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { val value: A = null }; class Text");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let name = Name::new(store.names.intern("value"), Namespace::Term);
+        let value = store
+            .scopes
+            .get(index.scope_of(box_class).unwrap())
+            .lookup(&name)
+            .unwrap();
+        let text_ty = nominal_type_ref(&mut store, definitions, text_class);
+        let receiver = applied_class_type(&mut store, definitions, box_class, &[text_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, box_class, name);
+        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), adapted), text_class);
+        let SymbolInfo::Complete(declaration) = *typer.store().symbols.info(value) else {
+            panic!("field signature should be completed")
+        };
+        assert_eq!(type_symbol(typer.store(), declaration), parameter);
+        assert_ne!(adapted, declaration);
+    }
+
+    #[test]
+    fn generic_member_arguments_follow_primary_constructor_source_order() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A, B] { val second: B = null }; class Text; class NumberText",
+        );
+        let pair = class_symbol(&parsed, &store, &index, source, "Pair");
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let number_text = class_symbol(&parsed, &store, &index, source, "NumberText");
+        let b = type_parameter_symbol(&parsed, &store, &index, source, "B");
+        assert_eq!(store.symbols.get(b).owner, Some(pair));
+        let name = Name::new(store.names.intern("second"), Namespace::Term);
+        let text_ty = nominal_type_ref(&mut store, definitions, text);
+        let number_ty = nominal_type_ref(&mut store, definitions, number_text);
+        let receiver = applied_class_type(&mut store, definitions, pair, &[text_ty, number_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, pair, name);
+        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), adapted), number_text);
+    }
+
+    #[test]
+    fn nested_applied_member_types_are_substituted_recursively() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A] { val values: List[A] = null }; class List[X]; class Text",
+        );
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let list_class = class_symbol(&parsed, &store, &index, source, "List");
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
+        let name = Name::new(store.names.intern("values"), Namespace::Term);
+        let text_ty = nominal_type_ref(&mut store, definitions, text_class);
+        let receiver = applied_class_type(&mut store, definitions, box_class, &[text_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, box_class, name);
+        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+
+        let Type::Applied { tycon, args } = typer.store().types.get(adapted) else {
+            panic!("expected the substituted List application")
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), list_class);
+        assert_eq!(args.len(), 1);
+        assert_eq!(type_symbol(typer.store(), args[0]), text_class);
+    }
+
+    #[test]
+    fn class_substitution_keeps_a_generic_methods_own_binder_intact() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { def convert[B](value: B): A = value }; class Text");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
+        let name = Name::new(store.names.intern("convert"), Namespace::Term);
+        let text_ty = nominal_type_ref(&mut store, definitions, text_class);
+        let receiver = applied_class_type(&mut store, definitions, box_class, &[text_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, box_class, name);
+        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(adapted) else {
+            panic!("expected the method's type-parameter binder")
+        };
+        let Type::Method(method) = typer.store().types.get(poly.result) else {
+            panic!("expected the method parameter clause")
+        };
+        let Type::ParamRef {
+            binder: parameter_binder,
+            index: 0,
+        } = typer.store().types.get(method.params[0].ty)
+        else {
+            panic!("method-owned B must remain a ParamRef")
+        };
+        assert_eq!(*parameter_binder, adapted);
+        assert_eq!(type_symbol(typer.store(), method.result), text_class);
+    }
+
+    #[test]
+    fn generic_source_receivers_must_supply_exact_arity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Pair[A, B] { val second: B = null }; class Text");
+        let pair = class_symbol(&parsed, &store, &index, source, "Pair");
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let name = Name::new(store.names.intern("second"), Namespace::Term);
+        let text_ty = nominal_type_ref(&mut store, definitions, text);
+        let receiver = applied_class_type(&mut store, definitions, pair, &[text_ty]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, pair, name);
+        assert!(matches!(
+            typer.member_type_on(receiver, &candidate),
+            Err(TyperError::ReceiverGenericArityMismatch {
+                class,
+                expected: 2,
+                actual: 1,
+            }) if class == pair
+        ));
+    }
+
+    #[test]
+    fn raw_source_generic_receivers_are_rejected_explicitly() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A] { val value: A = null }");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let name = Name::new(store.names.intern("value"), Namespace::Term);
+        let receiver = nominal_type_ref(&mut store, definitions, box_class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidate = candidate_for(&mut typer, receiver, box_class, name);
+        assert!(matches!(
+            typer.member_type_on(receiver, &candidate),
+            Err(TyperError::RawGenericSourceReceiverUnsupported {
+                class,
+                expected: 1,
+            }) if class == box_class
         ));
     }
 

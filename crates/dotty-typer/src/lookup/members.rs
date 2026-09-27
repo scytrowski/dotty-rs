@@ -213,7 +213,7 @@ impl SourceTyper<'_> {
         Ok(info.clone())
     }
 
-    fn is_current_source_symbol(&self, symbol: SymbolId) -> bool {
+    pub(crate) fn is_current_source_symbol(&self, symbol: SymbolId) -> bool {
         self.index
             .definition_of(symbol)
             .is_some_and(|definition| match definition {
