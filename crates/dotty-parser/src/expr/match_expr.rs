@@ -139,6 +139,8 @@ mod tests {
     struct FeedbackTokenSource {
         tokens: Vec<Token>,
         index: usize,
+        arrow_indents: bool,
+        outdent_at: Option<u32>,
     }
 
     impl TokenSource for FeedbackTokenSource {
@@ -167,14 +169,18 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                (ScannerEvent::ArrowIndented, TokenKind::Operator) => {
+                (ScannerEvent::ArrowIndented, TokenKind::Operator) if self.arrow_indents => {
                     let offset = self.current().span.end();
                     self.tokens.insert(
                         self.index + 1,
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                (ScannerEvent::Outdented, _) => {
+                (ScannerEvent::Outdented, _)
+                    if self
+                        .outdent_at
+                        .is_none_or(|offset| self.current().span.start() == offset) =>
+                {
                     let offset = self.current().span.start();
                     self.tokens.insert(
                         self.index,
@@ -211,7 +217,12 @@ mod tests {
         let mut parser = Parser::new(
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
-            FeedbackTokenSource { tokens, index: 0 },
+            FeedbackTokenSource {
+                tokens,
+                index: 0,
+                arrow_indents: true,
+                outdent_at: None,
+            },
             &mut names,
         );
 
@@ -258,7 +269,12 @@ mod tests {
         let mut parser = Parser::new(
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
-            FeedbackTokenSource { tokens, index: 0 },
+            FeedbackTokenSource {
+                tokens,
+                index: 0,
+                arrow_indents: true,
+                outdent_at: None,
+            },
             &mut names,
         );
 
@@ -273,6 +289,64 @@ mod tests {
             "expected match stat and following expression, diagnostics: {:?}",
             parser.diagnostics()
         );
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
+            panic!("expected the match expression");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn unindented_case_body_stops_at_the_enclosing_match_outdent() {
+        let source =
+            "{ value match\n    case A => val local = 1; local\n    case B => 0\n  after }";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Identifier, 2, 7),
+            token(TokenKind::Keyword(HardKeyword::Match), 8, 13),
+            token(TokenKind::Keyword(HardKeyword::Case), 18, 22),
+            token(TokenKind::Identifier, 23, 24),
+            token(TokenKind::Operator, 25, 27),
+            token(TokenKind::Keyword(HardKeyword::Val), 28, 31),
+            token(TokenKind::Identifier, 32, 37),
+            token(TokenKind::Operator, 38, 39),
+            token(TokenKind::IntegerLiteral, 40, 41),
+            token(TokenKind::Punctuation(Punctuation::Semicolon), 41, 42),
+            token(TokenKind::Identifier, 43, 48),
+            token(TokenKind::Newline, 48, 49),
+            token(TokenKind::Keyword(HardKeyword::Case), 53, 57),
+            token(TokenKind::Identifier, 58, 59),
+            token(TokenKind::Operator, 60, 62),
+            token(TokenKind::IntegerLiteral, 63, 64),
+            token(TokenKind::Newline, 64, 65),
+            token(TokenKind::Identifier, 67, 72),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 73, 74),
+            token(TokenKind::Eof, 74, 74),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource {
+                tokens,
+                index: 0,
+                arrow_indents: false,
+                outdent_at: Some(64),
+            },
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(tree).kind else {
+            panic!("expected the surrounding braced expression block");
+        };
+        assert_eq!(stats.len(), 1);
         let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
             panic!("expected the match expression");
         };
@@ -310,7 +384,12 @@ mod tests {
         let mut parser = Parser::new(
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
-            FeedbackTokenSource { tokens, index: 0 },
+            FeedbackTokenSource {
+                tokens,
+                index: 0,
+                arrow_indents: true,
+                outdent_at: None,
+            },
             &mut names,
         )
         .with_features(crate::ParserFeatures {

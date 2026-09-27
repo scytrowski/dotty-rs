@@ -166,9 +166,8 @@ where
                 .unwrap_or(mark);
             (block_mark, result.0, result.1)
         } else {
-            let (stats, expr) = self.with_case_body(|parser| {
-                parser.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace))
-            });
+            let (stats, expr) = self
+                .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
             (mark, stats, expr)
         };
 

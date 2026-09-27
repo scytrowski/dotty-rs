@@ -171,7 +171,9 @@ impl<'source> RawLexer<'source> {
             return Ok(Some(RawItem::Token(token)));
         }
         if character == '\'' {
-            if matches!(self.cursor.peek_nth(1), Some('{' | '[')) {
+            if matches!(self.cursor.peek_nth(1), Some('{' | '['))
+                && self.cursor.peek_nth(2) != Some('\'')
+            {
                 return Ok(Some(RawItem::Token(self.scan_quote(start)?)));
             }
             if self.looks_like_quote_id() {
@@ -1757,6 +1759,26 @@ mod tests {
             RawTokenKind::CharLiteral
         ),
         (
+            classifies_an_open_bracket_character_literal,
+            "'['",
+            RawTokenKind::CharLiteral
+        ),
+        (
+            classifies_a_close_bracket_character_literal,
+            "']'",
+            RawTokenKind::CharLiteral
+        ),
+        (
+            classifies_an_open_brace_character_literal,
+            "'{'",
+            RawTokenKind::CharLiteral
+        ),
+        (
+            classifies_a_close_brace_character_literal,
+            "'}'",
+            RawTokenKind::CharLiteral
+        ),
+        (
             classifies_an_integer_literal,
             "42",
             RawTokenKind::IntegerLiteral
@@ -2808,7 +2830,7 @@ mod tests {
 
     #[test]
     fn recognizes_term_and_type_quote_markers() {
-        let (items, diagnostics) = scan("'{ '[List[Int]]");
+        let (items, diagnostics) = scan("'{ x }; '[List[Int]]");
         let kinds: Vec<_> = items
             .into_iter()
             .filter_map(|item| match item {
@@ -2822,6 +2844,9 @@ mod tests {
             vec![
                 RawTokenKind::Quote,
                 RawTokenKind::Punctuation(Punctuation::LeftBrace),
+                RawTokenKind::Identifier,
+                RawTokenKind::Punctuation(Punctuation::RightBrace),
+                RawTokenKind::Punctuation(Punctuation::Semicolon),
                 RawTokenKind::Quote,
                 RawTokenKind::Punctuation(Punctuation::LeftBracket),
                 RawTokenKind::Identifier,
