@@ -22,7 +22,9 @@ mod typer;
 mod types;
 
 pub use source_type_index::SourceTypeIndex;
-pub use typer::{SourceTyper, TyperError};
+pub use typer::{
+    MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError, SourceTyper, TyperError,
+};
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,
 };
