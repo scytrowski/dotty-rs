@@ -183,16 +183,20 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         prefix: TypeId,
     ) -> Result<bool, TypeRelationError> {
         let declaration = self.typer.store.symbols.get(class);
-        if declaration.owner.is_some_and(|owner| {
-            self.typer.store.symbols.contains(owner)
+        if let Some(owner) = declaration.owner.filter(|owner| {
+            self.typer.store.symbols.contains(*owner)
                 && matches!(
-                    self.typer.store.symbols.get(owner).kind,
+                    self.typer.store.symbols.get(*owner).kind,
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
                 )
         }) {
-            // `ThisType` carries no enclosing-instance path, so a nested class
-            // reference cannot be proven to select the same outer instance.
-            return Ok(false);
+            // `ThisType` carries no enclosing-instance path. Accept the
+            // canonical owner `this` prefix, but reject a different outer
+            // instance because it may select a distinct path-dependent class.
+            return Ok(matches!(
+                self.type_at(prefix)?,
+                Type::ThisType { class: prefix_owner } if *prefix_owner == owner
+            ));
         }
 
         if matches!(self.type_at(prefix)?, Type::NoPrefix) {

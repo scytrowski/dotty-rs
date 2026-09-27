@@ -3454,6 +3454,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_this_type_conforms_through_its_canonical_owner_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner; val value: Inner = null }");
+        let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+        let inner = class_symbol(&parsed, &store, &index, source, "Inner");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let this_inner = store.types.alloc(Type::ThisType { class: inner });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let canonical_inner = typer.complete_symbol(value).unwrap();
+        let Type::TypeRef { prefix, .. } = typer.store().types.get(canonical_inner) else {
+            panic!("expected a qualified nested class reference")
+        };
+        assert_eq!(
+            typer.store().types.get(*prefix),
+            &Type::ThisType { class: outer }
+        );
+        assert!(typer.is_subtype(this_inner, canonical_inner).unwrap());
+    }
+
+    #[test]
     fn class_reference_does_not_conform_to_its_this_type() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");
