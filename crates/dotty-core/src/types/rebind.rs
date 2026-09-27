@@ -336,6 +336,10 @@ fn contains_substituted_symbol(
                 children.push(element);
                 false
             }
+            Type::Repeated { element } => {
+                children.push(element);
+                false
+            }
             Type::ClassInfo(info) => {
                 children.push(info.prefix);
                 children.extend(info.parents);
@@ -561,6 +565,7 @@ fn references_this_type(
             }
             Type::Wildcard { bounds } => stack.push(*bounds),
             Type::JavaArray { element } => stack.push(*element),
+            Type::Repeated { element } => stack.push(*element),
             Type::ClassInfo(info) => {
                 stack.push(info.prefix);
                 stack.extend(info.parents.iter().copied());
@@ -1143,6 +1148,10 @@ impl<'a> Rebinder<'a> {
             Type::JavaArray { element } => {
                 let new = self.ty(element)?;
                 self.keep_or_alloc(id, new == element, Type::JavaArray { element: new })
+            }
+            Type::Repeated { element } => {
+                let new = self.ty(element)?;
+                self.keep_or_alloc(id, new == element, Type::Repeated { element: new })
             }
 
             // The class symbol and its declaration scope are symbol-table
@@ -1844,6 +1853,7 @@ mod tests {
                 },
                 Type::Wildcard { bounds: a },
                 Type::JavaArray { element: a },
+                Type::Repeated { element: a },
             ];
             let ids: Vec<_> = members
                 .into_iter()
@@ -1888,6 +1898,7 @@ mod tests {
                 Type::MatchCase { pattern, result } => stack.extend([pattern, result]),
                 Type::Wildcard { bounds } => stack.push(bounds),
                 Type::JavaArray { element } => stack.push(element),
+                Type::Repeated { element } => stack.push(element),
                 Type::Match(m) => {
                     stack.extend([m.bound, m.scrutinee]);
                     stack.extend(m.cases);

@@ -1025,7 +1025,8 @@ impl<'a> SourceTyper<'a> {
                 | Type::Flexible { underlying: alias }
                 | Type::Recursive { parent: alias }
                 | Type::Wildcard { bounds: alias }
-                | Type::JavaArray { element: alias } => children.push(*alias),
+                | Type::JavaArray { element: alias }
+                | Type::Repeated { element: alias } => children.push(*alias),
                 Type::And { left, right } | Type::Or { left, right } => {
                     children.extend([*left, *right]);
                 }
@@ -1603,23 +1604,30 @@ impl<'a> SourceTyper<'a> {
                         kind,
                     });
                 };
-                let tpt = if kind == SymbolKind::Parameter {
+                let (tpt, repeated_parameter) = if kind == SymbolKind::Parameter {
                     match self.arena.try_get(tpt).map(|node| &node.kind) {
                         Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
                             if self.store.names.resolve(postfix.op.text()) == "*" =>
                         {
-                            postfix.operand
+                            (postfix.operand, true)
                         }
-                        _ => tpt,
+                        _ => (tpt, false),
                     }
                 } else {
-                    tpt
+                    (tpt, false)
                 };
                 let context = self
                     .index
                     .declaration_context_of(symbol)
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
-                let ty = self.type_of_tpt(tpt, context)?;
+                let element_type = self.type_of_tpt(tpt, context)?;
+                let ty = if repeated_parameter {
+                    self.store.types.alloc(Type::Repeated {
+                        element: element_type,
+                    })
+                } else {
+                    element_type
+                };
                 let previous = *self.store.symbols.info(symbol);
                 info_journal.push((symbol, previous));
                 self.store
@@ -2774,17 +2782,33 @@ impl<'a> SourceTyper<'a> {
                 });
             }
             clause_kind = Some(parameter_kind);
-            let ty = self.complete_signature_parameter(symbol, info_journal)?;
+            let repeated_parameter = matches!(
+                self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
+                    if self.store.names.resolve(postfix.op.text()) == "*"
+            );
+            let completed_parameter_type =
+                self.complete_signature_parameter(symbol, info_journal)?;
+            let ty = if repeated_parameter {
+                match self.store.types.try_get(completed_parameter_type) {
+                    Some(Type::Repeated { element }) => *element,
+                    _ => {
+                        return Err(TyperError::MalformedMethodClause {
+                            method,
+                            method_tree_index,
+                            clause_index,
+                        });
+                    }
+                }
+            } else {
+                completed_parameter_type
+            };
             parameters.push(MethodParamSpec {
                 symbol,
                 name: definition.name,
                 ty,
                 erased: flags.contains(SymbolFlags::ERASED),
-                varargs: matches!(
-                    self.arena.try_get(definition.tpt).map(|node| &node.kind),
-                    Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
-                        if self.store.names.resolve(postfix.op.text()) == "*"
-                ),
+                varargs: repeated_parameter,
             });
         }
         Ok((parameters, clause_kind.unwrap_or(MethodKind::Plain)))
@@ -11982,6 +12006,62 @@ mod tests {
             ),
             "unexpected varargs result: {result:?}"
         );
+    }
+
+    #[test]
+    fn varargs_parameter_reference_widens_to_repeated_type() {
+        let source_text = "class C { def f(xs: Int*): Int = xs }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(method)).then_some(tree))
+            .unwrap();
+        let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
+            panic!("method symbol should point to a DefDef")
+        };
+        let parameter_tree = definition.value_param_clauses[0][0];
+        let parameter = index.symbol_at(source, parameter_tree).unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(method).unwrap();
+        let TreeKind::Ident(ident) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should be the parameter reference")
+        };
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let expression_type = typer.typed_ast().get(typed).ty;
+        assert!(matches!(
+            typer.store().types.get(expression_type),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        let widened = typer.widen_expression_type(expression_type).unwrap();
+        assert!(matches!(
+            typer.store().types.get(widened),
+            Type::Repeated { element } if *element == definitions.int
+        ));
+        assert_eq!(typer.store().names.resolve(ident.name.text()), "xs");
+
+        let method_type = typer.store().symbols.info(method);
+        let SymbolInfo::Complete(method_type) = *method_type else {
+            panic!("method signature should be complete")
+        };
+        let Type::Method(method_type) = typer.store().types.get(method_type) else {
+            panic!("method symbol should contain a method type")
+        };
+        assert!(method_type.params[0].varargs);
+        assert_eq!(method_type.params[0].ty, definitions.int);
     }
 
     #[test]
