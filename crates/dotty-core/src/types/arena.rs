@@ -73,6 +73,24 @@ impl TypeArena {
         self.filled[id.index() as usize]
     }
 
+    /// Whether this arena has a slot for `id`, whether or not it is filled.
+    pub fn contains(&self, id: TypeId) -> bool {
+        (id.index() as usize) < self.types.len()
+    }
+
+    /// Looks up a type only when `id` is in range and its slot is filled.
+    ///
+    /// Returns `None` for both an out-of-range ID and a reserved but unfilled
+    /// slot; use [`contains`](Self::contains) to distinguish those cases.
+    pub fn try_get(&self, id: TypeId) -> Option<&Type> {
+        let index = id.index() as usize;
+        if self.filled.get(index).copied().unwrap_or(false) {
+            self.types.get(index)
+        } else {
+            None
+        }
+    }
+
     /// Panics if `id` was not allocated by this arena, or was `reserve`-d but
     /// never `fill`-ed.
     pub fn get(&self, id: TypeId) -> &Type {
@@ -196,6 +214,32 @@ mod tests {
 
         assert_eq!(id, reserved.id());
         assert_eq!(*arena.get(id), Type::NoPrefix);
+    }
+
+    #[test]
+    fn try_get_returns_none_for_out_of_range_ids() {
+        let arena = TypeArena::new();
+        let id = TypeId::new(0);
+
+        assert!(!arena.contains(id));
+        assert!(arena.try_get(id).is_none());
+    }
+
+    #[test]
+    fn try_get_returns_none_for_reserved_slots_and_contains_distinguishes_them() {
+        let mut arena = TypeArena::new();
+        let reserved = arena.reserve();
+
+        assert!(arena.contains(reserved.id()));
+        assert!(arena.try_get(reserved.id()).is_none());
+    }
+
+    #[test]
+    fn try_get_returns_filled_types() {
+        let mut arena = TypeArena::new();
+        let id = arena.alloc(Type::NoPrefix);
+
+        assert!(matches!(arena.try_get(id), Some(Type::NoPrefix)));
     }
 
     /// Reproduces `docs/dotty-core-design.md` §8's `def head[A](xs: A): A`
