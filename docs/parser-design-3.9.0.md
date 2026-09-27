@@ -248,7 +248,10 @@ ordinary assignment with bare `=`
 named arguments in ordinary and `using` lists in the narrow bare-identifier form
 the initial `if` and `while` expression forms, including Scala 2-compatible
 parenthesized conditions with braced branches, and indented method/control-flow
-bodies containing supported local definitions inside braced scopes
+bodies containing supported local definitions inside braced scopes. In legacy
+parenthesized `if`/`while` conditions, only the condition is consumed before
+parsing the following branch/body, so expressions beginning with parentheses
+or prefix operators are not mistaken for condition suffixes
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 including indented `try` bodies with local definitions represented in a shared
 expression `Block`, including scanner-feedback regions nested in braces, with

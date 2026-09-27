@@ -410,19 +410,22 @@ where
         // start a statement, or when the matching `then`/`do` is found ahead.
         // This matters for block arguments anywhere in the suffix chain, not
         // only when `{` immediately follows `)`.
-        let tree = if self.parenthesized_condition_should_continue(terminator) {
+        let continues_condition = self.parenthesized_condition_should_continue(terminator);
+        let tree = if continues_condition {
             self.simple_expr()
         } else {
-            self.simple_expr_before_braced_control_body()
+            self.parenthesized_condition_atom()
         };
         if self.current().kind == TokenKind::Keyword(terminator) {
             return tree;
         }
 
-        if matches!(
-            self.current().kind,
-            TokenKind::Operator | TokenKind::ColonOp
-        ) {
+        if continues_condition
+            && matches!(
+                self.current().kind,
+                TokenKind::Operator | TokenKind::ColonOp
+            )
+        {
             return self.infix_expr(tree);
         }
 
@@ -458,14 +461,15 @@ where
         if matches!(next_kind, TokenKind::Newline | TokenKind::Newlines) {
             return false;
         }
-        if matches!(
-            next_kind,
-            TokenKind::Punctuation(Punctuation::Dot)
-                | TokenKind::Operator
-                | TokenKind::ColonOp
-                | TokenKind::ColonFollow
-                | TokenKind::ColonEol
-        ) {
+        let next = self.cursor.lookahead(after_condition).clone();
+        if next.kind == TokenKind::Punctuation(Punctuation::Dot)
+            || matches!(
+                next.kind,
+                TokenKind::ColonOp | TokenKind::ColonFollow | TokenKind::ColonEol
+            )
+            || (next.kind == TokenKind::Operator
+                && !matches!(self.token_text(&next).ok(), Some("-" | "+" | "~" | "!")))
+        {
             return true;
         }
 
@@ -565,6 +569,118 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Block, Match, ParsedTry, Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
+
+    #[test]
+    fn keeps_parenthesized_legacy_if_branches_out_of_the_condition_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (cond) (yes) else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Keyword(HardKeyword::Else), 16, 20),
+                token(TokenKind::Identifier, 21, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.else_branch).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_a_prefix_expression_branch_out_of_a_parenthesized_if_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "if (cond) -1 else no",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 3, 4),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Operator, 10, 11),
+                token(TokenKind::IntegerLiteral, 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Else), 13, 17),
+                token(TokenKind::Identifier, 18, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::If(if_tree) = parser.ast().get(id).kind else {
+            panic!("expected if tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(if_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(if_tree.then_branch).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_a_parenthesized_legacy_while_body_out_of_the_condition_application() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "while (cond) (step)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 11),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 13, 14),
+                token(TokenKind::Identifier, 14, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+            panic!("expected while tree");
+        };
+
+        assert!(matches!(
+            parser.ast().get(while_tree.cond).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(matches!(
+            parser.ast().get(while_tree.body).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
 
     #[test]
     fn parses_braced_legacy_if_branches_after_parenthesized_condition() {

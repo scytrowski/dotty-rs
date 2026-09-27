@@ -30,19 +30,11 @@ where
         self.simple_expr_rest(mark, tree, can_apply)
     }
 
-    /// Parses a parenthesized condition and its ordinary suffixes without
-    /// consuming a following braced control-flow body as a block-application suffix.
-    pub(super) fn simple_expr_before_braced_control_body(&mut self) -> TreeId<Untyped> {
+    /// Parses only the parenthesized condition when legacy if/while syntax
+    /// leaves the following expression to be parsed as the body.
+    pub(super) fn parenthesized_condition_atom(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        let can_apply = self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::New);
-        let tree = self.simple_expr_atom(mark);
-        let can_apply = can_apply
-            && !matches!(
-                self.ast.get(tree).kind,
-                TreeKind::Block(_) | TreeKind::Match(_)
-            );
-
-        self.simple_expr_rest_with_brace_application(mark, tree, can_apply, false)
+        self.parse_parens_or_tuple(mark)
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
