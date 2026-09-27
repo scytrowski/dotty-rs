@@ -12170,6 +12170,61 @@ mod tests {
     }
 
     #[test]
+    fn local_overload_bucket_hides_inherited_method_buckets() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class ParentType {}; class ChildType extends ParentType {}; class Other {}; class Base { def method(x: ChildType): Int = 1 }; class C extends Base { def method(x: ParentType): Int = 2; def method(x: Other): Int = 3 }; class Client { def use(c: C, x: ChildType): Int = c.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let receiver_class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("local overload bucket should produce an Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected method reference, found {other:?}"),
+        };
+        assert_eq!(
+            typer.store().symbols.get(selected).owner,
+            Some(receiver_class)
+        );
+    }
+
+    #[test]
     fn a_type_namespace_name_does_not_resolve_as_a_term_identifier() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { type item = Int; def method: Int = item }");

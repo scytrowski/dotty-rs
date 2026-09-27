@@ -182,10 +182,16 @@ impl SourceTyper<'_> {
             )?;
             processed.push(pending.symbol);
             if !direct.is_empty() {
+                let direct_count = direct.len();
                 candidates.extend(direct);
-                if !include_hidden_inherited || pending.depth > 0 {
+                if !include_hidden_inherited
+                    || pending.depth > 0
+                    || (pending.depth == 0 && direct_count > 1)
+                {
                     // Ordinary member selection treats a direct bucket as a
-                    // complete override of inherited declarations.
+                    // complete override. Overload applications additionally
+                    // inspect the nearest inherited bucket when the receiver
+                    // declares only one method of that name.
                     edges.insert(pending.symbol, Vec::new());
                     continue;
                 }
