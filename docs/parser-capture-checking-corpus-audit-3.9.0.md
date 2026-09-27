@@ -44,7 +44,7 @@ Diagnostic occurrences (not affected-file counts) were 8,090 in the import cohor
 
 ## Feature-policy caveat
 
-`ParserFeatures::capture_checking` exists, but current parser production code does not consult it; its only references in `crates/dotty-parser/src` are feature-configuration tests. Therefore this audit cannot honestly report a parser “feature off vs feature on” delta. The cohorts are classified by source import, while parsing itself still uses the default feature policy.
+`ParserFeatures::capture_checking` exists, but no parser grammar production currently reads the flag; outside its declaration/default, the source references are tests. Therefore this audit cannot honestly report a parser “feature off vs feature on” delta. The cohorts are classified by source import, while parsing itself still uses the default feature policy.
 
 This is consistent with the current implementation boundary: capture syntax remains unimplemented. Dotty 3.9.0 marks capture references/sets and the type `^` suffix as capture-checking grammar in [Parsers.scala](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/parsing/Parsers.scala#L1672) and [the refined-type grammar](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/parsing/Parsers.scala#L1930). Its feature policy is tied to whether the compilation unit enables capture checking in [Feature.scala](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/config/Feature.scala#L153).
 
