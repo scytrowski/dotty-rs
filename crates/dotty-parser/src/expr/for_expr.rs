@@ -670,6 +670,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_indented_for_yield_body_as_a_statement_sequence() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for x <- xs yield\n  val result = x\n  transform(result)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(6, 8).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Keyword(HardKeyword::Yield), 12, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Indent, 18, 18),
+                token(TokenKind::Keyword(HardKeyword::Val), 20, 23),
+                token(TokenKind::Identifier, 24, 30),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(31, 32).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 33, 34),
+                token(TokenKind::Newline, 34, 35),
+                token(TokenKind::Identifier, 37, 46),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 46, 47),
+                token(TokenKind::Identifier, 47, 53),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 53, 54),
+                token(TokenKind::Outdent, 54, 54),
+                token(TokenKind::Eof, 54, 54),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(ref for_tree)) =
+            parser.ast().get(tree).kind
+        else {
+            panic!("expected ForYield");
+        };
+        let TreeKind::Block(ref block) = parser.ast().get(for_tree.body).kind else {
+            panic!("expected an indented statement-sequence block");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn reports_a_missing_outdent_after_an_indented_for_body() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
