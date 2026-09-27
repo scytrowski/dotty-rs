@@ -166,14 +166,10 @@ where
                 .unwrap_or(mark);
             (block_mark, result.0, result.1)
         } else {
-            let expr = self.with_case_body(|parser| {
-                parser.with_location(Location::InBlock, |parser| parser.expr())
+            let (stats, expr) = self.with_case_body(|parser| {
+                parser.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace))
             });
-            if self.accept(TokenKind::Punctuation(Punctuation::Semicolon)) {
-                // Dotty keeps the separator in the source-level case-body
-                // block span. The next case still starts after it.
-            }
-            (mark, Vec::new(), expr)
+            (mark, stats, expr)
         };
 
         self.alloc_from(block_mark, TreeKind::Block(Block { stats, expr }))

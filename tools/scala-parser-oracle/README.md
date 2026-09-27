@@ -70,7 +70,8 @@ type ascriptions, indented colon arguments, and `if`/`while` expressions,
 including basic indented bodies and local-definition sequences in indented
 method/control-flow bodies nested inside braces, plus braced and indented
 `match` expressions with case patterns, same-line and line-broken guards, and
-bodies. The current
+bodies. Braced case bodies also cover local statement sequences with `val` and
+`var` definitions. The current
 control-flow subset also includes `throw`, bare/value `return`, and source-level
 `try`/`catch`/`finally`,
 including their basic indented forms.

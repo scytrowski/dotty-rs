@@ -130,7 +130,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::ast::{Block, CaseDef, InfixOp, Match as MatchTree, UntypedNode};
+    use dotty_core::ast::{Block, CaseDef, InfixOp, Match as MatchTree, Modifier, UntypedNode};
     use dotty_core::{
         HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
         TokenSource,
@@ -377,6 +377,88 @@ mod tests {
             TextRange::new(0, 27).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_statement_sequences_in_unindented_braced_case_bodies() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value match { case A => val local = 1; local; case B => var result = 2; result }",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Case), 14, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Operator, 21, 23),
+                token(TokenKind::Keyword(HardKeyword::Val), 24, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Operator, 34, 35),
+                token(TokenKind::IntegerLiteral, 36, 37),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 37, 38),
+                token(TokenKind::Identifier, 39, 44),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 44, 45),
+                token(TokenKind::Keyword(HardKeyword::Case), 46, 50),
+                token(TokenKind::Identifier, 51, 52),
+                token(TokenKind::Operator, 53, 55),
+                token(TokenKind::Keyword(HardKeyword::Var), 56, 59),
+                token(TokenKind::Identifier, 60, 66),
+                token(TokenKind::Operator, 67, 68),
+                token(TokenKind::IntegerLiteral, 69, 70),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 70, 71),
+                token(TokenKind::Identifier, 72, 78),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 79, 80),
+                token(TokenKind::Eof, 80, 80),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(tree).kind else {
+            panic!("expected match tree");
+        };
+        assert_eq!(cases.len(), 2);
+
+        for (index, (case, expected_span)) in cases
+            .iter()
+            .copied()
+            .zip([
+                TextRange::new(21, 45).unwrap(),
+                TextRange::new(53, 78).unwrap(),
+            ])
+            .enumerate()
+        {
+            let TreeKind::CaseDef(CaseDef { body, .. }) = parser.ast().get(case).kind else {
+                panic!("expected case definition");
+            };
+            assert_eq!(
+                parser.ast().get(body).position.unwrap().span().range(),
+                expected_span
+            );
+            let TreeKind::Block(ref block) = parser.ast().get(body).kind else {
+                panic!("expected block case body");
+            };
+            assert_eq!(block.stats.len(), 1);
+            let TreeKind::ValDef(definition) = &parser.ast().get(block.stats[0]).kind else {
+                panic!("expected a local value definition");
+            };
+            assert_eq!(
+                definition.metadata.modifiers.contains(&Modifier::Var),
+                index == 1,
+                "case {index} should preserve its val/var distinction"
+            );
+            assert!(matches!(
+                parser.ast().get(block.expr).kind,
+                TreeKind::Ident(_)
+            ));
+        }
+
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
