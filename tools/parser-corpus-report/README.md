@@ -41,6 +41,15 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
+Schema version 3 also partitions outcomes into `capture_checking_cohorts`
+(`enabled`, `disabled`, and `unknown`) using the parser's effective
+`ParserFeatures` after compilation-unit imports have been processed. Each
+cohort records the same clean/recoverable/hard-failure and diagnostic summary
+as the whole corpus. Its caret audit distinguishes raw `^` characters from
+lexer `^` operator tokens and capture constructs represented in the parsed
+AST; this prevents comments and string contents from being counted as source
+syntax while keeping unparsed operator tokens visible for manual review.
+
 The low-level binary also accepts repeated `--root` options for focused runs:
 
 ```text
