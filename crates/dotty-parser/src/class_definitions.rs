@@ -1451,12 +1451,21 @@ where
     pub(crate) fn allocate_anonymous_new_template(
         &mut self,
         start: u32,
-        parent: Option<TreeId<Untyped>>,
+        parents: Vec<TreeId<Untyped>>,
         body: TemplateBodyResult,
     ) -> TreeId<Untyped> {
-        let parent_position = parent.and_then(|parent| self.ast.get(parent).position);
-        let parent_start = parent_position.map(|position| position.span().range().start());
-        let parent_end = parent_position.map(|position| position.span().range().end());
+        let parent_start = parents.first().and_then(|parent| {
+            self.ast
+                .get(*parent)
+                .position
+                .map(|position| position.span().range().start())
+        });
+        let parent_end = parents.last().and_then(|parent| {
+            self.ast
+                .get(*parent)
+                .position
+                .map(|position| position.span().range().end())
+        });
         let body_start = body.members.first().and_then(|member| {
             self.ast
                 .get(*member)
@@ -1464,7 +1473,7 @@ where
                 .map(|position| position.span().range().start())
         });
         let tail = TemplateTail {
-            parents: parent.into_iter().collect(),
+            parents,
             self_val: body.self_val,
             body: body.members,
             metadata: UntypedTemplateMetadata::default(),
