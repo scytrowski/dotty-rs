@@ -1241,7 +1241,7 @@ impl<'a> SourceTyper<'a> {
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
                 let members = self
-                    .lookup_members_journaled(receiver_view, selection.name, info_journal)
+                    .lookup_overload_members_journaled(receiver_view, selection.name, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
                 if members.len() <= 1 {
                     return Ok(None);
@@ -11617,6 +11617,10 @@ mod tests {
             &packages,
         );
 
+        let TreeKind::Apply(source_application) = &parsed.ast.get(rhs).kind else {
+            panic!("method RHS should be the source application")
+        };
+        let source_argument = source_application.args[0];
         let typed = typer.type_expression(rhs, context).unwrap();
         let selected = overloads
             .into_iter()
@@ -11637,6 +11641,13 @@ mod tests {
         let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
             panic!("overloaded invocation should produce a typed Apply")
         };
+        assert_eq!(
+            typer
+                .typed_index
+                .get(source, source_argument)
+                .expect("source argument should have one typed mapping"),
+            application.args[0]
+        );
         assert!(matches!(
             typer.store().types.get(typer.typed_ast().get(application.function).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == selected
@@ -11680,6 +11691,8 @@ mod tests {
             &packages,
         );
 
+        let typed_count_before = typer.typed_arena.iter().count();
+        let mapping_count_before = typer.typed_index.len();
         let result = typer.type_expression(rhs, context);
         let Err(TyperError::OverloadApplicationNoApplicable { candidates, .. }) = result else {
             panic!("unexpected overload result: {result:?}");
@@ -11692,6 +11705,8 @@ mod tests {
                 ..
             }
         )));
+        assert_eq!(typer.typed_arena.iter().count(), typed_count_before);
+        assert_eq!(typer.typed_index.len(), mapping_count_before);
     }
 
     #[test]
@@ -11749,6 +11764,64 @@ mod tests {
         assert!(matches!(
             typer.store().types.get(info),
             Type::Method(method) if method.params.len() == 2
+        ));
+    }
+
+    #[test]
+    fn overload_application_resolves_imported_method_candidates() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; object Lib { def method(x: A): Int = 1; def method(x: B): Int = 2 }; class Client { import Lib.*; def use(x: B): Int = method(x) }",
+        );
+        let expected_class = class_symbol(&parsed, &store, &index, source, "B");
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("imported overload should produce a typed Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a selected imported overload, found {other:?}"),
+        };
+        let info = typer.complete_symbol(selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == expected_class)
         ));
     }
 
@@ -11926,6 +11999,146 @@ mod tests {
             typer.type_expression(rhs, context),
             Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
                 if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn matching_arity_polymorphic_overload_blocks_monomorphic_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class C { def method(x: A): Int = 1; def method[T](x: T): Int = 2; def use(x: A): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                candidate,
+                ..
+            }) if matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Missing)
+                || matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Complete(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_arity_polymorphic_overload_does_not_block_monomorphic_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class C { def method(x: A): Int = 1; def method[T](x: T, y: T): Int = 2; def use(x: A): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.type_expression(rhs, context).is_ok());
+    }
+
+    #[test]
+    fn inherited_generic_overload_uses_the_receiver_adapted_signature() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Wider {}; class Text extends Wider {}; class Base[A] { def method(x: A): Int = 1 }; class Child extends Base[Text] { def method(x: Wider): Int = 2 }; class Client { def use(child: Child, x: Text): Int = child.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let base_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method"
+                    && store
+                        .symbols
+                        .get(index.symbol_at(source, tree).unwrap())
+                        .owner
+                        == Some(class_symbol(&parsed, &store, &index, source, "Base")))
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("typing inherited overload failed: {error:?}"));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("inherited generic overload should produce an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == base_method
         ));
     }
 

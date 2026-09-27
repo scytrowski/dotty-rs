@@ -102,7 +102,7 @@ impl SourceTyper<'_> {
         let store_checkpoint = self.store.checkpoint();
         let checkpoint = self.type_index.checkpoint();
         let mut journal = Vec::new();
-        let result = self.lookup_members_inner(receiver, name, &mut journal);
+        let result = self.lookup_members_inner(receiver, name, &mut journal, false);
         if result.is_err() {
             for (symbol, previous) in journal.into_iter().rev() {
                 if self.store.symbols.contains(symbol) {
@@ -121,7 +121,21 @@ impl SourceTyper<'_> {
         name: Name,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
-        self.lookup_members_inner(receiver, name, journal)
+        self.lookup_members_inner(receiver, name, journal, false)
+    }
+
+    /// Finds matching declarations on a receiver and its nominal parents,
+    /// including the nearest inherited buckets hidden by a direct declaration
+    /// on the receiver. A direct bucket on a parent hides deeper declarations
+    /// on that branch. Overload application uses this view before applicability
+    /// filtering.
+    pub(in crate::typer) fn lookup_overload_members_journaled(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
+        self.lookup_members_inner(receiver, name, journal, true)
     }
 
     fn lookup_members_inner(
@@ -129,6 +143,7 @@ impl SourceTyper<'_> {
         receiver: TypeId,
         name: Name,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        include_hidden_inherited: bool,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
         let receiver_view = TypeNormalizer::new(self.store)
             .normalize_for_lookup(receiver)
@@ -145,7 +160,19 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
 
         while let Some(pending) = queue.pop_front() {
-            let info = self.class_info(pending.symbol, journal)?;
+            let info = match self.class_info(pending.symbol, journal) {
+                Ok(info) => info,
+                Err(MemberLookupError::ClassInfoUnavailable { .. })
+                    if include_hidden_inherited && !candidates.is_empty() =>
+                {
+                    // A known direct or inherited bucket retains the ordinary
+                    // lookup boundary when external parent metadata is absent.
+                    processed.push(pending.symbol);
+                    edges.insert(pending.symbol, Vec::new());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let direct = self.direct_candidates(
                 pending.symbol,
                 pending.receiver_view,
@@ -156,9 +183,12 @@ impl SourceTyper<'_> {
             processed.push(pending.symbol);
             if !direct.is_empty() {
                 candidates.extend(direct);
-                // A direct bucket hides all inherited buckets from this class.
-                edges.insert(pending.symbol, Vec::new());
-                continue;
+                if !include_hidden_inherited || pending.depth > 0 {
+                    // Ordinary member selection treats a direct bucket as a
+                    // complete override of inherited declarations.
+                    edges.insert(pending.symbol, Vec::new());
+                    continue;
+                }
             }
 
             let mut parent_symbols = Vec::with_capacity(info.parents.len());
