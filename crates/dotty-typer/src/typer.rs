@@ -1417,13 +1417,14 @@ impl<'a> SourceTyper<'a> {
                 target: TypeRefTarget::Symbol(symbol),
                 prefix,
             } => {
+                if !self.store.symbols.contains(symbol) {
+                    return Err(TyperError::UnknownSymbol { symbol });
+                }
                 children.push(prefix);
-                if self.store.symbols.contains(symbol)
-                    && matches!(
-                        self.store.symbols.get(symbol).kind,
-                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-                    )
-                    && self.is_current_source_symbol(symbol)
+                if matches!(
+                    self.store.symbols.get(symbol).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) && self.is_current_source_symbol(symbol)
                     && matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
                 {
                     self.complete_symbol_inner(symbol, info_journal)?;
@@ -11822,6 +11823,32 @@ mod tests {
             Type::Method(method)
                 if matches!(typer.store().types.get(method.params[0].ty),
                     Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == expected_class)
+        ));
+    }
+
+    #[test]
+    fn overload_application_rejects_mixed_method_and_value_candidates() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val method: Int = 0; def method(x: Int): Int = x; def use: Int = method(1) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MixedApplicationCandidateKinds { candidates, .. })
+                if candidates.len() == 2
         ));
     }
 
