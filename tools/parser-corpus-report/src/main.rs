@@ -47,10 +47,22 @@ struct Report {
     scanner_diagnostics: usize,
     diagnostic_histogram: BTreeMap<String, usize>,
     first_failure_histogram: BTreeMap<String, FailureBucket>,
+    capture_checking_cohorts: BTreeMap<String, ParserCohortReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     namer: Option<NamerReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deferred_features: Option<BTreeMap<String, DeferredFeatureBucket>>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ParserCohortReport {
+    files: usize,
+    clean: usize,
+    recoverable: usize,
+    hard_failures: usize,
+    scanner_diagnostics: usize,
+    diagnostic_histogram: BTreeMap<String, usize>,
+    first_failure_histogram: BTreeMap<String, FailureBucket>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -113,6 +125,7 @@ struct FileOutcome {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -393,6 +406,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
                 scanner_diagnostics: outcome.scanner_diagnostics,
                 namer: outcome.namer,
                 deferred_features: outcome.deferred_features,
+                capture_checking_enabled: outcome.capture_checking_enabled,
             },
             Err(error) => process_failure(display_path, "WorkerProtocol", error.to_string()),
         },
@@ -411,6 +425,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
         },
         Err(error) => process_failure(display_path, "ProcessError", error.to_string()),
     }
@@ -427,6 +442,7 @@ fn process_failure(path: String, kind: &str, message: impl Into<String>) -> File
         scanner_diagnostics: 0,
         namer: None,
         deferred_features: BTreeMap::new(),
+        capture_checking_enabled: None,
     }
 }
 
@@ -437,6 +453,7 @@ struct WorkerResult {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
 }
 
 fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
@@ -456,6 +473,7 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                     scanner_diagnostics: parsed.scanner_diagnostics,
                     namer: parsed.namer,
                     deferred_features: parsed.deferred_features,
+                    capture_checking_enabled: parsed.capture_checking_enabled,
                 },
                 Err(_) => WorkerResult {
                     status: Status::Panic,
@@ -466,6 +484,7 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                     scanner_diagnostics: 0,
                     namer: None,
                     deferred_features: BTreeMap::new(),
+                    capture_checking_enabled: None,
                 },
             }
         }
@@ -478,6 +497,7 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
         },
     };
     serde_json::to_writer(io::stdout(), &result).map_err(io::Error::other)?;
@@ -536,6 +556,7 @@ struct ParsedSource {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
 }
 
 fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> ParsedSource {
@@ -551,6 +572,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 scanner_diagnostics: 0,
                 namer: None,
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
             };
         }
     };
@@ -567,6 +589,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 scanner_diagnostics,
                 namer: None,
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
             };
         }
     };
@@ -585,6 +608,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             message: diagnostic.message().to_owned(),
         })
         .collect::<Vec<_>>();
+    let capture_checking_enabled = Some(result.effective_features.capture_checking);
     let status = if diagnostics.is_empty() && scanner_diagnostics == 0 {
         Status::Clean
     } else {
@@ -627,6 +651,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         scanner_diagnostics,
         namer,
         deferred_features,
+        capture_checking_enabled,
     }
 }
 
@@ -855,7 +880,7 @@ fn build_report(
     collect_namer: bool,
 ) -> Report {
     let mut report = Report {
-        schema_version: 2,
+        schema_version: 3,
         corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
         source_version,
         source_revision,
@@ -871,6 +896,7 @@ fn build_report(
         scanner_diagnostics: 0,
         diagnostic_histogram: BTreeMap::new(),
         first_failure_histogram: BTreeMap::new(),
+        capture_checking_cohorts: BTreeMap::new(),
         namer: collect_namer.then(NamerReport::default),
         deferred_features: collect_namer.then(|| {
             [
@@ -901,6 +927,57 @@ fn build_report(
     };
 
     for outcome in outcomes {
+        let cohort_name = match outcome.capture_checking_enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "unknown",
+        };
+        let cohort = report
+            .capture_checking_cohorts
+            .entry(cohort_name.to_owned())
+            .or_default();
+        cohort.files += 1;
+        cohort.scanner_diagnostics += outcome.scanner_diagnostics;
+        match outcome.status {
+            Status::Clean => cohort.clean += 1,
+            Status::RecoverableDiagnostics => cohort.recoverable += 1,
+            Status::ScannerFailure | Status::ProcessFailure | Status::Panic | Status::Hang => {
+                cohort.hard_failures += 1;
+            }
+        }
+        for diagnostic in &outcome.diagnostics {
+            *cohort
+                .diagnostic_histogram
+                .entry(diagnostic.kind.clone())
+                .or_default() += 1;
+        }
+        if let Some(diagnostic) = outcome.diagnostics.first() {
+            let bucket = first_failure_bucket(diagnostic);
+            let entry = cohort
+                .first_failure_histogram
+                .entry(bucket)
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(outcome.path.clone());
+            }
+        } else if outcome.scanner_diagnostics != 0 {
+            let entry = cohort
+                .first_failure_histogram
+                .entry("ScannerDiagnostics".to_owned())
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(outcome.path.clone());
+            }
+        }
+
         if let Some(features) = &mut report.deferred_features {
             for (name, counts) in &outcome.deferred_features {
                 if counts.occurrences == 0 {
@@ -1141,6 +1218,12 @@ fn print_summary(report: &Report) {
             }
         }
     }
+    for (policy, cohort) in &report.capture_checking_cohorts {
+        println!(
+            "  capture-checking {policy}: {} files ({} clean, {} recoverable, {} hard failures)",
+            cohort.files, cohort.clean, cohort.recoverable, cohort.hard_failures
+        );
+    }
     if let Some(namer) = &report.namer {
         println!(
             "  files naming was prevented by scanning: {}",
@@ -1232,6 +1315,18 @@ mod tests {
         let parsed = parse_source("object C", "Test.scala", false);
         assert!(matches!(parsed.status, Status::Clean));
         assert!(parsed.diagnostics.is_empty());
+        assert_eq!(parsed.capture_checking_enabled, Some(false));
+    }
+
+    #[test]
+    fn corpus_worker_observes_capture_policy_enabled_by_global_import() {
+        let parsed = parse_source(
+            "import language.experimental.captureChecking\ntype F = A -> {cap} B",
+            "Capture.scala",
+            false,
+        );
+
+        assert_eq!(parsed.capture_checking_enabled, Some(true));
     }
 
     #[test]
@@ -1422,6 +1517,7 @@ mod tests {
                     invariant_violations: vec!["scope owner mismatch".to_owned()],
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
             },
             FileOutcome {
                 path: "recovered.scala".to_owned(),
@@ -1432,6 +1528,7 @@ mod tests {
                     invariant_violations: Vec::new(),
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(true),
             },
             FileOutcome {
                 path: "failed.scala".to_owned(),
@@ -1444,6 +1541,7 @@ mod tests {
                     transaction_residue: false,
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
             },
         ];
         let report = build_report(&outcomes, &[], None, None, None, None, true);
@@ -1478,6 +1576,46 @@ mod tests {
             namer.invariant_failure_histogram["scope owner mismatch"].count,
             1
         );
+    }
+
+    #[test]
+    fn report_partitions_files_by_effective_capture_checking_policy() {
+        let outcomes = [
+            FileOutcome {
+                path: "enabled.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(true),
+            },
+            FileOutcome {
+                path: "disabled.scala".to_owned(),
+                status: Status::RecoverableDiagnostics,
+                diagnostics: vec![DiagnosticSummary {
+                    kind: "ExpectedType".to_owned(),
+                    message: "expected a type".to_owned(),
+                }],
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
+            },
+            process_failure("unknown.scala".to_owned(), "WorkerError", "failed"),
+        ];
+
+        let report = build_report(&outcomes, &[], None, None, None, None, false);
+
+        assert_eq!(report.capture_checking_cohorts["enabled"].files, 1);
+        assert_eq!(report.capture_checking_cohorts["enabled"].clean, 1);
+        assert_eq!(report.capture_checking_cohorts["disabled"].files, 1);
+        assert_eq!(report.capture_checking_cohorts["disabled"].recoverable, 1);
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].diagnostic_histogram["ExpectedType"],
+            1
+        );
+        assert_eq!(report.capture_checking_cohorts["unknown"].hard_failures, 1);
     }
 
     #[cfg(unix)]
@@ -1529,6 +1667,7 @@ mod tests {
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
         };
         let report = build_report(&[outcome], &[], None, None, None, None, false);
 
