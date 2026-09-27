@@ -535,6 +535,8 @@ impl<'a> SourceTyper<'a> {
     /// Literal expressions preserve their exact `Type::Constant` type in the
     /// typed AST; consumers use this operation when they need the canonical
     /// builtin value type. A member reference is adapted to its receiver view.
+    /// Adapting a reference may complete source symbols and allocate semantic
+    /// types; failures roll those changes back.
     pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
         let store_checkpoint = self.store.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
@@ -829,6 +831,11 @@ impl<'a> SourceTyper<'a> {
                 ..
             }) if self.store.symbols.contains(*symbol) => {
                 let declaration = self.store.symbols.get(*symbol);
+                let by_name = matches!(
+                    declaration.info,
+                    SymbolInfo::Complete(info)
+                        if matches!(self.store.types.try_get(info), Some(Type::ByName { .. }))
+                );
                 matches!(
                     declaration.kind,
                     SymbolKind::Parameter
@@ -836,6 +843,7 @@ impl<'a> SourceTyper<'a> {
                         | SymbolKind::Value
                         | SymbolKind::Object
                 ) && !declaration.flags.contains(SymbolFlags::MUTABLE)
+                    && !by_name
                     && (declaration.kind != SymbolKind::Object
                         || self.source_module_class_of_object(*symbol).is_ok())
             }
@@ -10102,6 +10110,7 @@ mod tests {
         let source_text = "class Text; class Box[A] { val value: A }; class Use { def use(box: Box[Text]): Text = box.value }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let parameter = type_parameter_symbol(&parsed, &store, &index, source, "A");
         let field = val_symbol(&parsed, &store, &index, source, "value").0;
         let box_parameter = val_symbol(&parsed, &store, &index, source, "box").0;
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -10149,6 +10158,14 @@ mod tests {
             typer.store().types.get(widened),
             Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == text
         ));
+        let SymbolInfo::Complete(declaration_type) = *typer.store().symbols.info(field) else {
+            panic!("selected source field should be completed")
+        };
+        assert!(matches!(
+            typer.store().types.get(declaration_type),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                if *symbol == parameter
+        ));
     }
 
     #[test]
@@ -10178,6 +10195,32 @@ mod tests {
         assert_eq!(typer.typed_ast().iter().count(), 0);
         assert_eq!(typer.source_typed_index().len(), 0);
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    }
+
+    #[test]
+    fn by_name_parameter_is_not_a_stable_selection_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box { val value: Int = 1 }; class Use { def use(box: => Box): Int = box.value }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (parameter, _) = val_symbol(&parsed, &store, &index, source, "box");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnstableSelectionPrefix { .. })
+        ));
     }
 
     #[test]
