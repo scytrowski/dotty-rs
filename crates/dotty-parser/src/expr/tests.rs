@@ -2901,7 +2901,7 @@ fn rejects_a_second_prefix_operator_as_a_nested_prefix() {
 }
 
 #[test]
-fn rejects_a_prefix_operator_whose_operand_starts_on_the_next_line() {
+fn treats_a_prefix_spelling_without_a_same_line_operand_as_a_term_identifier() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
         "-\nx",
@@ -2916,16 +2916,14 @@ fn rejects_a_prefix_operator_whose_operand_starts_on_the_next_line() {
 
     let id = parser.postfix_expr();
 
-    assert!(matches!(
-        parser.ast().get(id).kind,
-        TreeKind::PhaseSpecific(_)
-    ));
+    let TreeKind::Ident(ident) = parser.ast().get(id).kind else {
+        panic!("expected the bare operator to parse as an identifier");
+    };
+    let name = ident.name;
     assert_eq!(parser.current().kind, TokenKind::Newline);
-    assert_eq!(parser.diagnostics().len(), 1);
-    assert_eq!(
-        parser.diagnostics()[0].kind(),
-        crate::ParseDiagnosticKind::ExpectedExpression
-    );
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "-");
 }
 
 #[test]
@@ -3474,10 +3472,10 @@ fn recovers_from_an_infix_operator_without_an_operand() {
 }
 
 #[test]
-fn recovers_from_an_infix_operator_before_an_invalid_operand() {
+fn recovers_from_an_infix_operator_before_a_structural_operator_token() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
-        "a + *",
+        "a + =",
         vec![
             token(TokenKind::Identifier, 0, 1),
             token(TokenKind::Operator, 2, 3),
@@ -3546,7 +3544,7 @@ fn recovers_from_an_infix_operator_before_an_opening_parenthesis() {
 }
 
 #[test]
-fn recovers_from_an_incomplete_prefix_expression() {
+fn parses_a_bare_prefix_spelling_as_a_term_identifier() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
         "!",
@@ -3557,10 +3555,101 @@ fn recovers_from_an_incomplete_prefix_expression() {
         &mut names,
     );
 
+    let id = parser.postfix_expr();
+
+    let TreeKind::Ident(ident) = parser.ast().get(id).kind else {
+        panic!("expected the bare operator to parse as an identifier");
+    };
+    let name = ident.name;
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "!");
+}
+
+#[test]
+fn parses_question_mark_operator_as_a_term_identifier() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "???",
+        vec![
+            token(TokenKind::Operator, 0, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let id = parser.postfix_expr();
+
+    let TreeKind::Ident(ident) = parser.ast().get(id).kind else {
+        panic!("expected identifier tree");
+    };
+    let name = ident.name;
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 3).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "???");
+}
+
+#[test]
+fn does_not_treat_assignment_equals_as_a_term_identifier() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "=",
+        vec![
+            token(TokenKind::Operator, 0, 1),
+            token(TokenKind::Eof, 1, 1),
+        ],
+        &mut names,
+    );
+
     let _id = parser.postfix_expr();
 
     assert_eq!(parser.current().kind, TokenKind::Eof);
-    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(parser.diagnostics().len(), 1);
+}
+
+#[test]
+fn does_not_treat_arrow_as_a_term_identifier() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "=>",
+        vec![
+            token(TokenKind::Operator, 0, 2),
+            token(TokenKind::Eof, 2, 2),
+        ],
+        &mut names,
+    );
+
+    let _id = parser.postfix_expr();
+
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert_eq!(parser.diagnostics().len(), 1);
+}
+
+#[test]
+fn does_not_treat_other_structural_operator_tokens_as_term_identifiers() {
+    for spelling in ["<-", "=>>", "?=>", "@", "#"] {
+        let mut names = NameInterner::new();
+        let end = spelling.len() as u32;
+        let mut parser = parser_for(
+            spelling,
+            vec![
+                token(TokenKind::Operator, 0, end),
+                token(TokenKind::Eof, end, end),
+            ],
+            &mut names,
+        );
+
+        let _id = parser.postfix_expr();
+
+        assert_eq!(parser.current().kind, TokenKind::Eof, "{spelling}");
+        assert_eq!(parser.diagnostics().len(), 1, "{spelling}");
+    }
 }
 
 #[test]

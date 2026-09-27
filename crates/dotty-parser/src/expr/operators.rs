@@ -1,6 +1,7 @@
 use dotty_core::ast::{Ident, InfixOp, PrefixOp, TypedExpr, UntypedNode};
 use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
+use super::simple::is_term_operator_identifier;
 use super::{PendingOperator, can_start_prefix_expr, is_numeric_literal};
 use crate::Parser;
 
@@ -339,10 +340,23 @@ where
             return None;
         }
 
-        match self.current_text().ok()? {
-            "-" | "+" | "~" | "!" => self.intern_current_term_name().ok(),
-            _ => None,
+        if !matches!(self.current_text().ok()?, "-" | "+" | "~" | "!") {
+            return None;
         }
+
+        let operand = self.cursor.lookahead(1).clone();
+        if !can_start_prefix_expr(operand.kind)
+            || (operand.kind == TokenKind::Operator
+                && !self
+                    .token_text(&operand)
+                    .ok()
+                    .is_some_and(is_term_operator_identifier))
+            || self.has_physical_line_break(self.current().span.end(), operand.span.start())
+        {
+            return None;
+        }
+
+        self.intern_current_term_name().ok()
     }
 
     pub(super) fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
