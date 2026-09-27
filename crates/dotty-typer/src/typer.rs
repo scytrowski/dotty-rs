@@ -20,8 +20,11 @@ use crate::SourceTypeIndex;
 mod lookup;
 #[path = "substitution.rs"]
 mod substitution;
+#[path = "types/subtype.rs"]
+mod subtype;
 
 pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
+pub use subtype::{MAX_TYPE_RELATION_DEPTH, TypeRelationError};
 
 /// A recoverable failure while projecting or completing source semantics.
 #[derive(Debug)]
@@ -3033,6 +3036,179 @@ mod tests {
         let typer = SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
         assert_eq!(typer.definitions.int, definitions.int);
+    }
+
+    #[test]
+    fn subtype_relation_is_reflexive_for_canonical_primitive_types() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(typer.is_subtype(definitions.int, definitions.int).unwrap());
+        assert!(typer.conforms(definitions.int, definitions.int).unwrap());
+    }
+
+    #[test]
+    fn semantic_type_refs_equivalent_across_distinct_type_ids() {
+        let (arena, mut store, packages, definitions) = setup();
+        let symbol = type_symbol(&store, definitions.int);
+        let prefix = store.types.alloc(Type::NoPrefix);
+        let duplicate = store.types.alloc(Type::type_ref(prefix, symbol));
+        assert_ne!(definitions.int, duplicate);
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(typer.is_subtype(definitions.int, duplicate).unwrap());
+    }
+
+    #[test]
+    fn bottom_and_top_rules_use_canonical_definitions() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(
+            typer
+                .is_subtype(definitions.nothing_type, definitions.int)
+                .unwrap()
+        );
+        assert!(
+            typer
+                .is_subtype(definitions.int, definitions.any_type)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn unrelated_source_classes_do_not_conform_without_inheritance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; class B");
+        let a = class_symbol(&parsed, &store, &index, source, "A");
+        let b = class_symbol(&parsed, &store, &index, source, "B");
+        let a_type = nominal_type_ref(&mut store, definitions, a);
+        let b_type = nominal_type_ref(&mut store, definitions, b);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.is_subtype(a_type, b_type).unwrap());
+    }
+
+    #[test]
+    fn this_type_conforms_to_its_own_class_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let this = store.types.alloc(Type::ThisType { class });
+        let class_type = nominal_type_ref(&mut store, definitions, class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.is_subtype(this, class_type).unwrap());
+    }
+
+    #[test]
+    fn invariant_applied_types_accept_equivalent_arguments_only() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let int_box = applied_class_type(&mut store, definitions, box_class, &[definitions.int]);
+        let same_int_box =
+            applied_class_type(&mut store, definitions, box_class, &[definitions.int]);
+        let any_box =
+            applied_class_type(&mut store, definitions, box_class, &[definitions.any_type]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.is_subtype(int_box, same_int_box).unwrap());
+        assert!(!typer.is_subtype(int_box, any_box).unwrap());
+    }
+
+    #[test]
+    fn invariant_applied_types_reject_malformed_arity_explicitly() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let int_box = applied_class_type(&mut store, definitions, box_class, &[definitions.int]);
+        let raw_box = applied_class_type(&mut store, definitions, box_class, &[]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.is_subtype(int_box, raw_box),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+    }
+
+    #[test]
+    fn unsupported_union_relations_return_an_explicit_error() {
+        let (arena, mut store, packages, definitions) = setup();
+        let union = store.types.alloc(Type::Or {
+            left: definitions.int,
+            right: definitions.boolean,
+        });
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.is_subtype(union, definitions.int),
+            Err(TypeRelationError::UnsupportedType { found, expected })
+                if found == union && expected == definitions.int
+        ));
+    }
+
+    #[test]
+    fn non_equivalent_by_name_relations_are_explicitly_unsupported() {
+        let (arena, mut store, packages, definitions) = setup();
+        let int_by_name = store.types.alloc(Type::ByName {
+            result: definitions.int,
+        });
+        let boolean_by_name = store.types.alloc(Type::ByName {
+            result: definitions.boolean,
+        });
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.is_subtype(int_by_name, boolean_by_name),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(matches!(
+            typer.is_subtype(int_by_name, definitions.any_type),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
     }
 
     #[test]
