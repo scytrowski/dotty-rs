@@ -41,7 +41,11 @@ pub enum ParseKind {
 /// policy in a context where that word has contextual meaning.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ParserFeatures {
-    /// Enables capture-checking syntax when that grammar is implemented.
+    /// Enables capture-checking grammar for this compilation unit.
+    ///
+    /// The default is disabled. A caller may enable it explicitly, or the
+    /// parser may enable it after a Scala 3.9 global language import. Capture
+    /// syntax productions are added incrementally.
     pub capture_checking: bool,
     /// Enables `erased` definitions when that grammar is implemented.
     pub erased_definitions: bool,

@@ -90,11 +90,15 @@ recovery paths. `KnownNames` pre-interns the Scala 3.9 soft keywords `as`,
 feature-dependent names `into`, `erased`, `tracked`, and `update`. The lexer
 still emits all of these as identifiers;
 parser context gives them grammar meaning only in the appropriate production.
-`ParserFeatures` currently exposes independent switches for capture checking,
-erased definitions, `into`, legacy `postfix_ops`, and experimental single-case
-`match case` syntax (`sub_cases`), all disabled by default.
-The switches are a boundary for future grammar work, not an implementation of
-those features.
+`ParserFeatures` exposes independent switches for capture checking, erased
+definitions, `into`, legacy `postfix_ops`, and experimental single-case
+`match case` syntax (`sub_cases`). Capture checking is disabled by default;
+the parser activates its per-unit policy for the top-level
+`language.experimental.captureChecking` import (or when explicitly enabled by
+the caller). A misplaced global language import receives Dotty's toplevel
+placement diagnostic while still marking the compilation unit, as in Dotty
+3.9. The capture-checking grammar itself remains an incremental follow-up; the
+other feature switches remain disabled policy boundaries for future grammar.
 
 The parser forwards `ColonEol`, `Indented`, `Outdented`, `ArrowIndented`, and
 the template-specific `SelfArrow` event through readable helpers. A self arrow

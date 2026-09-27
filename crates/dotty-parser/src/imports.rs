@@ -8,7 +8,62 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn parse_import_clause(&mut self, _location: Location) -> Vec<TreeId<Untyped>> {
-        self.parse_import_or_export_clause(false)
+        let imports = self.parse_import_or_export_clause(false);
+        for import_id in &imports {
+            if self.is_capture_checking_language_import(*import_id) {
+                // Dotty records this compilation-unit feature before checking
+                // whether the import was written at the outermost level.
+                self.context.features.capture_checking = true;
+                if !self.outermost_imports_allowed {
+                    let span = self
+                        .ast
+                        .get(*import_id)
+                        .position
+                        .unwrap_or_else(|| self.current_span());
+                    self.report_at(
+                        ParseDiagnosticKind::ExpectedToken,
+                        span,
+                        "this language import is only allowed at the toplevel",
+                    );
+                }
+            }
+        }
+        imports
+    }
+
+    fn is_capture_checking_language_import(&self, import_id: TreeId<Untyped>) -> bool {
+        let TreeKind::Import(import) = &self.ast.get(import_id).kind else {
+            return false;
+        };
+
+        let language_import = self.matches_name_path(import.expr, &["language", "experimental"])
+            || self.matches_name_path(import.expr, &["scala", "language", "experimental"])
+            || self.matches_name_path(
+                import.expr,
+                &["_root_", "scala", "language", "experimental"],
+            );
+        language_import
+            && import.selectors.iter().any(|selector| {
+                self.names.resolve(selector.imported.text()) == "captureChecking"
+                    && selector.renamed.is_none()
+                    && selector.bound.is_none()
+            })
+    }
+
+    fn matches_name_path(&self, tree_id: TreeId<Untyped>, expected: &[&str]) -> bool {
+        let Some((last, prefix)) = expected.split_last() else {
+            return false;
+        };
+        match &self.ast.get(tree_id).kind {
+            TreeKind::Ident(identifier) => {
+                prefix.is_empty() && self.names.resolve(identifier.name.text()) == *last
+            }
+            TreeKind::Select(selection) => {
+                self.names.resolve(selection.name.text()) == *last
+                    && self.matches_name_path(selection.qualifier, prefix)
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn parse_export_clause(&mut self, _location: Location) -> Vec<TreeId<Untyped>> {
@@ -351,7 +406,49 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{HardKeyword, NameInterner, TextRange, TreeKind};
+    use crate::statements::StatementSequenceBoundary;
+    use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, Token, TreeKind};
+
+    fn capture_import_tokens(source: &str) -> Vec<Token> {
+        let mut tokens = Vec::new();
+        let mut offset = 0;
+        while offset < source.len() {
+            let bytes = source.as_bytes();
+            if bytes[offset].is_ascii_whitespace() {
+                offset += 1;
+                continue;
+            }
+            if bytes[offset] == b'.' {
+                tokens.push(token(
+                    TokenKind::Punctuation(Punctuation::Dot),
+                    offset as u32,
+                    offset as u32 + 1,
+                ));
+                offset += 1;
+                continue;
+            }
+            let start = offset;
+            while offset < source.len()
+                && !bytes[offset].is_ascii_whitespace()
+                && bytes[offset] != b'.'
+            {
+                offset += 1;
+            }
+            let spelling = &source[start..offset];
+            let kind = if spelling == "import" {
+                TokenKind::Keyword(HardKeyword::Import)
+            } else {
+                TokenKind::Identifier
+            };
+            tokens.push(token(kind, start as u32, offset as u32));
+        }
+        tokens.push(token(
+            TokenKind::Eof,
+            source.len() as u32,
+            source.len() as u32,
+        ));
+        tokens
+    }
 
     fn assert_malformed_selector_list(source: &str, tokens: Vec<dotty_core::Token>) {
         let mut names = NameInterner::new();
@@ -400,6 +497,125 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(imported.text()), "bar");
+    }
+
+    #[test]
+    fn top_level_capture_checking_import_enables_the_unit_feature() {
+        let source = "import language.experimental.captureChecking";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, capture_import_tokens(source), &mut names);
+
+        assert!(!parser.features().capture_checking);
+        parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert!(parser.features().capture_checking);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn scala_qualified_capture_checking_import_enables_the_unit_feature() {
+        let source = "import scala.language.experimental.captureChecking";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, capture_import_tokens(source), &mut names);
+
+        parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert!(parser.features().capture_checking);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn root_qualified_capture_checking_import_enables_the_unit_feature() {
+        let source = "import _root_.scala.language.experimental.captureChecking";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, capture_import_tokens(source), &mut names);
+
+        parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert!(parser.features().capture_checking);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_checking_import_in_a_block_reports_placement_but_sets_unit_policy() {
+        let source = "import language.experimental.captureChecking}";
+        let mut tokens = capture_import_tokens("import language.experimental.captureChecking");
+        tokens.pop();
+        tokens.push(token(
+            TokenKind::Punctuation(Punctuation::RightBrace),
+            source.len() as u32 - 1,
+            source.len() as u32,
+        ));
+        tokens.push(token(
+            TokenKind::Eof,
+            source.len() as u32,
+            source.len() as u32,
+        ));
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+
+        parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Punctuation(
+            Punctuation::RightBrace,
+        )));
+
+        assert!(parser.features().capture_checking);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "this language import is only allowed at the toplevel"
+        );
+    }
+
+    #[test]
+    fn aliased_capture_checking_name_does_not_enable_the_feature() {
+        let source = "import language.experimental.captureChecking as cc";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, capture_import_tokens(source), &mut names);
+
+        parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert!(!parser.features().capture_checking);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn explicitly_enabled_feature_remains_enabled_without_a_language_import() {
+        let mut names = NameInterner::new();
+        let parser = parser_for("", vec![token(TokenKind::Eof, 0, 0)], &mut names).with_features(
+            crate::ParserFeatures {
+                capture_checking: true,
+                ..crate::ParserFeatures::default()
+            },
+        );
+
+        assert!(parser.features().capture_checking);
+    }
+
+    #[test]
+    fn capture_checking_import_state_does_not_leak_to_another_parser() {
+        let source = "import language.experimental.captureChecking";
+        let mut names = NameInterner::new();
+        let mut importing = parser_for(source, capture_import_tokens(source), &mut names);
+        importing.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+        assert!(importing.features().capture_checking);
+
+        let other = parser_for("", vec![token(TokenKind::Eof, 0, 0)], &mut names);
+        assert!(!other.features().capture_checking);
     }
 
     #[test]

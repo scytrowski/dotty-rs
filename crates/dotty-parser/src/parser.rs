@@ -24,6 +24,10 @@ where
     pub(crate) ast: AstArena<Untyped>,
     pub(crate) last_real_token_end: u32,
     pub(crate) context: ParseContext,
+    /// Whether the current statement sequence is Dotty's outermost import
+    /// position, where global language imports are permitted without a
+    /// placement diagnostic.
+    pub(crate) outermost_imports_allowed: bool,
     pub(crate) diagnostics: Vec<ParseDiagnostic>,
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
@@ -71,6 +75,7 @@ where
             ast: AstArena::new(),
             last_real_token_end,
             context: ParseContext::default(),
+            outermost_imports_allowed: false,
             diagnostics: Vec::new(),
             known_names,
             next_wildcard_param: 0,
@@ -161,6 +166,19 @@ where
         self.context.location = location;
         let result = parse(self);
         self.context.location = previous;
+        result
+    }
+
+    /// Runs a statement sequence with Dotty's outermost-import policy.
+    pub(crate) fn with_outermost_imports_allowed<T>(
+        &mut self,
+        allowed: bool,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.outermost_imports_allowed;
+        self.outermost_imports_allowed = allowed;
+        let result = parse(self);
+        self.outermost_imports_allowed = previous;
         result
     }
 

@@ -166,6 +166,16 @@ where
         &mut self,
         boundary: StatementSequenceBoundary,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        let outermost = boundary == StatementSequenceBoundary::CompilationUnit;
+        self.with_outermost_imports_allowed(outermost, |parser| {
+            parser.parse_statement_sequence_inner(boundary)
+        })
+    }
+
+    fn parse_statement_sequence_inner(
+        &mut self,
+        boundary: StatementSequenceBoundary,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut statements = Vec::new();
         let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
@@ -280,6 +290,17 @@ where
     /// Parses a compilation-unit or package statement sequence without the
     /// synthetic trailing expression used by expression blocks.
     pub(crate) fn parse_top_level_sequence(
+        &mut self,
+        boundary: StatementSequenceBoundary,
+        location: Location,
+    ) -> Vec<TreeId<Untyped>> {
+        let outermost = boundary == StatementSequenceBoundary::CompilationUnit;
+        self.with_outermost_imports_allowed(outermost, |parser| {
+            parser.parse_top_level_sequence_inner(boundary, location)
+        })
+    }
+
+    fn parse_top_level_sequence_inner(
         &mut self,
         boundary: StatementSequenceBoundary,
         location: Location,
