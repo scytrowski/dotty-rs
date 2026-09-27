@@ -595,8 +595,16 @@ where
             parents.push(self.parse_parent());
         }
 
-        if parents.len() > 1 || self.optional_template_body_starts_here() {
-            let body = self.parse_optional_template_body();
+        let has_template_body = self.optional_template_body_starts_here();
+        if parents.len() > 1 || has_template_body {
+            let body = if has_template_body {
+                self.parse_optional_template_body()
+            } else {
+                crate::templates::TemplateBodyResult {
+                    self_val: None,
+                    members: Vec::new(),
+                }
+            };
             self.new_with_anonymous_template(mark, parents, body)
         } else {
             let parent = parents[0];

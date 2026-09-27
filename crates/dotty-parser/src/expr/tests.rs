@@ -696,6 +696,43 @@ fn keeps_the_inner_new_span_on_its_type_name() {
 }
 
 #[test]
+fn leaves_a_statement_separator_after_a_mixin_new_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ new C with T\nx }",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::New), 2, 5),
+            token(TokenKind::Identifier, 6, 7),
+            token(TokenKind::Keyword(HardKeyword::With), 8, 12),
+            token(TokenKind::Identifier, 13, 14),
+            token(TokenKind::Newline, 14, 15),
+            token(TokenKind::Identifier, 15, 16),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Block(block) = &parser.ast().get(tree).kind else {
+        panic!("expected the enclosing expression block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::New(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_an_indented_template_body_after_mixin_parents() {
     let source = "new C with T:\n  def value = 1\n";
     let mut names = NameInterner::new();
