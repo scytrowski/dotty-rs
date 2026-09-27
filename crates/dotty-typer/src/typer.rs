@@ -10,11 +10,11 @@ use dotty_core::types::{
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
     ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Untyped,
+    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Typed, Untyped,
 };
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
-use crate::SourceTypeIndex;
+use crate::{SourceTypeIndex, SourceTypedIndex};
 
 #[path = "lookup/mod.rs"]
 mod lookup;
@@ -248,6 +248,8 @@ pub struct SourceTyper<'a> {
     packages: &'a Packages,
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
+    typed_arena: AstArena<Typed>,
+    typed_index: SourceTypedIndex,
 }
 
 #[derive(Clone, Copy)]
@@ -364,6 +366,8 @@ impl<'a> SourceTyper<'a> {
             packages,
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
+            typed_arena: AstArena::new(),
+            typed_index: SourceTypedIndex::new(),
         }
     }
 
@@ -2734,6 +2738,16 @@ impl<'a> SourceTyper<'a> {
     /// Exposes the shared semantic store after the driver is no longer needed.
     pub fn store(&self) -> &SemanticStore {
         self.store
+    }
+
+    /// Typed expression trees produced by this typer instance.
+    pub fn typed_ast(&self) -> &AstArena<Typed> {
+        &self.typed_arena
+    }
+
+    /// Source-to-typed mappings produced by this typer instance.
+    pub fn source_typed_index(&self) -> &SourceTypedIndex {
+        &self.typed_index
     }
 
     /// Exposes the package registry used by this driver.

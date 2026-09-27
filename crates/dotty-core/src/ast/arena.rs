@@ -14,6 +14,10 @@ pub struct AstArena<P: AstPhase> {
     nodes: Vec<Tree<P>>,
 }
 
+/// Opaque allocation checkpoint for an [`AstArena`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AstArenaCheckpoint(usize);
+
 impl<P: AstPhase> Default for AstArena<P> {
     fn default() -> Self {
         Self { nodes: Vec::new() }
@@ -29,6 +33,21 @@ impl<P: AstPhase> AstArena<P> {
         let id = TreeId::new(checked_index(self.nodes.len()));
         self.nodes.push(tree);
         id
+    }
+
+    /// Records the current allocation boundary. A later [`rollback_to`](Self::rollback_to)
+    /// invalidates every tree ID allocated after this checkpoint.
+    pub fn checkpoint(&self) -> AstArenaCheckpoint {
+        AstArenaCheckpoint(self.nodes.len())
+    }
+
+    /// Removes trees allocated after `checkpoint`.
+    ///
+    /// The checkpoint must come from this arena and must not be older than a
+    /// previous rollback. IDs for removed trees become invalid and may be
+    /// reused by later allocations.
+    pub fn rollback_to(&mut self, checkpoint: AstArenaCheckpoint) {
+        self.nodes.truncate(checkpoint.0);
     }
 
     /// Panics if `id` was not allocated by this arena — see
@@ -141,5 +160,18 @@ mod tests {
         let arena = AstArena::<Untyped>::new();
 
         assert!(arena.try_get(TreeId::new(0)).is_none());
+    }
+
+    #[test]
+    fn rollback_removes_only_allocations_after_its_checkpoint() {
+        let mut arena = AstArena::<Untyped>::new();
+        let kept = arena.alloc(ident_tree(1));
+        let checkpoint = arena.checkpoint();
+        let removed = arena.alloc(ident_tree(2));
+
+        arena.rollback_to(checkpoint);
+
+        assert_eq!(arena.try_get(kept), Some(&ident_tree(1)));
+        assert!(arena.try_get(removed).is_none());
     }
 }

@@ -18,10 +18,12 @@
 //! preceding it in its source context chain.
 
 mod source_type_index;
+mod source_typed_index;
 mod typer;
 mod types;
 
 pub use source_type_index::SourceTypeIndex;
+pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
     MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MemberCandidate,
     MemberLookupError, SourceTyper, TypeRelationError, TyperError,
