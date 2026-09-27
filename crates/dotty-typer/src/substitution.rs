@@ -12,6 +12,27 @@ impl SourceTyper<'_> {
     /// Adapts a completed declaration type for this candidate's instantiated
     /// declaring-class view. The canonical declaration info is never changed.
     pub fn member_type_on(&mut self, candidate: &MemberCandidate) -> Result<TypeId, TyperError> {
+        let store_checkpoint = self.store.checkpoint();
+        let mut journal = Vec::new();
+        let checkpoint = self.type_index.checkpoint();
+        let result = self.member_type_on_journaled(candidate, &mut journal);
+        if result.is_err() {
+            for (symbol, previous) in journal.into_iter().rev() {
+                if self.store.symbols.contains(symbol) {
+                    self.store.symbols.set_info(symbol, previous);
+                }
+            }
+            self.store.rollback_to(store_checkpoint);
+            self.type_index.restore(checkpoint);
+        }
+        result
+    }
+
+    pub(in crate::typer) fn member_type_on_journaled(
+        &mut self,
+        candidate: &MemberCandidate,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         // The lookup candidate owns the instantiated declaring-class view.
         // Taking no separate receiver avoids implying we can validate how it
         // was reached from an original receiver type.
@@ -33,7 +54,7 @@ impl SourceTyper<'_> {
             SymbolInfo::Missing
         ) && self.is_current_source_symbol(candidate.symbol)
         {
-            self.complete_symbol(candidate.symbol)?;
+            self.complete_symbol_inner(candidate.symbol, journal)?;
         }
         let declaration = match *self.store.symbols.info(candidate.symbol) {
             SymbolInfo::Complete(info) => info,

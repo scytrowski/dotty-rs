@@ -2,12 +2,13 @@
 //! without a real `TypeId`.
 
 use crate::ast::arena::AstArena;
-use crate::ast::common::{Apply, ApplyKind, Ident};
+use crate::ast::common::{Apply, ApplyKind, Ident, Literal, Select, This};
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
 use crate::ids::{TreeId, TypeId};
 use crate::names::Name;
 use crate::source::SourceSpan;
+use crate::types::Constant;
 
 pub type TypedTree = Tree<Typed>;
 pub type TypedTreeId = TreeId<Typed>;
@@ -26,11 +27,67 @@ impl<'a> TypedAstBuilder<'a> {
     }
 
     pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
+        self.ident_with_backquoted(name, false, ty, position)
+    }
+
+    /// Allocates a typed identifier while retaining its source backquotes.
+    pub fn ident_with_backquoted(
+        &mut self,
+        name: Name,
+        backquoted: bool,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
-            kind: TreeKind::Ident(Ident {
+            kind: TreeKind::Ident(Ident { name, backquoted }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed literal with its already-determined semantic type.
+    pub fn literal(
+        &mut self,
+        value: Constant,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::Literal(Literal { value }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed member selection referencing a typed qualifier.
+    pub fn select(
+        &mut self,
+        qualifier: TreeId<Typed>,
+        name: Name,
+        backquoted: bool,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier,
                 name,
-                backquoted: false,
+                backquoted,
             }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed `this` reference with an optional source qualifier.
+    pub fn this(
+        &mut self,
+        qual: Option<Name>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::This(This { qual }),
             position,
             ty,
         })
@@ -98,5 +155,65 @@ mod tests {
         };
         assert_eq!(apply.function, function);
         assert_eq!(apply.args, vec![arg]);
+    }
+
+    #[test]
+    fn literal_keeps_the_constant_and_explicit_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let ty = TypeId::new(2);
+
+        let literal = builder.literal(Constant::Int(42), ty, None);
+
+        assert_eq!(
+            arena.get(literal).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Int(42)
+            })
+        );
+        assert_eq!(arena.get(literal).ty, ty);
+    }
+
+    #[test]
+    fn select_keeps_the_typed_qualifier_and_explicit_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let qualifier = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let selected_name = Name::new(NameId::new(3), Namespace::Term);
+        let selected_type = TypeId::new(4);
+
+        let select = builder.select(qualifier, selected_name, true, selected_type, None);
+
+        assert_eq!(
+            arena.get(select).kind,
+            TreeKind::Select(Select {
+                qualifier,
+                name: selected_name,
+                backquoted: true,
+            })
+        );
+        assert_eq!(arena.get(select).ty, selected_type);
+    }
+
+    #[test]
+    fn this_keeps_its_optional_qualifier_and_explicit_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let qualifier = Name::new(NameId::new(3), Namespace::Type);
+        let ty = TypeId::new(4);
+
+        let this = builder.this(Some(qualifier), ty, None);
+
+        assert_eq!(
+            arena.get(this).kind,
+            TreeKind::This(This {
+                qual: Some(qualifier)
+            })
+        );
+        assert_eq!(arena.get(this).ty, ty);
     }
 }

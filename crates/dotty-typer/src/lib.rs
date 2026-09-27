@@ -1,8 +1,11 @@
 //! Source declaration signature completion.
 //!
 //! The typer consumes a parsed and named untyped source tree. It does not
-//! parse source, allocate declaration symbols, load classpath entries, or
-//! construct a typed AST. Semantic type trees are cached per source unit.
+//! parse source, allocate declaration symbols, or load classpath entries.
+//! [`SourceTyper::type_expression`] builds typed AST nodes for literals, term
+//! identifiers, `this`, and unique member selections. Unsupported expression
+//! forms return typed errors. Semantic type trees and source-to-typed mappings
+//! are cached by source tree identity.
 //!
 //! Qualified type references use `ThisType` for an enclosing class prefix and
 //! the canonical package `TypeRef` (with `no_prefix`) for package prefixes.
@@ -18,13 +21,15 @@
 //! preceding it in its source context chain.
 
 mod source_type_index;
+mod source_typed_index;
 mod typer;
 mod types;
 
 pub use source_type_index::SourceTypeIndex;
+pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
-    MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MemberCandidate,
-    MemberLookupError, SourceTyper, TypeRelationError, TyperError,
+    ExpressionContext, MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS,
+    MemberCandidate, MemberLookupError, SourceTyper, TypeRelationError, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,
