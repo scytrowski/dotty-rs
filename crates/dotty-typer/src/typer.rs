@@ -2902,14 +2902,56 @@ mod tests {
         class: SymbolId,
         arguments: &[TypeId],
     ) -> TypeId {
-        let tycon = store.types.alloc(Type::TypeRef {
-            prefix: definitions.no_prefix,
-            target: TypeRefTarget::Symbol(class),
-        });
+        applied_class_type_with_prefix(store, class, definitions.no_prefix, arguments)
+    }
+
+    fn applied_class_type_with_prefix(
+        store: &mut SemanticStore,
+        class: SymbolId,
+        prefix: TypeId,
+        arguments: &[TypeId],
+    ) -> TypeId {
+        let tycon = store.types.alloc(Type::type_ref(prefix, class));
         store.types.alloc(Type::Applied {
             tycon,
             args: arguments.to_vec(),
         })
+    }
+
+    fn parent_prefix_for(
+        store: &SemanticStore,
+        class: SymbolId,
+        expected_parent: SymbolId,
+    ) -> TypeId {
+        let SymbolInfo::Complete(info) = *store.symbols.info(class) else {
+            panic!("class info for {class:?} is not complete");
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            panic!("class info for {class:?} does not reference ClassInfo");
+        };
+        let Some(parent) = info.parents.iter().find(|parent| {
+            let tycon = match store.types.get(**parent) {
+                Type::Applied { tycon, .. } => *tycon,
+                _ => **parent,
+            };
+            matches!(
+                store.types.get(tycon),
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == expected_parent
+            )
+        }) else {
+            panic!("class {class:?} has no parent view");
+        };
+        let tycon = match store.types.get(*parent) {
+            Type::Applied { tycon, .. } => *tycon,
+            _ => *parent,
+        };
+        match store.types.get(tycon) {
+            Type::TypeRef { prefix, .. } => *prefix,
+            other => panic!("parent view has unexpected type constructor {other:?}"),
+        }
     }
 
     fn nominal_type_ref(
@@ -2917,10 +2959,15 @@ mod tests {
         definitions: Definitions,
         class: SymbolId,
     ) -> TypeId {
-        store.types.alloc(Type::TypeRef {
-            prefix: definitions.no_prefix,
-            target: TypeRefTarget::Symbol(class),
-        })
+        nominal_type_ref_with_prefix(store, class, definitions.no_prefix)
+    }
+
+    fn nominal_type_ref_with_prefix(
+        store: &mut SemanticStore,
+        class: SymbolId,
+        prefix: TypeId,
+    ) -> TypeId {
+        store.types.alloc(Type::type_ref(prefix, class))
     }
 
     fn candidate_for(
@@ -3066,6 +3113,29 @@ mod tests {
     }
 
     #[test]
+    fn same_class_references_with_distinct_prefixes_are_not_equivalent() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C; class First; class Second");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let first = class_symbol(&parsed, &store, &index, source, "First");
+        let second = class_symbol(&parsed, &store, &index, source, "Second");
+        let first_prefix = store.types.alloc(Type::ThisType { class: first });
+        let second_prefix = store.types.alloc(Type::ThisType { class: second });
+        let first_reference = store.types.alloc(Type::type_ref(first_prefix, class));
+        let second_reference = store.types.alloc(Type::type_ref(second_prefix, class));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.is_subtype(first_reference, second_reference).unwrap());
+    }
+
+    #[test]
     fn bottom_and_top_rules_use_canonical_definitions() {
         let (arena, mut store, packages, definitions) = setup();
         let index = SourceSemanticIndex::new();
@@ -3114,7 +3184,6 @@ mod tests {
         let parent = class_symbol(&parsed, &store, &index, source, "Parent");
         let child = class_symbol(&parsed, &store, &index, source, "Child");
         let child_type = nominal_type_ref(&mut store, definitions, child);
-        let parent_type = nominal_type_ref(&mut store, definitions, parent);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3126,6 +3195,8 @@ mod tests {
 
         typer.complete_symbol(child).unwrap();
         typer.complete_symbol(parent).unwrap();
+        let parent_prefix = parent_prefix_for(typer.store, child, parent);
+        let parent_type = nominal_type_ref_with_prefix(typer.store, parent, parent_prefix);
         assert!(typer.is_subtype(child_type, parent_type).unwrap());
     }
 
@@ -3136,7 +3207,6 @@ mod tests {
         let parent = class_symbol(&parsed, &store, &index, source, "Parent");
         let child = class_symbol(&parsed, &store, &index, source, "Child");
         let child_type = nominal_type_ref(&mut store, definitions, child);
-        let parent_type = nominal_type_ref(&mut store, definitions, parent);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3148,6 +3218,8 @@ mod tests {
 
         typer.complete_symbol(child).unwrap();
         typer.complete_symbol(parent).unwrap();
+        let parent_prefix = parent_prefix_for(typer.store, child, parent);
+        let parent_type = nominal_type_ref_with_prefix(typer.store, parent, parent_prefix);
         assert!(typer.is_subtype(child_type, parent_type).unwrap());
     }
 
@@ -3160,7 +3232,6 @@ mod tests {
         let parent = class_symbol(&parsed, &store, &index, source, "Parent");
         let child = class_symbol(&parsed, &store, &index, source, "Child");
         let child_type = nominal_type_ref(&mut store, definitions, child);
-        let grandparent_type = nominal_type_ref(&mut store, definitions, grandparent);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3173,6 +3244,9 @@ mod tests {
         typer.complete_symbol(child).unwrap();
         typer.complete_symbol(parent).unwrap();
         typer.complete_symbol(grandparent).unwrap();
+        let grandparent_prefix = parent_prefix_for(typer.store, parent, grandparent);
+        let grandparent_type =
+            nominal_type_ref_with_prefix(typer.store, grandparent, grandparent_prefix);
         assert!(typer.is_subtype(child_type, grandparent_type).unwrap());
     }
 
@@ -3183,9 +3257,6 @@ mod tests {
         let parent = class_symbol(&parsed, &store, &index, source, "Parent");
         let child = class_symbol(&parsed, &store, &index, source, "Child");
         let child_type = applied_class_type(&mut store, definitions, child, &[definitions.int]);
-        let parent_type = applied_class_type(&mut store, definitions, parent, &[definitions.int]);
-        let wrong_parent_type =
-            applied_class_type(&mut store, definitions, parent, &[definitions.boolean]);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3197,6 +3268,15 @@ mod tests {
 
         typer.complete_symbol(child).unwrap();
         typer.complete_symbol(parent).unwrap();
+        let parent_prefix = parent_prefix_for(typer.store, child, parent);
+        let parent_type =
+            applied_class_type_with_prefix(typer.store, parent, parent_prefix, &[definitions.int]);
+        let wrong_parent_type = applied_class_type_with_prefix(
+            typer.store,
+            parent,
+            parent_prefix,
+            &[definitions.boolean],
+        );
         assert!(typer.is_subtype(child_type, parent_type).unwrap());
         assert!(!typer.is_subtype(child_type, wrong_parent_type).unwrap());
     }

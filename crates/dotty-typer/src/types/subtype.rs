@@ -368,17 +368,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             _ => return Ok(false),
         }
 
-        let declaration = self.typer.store.symbols.get(left.class);
-        let nested = declaration.owner.is_some_and(|owner| {
-            self.typer.store.symbols.contains(owner)
-                && matches!(
-                    self.typer.store.symbols.get(owner).kind,
-                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-                )
-        });
-        if !nested {
-            return Ok(true);
-        }
         self.equivalent(left_constructor, right_constructor, depth + 1)
     }
 
