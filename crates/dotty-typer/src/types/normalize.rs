@@ -26,6 +26,8 @@ pub enum SymbolInfoState {
 pub enum TypeNormalizeError {
     /// A `TypeId` is a reserved slot that has not been filled.
     UnfilledType { ty: TypeId },
+    /// A `TypeId` points outside the semantic store's type arena.
+    InvalidType { ty: TypeId },
     /// A symbol reference points outside this semantic store.
     UnknownSymbol { symbol: SymbolId },
     /// A type alias is opaque at this stage; its representation is hidden.
@@ -97,10 +99,7 @@ impl<'a> TypeNormalizer<'a> {
         let mut visited = Vec::new();
 
         for links in 0..=budget {
-            if !self.store.types.is_filled(current) {
-                return Err(TypeNormalizeError::UnfilledType { ty: current });
-            }
-            let (symbol, next) = match self.store.types.get(current) {
+            let (symbol, next) = match self.type_at(current)? {
                 Type::TypeRef {
                     target: TypeRefTarget::Symbol(symbol),
                     ..
@@ -150,10 +149,7 @@ impl<'a> TypeNormalizer<'a> {
     /// methods, constructors, objects, packages, locals, and name targets need
     /// different typing rules and are rejected.
     pub fn widen_term_ref(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
-        if !self.store.types.is_filled(ty) {
-            return Err(TypeNormalizeError::UnfilledType { ty });
-        }
-        let Type::TermRef { target, .. } = self.store.types.get(ty) else {
+        let Type::TermRef { target, .. } = self.type_at(ty)? else {
             return Err(TypeNormalizeError::NotTermRef { ty });
         };
         let symbol = match target {
@@ -177,9 +173,7 @@ impl<'a> TypeNormalizer<'a> {
         }
         match declaration.info {
             SymbolInfo::Complete(info) => {
-                if !self.store.types.is_filled(info) {
-                    return Err(TypeNormalizeError::UnfilledType { ty: info });
-                }
+                self.type_at(info)?;
                 Ok(info)
             }
             SymbolInfo::Missing => Err(TypeNormalizeError::TermRefInfoIncomplete {
@@ -212,12 +206,10 @@ impl<'a> TypeNormalizer<'a> {
                 return Err(TypeNormalizeError::NormalizationCycle { ty: current });
             }
             visited.push(current);
-            if !self.store.types.is_filled(current) {
-                return Err(TypeNormalizeError::UnfilledType { ty: current });
-            }
+            let current_type = self.type_at(current)?;
             // Applied aliases require substitution. Lookup normalization is
             // intentionally shallow, so it preserves the entire application.
-            if matches!(self.store.types.get(current), Type::Applied { .. }) {
+            if matches!(current_type, Type::Applied { .. }) {
                 return Ok(current);
             }
             let (dealiased, links) = self.dealias_top_with_budget(
@@ -229,7 +221,7 @@ impl<'a> TypeNormalizer<'a> {
                 current = dealiased;
                 continue;
             }
-            let underlying = match self.store.types.get(current) {
+            let underlying = match self.type_at(current)? {
                 Type::Annotated { underlying, .. } | Type::Flexible { underlying } => *underlying,
                 _ => return Ok(current),
             };
@@ -242,13 +234,10 @@ impl<'a> TypeNormalizer<'a> {
     }
 
     fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {
-        if !self.store.types.is_filled(ty) {
-            return Err(TypeNormalizeError::UnfilledType { ty });
-        }
         let Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
-        } = self.store.types.get(ty)
+        } = self.type_at(ty)?
         else {
             return Ok(None);
         };
@@ -293,13 +282,20 @@ impl<'a> TypeNormalizer<'a> {
                 });
             }
         };
-        if !self.store.types.is_filled(info) {
-            return Err(TypeNormalizeError::UnfilledType { ty: info });
-        }
-        match self.store.types.get(info) {
+        match self.type_at(info)? {
             Type::AliasingBounds { alias } => Ok(Some(*alias)),
             _ => Err(TypeNormalizeError::AliasInfoNotAliasingBounds { symbol, info }),
         }
+    }
+
+    fn type_at(&self, ty: TypeId) -> Result<&Type, TypeNormalizeError> {
+        self.store.types.try_get(ty).ok_or_else(|| {
+            if self.store.types.contains(ty) {
+                TypeNormalizeError::UnfilledType { ty }
+            } else {
+                TypeNormalizeError::InvalidType { ty }
+            }
+        })
     }
 }
 
@@ -525,6 +521,35 @@ mod tests {
         assert_eq!(
             TypeNormalizer::new(&w.store).dealias_top(reserved.id()),
             Err(TypeNormalizeError::UnfilledType { ty: reserved.id() })
+        );
+    }
+
+    #[test]
+    fn reports_an_out_of_range_root_type_id() {
+        let mut foreign_store = SemanticStore::new();
+        let foreign_ty = foreign_store.types.alloc(Type::NoType);
+        let empty_store = SemanticStore::new();
+
+        assert_eq!(
+            TypeNormalizer::new(&empty_store).dealias_top(foreign_ty),
+            Err(TypeNormalizeError::InvalidType { ty: foreign_ty })
+        );
+    }
+
+    #[test]
+    fn reports_an_out_of_range_nested_proxy_reference() {
+        let mut w = World::new();
+        let mut foreign_store = SemanticStore::new();
+        foreign_store.types.alloc(Type::NoType);
+        foreign_store.types.alloc(Type::NoType);
+        let foreign_ty = foreign_store.types.alloc(Type::NoType);
+        let flexible = w.store.types.alloc(Type::Flexible {
+            underlying: foreign_ty,
+        });
+
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(flexible),
+            Err(TypeNormalizeError::InvalidType { ty: foreign_ty })
         );
     }
 
