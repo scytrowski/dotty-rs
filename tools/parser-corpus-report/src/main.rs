@@ -671,7 +671,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         })
         .collect::<Vec<_>>();
     let capture_checking_enabled = Some(result.effective_features.capture_checking);
-    let has_parser_capture_syntax = has_capture_syntax_nodes(&result.ast, &store.names);
+    let has_parser_capture_syntax = has_capture_syntax_nodes(&result.ast, &store.names, source);
     let status = if diagnostics.is_empty() && scanner_diagnostics == 0 {
         Status::Clean
     } else {
@@ -721,14 +721,18 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
     }
 }
 
-fn has_capture_syntax_nodes(arena: &AstArena<Untyped>, names: &dotty_core::NameInterner) -> bool {
+fn has_capture_syntax_nodes(
+    arena: &AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    source: &str,
+) -> bool {
     arena.iter().any(|(_, tree)| match &tree.kind {
         TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => true,
         TreeKind::Annotated(annotation) => {
             let TreeKind::New(new) = &arena.get(annotation.annotation).kind else {
                 return false;
             };
-            matches!(
+            let is_capture_marker = matches!(
                 type_name_path(arena, new.tpt, names).as_deref(),
                 Some(
                     "scala.annotation.retains"
@@ -736,7 +740,14 @@ fn has_capture_syntax_nodes(arena: &AstArena<Untyped>, names: &dotty_core::NameI
                         | "scala.annotation.internal.reachCapability"
                         | "scala.annotation.internal.onlyCapability"
                 )
-            )
+            );
+            is_capture_marker
+                && tree.position.is_some_and(|position| {
+                    let range = position.span().range();
+                    source
+                        .get(range.start() as usize..range.end() as usize)
+                        .is_some_and(|spelling| spelling.contains('^'))
+                })
         }
         _ => false,
     })
@@ -1494,6 +1505,17 @@ mod tests {
 
         assert!(parsed.has_raw_caret_character);
         assert!(!parsed.has_caret_operator_token);
+        assert!(!parsed.has_parser_capture_syntax);
+    }
+
+    #[test]
+    fn explicit_retains_annotation_is_not_counted_as_capture_syntax() {
+        let parsed = parse_source(
+            "import language.experimental.captureChecking\ntype T = A @scala.annotation.retains",
+            "ExplicitAnnotation.scala",
+            false,
+        );
+
         assert!(!parsed.has_parser_capture_syntax);
     }
 
