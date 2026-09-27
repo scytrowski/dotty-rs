@@ -68,13 +68,13 @@ where
         if self.starts_bracketed_function_type() {
             return self.parse_bracketed_function_type(mark);
         }
-        if self.starts_empty_function_type() {
-            if let Some(arrow) = self.lookahead_function_type_arrow(2) {
-                self.advance();
-                self.advance();
-                self.advance();
-                return self.finish_function_type(mark, Vec::new(), arrow, Vec::new());
-            }
+        if self.starts_empty_function_type()
+            && let Some(arrow) = self.lookahead_function_type_arrow(2)
+        {
+            self.advance();
+            self.advance();
+            self.advance();
+            return self.finish_function_type(mark, Vec::new(), arrow, Vec::new());
         }
         if self.starts_empty_context_function_type() {
             self.advance();
