@@ -814,6 +814,13 @@ the parser still requires a generator eventually. Aliases are represented as
 `GenAlias`, never as ordinary assignment trees, and guards remain ordinary
 expression trees in their exact enumerator order.
 
+An `Outdent` consumed while finishing a nested indented expression also
+separates that expression from the next member of an enclosing braced template.
+The parser preserves this boundary rather than requiring a second newline
+separator; this matters for multiline `match` members followed by another
+member or a matching `end` marker. The scanner remains responsible for
+deciding whether an outdent exists.
+
 Parenthesized, braced, and indentation-based enumerator regions are supported,
 including the wrapped legacy form whose body has no explicit `do`. The parser
 emits `ForYield` or `ForDo` directly and does not desugar comprehensions into

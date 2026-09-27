@@ -49,7 +49,6 @@ where
         }
 
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
-
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
@@ -144,13 +143,10 @@ where
             }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
-            } else if ended_nested_indented_body
-                && closing == TokenKind::Outdent
-                && !self.template_body_ended(closing)
-            {
-                // The separator newline belongs to the nested body. Its
-                // synthetic Outdent is the boundary between that body and
-                // the next member of the enclosing template.
+            } else if ended_nested_indented_body && !self.template_body_ended(closing) {
+                // The nested body's Outdent is also the boundary before the
+                // next statement/member, including inside a braced template
+                // where the outer body itself has no layout delimiter.
             } else if !self.template_body_ended(closing) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -342,6 +338,8 @@ where
         }
         self.defer_template_outdent_feedback = false;
         if self.current().kind != TokenKind::Outdent && self.current().kind != TokenKind::Eof {
+            // The scanner owns the active layout stack and decides whether
+            // this position closes a nested indented expression.
             self.observe_outdented();
         }
     }
