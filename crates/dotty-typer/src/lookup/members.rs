@@ -1,5 +1,6 @@
 //! Nominal member candidate discovery over completed `ClassInfo` graphs.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
@@ -95,8 +96,58 @@ impl SourceTyper<'_> {
             .normalize_for_lookup(receiver)
             .map_err(MemberLookupError::TypeNormalization)?;
         let class = class_symbol_for_type(self.store, receiver_view, false)?;
-        let info = self.class_info(class)?;
-        self.direct_candidates(class, receiver_view, 0, name, &info)
+        let mut queue = VecDeque::from([PendingClass {
+            symbol: class,
+            receiver_view,
+            depth: 0,
+        }]);
+        let mut visited = HashSet::from([class]);
+        let mut processed = Vec::new();
+        let mut edges = HashMap::<SymbolId, Vec<SymbolId>>::new();
+        let mut candidates = Vec::new();
+
+        while let Some(pending) = queue.pop_front() {
+            let info = self.class_info(pending.symbol)?;
+            let direct = self.direct_candidates(
+                pending.symbol,
+                pending.receiver_view,
+                pending.depth,
+                name,
+                &info,
+            )?;
+            processed.push(pending.symbol);
+            if !direct.is_empty() {
+                candidates.extend(direct);
+                // A direct bucket hides all inherited buckets from this class.
+                edges.insert(pending.symbol, Vec::new());
+                continue;
+            }
+
+            let mut parent_symbols = Vec::with_capacity(info.parents.len());
+            for parent_view in info.parents {
+                let parent = class_symbol_for_type(self.store, parent_view, true)?;
+                parent_symbols.push(parent);
+                if visited.insert(parent) {
+                    if pending.depth == MAX_MEMBER_LOOKUP_DEPTH {
+                        return Err(MemberLookupError::TooDeep);
+                    }
+                    queue.push_back(PendingClass {
+                        symbol: parent,
+                        receiver_view: parent_view,
+                        depth: pending.depth + 1,
+                    });
+                }
+            }
+            edges.insert(pending.symbol, parent_symbols);
+        }
+
+        if let Some(cycle) = find_inheritance_cycle(class, &processed, &edges) {
+            return Err(MemberLookupError::InheritanceCycle { symbol: cycle });
+        }
+
+        let mut seen_candidates = HashSet::new();
+        candidates.retain(|candidate| seen_candidates.insert(candidate.symbol));
+        Ok(candidates)
     }
 
     fn class_info(&mut self, symbol: SymbolId) -> Result<ClassInfo, MemberLookupError> {
@@ -180,6 +231,13 @@ impl SourceTyper<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PendingClass {
+    symbol: SymbolId,
+    receiver_view: TypeId,
+    depth: usize,
+}
+
 fn class_symbol_for_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -198,6 +256,9 @@ fn class_symbol_for_type(
             } else {
                 MemberLookupError::UnsupportedReceiverType { ty }
             });
+        }
+        if visited.len() > MAX_MEMBER_LOOKUP_DEPTH {
+            return Err(MemberLookupError::TooDeep);
         }
         visited.push(current);
         let Some(ty_node) = store.types.try_get(current) else {
@@ -265,6 +326,58 @@ fn validate_class_symbol(
     } else {
         MemberLookupError::ReceiverNotClassLike { ty }
     })
+}
+
+fn find_inheritance_cycle(
+    root: SymbolId,
+    processed: &[SymbolId],
+    edges: &HashMap<SymbolId, Vec<SymbolId>>,
+) -> Option<SymbolId> {
+    let mut indegrees: HashMap<SymbolId, usize> = processed
+        .iter()
+        .copied()
+        .map(|symbol| (symbol, 0))
+        .collect();
+    for symbol in processed {
+        if let Some(parents) = edges.get(symbol) {
+            for parent in parents {
+                *indegrees.entry(*parent).or_default() += 1;
+            }
+        }
+    }
+
+    let mut ready: VecDeque<_> = processed
+        .iter()
+        .copied()
+        .filter(|symbol| indegrees.get(symbol) == Some(&0))
+        .collect();
+    let mut removed = HashSet::new();
+    while let Some(symbol) = ready.pop_front() {
+        if !removed.insert(symbol) {
+            continue;
+        }
+        if let Some(parents) = edges.get(&symbol) {
+            for parent in parents {
+                let Some(indegree) = indegrees.get_mut(parent) else {
+                    continue;
+                };
+                *indegree -= 1;
+                if *indegree == 0 {
+                    ready.push_back(*parent);
+                }
+            }
+        }
+    }
+
+    processed
+        .iter()
+        .copied()
+        .find(|symbol| !removed.contains(symbol))
+        .or_else(|| {
+            // The root is included in `processed`; this fallback keeps the
+            // parameter useful if a future caller supplies an empty list.
+            (indegrees.get(&root).copied().unwrap_or(0) > 0).then_some(root)
+        })
 }
 
 #[cfg(test)]
@@ -564,6 +677,329 @@ mod tests {
         let candidates = w.lookup(receiver, name).unwrap();
         assert_eq!(candidates[0].symbol, field);
         assert_eq!(candidates[0].receiver_view, class_ref);
+    }
+
+    #[test]
+    fn finds_a_member_in_the_direct_parent() {
+        let mut w = World::new();
+        let base = w.class("Base");
+        let base_scope = w.scope(base);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(base_scope).enter(name, field);
+        w.publish_class(base, base_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let base_view = w.class_ref(base);
+        w.publish_class(child, child_scope, vec![base_view]);
+        let receiver = w.class_ref(child);
+
+        assert_eq!(
+            w.lookup(receiver, name).unwrap(),
+            vec![MemberCandidate {
+                symbol: field,
+                declaring_class: base,
+                receiver_view: base_view,
+                inheritance_depth: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn finds_a_member_multiple_parent_levels_up() {
+        let mut w = World::new();
+        let root = w.class("Root");
+        let root_scope = w.scope(root);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(root_scope).enter(name, field);
+        w.publish_class(root, root_scope, Vec::new());
+
+        let parent = w.class("Parent");
+        let parent_scope = w.scope(parent);
+        let root_view = w.class_ref(root);
+        w.publish_class(parent, parent_scope, vec![root_view]);
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let parent_view = w.class_ref(parent);
+        w.publish_class(child, child_scope, vec![parent_view]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(candidates[0].declaring_class, root);
+        assert_eq!(candidates[0].receiver_view, root_view);
+        assert_eq!(candidates[0].inheritance_depth, 2);
+    }
+
+    #[test]
+    fn direct_member_hides_the_entire_inherited_bucket() {
+        let mut w = World::new();
+        let base = w.class("Base");
+        let base_scope = w.scope(base);
+        let inherited = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(inherited).name;
+        w.store.scopes.get_mut(base_scope).enter(name, inherited);
+        w.publish_class(base, base_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let direct = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        w.store.scopes.get_mut(child_scope).enter(name, direct);
+        let base_view = w.class_ref(base);
+        w.publish_class(child, child_scope, vec![base_view]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol, direct);
+        assert_eq!(candidates[0].declaring_class, child);
+        assert_eq!(candidates[0].inheritance_depth, 0);
+    }
+
+    #[test]
+    fn distinct_parent_declarations_are_returned_in_parent_order() {
+        let mut w = World::new();
+        let first_parent = w.class("First");
+        let first_scope = w.scope(first_parent);
+        let first_member = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(first_member).name;
+        w.store
+            .scopes
+            .get_mut(first_scope)
+            .enter(name, first_member);
+        w.publish_class(first_parent, first_scope, Vec::new());
+
+        let second_parent = w.class("Second");
+        let second_scope = w.scope(second_parent);
+        let second_member = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        w.store
+            .scopes
+            .get_mut(second_scope)
+            .enter(name, second_member);
+        w.publish_class(second_parent, second_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let first_view = w.class_ref(first_parent);
+        let second_view = w.class_ref(second_parent);
+        w.publish_class(child, child_scope, vec![first_view, second_view]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(
+            candidates.iter().map(|c| c.symbol).collect::<Vec<_>>(),
+            vec![first_member, second_member]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.receiver_view)
+                .collect::<Vec<_>>(),
+            vec![first_view, second_view]
+        );
+        assert!(candidates.iter().all(|c| c.inheritance_depth == 1));
+    }
+
+    #[test]
+    fn inherited_candidates_are_ordered_by_depth_before_parent_order() {
+        let mut w = World::new();
+        let deep = w.class("Deep");
+        let deep_scope = w.scope(deep);
+        let deep_member = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(deep_member).name;
+        w.store.scopes.get_mut(deep_scope).enter(name, deep_member);
+        w.publish_class(deep, deep_scope, Vec::new());
+
+        let first = w.class("First");
+        let first_scope = w.scope(first);
+        let deep_view = w.class_ref(deep);
+        w.publish_class(first, first_scope, vec![deep_view]);
+        let second = w.class("Second");
+        let second_scope = w.scope(second);
+        let second_member = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        w.store
+            .scopes
+            .get_mut(second_scope)
+            .enter(name, second_member);
+        w.publish_class(second, second_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let first_view = w.class_ref(first);
+        let second_view = w.class_ref(second);
+        w.publish_class(child, child_scope, vec![first_view, second_view]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(
+            candidates.iter().map(|c| c.symbol).collect::<Vec<_>>(),
+            vec![second_member, deep_member]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.inheritance_depth)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn diamond_inheritance_deduplicates_a_shared_declaration() {
+        let mut w = World::new();
+        let root = w.class("Root");
+        let root_scope = w.scope(root);
+        let member = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(member).name;
+        w.store.scopes.get_mut(root_scope).enter(name, member);
+        w.publish_class(root, root_scope, Vec::new());
+
+        let left = w.class("Left");
+        let left_scope = w.scope(left);
+        let root_left_view = w.class_ref(root);
+        w.publish_class(left, left_scope, vec![root_left_view]);
+        let right = w.class("Right");
+        let right_scope = w.scope(right);
+        let root_right_view = w.class_ref(root);
+        w.publish_class(right, right_scope, vec![root_right_view]);
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let left_view = w.class_ref(left);
+        let right_view = w.class_ref(right);
+        w.publish_class(child, child_scope, vec![left_view, right_view]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol, member);
+        assert_eq!(candidates[0].receiver_view, root_left_view);
+        assert_eq!(candidates[0].inheritance_depth, 2);
+    }
+
+    #[test]
+    fn inherited_cycles_are_reported() {
+        let mut w = World::new();
+        let left = w.class("Left");
+        let right = w.class("Right");
+        let left_scope = w.scope(left);
+        let right_scope = w.scope(right);
+        let right_view = w.class_ref(right);
+        let left_view = w.class_ref(left);
+        w.publish_class(left, left_scope, vec![right_view]);
+        w.publish_class(right, right_scope, vec![left_view]);
+        let name = Name::new(w.store.names.intern("missing"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(left_view, name),
+            Err(MemberLookupError::InheritanceCycle { .. })
+        ));
+    }
+
+    #[test]
+    fn inheritance_traversal_rejects_graphs_past_the_depth_limit() {
+        let mut w = World::new();
+        let mut classes = Vec::new();
+        let mut scopes = Vec::new();
+        for index in 0..=MAX_MEMBER_LOOKUP_DEPTH + 1 {
+            let class = w.class(&format!("C{index}"));
+            classes.push(class);
+            scopes.push(w.scope(class));
+        }
+        for index in 0..classes.len() {
+            let parents = classes
+                .get(index + 1)
+                .map(|parent| vec![w.class_ref(*parent)])
+                .unwrap_or_default();
+            w.publish_class(classes[index], scopes[index], parents);
+        }
+        let receiver = w.class_ref(classes[0]);
+        let missing = Name::new(w.store.names.intern("missing"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, missing),
+            Err(MemberLookupError::TooDeep)
+        ));
+    }
+
+    #[test]
+    fn union_receivers_are_explicitly_unsupported() {
+        let mut w = World::new();
+        let left = w.store.types.alloc(Type::NoType);
+        let right = w.store.types.alloc(Type::NoType);
+        let union = w.store.types.alloc(Type::Or { left, right });
+        let name = Name::new(w.store.names.intern("member"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(union, name),
+            Err(MemberLookupError::UnsupportedReceiverType { ty }) if ty == union
+        ));
+    }
+
+    #[test]
+    fn refinement_parent_is_rejected_as_malformed() {
+        let mut w = World::new();
+        let class = w.class("C");
+        let scope = w.scope(class);
+        let refined = w.store.types.alloc(Type::Refined {
+            parent: w.definitions.no_prefix,
+            name: Name::new(w.store.names.intern("T"), Namespace::Type),
+            info: w.definitions.no_prefix,
+        });
+        w.publish_class(class, scope, vec![refined]);
+        let receiver = w.class_ref(class);
+        let name = Name::new(w.store.names.intern("missing"), Namespace::Term);
+
+        assert!(matches!(
+            w.lookup(receiver, name),
+            Err(MemberLookupError::MalformedParentType { ty }) if ty == refined
+        ));
     }
 
     #[test]
