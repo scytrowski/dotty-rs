@@ -31,6 +31,14 @@ compiler presentation rather than a compatibility protocol.
 Compiler source offsets are UTF-16 code-unit offsets. Consumers comparing them
 with Rust source spans must convert them to UTF-8 byte offsets first.
 
+For application argument lists, the Scala 3.9 parser's generic comma-list
+helper creates a synthetic `???` placeholder spanning the trivia before `)`
+after a trailing comma (zero-width when there is no trivia). The oracle omits
+only that final child when the span contains whitespace and comments only: it
+has no source argument and represents the accepted trailing-comma boundary,
+not a missing argument in the normalized syntax tree. Explicit `???`
+expressions and non-trailing missing arguments remain visible.
+
 The default fixtures cover the expression forms currently represented by the Rust
 parser: identifiers, numeric and string literals, `this`, parentheses, the
 empty tuple, tuples, simple selections and applications, `super`, `new`, and

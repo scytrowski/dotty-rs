@@ -219,7 +219,11 @@ object Main:
         childTrees(tree).flatMap: child =>
           if child.getClass.getSimpleName.stripSuffix("$") == "Thicket" then childTrees(child)
           else child :: Nil
-      else childTrees(tree)
+      else tree match
+        case application: dotty.tools.dotc.ast.Trees.Apply[?] =>
+          childTrees(tree).filterNot: child =>
+            application.args.lastOption.contains(child) && isTrailingCommaPlaceholder(child, source)
+        case _ => childTrees(tree)
     val operatorIndex = normalizedKind match
       case "PrefixOp"  => Some(0)
       case "InfixOp"   => Some(1)
@@ -391,6 +395,46 @@ object Main:
     val start = math.max(0, math.min(tree.span.start, source.length))
     val end = math.max(start, math.min(tree.span.end, source.length))
     source.substring(start, end)
+
+  // Dotty's generic commaSeparated helper parses one extra `???` tree when an
+  // application ends in a trailing comma. Its span covers the trivia up to
+  // `)`, or is zero-width when there is no trivia. Normalize only that final
+  // synthetic child; explicit `???` arguments retain their source span.
+  private def isTrailingCommaPlaceholder(
+      tree: dotty.tools.dotc.ast.Trees.Tree[?],
+      source: String
+  ): Boolean =
+    val isQuestionMarkSelect = tree match
+      case select: dotty.tools.dotc.ast.Trees.Select[?] => select.name.toString == "???"
+      case _ => false
+    if !isQuestionMarkSelect || !tree.span.exists then return false
+    val start = tree.span.start
+    val end = tree.span.end
+    if start <= 0 || start > end || end >= source.length ||
+        source.charAt(start - 1) != ',' || source.charAt(end) != ')' then
+      return false
+
+    var cursor = start
+    while cursor < end do
+      if source.charAt(cursor).isWhitespace then cursor += 1
+      else if source.startsWith("//", cursor) then
+        cursor += 2
+        while cursor < end && source.charAt(cursor) != '\n' do cursor += 1
+      else if source.startsWith("/*", cursor) then
+        cursor += 2
+        var nesting = 1
+        while cursor < end && nesting > 0 do
+          if source.startsWith("/*", cursor) then
+            nesting += 1
+            cursor += 2
+          else if source.startsWith("*/", cursor) then
+            nesting -= 1
+            cursor += 2
+          else cursor += 1
+        if nesting != 0 then return false
+      else return false
+
+    true
 
   private def operatorName(tree: dotty.tools.dotc.ast.Trees.Tree[?], source: String): String =
     slice(tree, source) match
