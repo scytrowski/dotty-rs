@@ -87,6 +87,16 @@ fn exposes_the_core_semantic_api_under_the_dotty_namespace() {
 }
 
 #[test]
+fn exposes_bounded_type_normalization_under_the_dotty_namespace() {
+    let mut store = SemanticStore::new();
+    let ty = store.types.alloc(dotty::core::Type::NoType);
+    let normalizer = dotty::typer::TypeNormalizer::new(&store);
+
+    assert_eq!(normalizer.dealias_top(ty), Ok(ty));
+    assert_eq!(normalizer.normalize_for_lookup(ty), Ok(ty));
+}
+
+#[test]
 fn exposes_the_parser_api_under_the_dotty_namespace() {
     let source = "x";
     let tokens = SingleTokenSource {
