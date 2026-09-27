@@ -545,6 +545,41 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_value_definition_without_an_indented_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val result =\n",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 10),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Newline, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a recovered value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        assert!(definition.rhs.is_some_and(|rhs| matches!(
+            parser.ast().get(rhs).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        )));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_val_definition_with_an_inferred_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
