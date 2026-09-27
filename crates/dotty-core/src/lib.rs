@@ -83,5 +83,6 @@ pub use types::{
     ClassInfo, Constant, ErrorType, MatchType, MethodKind, MethodParam, MethodParamSpec,
     MethodType, PolyType, ReservedTypeId, TermRefTarget, Type, TypeArena, TypeLambda, TypeParam,
     TypeParamSpec, TypeRebindError, TypeRefTarget, Variance, close_over_this,
-    method_type_from_symbols, poly_type_from_symbols, rebind_type_lambda, type_lambda_from_symbols,
+    method_type_from_symbols, poly_type_from_symbols, rebind_type_lambda, substitute_type_symbols,
+    type_lambda_from_symbols,
 };

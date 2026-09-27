@@ -66,6 +66,8 @@ const MAX_DEPTH: usize = 512;
 pub enum TypeRebindError {
     /// `source` is not a [`Type::TypeLambda`].
     NotATypeLambda { source: TypeId },
+    /// A referenced type id is outside the store's type arena.
+    InvalidType { id: TypeId },
     /// `declared_variances` has `actual` entries, but the lambda has
     /// `expected` parameters. Nothing is truncated or padded.
     VarianceArityMismatch {
@@ -85,11 +87,16 @@ pub enum TypeRebindError {
     /// A parameter symbol was given twice to an abstraction: a reference to it
     /// could only name one of the two positions.
     DuplicateParameterSymbol { symbol: SymbolId },
+    /// A symbol was given more than one replacement in a substitution.
+    DuplicateSubstitutionSymbol { symbol: SymbolId },
 }
 
 impl fmt::Display for TypeRebindError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidType { id } => {
+                write!(formatter, "type {} is outside the type arena", id.index())
+            }
             Self::NotATypeLambda { source } => {
                 write!(formatter, "type {} is not a type lambda", source.index())
             }
@@ -117,8 +124,52 @@ impl fmt::Display for TypeRebindError {
                 "parameter symbol {} was given for two positions",
                 symbol.index()
             ),
+            Self::DuplicateSubstitutionSymbol { symbol } => write!(
+                formatter,
+                "symbol {} was given more than one type replacement",
+                symbol.index()
+            ),
         }
     }
+}
+
+/// Replaces references to exact semantic symbols throughout a type graph.
+///
+/// Only symbol-designated `TypeRef` and `TermRef` nodes are eligible. Names
+/// are never compared, and a matching reference is replaced by the supplied
+/// type in full (its old prefix is discarded). Binder-shaped nodes are copied
+/// through the same traversal used by type rebinding, so nested `ParamRef`s
+/// and `RecThis` nodes point at their copied binders. Unchanged non-binder
+/// nodes are shared by `TypeId`; repeated children share one transformed id.
+///
+/// The operation does not mutate the original graph. A malformed, cyclic, or
+/// too-deep graph returns a typed error and rolls back allocations.
+pub fn substitute_type_symbols(
+    store: &mut SemanticStore,
+    root: TypeId,
+    substitutions: &[(SymbolId, TypeId)],
+) -> Result<TypeId, TypeRebindError> {
+    let mut seen = HashSet::new();
+    for (symbol, replacement) in substitutions {
+        if !seen.insert(*symbol) {
+            return Err(TypeRebindError::DuplicateSubstitutionSymbol { symbol: *symbol });
+        }
+        if !store.types.contains(*replacement) {
+            return Err(TypeRebindError::InvalidType { id: *replacement });
+        }
+        if !store.types.is_filled(*replacement) {
+            return Err(TypeRebindError::UnfilledType { id: *replacement });
+        }
+    }
+
+    let checkpoint = store.checkpoint();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.replacements.extend(substitutions.iter().copied());
+    let result = rebinder.ty(root);
+    if result.is_err() {
+        rebinder.store.rollback_to(checkpoint);
+    }
+    result
 }
 
 impl std::error::Error for TypeRebindError {}
@@ -487,6 +538,8 @@ struct Rebinder<'a> {
     /// Parameter symbol -> the binder position that replaces every reference
     /// to it (`abstract_symbols`). Empty when only rebinding.
     substitution: HashMap<SymbolId, (TypeId, u32)>,
+    /// Exact symbol replacements used by `substitute_type_symbols`.
+    replacements: HashMap<SymbolId, TypeId>,
     /// `(target class, new recursive binder)` for [`close_over_this`]: every
     /// `ThisType { class: target }` becomes the one canonical `RecThis` of the
     /// new binder. `None` outside a close-over call.
@@ -507,6 +560,7 @@ impl<'a> Rebinder<'a> {
             binders: HashMap::new(),
             annotations: HashMap::new(),
             substitution: HashMap::new(),
+            replacements: HashMap::new(),
             close_over: None,
             close_over_rec_this: None,
             in_progress: HashSet::new(),
@@ -519,6 +573,9 @@ impl<'a> Rebinder<'a> {
     fn ty(&mut self, id: TypeId) -> Result<TypeId, TypeRebindError> {
         if let Some(&done) = self.memo.get(&id) {
             return Ok(done);
+        }
+        if !self.store.types.contains(id) {
+            return Err(TypeRebindError::InvalidType { id });
         }
         if !self.store.types.is_filled(id) {
             return Err(TypeRebindError::UnfilledType { id });
@@ -665,6 +722,14 @@ impl<'a> Rebinder<'a> {
 
             // Only the prefix is rebound; a symbol or a name designator stays
             // as it is.
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if self.replacements.contains_key(&symbol) => self.replacements[&symbol],
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if self.replacements.contains_key(&symbol) => self.replacements[&symbol],
             Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
                 ..
@@ -2415,6 +2480,108 @@ mod tests {
         assert_eq!(
             close_over_this(&mut f.store, parent, class),
             Err(TypeRebindError::UnfilledType { id: unfilled })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn substitution_replaces_only_the_exact_symbol_and_reuses_repeated_children() {
+        let mut f = Fixture::new();
+        let wanted = SymbolId::new(40);
+        let same_name = SymbolId::new(41);
+        let prefix = f.store.types.alloc(Type::NoPrefix);
+        let reference = f.store.types.alloc(Type::type_ref(prefix, wanted));
+        let unrelated = f.store.types.alloc(Type::type_ref(prefix, same_name));
+        let root = f.store.types.alloc(Type::And {
+            left: reference,
+            right: reference,
+        });
+
+        let result = substitute_type_symbols(&mut f.store, root, &[(wanted, unrelated)]).unwrap();
+
+        let Type::And { left, right } = f.store.types.get(result) else {
+            panic!("expected an And type")
+        };
+        assert_eq!((*left, *right), (unrelated, unrelated));
+        assert_eq!(
+            f.store.types.get(reference),
+            &Type::type_ref(prefix, wanted)
+        );
+
+        let unchanged =
+            substitute_type_symbols(&mut f.store, unrelated, &[(wanted, f.leaf)]).unwrap();
+        assert_eq!(unchanged, unrelated);
+    }
+
+    #[test]
+    fn substitution_preserves_paramrefs_inside_a_copied_method_binder() {
+        let mut f = Fixture::new();
+        let class_parameter = SymbolId::new(50);
+        let prefix = f.store.types.alloc(Type::NoPrefix);
+        let result = f.store.types.alloc(Type::type_ref(prefix, class_parameter));
+        let reserved = f.store.types.reserve();
+        let old_method = reserved.id();
+        let own_parameter = f.store.types.alloc(Type::ParamRef {
+            binder: old_method,
+            index: 0,
+        });
+        f.store.types.fill(
+            reserved,
+            Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: TermName::new(f.store.names.intern("x")),
+                    ty: own_parameter,
+                    erased: false,
+                    varargs: false,
+                }],
+                result,
+                kind: MethodKind::Plain,
+            }),
+        );
+
+        let adapted =
+            substitute_type_symbols(&mut f.store, old_method, &[(class_parameter, f.leaf)])
+                .unwrap();
+        let Type::Method(method) = f.store.types.get(adapted) else {
+            panic!("expected a method type")
+        };
+        let Type::ParamRef { binder, index } = f.store.types.get(method.params[0].ty) else {
+            panic!("method parameter must remain a ParamRef")
+        };
+        assert_eq!(*binder, adapted);
+        assert_eq!(*index, 0);
+        assert_eq!(method.result, f.leaf);
+    }
+
+    #[test]
+    fn substitution_rejects_cycles_with_a_typed_error() {
+        let mut f = Fixture::new();
+        let symbol = SymbolId::new(60);
+        let reserved = f.store.types.reserve();
+        let root = reserved.id();
+        f.store.types.fill(
+            reserved,
+            Type::Applied {
+                tycon: root,
+                args: vec![],
+            },
+        );
+
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, root, &[(symbol, f.leaf)]),
+            Err(TypeRebindError::CyclicType { id: root })
+        );
+    }
+
+    #[test]
+    fn substitution_rejects_duplicate_symbols_without_allocating() {
+        let mut f = Fixture::new();
+        let symbol = SymbolId::new(70);
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, f.leaf, &[(symbol, f.leaf), (symbol, f.leaf)]),
+            Err(TypeRebindError::DuplicateSubstitutionSymbol { symbol })
         );
         assert_eq!(type_count(&mut f), before + 1);
     }
