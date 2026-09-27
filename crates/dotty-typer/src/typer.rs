@@ -253,6 +253,15 @@ pub enum TyperError {
         tree_index: u32,
         spelling: String,
     },
+    /// The selected `this` qualifier is not an enclosing class-like owner.
+    ThisOwnerNotEnclosing {
+        source: SourceId,
+        tree_index: u32,
+        qualifier: Option<dotty_core::Name>,
+        owner: SymbolId,
+    },
+    /// The semantic owner chain used by `this` contains a cycle.
+    ThisOwnerCycle { source: SourceId, owner: SymbolId },
     /// The source expression form is outside this issue's supported subset.
     UnsupportedExpression {
         source: SourceId,
@@ -457,7 +466,7 @@ impl<'a> SourceTyper<'a> {
     fn type_expression_inner(
         &mut self,
         tree: TreeId<Untyped>,
-        _context: ExpressionContext,
+        context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {
             return Err(TyperError::TreeOutsideArena {
@@ -465,23 +474,75 @@ impl<'a> SourceTyper<'a> {
                 tree_index: tree.index(),
             });
         };
-        let (value, ty) = match source_tree.kind {
+        match source_tree.kind {
             TreeKind::Literal(literal) => {
                 let ty = self.literal_type(&literal.value, tree.index())?;
-                (literal.value, ty)
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(
+                    literal.value,
+                    ty,
+                    source_tree.position,
+                ))
             }
             TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
-                self.type_number_literal(number, tree.index())?
+                let (value, ty) = self.type_number_literal(number, tree.index())?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(
+                    value,
+                    ty,
+                    source_tree.position,
+                ))
             }
-            _ => {
-                return Err(TyperError::UnsupportedExpression {
+            TreeKind::This(this) => {
+                let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
+                let ty = self.store.types.alloc(Type::ThisType { class });
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).this(
+                    this.qual,
+                    ty,
+                    source_tree.position,
+                ))
+            }
+            _ => Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: tree_kind_name(&source_tree.kind),
+            }),
+        }
+    }
+
+    fn enclosing_this_owner(
+        &self,
+        qualifier: Option<dotty_core::Name>,
+        expression_owner: SymbolId,
+        tree_index: u32,
+    ) -> Result<SymbolId, TyperError> {
+        use std::collections::HashSet;
+        let mut current = Some(expression_owner);
+        let mut seen = HashSet::new();
+        while let Some(symbol) = current {
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            if !seen.insert(symbol) {
+                return Err(TyperError::ThisOwnerCycle {
                     source: self.source,
-                    tree_index: tree.index(),
-                    expression_kind: tree_kind_name(&source_tree.kind),
+                    owner: symbol,
                 });
             }
-        };
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(value, ty, source_tree.position))
+            let declaration = self.store.symbols.get(symbol);
+            if matches!(
+                declaration.kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            ) && qualifier.is_none_or(|name| declaration.name == name)
+            {
+                return Ok(symbol);
+            }
+            current = declaration.owner;
+        }
+        Err(TyperError::ThisOwnerNotEnclosing {
+            source: self.source,
+            tree_index,
+            qualifier,
+            owner: expression_owner,
+        })
     }
 
     fn literal_type(
@@ -8831,6 +8892,97 @@ mod tests {
             })
         );
         assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+    }
+
+    #[test]
+    fn bare_this_gets_the_nearest_enclosing_class_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = this }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: symbol,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::This(dotty_core::ast::This { qual: None })
+        ));
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            &Type::ThisType { class }
+        );
+    }
+
+    #[test]
+    fn qualified_this_resolves_an_enclosing_class_owner() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Outer { class Inner { val value = this } }");
+        let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let qualifier = store.symbols.get(outer).name;
+        parsed.ast.get_mut(rhs).kind = TreeKind::This(dotty_core::ast::This {
+            qual: Some(qualifier),
+        });
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: symbol,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            &Type::ThisType { class: outer }
+        );
+    }
+
+    #[test]
+    fn qualified_this_rejects_a_non_enclosing_class() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Other; class C { val value = this }");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let qualifier = store.symbols.get(other).name;
+        parsed.ast.get_mut(rhs).kind = TreeKind::This(dotty_core::ast::This {
+            qual: Some(qualifier),
+        });
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: symbol,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ThisOwnerNotEnclosing { .. })
+        ));
     }
 
     #[test]
