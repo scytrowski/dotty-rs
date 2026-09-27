@@ -8,7 +8,7 @@ mod tree;
 mod typed;
 mod untyped;
 
-pub use arena::AstArena;
+pub use arena::{AstArena, AstArenaCheckpoint};
 pub use common::{
     Alternative, Annotated, AppliedTypeTree, Apply, ApplyKind, Assign, Bind, Block, ByNameTypeTree,
     CaseDef, Closure, DefDef, Export, Ident, If, Import, ImportSelector, Inlined, LambdaTypeTree,
