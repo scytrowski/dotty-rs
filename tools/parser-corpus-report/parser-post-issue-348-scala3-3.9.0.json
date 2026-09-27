@@ -1,0 +1,295 @@
+{
+  "schema_version": 4,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "parser_revision": "d2f710011606a2a72bdae001c0579de91ee356e8",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 30,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 797,
+  "files_parsed_with_recoverable_diagnostics": 439,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 13,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 3742,
+    "ExpectedPattern": 5,
+    "ExpectedToken": 1083,
+    "ExpectedType": 609,
+    "UnexpectedToken": 3300,
+    "UnsupportedSyntax": 1729
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 171,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+        "compiler/src/dotty/tools/backend/jvm/CodeGen.scala",
+        "compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala",
+        "compiler/src/dotty/tools/backend/jvm/PostProcessor.scala"
+      ]
+    },
+    "ExpectedPattern": {
+      "count": 2,
+      "examples": [
+        "compiler/src/dotty/tools/debug/ResolveReflectEval.scala",
+        "compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 54,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala",
+        "compiler/src/dotty/tools/dotc/classpath/FileUtils.scala",
+        "compiler/src/dotty/tools/dotc/config/Settings.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 108,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/OptimizerSettings.scala",
+        "compiler/src/dotty/tools/backend/sjs/ScopedVar.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 97,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+        "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala"
+      ]
+    },
+    "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "UnsupportedSyntax: unsupported enum case syntax": {
+      "count": 6,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        "compiler/src/dotty/tools/dotc/profile/Profiler.scala",
+        "compiler/src/dotty/tools/dotc/reporting/ErrorMessageID.scala"
+      ]
+    }
+  },
+  "capture_checking_cohorts": {
+    "disabled": {
+      "files": 994,
+      "clean": 649,
+      "recoverable": 345,
+      "hard_failures": 0,
+      "scanner_diagnostics": 13,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 2657,
+        "ExpectedPattern": 5,
+        "ExpectedToken": 681,
+        "ExpectedType": 410,
+        "UnexpectedToken": 2081,
+        "UnsupportedSyntax": 809
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 148,
+          "examples": [
+            "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+            "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+            "compiler/src/dotty/tools/backend/jvm/CodeGen.scala",
+            "compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala",
+            "compiler/src/dotty/tools/backend/jvm/PostProcessor.scala"
+          ]
+        },
+        "ExpectedPattern": {
+          "count": 2,
+          "examples": [
+            "compiler/src/dotty/tools/debug/ResolveReflectEval.scala",
+            "compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 35,
+          "examples": [
+            "compiler/src/dotty/tools/backend/jvm/analysis/NullnessAnalyzer.scala",
+            "compiler/src/dotty/tools/dotc/Run.scala",
+            "compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala",
+            "compiler/src/dotty/tools/dotc/classpath/FileUtils.scala",
+            "compiler/src/dotty/tools/dotc/config/Settings.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 67,
+          "examples": [
+            "compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala",
+            "compiler/src/dotty/tools/backend/jvm/opt/OptimizerSettings.scala",
+            "compiler/src/dotty/tools/backend/sjs/ScopedVar.scala",
+            "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+            "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 87,
+          "examples": [
+            "compiler/src/dotty/tools/MainGenericCompiler.scala",
+            "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+            "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+            "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+            "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala"
+          ]
+        },
+        "UnsupportedSyntax: unsupported enum case syntax": {
+          "count": 6,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/config/MigrationVersion.scala",
+            "compiler/src/dotty/tools/dotc/config/ScalaSettings.scala",
+            "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+            "compiler/src/dotty/tools/dotc/profile/Profiler.scala",
+            "compiler/src/dotty/tools/dotc/reporting/ErrorMessageID.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 83,
+      "files_with_caret_operator_token": 21,
+      "files_with_parser_capture_syntax": 0,
+      "raw_caret_without_operator_examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CapturingType.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/RetainingAnnotation.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+        "compiler/src/dotty/tools/dotc/cc/Synthetics.scala",
+        "compiler/src/dotty/tools/dotc/config/PathResolver.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaVersion.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Periods.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbInputStream.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbOutputStream.scala",
+        "compiler/src/dotty/tools/dotc/transform/sjs/JSSymUtils.scala",
+        "compiler/src/dotty/tools/dotc/typer/ConstFold.scala",
+        "compiler/src/dotty/tools/dotc/typer/Typer.scala",
+        "compiler/src/dotty/tools/dotc/util/HashMap.scala",
+        "compiler/src/dotty/tools/dotc/util/HashSet.scala",
+        "compiler/src/dotty/tools/dotc/util/PerfectHashing.scala",
+        "library/src/scala/Boolean.scala",
+        "library/src/scala/Byte.scala",
+        "library/src/scala/Char.scala",
+        "library/src/scala/Int.scala",
+        "library/src/scala/Long.scala",
+        "library/src/scala/Short.scala",
+        "library/src/scala/concurrent/duration/Duration.scala",
+        "library/src/scala/math/BigInt.scala"
+      ]
+    },
+    "enabled": {
+      "files": 242,
+      "clean": 148,
+      "recoverable": 94,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 1085,
+        "ExpectedToken": 402,
+        "ExpectedType": 199,
+        "UnexpectedToken": 1219,
+        "UnsupportedSyntax": 920
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 23,
+          "examples": [
+            "library/src/scala/Predef.scala",
+            "library/src/scala/collection/LinearSeq.scala",
+            "library/src/scala/collection/Seq.scala",
+            "library/src/scala/collection/concurrent/TrieMap.scala",
+            "library/src/scala/collection/immutable/HashSet.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 19,
+          "examples": [
+            "library/src/scala/caps/package.scala",
+            "library/src/scala/collection/MapView.scala",
+            "library/src/scala/collection/SeqView.scala",
+            "library/src/scala/collection/SortedMap.scala",
+            "library/src/scala/collection/immutable/HashMap.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 41,
+          "examples": [
+            "library/src/scala/Array.scala",
+            "library/src/scala/IArray.scala",
+            "library/src/scala/Tuple.scala",
+            "library/src/scala/annotation/internal/WitnessNames.scala",
+            "library/src/scala/collection/Factory.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 10,
+          "examples": [
+            "library/src/scala/CanEqual.scala",
+            "library/src/scala/PartialFunction.scala",
+            "library/src/scala/collection/Iterator.scala",
+            "library/src/scala/collection/LazyZipOps.scala",
+            "library/src/scala/collection/Stepper.scala"
+          ]
+        },
+        "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+          "count": 1,
+          "examples": [
+            "library/src/scala/NamedTuple.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 113,
+      "files_with_caret_operator_token": 109,
+      "files_with_parser_capture_syntax": 103,
+      "raw_caret_without_operator_examples": [
+        "library/src/scala/annotation/retains.scala",
+        "library/src/scala/caps/package.scala",
+        "library/src/scala/quoted/Quotes.scala",
+        "library/src/scala/util/Either.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "library/src/scala/collection/Hashing.scala",
+        "library/src/scala/collection/generic/BitOperations.scala",
+        "library/src/scala/collection/package.scala",
+        "library/src/scala/compiletime/ops/boolean.scala",
+        "library/src/scala/compiletime/ops/int.scala",
+        "library/src/scala/compiletime/ops/long.scala"
+      ]
+    }
+  }
+}

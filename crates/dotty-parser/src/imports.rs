@@ -516,6 +516,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_result_reports_capture_checking_enabled_by_global_import() {
+        let source = "import language.experimental.captureChecking";
+        let mut names = NameInterner::new();
+        let parser = parser_for(source, capture_import_tokens(source), &mut names);
+
+        let result = parser.source_compilation_unit();
+
+        assert!(result.effective_features.capture_checking);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn scala_qualified_capture_checking_import_enables_the_unit_feature() {
         let source = "import scala.language.experimental.captureChecking";
         let mut names = NameInterner::new();

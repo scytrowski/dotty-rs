@@ -41,6 +41,19 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
+Schema version 4 also records the parser commit as `parser_revision` and
+partitions outcomes into `capture_checking_cohorts`
+(`enabled`, `disabled`, and `unknown`) using the parser's effective
+`ParserFeatures` after compilation-unit imports have been processed. Each
+cohort records the same clean/recoverable/hard-failure and diagnostic summary
+as the whole corpus. Its caret audit distinguishes raw `^` characters from
+lexer `^` operator tokens and capture constructs represented in the parsed
+AST; this prevents comments and string contents from being counted as source
+syntax while keeping unparsed operator tokens visible for manual review. The
+report includes paths for raw-only marker hits and lexer caret tokens for which
+the parser did not build a capture-specific AST shape, making the remaining
+candidate set inspectable rather than treating every caret as capture syntax.
+
 The low-level binary also accepts repeated `--root` options for focused runs:
 
 ```text
@@ -135,6 +148,22 @@ Recreate it with:
 ```text
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-342-scala3-3.9.0.json
+```
+
+`parser-post-issue-348-scala3-3.9.0.json` measures the same corpus after PR
+#351, at parser revision `d2f710011606a2a72bdae001c0579de91ee356e8`. It includes
+effective capture-checking cohorts, caret-token/AST evidence, and the exact
+parser and Scala source revisions. It records 797 clean parses (64.48%), 439
+recoverable files, and zero hard failures, panics, or hangs; the oracle emitted
+all 1,236 results with the same 30 exceptions. The comparison and capture
+syntax triage are documented in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md) and
+[`parser-capture-checking-corpus-audit-3.9.0.md`](../../docs/parser-capture-checking-corpus-audit-3.9.0.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-348-scala3-3.9.0.json
 ```
 
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact

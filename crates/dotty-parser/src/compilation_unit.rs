@@ -10,6 +10,12 @@ pub struct ParseResult {
     pub ast: AstArena<Untyped>,
     pub root: TreeId<Untyped>,
     pub diagnostics: Vec<ParseDiagnostic>,
+    /// Parser feature policy after processing this input.
+    ///
+    /// This records the effective policy, including changes made by
+    /// compilation-unit language imports, and is useful to tooling that needs
+    /// to report dialect-dependent parsing accurately.
+    pub effective_features: crate::ParserFeatures,
 }
 
 /// Parses a source-backed token stream as a Scala 3.9.0 compilation unit.
@@ -67,10 +73,12 @@ where
         }
 
         self.report_escaping_placeholders();
+        let effective_features = *self.features();
         ParseResult {
             ast: self.ast,
             root: expression,
             diagnostics: self.diagnostics,
+            effective_features,
         }
     }
 
@@ -84,6 +92,7 @@ where
             self.parse_statement_sequence(StatementSequenceBoundary::CompilationUnit);
 
         self.report_escaping_placeholders();
+        let effective_features = *self.features();
         let root = self.alloc(
             TreeKind::Block(Block { stats, expr }),
             Some(self.span_from(unit_mark)),
@@ -93,6 +102,7 @@ where
             ast: self.ast,
             root,
             diagnostics: self.diagnostics,
+            effective_features,
         }
     }
 
@@ -105,6 +115,7 @@ where
         );
 
         self.report_escaping_placeholders();
+        let effective_features = *self.features();
         let root =
             if stats.len() == 1 && matches!(self.ast.get(stats[0]).kind, TreeKind::PackageDef(_)) {
                 stats[0]
@@ -130,6 +141,7 @@ where
             ast: self.ast,
             root,
             diagnostics: self.diagnostics,
+            effective_features,
         }
     }
 }

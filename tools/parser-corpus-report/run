@@ -39,6 +39,7 @@ done
 
 repo_dir=$(cd "${script_dir}/../.." && pwd)
 cd "$repo_dir"
+parser_revision=$(git -C "$repo_dir" rev-parse HEAD)
 manifest=$(mktemp)
 scala_output=$(mktemp)
 trap 'rm -f "$manifest" "$scala_output"' EXIT
@@ -65,4 +66,5 @@ else
 fi
 exec cargo run --quiet --locked -p dotty-parser-corpus-report -- \
   "${roots[@]}" --source-version 3.9.0 --source-revision "$actual_revision" \
+  --parser-revision "$parser_revision" \
   "${oracle_args[@]}" "${forwarded_args[@]}"

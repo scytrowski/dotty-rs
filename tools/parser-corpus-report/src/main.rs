@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Untyped, UntypedNode};
-use dotty_core::{Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::{Packages, SemanticStore, SourceId, SourceText, TokenKind};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{SourceSemanticIndex, name_compilation_unit};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
@@ -24,9 +24,20 @@ struct Options {
     timeout: Duration,
     source_version: Option<String>,
     source_revision: Option<String>,
+    parser_revision: Option<String>,
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
     namer: bool,
+}
+
+struct ReportMetadata<'a> {
+    roots: &'a [PathBuf],
+    source_version: Option<String>,
+    source_revision: Option<String>,
+    parser_revision: Option<String>,
+    oracle_files: Option<usize>,
+    oracle_failures: Option<usize>,
+    collect_namer: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +46,7 @@ struct Report {
     corpus_roots: Vec<String>,
     source_version: Option<String>,
     source_revision: Option<String>,
+    parser_revision: Option<String>,
     scala_oracle_files: Option<usize>,
     scala_oracle_failures: Option<usize>,
     files_attempted: usize,
@@ -47,10 +59,27 @@ struct Report {
     scanner_diagnostics: usize,
     diagnostic_histogram: BTreeMap<String, usize>,
     first_failure_histogram: BTreeMap<String, FailureBucket>,
+    capture_checking_cohorts: BTreeMap<String, ParserCohortReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     namer: Option<NamerReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deferred_features: Option<BTreeMap<String, DeferredFeatureBucket>>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ParserCohortReport {
+    files: usize,
+    clean: usize,
+    recoverable: usize,
+    hard_failures: usize,
+    scanner_diagnostics: usize,
+    diagnostic_histogram: BTreeMap<String, usize>,
+    first_failure_histogram: BTreeMap<String, FailureBucket>,
+    files_with_raw_caret_character: usize,
+    files_with_caret_operator_token: usize,
+    files_with_parser_capture_syntax: usize,
+    raw_caret_without_operator_examples: Vec<String>,
+    operator_without_capture_ast_examples: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -113,6 +142,10 @@ struct FileOutcome {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
+    has_raw_caret_character: bool,
+    has_caret_operator_token: bool,
+    has_parser_capture_syntax: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,7 +197,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
+                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
             );
             std::process::exit(2);
         }
@@ -181,12 +214,15 @@ fn main() {
     let outcomes = parse_files(&files, &options.roots, options.timeout, options.namer);
     let report = build_report(
         &outcomes,
-        &options.roots,
-        options.source_version,
-        options.source_revision,
-        options.oracle_files,
-        options.oracle_failures,
-        options.namer,
+        ReportMetadata {
+            roots: &options.roots,
+            source_version: options.source_version,
+            source_revision: options.source_revision,
+            parser_revision: options.parser_revision,
+            oracle_files: options.oracle_files,
+            oracle_failures: options.oracle_failures,
+            collect_namer: options.namer,
+        },
     );
 
     if let Some(output) = options.output
@@ -208,6 +244,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut source_version = None;
     let mut source_revision = None;
+    let mut parser_revision = None;
     let mut oracle_files = None;
     let mut oracle_failures = None;
     let mut namer = false;
@@ -233,6 +270,9 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             "--source-revision" => {
                 source_revision = Some(next_argument(&mut args, "--source-revision")?);
             }
+            "--parser-revision" => {
+                parser_revision = Some(next_argument(&mut args, "--parser-revision")?);
+            }
             "--oracle-files" => {
                 let value = next_argument(&mut args, "--oracle-files")?;
                 oracle_files = Some(
@@ -252,7 +292,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             "--namer" => namer = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
+                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -268,6 +308,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         timeout,
         source_version,
         source_revision,
+        parser_revision,
         oracle_files,
         oracle_failures,
         namer,
@@ -393,6 +434,10 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
                 scanner_diagnostics: outcome.scanner_diagnostics,
                 namer: outcome.namer,
                 deferred_features: outcome.deferred_features,
+                capture_checking_enabled: outcome.capture_checking_enabled,
+                has_raw_caret_character: outcome.has_raw_caret_character,
+                has_caret_operator_token: outcome.has_caret_operator_token,
+                has_parser_capture_syntax: outcome.has_parser_capture_syntax,
             },
             Err(error) => process_failure(display_path, "WorkerProtocol", error.to_string()),
         },
@@ -411,6 +456,10 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
+            has_raw_caret_character: false,
+            has_caret_operator_token: false,
+            has_parser_capture_syntax: false,
         },
         Err(error) => process_failure(display_path, "ProcessError", error.to_string()),
     }
@@ -427,6 +476,10 @@ fn process_failure(path: String, kind: &str, message: impl Into<String>) -> File
         scanner_diagnostics: 0,
         namer: None,
         deferred_features: BTreeMap::new(),
+        capture_checking_enabled: None,
+        has_raw_caret_character: false,
+        has_caret_operator_token: false,
+        has_parser_capture_syntax: false,
     }
 }
 
@@ -437,6 +490,10 @@ struct WorkerResult {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
+    has_raw_caret_character: bool,
+    has_caret_operator_token: bool,
+    has_parser_capture_syntax: bool,
 }
 
 fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
@@ -456,6 +513,10 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                     scanner_diagnostics: parsed.scanner_diagnostics,
                     namer: parsed.namer,
                     deferred_features: parsed.deferred_features,
+                    capture_checking_enabled: parsed.capture_checking_enabled,
+                    has_raw_caret_character: parsed.has_raw_caret_character,
+                    has_caret_operator_token: parsed.has_caret_operator_token,
+                    has_parser_capture_syntax: parsed.has_parser_capture_syntax,
                 },
                 Err(_) => WorkerResult {
                     status: Status::Panic,
@@ -466,6 +527,10 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                     scanner_diagnostics: 0,
                     namer: None,
                     deferred_features: BTreeMap::new(),
+                    capture_checking_enabled: None,
+                    has_raw_caret_character: false,
+                    has_caret_operator_token: false,
+                    has_parser_capture_syntax: false,
                 },
             }
         }
@@ -478,6 +543,10 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
+            has_raw_caret_character: false,
+            has_caret_operator_token: false,
+            has_parser_capture_syntax: false,
         },
     };
     serde_json::to_writer(io::stdout(), &result).map_err(io::Error::other)?;
@@ -536,6 +605,10 @@ struct ParsedSource {
     scanner_diagnostics: usize,
     namer: Option<NamerOutcome>,
     deferred_features: BTreeMap<String, FeatureCount>,
+    capture_checking_enabled: Option<bool>,
+    has_raw_caret_character: bool,
+    has_caret_operator_token: bool,
+    has_parser_capture_syntax: bool,
 }
 
 fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> ParsedSource {
@@ -551,10 +624,18 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 scanner_diagnostics: 0,
                 namer: None,
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: source.contains('^'),
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
             };
         }
     };
     let scanner_diagnostics = scanner.diagnostics().len();
+    let has_caret_operator_token = scanner.tokens().iter().any(|token| {
+        token.kind == TokenKind::Operator
+            && source.get(token.span.start() as usize..token.span.end() as usize) == Some("^")
+    });
     let source_text = match SourceText::new(source) {
         Ok(source_text) => source_text,
         Err(error) => {
@@ -567,6 +648,10 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 scanner_diagnostics,
                 namer: None,
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: source.contains('^'),
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
             };
         }
     };
@@ -585,6 +670,8 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             message: diagnostic.message().to_owned(),
         })
         .collect::<Vec<_>>();
+    let capture_checking_enabled = Some(result.effective_features.capture_checking);
+    let has_parser_capture_syntax = has_capture_syntax_nodes(&result.ast, &store.names, source);
     let status = if diagnostics.is_empty() && scanner_diagnostics == 0 {
         Status::Clean
     } else {
@@ -627,6 +714,59 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         scanner_diagnostics,
         namer,
         deferred_features,
+        capture_checking_enabled,
+        has_raw_caret_character: source.contains('^'),
+        has_caret_operator_token,
+        has_parser_capture_syntax,
+    }
+}
+
+fn has_capture_syntax_nodes(
+    arena: &AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    source: &str,
+) -> bool {
+    arena.iter().any(|(_, tree)| match &tree.kind {
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => true,
+        TreeKind::Annotated(annotation) => {
+            let TreeKind::New(new) = &arena.get(annotation.annotation).kind else {
+                return false;
+            };
+            let is_capture_marker = matches!(
+                type_name_path(arena, new.tpt, names).as_deref(),
+                Some(
+                    "scala.annotation.retains"
+                        | "scala.annotation.retainsCap"
+                        | "scala.annotation.internal.reachCapability"
+                        | "scala.annotation.internal.onlyCapability"
+                )
+            );
+            is_capture_marker
+                && tree.position.is_some_and(|position| {
+                    let range = position.span().range();
+                    source
+                        .get(range.start() as usize..range.end() as usize)
+                        .is_some_and(|spelling| spelling.contains('^'))
+                })
+        }
+        _ => false,
+    })
+}
+
+fn type_name_path(
+    arena: &AstArena<Untyped>,
+    tree_id: dotty_core::TreeId<Untyped>,
+    names: &dotty_core::NameInterner,
+) -> Option<String> {
+    match &arena.get(tree_id).kind {
+        TreeKind::Ident(ident) => Some(names.resolve(ident.name.text()).to_owned()),
+        TreeKind::Select(select) => Some(format!(
+            "{}.{}",
+            type_name_path(arena, select.qualifier, names)?,
+            names.resolve(select.name.text())
+        )),
+        TreeKind::AppliedTypeTree(applied) => type_name_path(arena, applied.tpt, names),
+        _ => None,
     }
 }
 
@@ -845,22 +985,15 @@ fn root_label(root: &Path) -> String {
     name.to_owned()
 }
 
-fn build_report(
-    outcomes: &[FileOutcome],
-    roots: &[PathBuf],
-    source_version: Option<String>,
-    source_revision: Option<String>,
-    oracle_files: Option<usize>,
-    oracle_failures: Option<usize>,
-    collect_namer: bool,
-) -> Report {
+fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
-        schema_version: 2,
-        corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
-        source_version,
-        source_revision,
-        scala_oracle_files: oracle_files,
-        scala_oracle_failures: oracle_failures,
+        schema_version: 4,
+        corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
+        source_version: metadata.source_version,
+        source_revision: metadata.source_revision,
+        parser_revision: metadata.parser_revision,
+        scala_oracle_files: metadata.oracle_files,
+        scala_oracle_failures: metadata.oracle_failures,
         files_attempted: outcomes.len(),
         files_parsed_without_diagnostics: 0,
         files_parsed_with_recoverable_diagnostics: 0,
@@ -871,8 +1004,9 @@ fn build_report(
         scanner_diagnostics: 0,
         diagnostic_histogram: BTreeMap::new(),
         first_failure_histogram: BTreeMap::new(),
-        namer: collect_namer.then(NamerReport::default),
-        deferred_features: collect_namer.then(|| {
+        capture_checking_cohorts: BTreeMap::new(),
+        namer: metadata.collect_namer.then(NamerReport::default),
+        deferred_features: metadata.collect_namer.then(|| {
             [
                 "enum_definitions",
                 "enum_cases",
@@ -901,6 +1035,76 @@ fn build_report(
     };
 
     for outcome in outcomes {
+        let cohort_name = match outcome.capture_checking_enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "unknown",
+        };
+        let cohort = report
+            .capture_checking_cohorts
+            .entry(cohort_name.to_owned())
+            .or_default();
+        cohort.files += 1;
+        cohort.scanner_diagnostics += outcome.scanner_diagnostics;
+        cohort.files_with_raw_caret_character += usize::from(outcome.has_raw_caret_character);
+        cohort.files_with_caret_operator_token += usize::from(outcome.has_caret_operator_token);
+        cohort.files_with_parser_capture_syntax += usize::from(outcome.has_parser_capture_syntax);
+        if outcome.has_raw_caret_character
+            && !outcome.has_caret_operator_token
+            && cohort.raw_caret_without_operator_examples.len() < 20
+        {
+            cohort
+                .raw_caret_without_operator_examples
+                .push(outcome.path.clone());
+        }
+        if outcome.has_caret_operator_token
+            && !outcome.has_parser_capture_syntax
+            && cohort.operator_without_capture_ast_examples.len() < 20
+        {
+            cohort
+                .operator_without_capture_ast_examples
+                .push(outcome.path.clone());
+        }
+        match outcome.status {
+            Status::Clean => cohort.clean += 1,
+            Status::RecoverableDiagnostics => cohort.recoverable += 1,
+            Status::ScannerFailure | Status::ProcessFailure | Status::Panic | Status::Hang => {
+                cohort.hard_failures += 1;
+            }
+        }
+        for diagnostic in &outcome.diagnostics {
+            *cohort
+                .diagnostic_histogram
+                .entry(diagnostic.kind.clone())
+                .or_default() += 1;
+        }
+        if let Some(diagnostic) = outcome.diagnostics.first() {
+            let bucket = first_failure_bucket(diagnostic);
+            let entry = cohort
+                .first_failure_histogram
+                .entry(bucket)
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(outcome.path.clone());
+            }
+        } else if outcome.scanner_diagnostics != 0 {
+            let entry = cohort
+                .first_failure_histogram
+                .entry("ScannerDiagnostics".to_owned())
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            entry.count += 1;
+            if entry.examples.len() < 5 {
+                entry.examples.push(outcome.path.clone());
+            }
+        }
+
         if let Some(features) = &mut report.deferred_features {
             for (name, counts) in &outcome.deferred_features {
                 if counts.occurrences == 0 {
@@ -1106,6 +1310,12 @@ fn write_report(path: &Path, report: &Report) -> io::Result<()> {
 
 fn print_summary(report: &Report) {
     println!("Parser corpus report");
+    if let Some(revision) = &report.parser_revision {
+        println!("  dotty-rs revision: {revision}");
+    }
+    if let Some(revision) = &report.source_revision {
+        println!("  Scala source revision: {revision}");
+    }
     println!("  files attempted: {}", report.files_attempted);
     println!(
         "  parsed without diagnostics: {}",
@@ -1139,6 +1349,24 @@ fn print_summary(report: &Report) {
             for example in &failure.examples {
                 println!("      - {example}");
             }
+        }
+    }
+    for (policy, cohort) in &report.capture_checking_cohorts {
+        println!(
+            "  capture-checking {policy}: {} files ({} clean, {} recoverable, {} hard failures)",
+            cohort.files, cohort.clean, cohort.recoverable, cohort.hard_failures
+        );
+        println!(
+            "    raw ^ marker: {}, lexer ^ token: {}, parser-confirmed capture syntax: {}",
+            cohort.files_with_raw_caret_character,
+            cohort.files_with_caret_operator_token,
+            cohort.files_with_parser_capture_syntax
+        );
+        for path in &cohort.raw_caret_without_operator_examples {
+            println!("    raw-only ^ example: {path}");
+        }
+        for path in &cohort.operator_without_capture_ast_examples {
+            println!("    unconfirmed ^ token example: {path}");
         }
     }
     if let Some(namer) = &report.namer {
@@ -1211,6 +1439,18 @@ fn print_summary(report: &Report) {
 mod tests {
     use super::*;
 
+    fn test_report_metadata(collect_namer: bool) -> ReportMetadata<'static> {
+        ReportMetadata {
+            roots: &[],
+            source_version: None,
+            source_revision: None,
+            parser_revision: None,
+            oracle_files: None,
+            oracle_failures: None,
+            collect_namer,
+        }
+    }
+
     #[test]
     fn discovers_scala_files_in_sorted_order() {
         let root = unique_temp_dir("discover");
@@ -1232,6 +1472,51 @@ mod tests {
         let parsed = parse_source("object C", "Test.scala", false);
         assert!(matches!(parsed.status, Status::Clean));
         assert!(parsed.diagnostics.is_empty());
+        assert_eq!(parsed.capture_checking_enabled, Some(false));
+    }
+
+    #[test]
+    fn corpus_worker_observes_capture_policy_enabled_by_global_import() {
+        let parsed = parse_source(
+            "import language.experimental.captureChecking\ntype F = A -> {cap} B",
+            "Capture.scala",
+            false,
+        );
+
+        assert_eq!(parsed.capture_checking_enabled, Some(true));
+    }
+
+    #[test]
+    fn corpus_worker_recognizes_capture_syntax_in_the_ast() {
+        let parsed = parse_source(
+            "import language.experimental.captureChecking\ntype F = A -> {cap} B\ntype R = T^{cap}",
+            "Capture.scala",
+            false,
+        );
+
+        assert_eq!(parsed.capture_checking_enabled, Some(true));
+        assert!(parsed.has_caret_operator_token);
+        assert!(parsed.has_parser_capture_syntax);
+    }
+
+    #[test]
+    fn caret_characters_in_comments_and_strings_are_not_capture_syntax_tokens() {
+        let parsed = parse_source("// ^\nval marker = \"^\"", "Marker.scala", false);
+
+        assert!(parsed.has_raw_caret_character);
+        assert!(!parsed.has_caret_operator_token);
+        assert!(!parsed.has_parser_capture_syntax);
+    }
+
+    #[test]
+    fn explicit_retains_annotation_is_not_counted_as_capture_syntax() {
+        let parsed = parse_source(
+            "import language.experimental.captureChecking\ntype T = A @scala.annotation.retains",
+            "ExplicitAnnotation.scala",
+            false,
+        );
+
+        assert!(!parsed.has_parser_capture_syntax);
     }
 
     #[test]
@@ -1422,6 +1707,10 @@ mod tests {
                     invariant_violations: vec!["scope owner mismatch".to_owned()],
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
             },
             FileOutcome {
                 path: "recovered.scala".to_owned(),
@@ -1432,6 +1721,10 @@ mod tests {
                     invariant_violations: Vec::new(),
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(true),
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
             },
             FileOutcome {
                 path: "failed.scala".to_owned(),
@@ -1444,9 +1737,13 @@ mod tests {
                     transaction_residue: false,
                 }),
                 deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
             },
         ];
-        let report = build_report(&outcomes, &[], None, None, None, None, true);
+        let report = build_report(&outcomes, test_report_metadata(true));
         assert!(
             report
                 .deferred_features
@@ -1480,6 +1777,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn report_partitions_files_by_effective_capture_checking_policy() {
+        let outcomes = [
+            FileOutcome {
+                path: "enabled.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(true),
+                has_raw_caret_character: false,
+                has_caret_operator_token: true,
+                has_parser_capture_syntax: true,
+            },
+            FileOutcome {
+                path: "candidate.scala".to_owned(),
+                status: Status::RecoverableDiagnostics,
+                diagnostics: vec![DiagnosticSummary {
+                    kind: "ExpectedType".to_owned(),
+                    message: "expected a type".to_owned(),
+                }],
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
+                has_raw_caret_character: true,
+                has_caret_operator_token: true,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "comment.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
+                has_raw_caret_character: true,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+            process_failure("unknown.scala".to_owned(), "WorkerError", "failed"),
+        ];
+
+        let report = build_report(&outcomes, test_report_metadata(false));
+
+        assert_eq!(report.capture_checking_cohorts["enabled"].files, 1);
+        assert_eq!(report.capture_checking_cohorts["enabled"].clean, 1);
+        assert_eq!(
+            report.capture_checking_cohorts["enabled"].files_with_caret_operator_token,
+            1
+        );
+        assert_eq!(
+            report.capture_checking_cohorts["enabled"].files_with_parser_capture_syntax,
+            1
+        );
+        assert_eq!(report.capture_checking_cohorts["disabled"].files, 2);
+        assert_eq!(report.capture_checking_cohorts["disabled"].recoverable, 1);
+        assert_eq!(report.capture_checking_cohorts["disabled"].clean, 1);
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].diagnostic_histogram["ExpectedType"],
+            1
+        );
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].operator_without_capture_ast_examples,
+            ["candidate.scala"]
+        );
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].raw_caret_without_operator_examples,
+            ["comment.scala"]
+        );
+        assert_eq!(report.capture_checking_cohorts["unknown"].hard_failures, 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_kills_the_worker_process_before_returning() {
@@ -1510,7 +1882,7 @@ mod tests {
             "WorkerProtocol",
             "invalid worker output",
         );
-        let report = build_report(&[outcome], &[], None, None, None, None, false);
+        let report = build_report(&[outcome], test_report_metadata(false));
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.process_failures, 1);
@@ -1529,8 +1901,12 @@ mod tests {
             scanner_diagnostics: 0,
             namer: None,
             deferred_features: BTreeMap::new(),
+            capture_checking_enabled: None,
+            has_raw_caret_character: false,
+            has_caret_operator_token: false,
+            has_parser_capture_syntax: false,
         };
-        let report = build_report(&[outcome], &[], None, None, None, None, false);
+        let report = build_report(&[outcome], test_report_metadata(false));
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.panics, 1);
@@ -1541,17 +1917,21 @@ mod tests {
         let roots = vec![PathBuf::from("/tmp/scala3/library/src")];
         let report = build_report(
             &[],
-            &roots,
-            Some("3.9.0".to_owned()),
-            Some("revision".to_owned()),
-            Some(12),
-            Some(1),
-            false,
+            ReportMetadata {
+                roots: &roots,
+                source_version: Some("3.9.0".to_owned()),
+                source_revision: Some("revision".to_owned()),
+                parser_revision: Some("parser revision".to_owned()),
+                oracle_files: Some(12),
+                oracle_failures: Some(1),
+                collect_namer: false,
+            },
         );
 
         assert_eq!(report.corpus_roots, vec!["library/src"]);
         assert_eq!(report.source_version.as_deref(), Some("3.9.0"));
         assert_eq!(report.source_revision.as_deref(), Some("revision"));
+        assert_eq!(report.parser_revision.as_deref(), Some("parser revision"));
         assert_eq!(report.scala_oracle_files, Some(12));
         assert_eq!(report.scala_oracle_failures, Some(1));
     }
