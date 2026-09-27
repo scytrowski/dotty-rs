@@ -197,6 +197,11 @@ impl AnnotationArena {
     pub fn get(&self, id: AnnotationId) -> &Annotation {
         &self.annotations[id.index() as usize]
     }
+
+    /// Looks up an annotation without panicking when the id is out of range.
+    pub fn try_get(&self, id: AnnotationId) -> Option<&Annotation> {
+        self.annotations.get(id.index() as usize)
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +217,8 @@ mod tests {
 
         assert_eq!(arena.get(id).ty, ty);
         assert_eq!(arena.get(id).tree, None);
+        assert_eq!(arena.try_get(id), Some(arena.get(id)));
+        assert_eq!(arena.try_get(AnnotationId::new(99)), None);
     }
 
     #[test]

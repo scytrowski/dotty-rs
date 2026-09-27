@@ -68,6 +68,8 @@ pub enum TypeRebindError {
     NotATypeLambda { source: TypeId },
     /// A referenced type id is outside the store's type arena.
     InvalidType { id: TypeId },
+    /// An annotation id is outside the store's annotation arena.
+    InvalidAnnotation { id: AnnotationId },
     /// `declared_variances` has `actual` entries, but the lambda has
     /// `expected` parameters. Nothing is truncated or padded.
     VarianceArityMismatch {
@@ -96,6 +98,13 @@ impl fmt::Display for TypeRebindError {
         match self {
             Self::InvalidType { id } => {
                 write!(formatter, "type {} is outside the type arena", id.index())
+            }
+            Self::InvalidAnnotation { id } => {
+                write!(
+                    formatter,
+                    "annotation {} is outside the annotation arena",
+                    id.index()
+                )
             }
             Self::NotATypeLambda { source } => {
                 write!(formatter, "type {} is not a type lambda", source.index())
@@ -305,7 +314,10 @@ fn contains_substituted_symbol(
                 annotation,
             } => {
                 children.push(underlying);
-                let annotation = store.annotations.get(annotation);
+                let annotation = store
+                    .annotations
+                    .try_get(annotation)
+                    .ok_or(TypeRebindError::InvalidAnnotation { id: annotation })?;
                 children.push(annotation.ty);
                 if let AnnotationArguments::Known(arguments) = &annotation.arguments {
                     for argument in arguments {
@@ -534,7 +546,10 @@ fn references_this_type(
                 annotation,
             } => {
                 stack.push(*underlying);
-                let annotation = store.annotations.get(*annotation);
+                let annotation = store
+                    .annotations
+                    .try_get(*annotation)
+                    .ok_or(TypeRebindError::InvalidAnnotation { id: *annotation })?;
                 stack.push(annotation.ty);
                 if let AnnotationArguments::Known(arguments) = &annotation.arguments {
                     for argument in arguments {
@@ -816,7 +831,12 @@ impl<'a> Rebinder<'a> {
         if let Some(&done) = self.annotations.get(&id) {
             return Ok(done);
         }
-        let annotation = self.store.annotations.get(id).clone();
+        let annotation = self
+            .store
+            .annotations
+            .try_get(id)
+            .ok_or(TypeRebindError::InvalidAnnotation { id })?
+            .clone();
         let ty = self.ty(annotation.ty)?;
         // The term arguments can name types too (`classOf[T]`); rebinding
         // them is part of the annotation, and the rest is copied as it is.
@@ -2806,6 +2826,43 @@ mod tests {
         assert_eq!(
             substitute_type_symbols(&mut f.store, f.leaf, &[(symbol, invalid)]),
             Err(TypeRebindError::InvalidType { id: invalid })
+        );
+    }
+
+    #[test]
+    fn substitution_reports_an_invalid_annotation_during_the_scan() {
+        let mut f = Fixture::new();
+        let invalid = AnnotationId::new(u32::MAX);
+        let annotated = f.store.types.alloc(Type::Annotated {
+            underlying: f.leaf,
+            annotation: invalid,
+        });
+
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, annotated, &[(SymbolId::new(81), f.leaf)]),
+            Err(TypeRebindError::InvalidAnnotation { id: invalid })
+        );
+    }
+
+    #[test]
+    fn substitution_reports_an_invalid_annotation_during_rewriting() {
+        let mut f = Fixture::new();
+        let invalid = AnnotationId::new(u32::MAX);
+        let symbol = SymbolId::new(82);
+        let prefix = f.store.types.alloc(Type::NoPrefix);
+        let matching = f.store.types.alloc(Type::type_ref(prefix, symbol));
+        let annotated = f.store.types.alloc(Type::Annotated {
+            underlying: f.leaf,
+            annotation: invalid,
+        });
+        let root = f.store.types.alloc(Type::And {
+            left: matching,
+            right: annotated,
+        });
+
+        assert_eq!(
+            substitute_type_symbols(&mut f.store, root, &[(symbol, f.leaf)]),
+            Err(TypeRebindError::InvalidAnnotation { id: invalid })
         );
     }
 
