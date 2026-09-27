@@ -41,7 +41,8 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
-Schema version 3 also partitions outcomes into `capture_checking_cohorts`
+Schema version 4 also records the parser commit as `parser_revision` and
+partitions outcomes into `capture_checking_cohorts`
 (`enabled`, `disabled`, and `unknown`) using the parser's effective
 `ParserFeatures` after compilation-unit imports have been processed. Each
 cohort records the same clean/recoverable/hard-failure and diagnostic summary

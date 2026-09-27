@@ -24,6 +24,7 @@ struct Options {
     timeout: Duration,
     source_version: Option<String>,
     source_revision: Option<String>,
+    parser_revision: Option<String>,
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
     namer: bool,
@@ -35,6 +36,7 @@ struct Report {
     corpus_roots: Vec<String>,
     source_version: Option<String>,
     source_revision: Option<String>,
+    parser_revision: Option<String>,
     scala_oracle_files: Option<usize>,
     scala_oracle_failures: Option<usize>,
     files_attempted: usize,
@@ -185,7 +187,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
+                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
             );
             std::process::exit(2);
         }
@@ -205,6 +207,7 @@ fn main() {
         &options.roots,
         options.source_version,
         options.source_revision,
+        options.parser_revision,
         options.oracle_files,
         options.oracle_failures,
         options.namer,
@@ -229,6 +232,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut source_version = None;
     let mut source_revision = None;
+    let mut parser_revision = None;
     let mut oracle_files = None;
     let mut oracle_failures = None;
     let mut namer = false;
@@ -254,6 +258,9 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             "--source-revision" => {
                 source_revision = Some(next_argument(&mut args, "--source-revision")?);
             }
+            "--parser-revision" => {
+                parser_revision = Some(next_argument(&mut args, "--parser-revision")?);
+            }
             "--oracle-files" => {
                 let value = next_argument(&mut args, "--oracle-files")?;
                 oracle_files = Some(
@@ -273,7 +280,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             "--namer" => namer = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
+                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -289,6 +296,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         timeout,
         source_version,
         source_revision,
+        parser_revision,
         oracle_files,
         oracle_failures,
         namer,
@@ -959,15 +967,17 @@ fn build_report(
     roots: &[PathBuf],
     source_version: Option<String>,
     source_revision: Option<String>,
+    parser_revision: Option<String>,
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
     collect_namer: bool,
 ) -> Report {
     let mut report = Report {
-        schema_version: 3,
+        schema_version: 4,
         corpus_roots: roots.iter().map(|root| root_label(root)).collect(),
         source_version,
         source_revision,
+        parser_revision,
         scala_oracle_files: oracle_files,
         scala_oracle_failures: oracle_failures,
         files_attempted: outcomes.len(),
@@ -1286,6 +1296,12 @@ fn write_report(path: &Path, report: &Report) -> io::Result<()> {
 
 fn print_summary(report: &Report) {
     println!("Parser corpus report");
+    if let Some(revision) = &report.parser_revision {
+        println!("  dotty-rs revision: {revision}");
+    }
+    if let Some(revision) = &report.source_revision {
+        println!("  Scala source revision: {revision}");
+    }
     println!("  files attempted: {}", report.files_attempted);
     println!(
         "  parsed without diagnostics: {}",
@@ -1690,7 +1706,7 @@ mod tests {
                 has_parser_capture_syntax: false,
             },
         ];
-        let report = build_report(&outcomes, &[], None, None, None, None, true);
+        let report = build_report(&outcomes, &[], None, None, None, None, None, true);
         assert!(
             report
                 .deferred_features
@@ -1769,7 +1785,7 @@ mod tests {
             process_failure("unknown.scala".to_owned(), "WorkerError", "failed"),
         ];
 
-        let report = build_report(&outcomes, &[], None, None, None, None, false);
+        let report = build_report(&outcomes, &[], None, None, None, None, None, false);
 
         assert_eq!(report.capture_checking_cohorts["enabled"].files, 1);
         assert_eq!(report.capture_checking_cohorts["enabled"].clean, 1);
@@ -1829,7 +1845,7 @@ mod tests {
             "WorkerProtocol",
             "invalid worker output",
         );
-        let report = build_report(&[outcome], &[], None, None, None, None, false);
+        let report = build_report(&[outcome], &[], None, None, None, None, None, false);
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.process_failures, 1);
@@ -1853,7 +1869,7 @@ mod tests {
             has_caret_operator_token: false,
             has_parser_capture_syntax: false,
         };
-        let report = build_report(&[outcome], &[], None, None, None, None, false);
+        let report = build_report(&[outcome], &[], None, None, None, None, None, false);
 
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.panics, 1);
@@ -1867,6 +1883,7 @@ mod tests {
             &roots,
             Some("3.9.0".to_owned()),
             Some("revision".to_owned()),
+            Some("parser revision".to_owned()),
             Some(12),
             Some(1),
             false,
@@ -1875,6 +1892,7 @@ mod tests {
         assert_eq!(report.corpus_roots, vec!["library/src"]);
         assert_eq!(report.source_version.as_deref(), Some("3.9.0"));
         assert_eq!(report.source_revision.as_deref(), Some("revision"));
+        assert_eq!(report.parser_revision.as_deref(), Some("parser revision"));
         assert_eq!(report.scala_oracle_files, Some(12));
         assert_eq!(report.scala_oracle_failures, Some(1));
     }
