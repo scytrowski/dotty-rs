@@ -1021,6 +1021,29 @@ impl<'a> SourceTyper<'a> {
         if owner == Some(current_class) {
             return Ok(prefix);
         }
+        let mut enclosing = self.store.symbols.get(current_class).owner;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(class) = enclosing {
+            if !self.store.symbols.contains(class) {
+                return Err(TyperError::UnknownSymbol { symbol: class });
+            }
+            if !seen.insert(class) {
+                return Err(TyperError::ThisOwnerCycle {
+                    source: self.source,
+                    owner: class,
+                });
+            }
+            let declaration = self.store.symbols.get(class);
+            enclosing = declaration.owner;
+            if Some(class) == owner
+                && matches!(
+                    declaration.kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                )
+            {
+                return Ok(self.store.types.alloc(Type::ThisType { class }));
+            }
+        }
         let name = self.store.symbols.get(symbol).name;
         match self.lookup_members_journaled(prefix, name, info_journal) {
             Ok(candidates)
@@ -9851,6 +9874,50 @@ mod tests {
             .widen_expression_type(typer.typed_ast().get(typed).ty)
             .unwrap();
         assert_eq!(widened, definitions.int);
+    }
+
+    #[test]
+    fn nested_class_identifier_uses_enclosing_generic_this_prefix() {
+        let source_text = "class Outer[A] { val value: A; class Inner { def use: A = value } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let outer = class_symbol(&parsed, &store, &index, source, "Outer");
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let term_type = typer.typed_ast().get(typed).ty;
+        assert!(
+            matches!(
+                typer.store().types.get(term_type),
+                Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+                    if *symbol == field
+                        && matches!(typer.store().types.get(*prefix), Type::ThisType { class } if *class == outer)
+            ),
+            "nested member should retain its enclosing class path"
+        );
+        let widened = typer.widen_expression_type(term_type).unwrap();
+        let SymbolInfo::Complete(raw) = *typer.store().symbols.info(field) else {
+            panic!("source field should have complete info");
+        };
+        assert_ne!(
+            widened,
+            raw,
+            "widening should adapt the outer member through Outer[A]: {:?} vs {:?}",
+            typer.store().types.get(widened),
+            typer.store().types.get(raw)
+        );
     }
 
     #[test]
