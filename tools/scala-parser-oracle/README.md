@@ -19,6 +19,9 @@ The batch manifest contains one tab-separated `mode` and absolute source path
 per line. `compare.sh` uses this mode automatically: Scala parses the whole
 corpus in one JVM, while the Rust dump tool is built and run once. This avoids
 restarting sbt, Scala, Cargo, and Python for every fixture.
+Each Scala fixture is attached to a fresh `CompilationUnit`, so source-level
+language imports and other per-unit parser features cannot leak to later
+fixtures in the batch.
 
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
@@ -54,10 +57,11 @@ arguments, and binding around union, intersection, and parenthesized types.
 Refined-type fixtures cover `RefinedTypeTree` parents with abstract, aliased,
 and upper-bounded `TypeDef` members, declaration-only `val`, `var`, and `def`
 members, multiple members in source order, annotated and applied parents, and
-the parentless refinement form. RHS-bearing declarations, default arguments,
-class-like members, modifiers, refined type members, capture-checking
-refinements, and capture-checking type syntax remain outside this parser
-milestone. Core match types are compared in the type-definition fixtures,
+the parentless refinement form. Capture-checking compilation fixtures also
+compare caret disambiguation and pure function-type capture sets. RHS-bearing
+refined declarations, default arguments, class-like members, modifiers,
+refined type members, and capture-checking refinements remain outside this
+parser milestone. Core match types are compared in the type-definition fixtures,
 including ordered `CaseDef` children, applied/tuple/infix patterns, full type
 results, and upper-bounded match-type aliases. Generic symbolic and identifier
 infix types are compared in

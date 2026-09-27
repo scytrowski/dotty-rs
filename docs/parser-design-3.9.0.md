@@ -97,8 +97,10 @@ the parser activates its per-unit policy for the top-level
 `language.experimental.captureChecking` import (or when explicitly enabled by
 the caller). A misplaced global language import receives Dotty's toplevel
 placement diagnostic while still marking the compilation unit, as in Dotty
-3.9. The capture-checking grammar itself remains an incremental follow-up; the
-other feature switches remain disabled policy boundaries for future grammar.
+3.9. The implemented capture-checking type subset includes capture suffixes,
+capture references/sets, and pure function arrows; capture-aware refinements,
+`.rd`, and semantic capability checking remain deferred. The other feature
+switches remain disabled policy boundaries for future grammar.
 
 The parser forwards `ColonEol`, `Indented`, `Outdented`, `ArrowIndented`, and
 the template-specific `SelfArrow` event through readable helpers. A self arrow
@@ -379,8 +381,18 @@ Named parameters can use the full currently-supported `type_expr()` subset and
 compose recursively with ordinary or context arrows. Named tuple types such as
 `(name: String, age: Int)` are represented by the shared `Tuple` node with
 `NamedArg` children; each child preserves its term name and a full
-`type_expr()` element type. The lookahead for a following `=>` or `?=>` still
-selects the named function-parameter path instead. Pure arrows remain deferred.
+`type_expr()` element type. With capture checking enabled, pure arrows `->`
+and `?->` accept an optional `{captureRef, ...}` set before the result. The
+set and result are preserved in the untyped-only `CapturesAndResult` node,
+matching Dotty's parser tree; parsing does not lower this node to a retaining
+annotation. Ordinary `=>` is marked `Impure` under capture checking. For
+non-function types, `T^` and `T^{...}` use the existing `Annotated` node with
+Dotty's `retainsCap`/`retains` annotation shapes. Capture refs support
+qualified term paths, reach `*`, and `.only[QualId]`; explicit empty sets
+lower to `retains[Nothing]`. Dotty's lookahead distinguishes a capture suffix
+`^` from an infix type operator, including physical line breaks. The lookahead
+for a following `=>`, `?=>`, `->`, or `?->` selects the named function-parameter
+path instead.
 Supported
 context-function types use
 `FunctionWithMods` with exactly one `Given` modifier and one positional boolean
@@ -392,12 +404,12 @@ in the leading-arrow `FunArgType` form, such as `(=> A) => B` and
 `(A, => B) => C`. Each explicit `=> Type` parameter is represented by the
 shared `ByNameTypeTree`, and strict/by-name parameters retain source order.
 The wrapped result uses the full current `type_expr()` parser, so applied,
-union/intersection, tuple, and nested ordinary/context function types are
+union/intersection, tuple, and nested ordinary/context/pure function types are
 preserved. By-name parameters are supported in parenthesized ordinary and
 context-function types. The latter use `FunctionWithMods` with `Given` on the
 outer function and retain an all-`false` `erased_params` vector; the
-`ByNameTypeTree` itself carries no context metadata. Named by-name parameters,
-erased/by-name combinations, and pure arrows remain deferred.
+`ByNameTypeTree` itself carries no context metadata. Named by-name parameters
+and erased/by-name combinations remain deferred.
 Polymorphic function types such as `[A] => A => A` reuse the shared
 `parse_type_param_clause(ParamOwner::Type)` grammar and are represented by
 `PolyFunction` with `TypeDef` children followed by a function-type body.
@@ -568,8 +580,8 @@ different from an expression block, whose last expression is its result. Layout
 classification remains owned by the scanner; the parser only feeds back the
 `ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
 template region. The parser preserves `derives` and ordered `uses` metadata in
-`UntypedTemplateMetadata`; it does not perform derivation or capture checking.
-Sequence capture references, `.only[...]`/`.rd` forms, auxiliary constructors,
+`UntypedTemplateMetadata`; it does not perform derivation or semantic capture
+checking. Sequence capture references, `.rd` forms, auxiliary constructors,
 and semantic template processing remain future work. Direct enum-case
 annotations, access modifiers, and qualified visibility are preserved as
 definition metadata; constructor-level annotations/modifiers after the case
