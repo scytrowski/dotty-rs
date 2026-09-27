@@ -48,7 +48,10 @@ cohort records the same clean/recoverable/hard-failure and diagnostic summary
 as the whole corpus. Its caret audit distinguishes raw `^` characters from
 lexer `^` operator tokens and capture constructs represented in the parsed
 AST; this prevents comments and string contents from being counted as source
-syntax while keeping unparsed operator tokens visible for manual review.
+syntax while keeping unparsed operator tokens visible for manual review. The
+report includes paths for raw-only marker hits and lexer caret tokens for which
+the parser did not build a capture-specific AST shape, making the remaining
+candidate set inspectable rather than treating every caret as capture syntax.
 
 The low-level binary also accepts repeated `--root` options for focused runs:
 

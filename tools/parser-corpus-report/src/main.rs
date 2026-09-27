@@ -66,6 +66,8 @@ struct ParserCohortReport {
     files_with_raw_caret_character: usize,
     files_with_caret_operator_token: usize,
     files_with_parser_capture_syntax: usize,
+    raw_caret_without_operator_examples: Vec<String>,
+    operator_without_capture_ast_examples: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1023,6 +1025,22 @@ fn build_report(
         cohort.files_with_raw_caret_character += usize::from(outcome.has_raw_caret_character);
         cohort.files_with_caret_operator_token += usize::from(outcome.has_caret_operator_token);
         cohort.files_with_parser_capture_syntax += usize::from(outcome.has_parser_capture_syntax);
+        if outcome.has_raw_caret_character
+            && !outcome.has_caret_operator_token
+            && cohort.raw_caret_without_operator_examples.len() < 20
+        {
+            cohort
+                .raw_caret_without_operator_examples
+                .push(outcome.path.clone());
+        }
+        if outcome.has_caret_operator_token
+            && !outcome.has_parser_capture_syntax
+            && cohort.operator_without_capture_ast_examples.len() < 20
+        {
+            cohort
+                .operator_without_capture_ast_examples
+                .push(outcome.path.clone());
+        }
         match outcome.status {
             Status::Clean => cohort.clean += 1,
             Status::RecoverableDiagnostics => cohort.recoverable += 1,
@@ -1314,6 +1332,12 @@ fn print_summary(report: &Report) {
             cohort.files_with_caret_operator_token,
             cohort.files_with_parser_capture_syntax
         );
+        for path in &cohort.raw_caret_without_operator_examples {
+            println!("    raw-only ^ example: {path}");
+        }
+        for path in &cohort.operator_without_capture_ast_examples {
+            println!("    unconfirmed ^ token example: {path}");
+        }
     }
     if let Some(namer) = &report.namer {
         println!(
@@ -1716,7 +1740,7 @@ mod tests {
                 has_parser_capture_syntax: true,
             },
             FileOutcome {
-                path: "disabled.scala".to_owned(),
+                path: "candidate.scala".to_owned(),
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "ExpectedType".to_owned(),
@@ -1726,7 +1750,19 @@ mod tests {
                 namer: None,
                 deferred_features: BTreeMap::new(),
                 capture_checking_enabled: Some(false),
-                has_raw_caret_character: false,
+                has_raw_caret_character: true,
+                has_caret_operator_token: true,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "comment.scala".to_owned(),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: Some(false),
+                has_raw_caret_character: true,
                 has_caret_operator_token: false,
                 has_parser_capture_syntax: false,
             },
@@ -1745,11 +1781,20 @@ mod tests {
             report.capture_checking_cohorts["enabled"].files_with_parser_capture_syntax,
             1
         );
-        assert_eq!(report.capture_checking_cohorts["disabled"].files, 1);
+        assert_eq!(report.capture_checking_cohorts["disabled"].files, 2);
         assert_eq!(report.capture_checking_cohorts["disabled"].recoverable, 1);
+        assert_eq!(report.capture_checking_cohorts["disabled"].clean, 1);
         assert_eq!(
             report.capture_checking_cohorts["disabled"].diagnostic_histogram["ExpectedType"],
             1
+        );
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].operator_without_capture_ast_examples,
+            ["candidate.scala"]
+        );
+        assert_eq!(
+            report.capture_checking_cohorts["disabled"].raw_caret_without_operator_examples,
+            ["comment.scala"]
         );
         assert_eq!(report.capture_checking_cohorts["unknown"].hard_failures, 1);
     }
