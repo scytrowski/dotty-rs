@@ -438,7 +438,7 @@ fn build_tokens(
                         && !continues_previous_region
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
-                        && can_start_statement(raw.kind)
+                        && can_start_statement_or_annotation(source, raw)
                     {
                         let separator = if blank_line {
                             TokenKind::Newlines
@@ -458,7 +458,8 @@ fn build_tokens(
                         && !continues_previous_region
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
-                        && (can_start_statement(raw.kind) || blank_line_before_operator)
+                        && (can_start_statement_or_annotation(source, raw)
+                            || blank_line_before_operator)
                     {
                         let separator = if blank_line {
                             TokenKind::Newlines
@@ -850,6 +851,15 @@ fn can_start_statement(kind: RawTokenKind) -> bool {
     )
 }
 
+fn can_start_statement_or_annotation(source: &str, token: &RawToken) -> bool {
+    can_start_statement(token.kind) || is_annotation_operator(source, token)
+}
+
+fn is_annotation_operator(source: &str, token: &RawToken) -> bool {
+    token.kind == RawTokenKind::Operator
+        && source.get(token.span.start() as usize..token.span.end() as usize) == Some("@")
+}
+
 fn can_start_statement_kind(kind: TokenKind) -> bool {
     !matches!(
         kind,
@@ -967,7 +977,8 @@ fn is_leading_infix(
     if !matches!(
         current.kind,
         RawTokenKind::Operator | RawTokenKind::BackquotedIdentifier
-    ) {
+    ) || is_annotation_operator(source, current)
+    {
         return false;
     }
     let Some(next) = next_raw_token(items, item_index) else {
@@ -2763,6 +2774,27 @@ mod tests {
     }
 
     #[test]
+    fn inserts_a_newline_before_an_annotation_prefixed_definition() {
+        assert_eq!(
+            kinds("previous { 1 }\n@tailrec def loop = done"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                TokenKind::IntegerLiteral,
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                TokenKind::Newline,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Def),
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn inserts_newlines_after_a_blank_line() {
         assert!(kinds("val first = 1\n\nval second = 2").contains(&TokenKind::Newlines));
     }
@@ -2776,6 +2808,24 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_treat_at_as_a_leading_infix_operator() {
+        assert_eq!(
+            kinds("value\n@tailrec def loop = done"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Keyword(HardKeyword::Def),
+                TokenKind::Identifier,
+                TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
