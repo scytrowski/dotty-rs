@@ -10239,6 +10239,60 @@ mod tests {
     }
 
     #[test]
+    fn generic_method_selection_widens_to_receiver_adapted_signature() {
+        let source_text = "class Box[A] { def get(): A = null }; class Text; class Use { def use(box: Box[Text]): Text = box.get }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (parameter, _) = val_symbol(&parsed, &store, &index, source, "box");
+        let referenced_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "get")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == referenced_method
+        ));
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap();
+        let widened_type = typer.store().types.get(widened);
+        let Type::Method(method) = widened_type else {
+            panic!("selected method should widen to its method signature")
+        };
+        assert!(matches!(
+            typer.store().types.get(method.result),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == text
+        ));
+    }
+
+    #[test]
     fn inherited_unique_member_selection_finds_the_parent_field() {
         let (kind, _, widened, _, definitions) = type_method_rhs(
             "class Parent { val value: Int }; class Child extends Parent; class Use { def use(child: Child): Int = child.value }",
