@@ -1,6 +1,7 @@
 //! End-to-end typed-expression checks over synthetic source.
 
 use dotty_core::ast::TreeKind;
+use dotty_core::types::{TermRefTarget, Type};
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -50,6 +51,17 @@ fn types_a_synthetic_field_selection_through_the_public_pipeline() {
         owner: method,
     };
     let source_position = parsed.ast.get(rhs).position;
+    let field = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "value")
+                .then(|| index.symbol_at(source, tree).unwrap())
+        })
+        .expect("source should contain field value");
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -65,7 +77,14 @@ fn types_a_synthetic_field_selection_through_the_public_pipeline() {
         typer.typed_ast().get(typed).kind,
         TreeKind::Select(_)
     ));
-    assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == field
+    ));
+    let widened = typer
+        .widen_expression_type(typer.typed_ast().get(typed).ty)
+        .unwrap();
+    assert_eq!(widened, definitions.int);
     assert_eq!(typer.typed_ast().get(typed).position, source_position);
     assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
     for (_, node) in typer.typed_ast().iter() {

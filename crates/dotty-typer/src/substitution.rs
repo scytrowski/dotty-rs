@@ -9,6 +9,40 @@ use crate::types::TypeNormalizer;
 use crate::{MemberCandidate, SourceTyper, TyperError};
 
 impl SourceTyper<'_> {
+    /// Instantiates a source generic `ThisType` with its own type parameters
+    /// for receiver lookup and member adaptation.
+    pub(super) fn this_type_receiver_view(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
+        let Type::ThisType { class } = *self.store.types.get(ty) else {
+            return Ok(ty);
+        };
+        if !self.is_current_source_symbol(class) {
+            return Ok(ty);
+        }
+        let parameters = self.source_class_type_parameters(class)?;
+        if parameters.is_empty() {
+            return Ok(ty);
+        }
+        let class_prefix = self.type_symbol_prefix(class);
+        let tycon = self.store.types.alloc(Type::TypeRef {
+            prefix: class_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let parameter_prefix = self.store.types.alloc(Type::ThisType { class });
+        let arguments = parameters
+            .into_iter()
+            .map(|parameter| {
+                self.store.types.alloc(Type::TypeRef {
+                    prefix: parameter_prefix,
+                    target: TypeRefTarget::Symbol(parameter),
+                })
+            })
+            .collect();
+        Ok(self.store.types.alloc(Type::Applied {
+            tycon,
+            args: arguments,
+        }))
+    }
+
     /// Adapts a completed declaration type for this candidate's instantiated
     /// declaring-class view. The canonical declaration info is never changed.
     pub fn member_type_on(&mut self, candidate: &MemberCandidate) -> Result<TypeId, TyperError> {
@@ -138,7 +172,10 @@ impl SourceTyper<'_> {
         }
     }
 
-    fn source_class_type_parameters(&self, class: SymbolId) -> Result<Vec<SymbolId>, TyperError> {
+    pub(super) fn source_class_type_parameters(
+        &self,
+        class: SymbolId,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         if !self.store.symbols.contains(class) {
             return Err(TyperError::UnknownSymbol { symbol: class });
         }
