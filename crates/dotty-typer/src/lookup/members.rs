@@ -62,6 +62,8 @@ pub enum MemberLookupError {
     },
     /// Source completion for a current-unit class failed before lookup.
     SourceClassCompletion { symbol: SymbolId, error: TyperError },
+    /// A source class's declared parent view could not be instantiated.
+    ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
     /// A parent path revisits a class already on that path.
     InheritanceCycle { symbol: SymbolId },
     /// The parent graph exceeds [`MAX_MEMBER_LOOKUP_DEPTH`].
@@ -130,6 +132,12 @@ impl SourceTyper<'_> {
 
             let mut parent_symbols = Vec::with_capacity(info.parents.len());
             for parent_view in info.parents {
+                let parent_view = self
+                    .adapt_parent_view(pending.symbol, pending.receiver_view, parent_view)
+                    .map_err(|error| MemberLookupError::ParentTypeAdaptation {
+                        symbol: pending.symbol,
+                        error,
+                    })?;
                 let parent = class_symbol_for_type(self.store, parent_view, true)?;
                 parent_symbols.push(parent);
                 if visited.insert(parent) {

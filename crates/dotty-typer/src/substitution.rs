@@ -18,7 +18,13 @@ impl SourceTyper<'_> {
     ) -> Result<TypeId, TyperError> {
         // Validate both views. The candidate keeps the declaring-class view;
         // `receiver` is the original expression type supplied by the caller.
-        let _receiver = self.class_view(receiver)?;
+        let receiver = self.class_view(receiver)?;
+        if receiver.class.is_none() {
+            return Err(TyperError::ReceiverDoesNotDenoteExpectedClass {
+                expected: candidate.declaring_class,
+                actual: None,
+            });
+        }
         let view = self.class_view(candidate.receiver_view)?;
         if view.class != Some(candidate.declaring_class) {
             return Err(TyperError::ReceiverDoesNotDenoteExpectedClass {
