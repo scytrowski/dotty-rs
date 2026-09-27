@@ -11,20 +11,10 @@ use crate::{MemberCandidate, SourceTyper, TyperError};
 impl SourceTyper<'_> {
     /// Adapts a completed declaration type for this candidate's instantiated
     /// declaring-class view. The canonical declaration info is never changed.
-    pub fn member_type_on(
-        &mut self,
-        receiver: TypeId,
-        candidate: &MemberCandidate,
-    ) -> Result<TypeId, TyperError> {
-        // Validate both views. The candidate keeps the declaring-class view;
-        // `receiver` is the original expression type supplied by the caller.
-        let receiver = self.class_view(receiver)?;
-        if receiver.class.is_none() {
-            return Err(TyperError::ReceiverDoesNotDenoteExpectedClass {
-                expected: candidate.declaring_class,
-                actual: None,
-            });
-        }
+    pub fn member_type_on(&mut self, candidate: &MemberCandidate) -> Result<TypeId, TyperError> {
+        // The lookup candidate owns the instantiated declaring-class view.
+        // Taking no separate receiver avoids implying we can validate how it
+        // was reached from an original receiver type.
         let view = self.class_view(candidate.receiver_view)?;
         if view.class != Some(candidate.declaring_class) {
             return Err(TyperError::ReceiverDoesNotDenoteExpectedClass {

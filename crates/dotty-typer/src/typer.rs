@@ -3146,7 +3146,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
 
         assert_eq!(type_symbol(typer.store(), adapted), text_class);
         let SymbolInfo::Complete(declaration) = *typer.store().symbols.info(get) else {
@@ -3180,7 +3180,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
 
         assert_eq!(type_symbol(typer.store(), adapted), text_class);
         let SymbolInfo::Complete(declaration) = *typer.store().symbols.info(value) else {
@@ -3214,7 +3214,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, pair, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
 
         assert_eq!(type_symbol(typer.store(), adapted), number_text);
     }
@@ -3240,7 +3240,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
 
         let Type::Applied { tycon, args } = typer.store().types.get(adapted) else {
             panic!("expected the substituted List application")
@@ -3269,7 +3269,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
 
         let Type::Poly(poly) = typer.store().types.get(adapted) else {
             panic!("expected the method's type-parameter binder")
@@ -3308,7 +3308,7 @@ mod tests {
 
         let candidate = candidate_for(&mut typer, receiver, pair, name);
         assert!(matches!(
-            typer.member_type_on(receiver, &candidate),
+            typer.member_type_on(&candidate),
             Err(TyperError::ReceiverGenericArityMismatch {
                 class,
                 expected: 2,
@@ -3335,7 +3335,7 @@ mod tests {
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
         assert!(matches!(
-            typer.member_type_on(receiver, &candidate),
+            typer.member_type_on(&candidate),
             Err(TyperError::RawGenericSourceReceiverUnsupported {
                 class,
                 expected: 1,
@@ -3362,7 +3362,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
         let Type::Method(method) = typer.store().types.get(adapted) else {
             panic!("expected a term method")
         };
@@ -3392,7 +3392,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, box_class, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
         let Type::Bounds { low, high } = typer.store().types.get(adapted) else {
             panic!("expected member type bounds")
         };
@@ -3423,7 +3423,7 @@ mod tests {
             SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
         assert!(matches!(
-            typer.member_type_on(receiver, &candidate),
+            typer.member_type_on(&candidate),
             Err(TyperError::ExternalGenericInstantiationDeferred { class })
                 if class == external_class
         ));
@@ -3487,7 +3487,7 @@ mod tests {
         };
         assert_eq!(type_symbol(typer.store(), *tycon), parent);
         assert_eq!(type_symbol(typer.store(), args[0]), text);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
         assert_eq!(type_symbol(typer.store(), adapted), text);
     }
 
@@ -3525,7 +3525,7 @@ mod tests {
         };
         assert_eq!(type_symbol(typer.store(), *nested_tycon), list);
         assert_eq!(type_symbol(typer.store(), nested_args[0]), text);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
         let Type::Applied { args, .. } = typer.store().types.get(adapted) else {
             panic!("expected the inherited member's List result")
         };
@@ -3554,7 +3554,7 @@ mod tests {
         );
 
         let candidate = candidate_for(&mut typer, receiver, parent, name);
-        let adapted = typer.member_type_on(receiver, &candidate).unwrap();
+        let adapted = typer.member_type_on(&candidate).unwrap();
         let Type::Applied { tycon, args } = typer.store().types.get(adapted) else {
             panic!("expected the composed List member type")
         };
