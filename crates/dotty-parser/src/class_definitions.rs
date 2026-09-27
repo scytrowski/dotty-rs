@@ -1074,14 +1074,17 @@ where
         ) {
             lookahead += 1;
         }
-        matches!(
-            self.cursor.lookahead(lookahead).kind,
-            TokenKind::ColonFollow
-                | TokenKind::ColonOp
-                | TokenKind::ColonEol
-                | TokenKind::Indent
-                | TokenKind::Punctuation(Punctuation::LeftBrace)
-        )
+        match self.cursor.lookahead(lookahead).kind {
+            TokenKind::ColonFollow | TokenKind::ColonOp if lookahead == 0 => {
+                self.observe_colon_eol(true);
+                self.current().kind == TokenKind::ColonEol
+            }
+            TokenKind::ColonFollow | TokenKind::ColonOp => false,
+            TokenKind::ColonEol
+            | TokenKind::Indent
+            | TokenKind::Punctuation(Punctuation::LeftBrace) => true,
+            _ => false,
+        }
     }
 
     fn consume_newlines_before_template_body(&mut self) {

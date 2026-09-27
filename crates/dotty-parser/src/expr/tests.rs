@@ -1967,6 +1967,85 @@ fn parses_an_ascription_on_an_application() {
 }
 
 #[test]
+fn parses_a_parenthesized_ascription_on_a_new_application() {
+    let mut names = NameInterner::new();
+    let source = "(new Foo(1): Foo)";
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::New), 1, 4),
+            token(TokenKind::Identifier, 5, 8),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+            token(TokenKind::IntegerLiteral, 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+            token(TokenKind::ColonFollow, 11, 12),
+            token(TokenKind::Identifier, 13, 16),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+            token(TokenKind::Eof, 17, 17),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parser.ast().get(tree).kind else {
+        panic!("expected parenthesized expression");
+    };
+    let typed_id = parens.inner;
+    let TreeKind::Typed(typed) = &parser.ast().get(typed_id).kind else {
+        panic!("expected a type ascription around the new application");
+    };
+    assert!(matches!(
+        parser.ast().get(typed.expr).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(
+        parser.ast().get(typed_id).position.unwrap().span().range(),
+        TextRange::new(1, 16).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 17).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
+fn malformed_parenthesized_new_ascription_recovers_without_suffix_stall() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "(new Foo(1):)",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::New), 1, 4),
+            token(TokenKind::Identifier, 5, 8),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 8, 9),
+            token(TokenKind::IntegerLiteral, 9, 10),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+            token(TokenKind::ColonFollow, 11, 12),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(tree).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+    ));
+    assert!(!parser.diagnostics().is_empty());
+    assert!(parser.diagnostics().iter().all(|diagnostic| {
+        !diagnostic
+            .message()
+            .contains("no progress while parsing an expression suffix")
+    }));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn parses_an_annotation_ascription_as_annotated_expression() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
