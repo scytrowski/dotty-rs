@@ -335,3 +335,55 @@ four, which is not by itself evidence of regressions: this report does not
 track per-file transitions, and removing earlier failures can expose later
 ones. Hard failures, process failures, panics, and hangs remain zero; the
 Scala oracle still returns all 1,236 results with 30 existing exceptions.
+
+## Corpus rerun after capture-checking type support
+
+Issue #348 reran the same corpus after PR #351 at dotty-rs revision
+`d2f710011606a2a72bdae001c0579de91ee356e8`, using the unchanged Scala 3.9.0
+revision `777528f19a58e794c9954a42f433373472ec57f8`. The deterministic report
+is [`parser-post-issue-348-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-348-scala3-3.9.0.json).
+
+| Measure | After #340–#341 (`87b309d2`) | After #351 (`d2f71001`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 758 (61.33%) | 797 (64.48%) | +39 (+3.16 pp) |
+| Recoverable diagnostics | 478 (38.67%) | 439 (35.52%) | -39 (-3.16 pp) |
+| Hard failures / panics / hangs | 0 / 0 / 0 | 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+| Diagnostic occurrences | After #340–#341 | After #351 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 4,496 | 3,742 | -754 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 1,740 | 1,083 | -657 |
+| `ExpectedType` | 1,273 | 609 | -664 |
+| `UnexpectedToken` | 4,697 | 3,300 | -1,397 |
+| `UnsupportedSyntax` | 2,522 | 1,729 | -793 |
+| **Total** | **14,733** | **10,468** | **-4,265 (-29.0%)** |
+
+The report partitions files by the parser's effective capture-checking policy,
+not by grepping for the import spelling. All 39 newly clean files are among
+the 242 files where the parser enables capture checking; that cohort improved
+from 109 to 148 clean files while the 994 disabled files remained at 649.
+Diagnostic occurrences fell by 4,265 in the enabled cohort (8,090 to 3,825),
+with no aggregate change in the disabled cohort.
+
+Capture-marker triage further separates 113 raw `^` characters in the enabled
+cohort from 109 actual lexer operator tokens and 103 files with capture-specific
+AST nodes. Four raw-only hits are comments/documentation; five of the six
+token-only cases are ordinary XOR/type-operator uses. One remaining file,
+`library/src/scala/collection/package.scala`, contains capture suffix syntax,
+but parsing stops earlier at its unsupported symbolic `object +:` declaration;
+this is not evidence of a capture-production failure. Details and paths are in
+the [capture corpus audit](parser-capture-checking-corpus-audit-3.9.0.md).
+
+First-failure counts shifted: `ExpectedType` fell from 150 to 108 files,
+`ExpectedToken` from 57 to 54, while `ExpectedExpression` rose from 163 to 171
+and `UnexpectedToken` from 92 to 97. In the capture-enabled cohort itself,
+`ExpectedType` fell from 83 to 41, while expression/token failures rose as
+parsing reached later syntax. These histograms are not per-file transition
+data. The next broad target remains the 148 `ExpectedExpression` first
+failures in the capture-disabled cohort; for capture-enabled files, investigate
+the remaining 41 `ExpectedType` first failures. The audit document records the
+syntax-level caveats and concrete next-step interpretation.
