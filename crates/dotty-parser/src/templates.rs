@@ -49,7 +49,6 @@ where
         }
 
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
-
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
@@ -144,13 +143,10 @@ where
             }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
-            } else if ended_nested_indented_body
-                && closing == TokenKind::Outdent
-                && !self.template_body_ended(closing)
-            {
-                // The separator newline belongs to the nested body. Its
-                // synthetic Outdent is the boundary between that body and
-                // the next member of the enclosing template.
+            } else if ended_nested_indented_body && !self.template_body_ended(closing) {
+                // The nested body's Outdent is also the boundary before the
+                // next statement/member, including inside a braced template
+                // where the outer body itself has no layout delimiter.
             } else if !self.template_body_ended(closing) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -342,6 +338,8 @@ where
         }
         self.defer_template_outdent_feedback = false;
         if self.current().kind != TokenKind::Outdent && self.current().kind != TokenKind::Eof {
+            // The scanner owns the active layout stack and decides whether
+            // this position closes a nested indented expression.
             self.observe_outdented();
         }
     }
@@ -394,6 +392,58 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{HardKeyword, NameInterner, TreeKind};
+
+    fn source_token(
+        source: &str,
+        kind: TokenKind,
+        text: &str,
+        occurrence: usize,
+    ) -> dotty_core::Token {
+        let (start, value) = source
+            .match_indices(text)
+            .nth(occurrence)
+            .expect("test token text exists in source");
+        token(kind, start as u32, (start + value.len()) as u32)
+    }
+
+    fn nested_match_template_tokens(
+        source: &str,
+        ending: Vec<dotty_core::Token>,
+    ) -> Vec<dotty_core::Token> {
+        let mut tokens = vec![
+            source_token(
+                source,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                "{",
+                0,
+            ),
+            source_token(source, TokenKind::Keyword(HardKeyword::Def), "def", 0),
+            source_token(source, TokenKind::Identifier, "f", 0),
+            source_token(source, TokenKind::Operator, "=", 0),
+            source_token(source, TokenKind::Identifier, "value", 0),
+            source_token(source, TokenKind::Keyword(HardKeyword::Match), "match", 0),
+            source_token(source, TokenKind::Newline, "\n", 0),
+            token(TokenKind::Indent, 0, 0),
+            source_token(source, TokenKind::Keyword(HardKeyword::Case), "case", 0),
+            source_token(source, TokenKind::Identifier, "A", 0),
+            source_token(source, TokenKind::Operator, "=>", 0),
+            source_token(source, TokenKind::Identifier, "result", 0),
+            token(TokenKind::Outdent, 0, 0),
+        ];
+        tokens.extend(ending);
+        tokens.push(source_token(
+            source,
+            TokenKind::Punctuation(Punctuation::RightBrace),
+            "}",
+            0,
+        ));
+        tokens.push(token(
+            TokenKind::Eof,
+            source.len() as u32,
+            source.len() as u32,
+        ));
+        tokens
+    }
 
     #[test]
     fn braced_template_body_preserves_definitions_and_expressions() {
@@ -455,6 +505,78 @@ mod tests {
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nested_match_outdent_separates_the_following_template_method() {
+        let source = "{ def f = value match\n  case A => result\n  def g = next }";
+        let mut names = NameInterner::new();
+        let next_method = vec![
+            source_token(source, TokenKind::Keyword(HardKeyword::Def), "def", 1),
+            source_token(source, TokenKind::Identifier, "g", 0),
+            source_token(source, TokenKind::Operator, "=", 1),
+            source_token(source, TokenKind::Identifier, "next", 0),
+        ];
+        let mut parser = parser_for(
+            source,
+            nested_match_template_tokens(source, next_method),
+            &mut names,
+        );
+
+        let members = parser.parse_template_body(TemplateBody::Braced).members;
+
+        assert_eq!(members.len(), 2);
+        assert!(matches!(
+            parser.ast().get(members[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(members[1]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+    }
+
+    #[test]
+    fn nested_match_outdent_preserves_the_following_end_marker() {
+        let source = "{ def f = value match\n  case A => result\n  end f }";
+        let mut names = NameInterner::new();
+        let end_marker = vec![
+            source_token(source, TokenKind::EndMarker, "end", 0),
+            source_token(source, TokenKind::Identifier, "f", 2),
+        ];
+        let mut parser = parser_for(
+            source,
+            nested_match_template_tokens(source, end_marker),
+            &mut names,
+        );
+
+        let members = parser.parse_template_body(TemplateBody::Braced).members;
+
+        assert_eq!(members.len(), 1);
+        assert!(matches!(
+            parser.ast().get(members[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        let method_span = parser
+            .ast()
+            .get(members[0])
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(method_span.end(), source.find("end f").unwrap() as u32 + 5);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
     }
 
     #[test]
