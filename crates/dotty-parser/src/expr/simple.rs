@@ -44,6 +44,20 @@ where
             return self.parse_expression_splice(mark);
         }
 
+        if self.current_operator_is_term_identifier() {
+            let Ok(name) = self.intern_current_term_name() else {
+                return self.unexpected_expression();
+            };
+            self.advance();
+            return self.alloc_from(
+                mark,
+                TreeKind::Ident(Ident {
+                    name: *name.as_name(),
+                    backquoted: false,
+                }),
+            );
+        }
+
         if matches!(
             self.current().kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
@@ -100,6 +114,16 @@ where
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
             _ => self.unexpected_expression(),
         }
+    }
+
+    fn current_operator_is_term_identifier(&mut self) -> bool {
+        if self.current().kind != TokenKind::Operator {
+            return false;
+        }
+
+        self.current_text()
+            .ok()
+            .is_some_and(is_term_operator_identifier)
     }
 
     fn parse_quote(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -841,6 +865,10 @@ where
         }
         self.error_expr(position)
     }
+}
+
+pub(super) fn is_term_operator_identifier(spelling: &str) -> bool {
+    !matches!(spelling, "=" | "=>" | "=>>" | "?=>" | "<-" | "@" | "#")
 }
 
 #[cfg(test)]

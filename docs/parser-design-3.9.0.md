@@ -241,6 +241,8 @@ including annotation-only forms such as `value: @unchecked` and
 parenthesized `using` argument lists, including nested application clauses
 indented colon arguments, including block, lambda, and case bodies
 prefix operators `-`, `+`, `~`, and `!` on the same physical line
+bare symbolic operator references such as `???` and `::`, while structural
+tokens such as assignment/arrow operators remain grammar delimiters
 negative numeric literals using Scala's parser-level literal shape
 infix operators with Scala 3.9 precedence and associativity
 feature-gated legacy postfix operators (disabled by default)
