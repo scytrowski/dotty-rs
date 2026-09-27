@@ -228,8 +228,9 @@ clause rather than forming a `Select`, and reserved operator tokens such as
 bare `=` are not accepted as selector names
 simple applications such as foo(42) and foo(1, 2)
 super, qualified super, and simple mixin-qualified super
-new with simple or qualified type names, constructor applications, and
-braced or indented anonymous template bodies after `new`
+new with simple or qualified type names, constructor applications, ordered
+`with`-separated parent/mixin chains, and braced or indented anonymous
+template bodies after `new`
 simple type applications such as foo[A] and foo[A, B]
 match types with braced type cases, including wildcard cases
 opaque type aliases, including parameterized and bounded aliases

@@ -584,51 +584,74 @@ where
         self.advance();
         if self.optional_template_body_starts_here() {
             let body = self.parse_optional_template_body();
-            return self.new_with_anonymous_template(mark, None, body);
+            return self.new_with_anonymous_template(mark, Vec::new(), body);
         }
 
-        let type_mark = self.mark();
-        let tpt = self.simple_type();
-        let tpt = if self
-            .cursor
-            .at(TokenKind::Punctuation(Punctuation::LeftBracket))
-        {
-            self.parse_type_application(type_mark, tpt)
-        } else {
-            tpt
-        };
-        let new_tree = self.alloc_from(type_mark, TreeKind::New(New { tpt }));
-        let constructor_mark = crate::Mark {
-            start: type_mark.start,
-        };
-        let mut constructor = new_tree;
-        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
-            constructor = self.parse_application(constructor_mark, constructor);
+        // Dotty parses `new` parents as constructor applications separated by
+        // `with`. Reuse the class-parent production for the same type and
+        // constructor-argument shapes.
+        let mut parents = vec![self.parse_parent()];
+        while self.consume_new_parent_separator() {
+            parents.push(self.parse_parent());
         }
-        if self.optional_template_body_starts_here() {
-            let body = self.parse_optional_template_body();
-            let parent = self.new_template_parent(constructor).or(Some(tpt));
-            self.new_with_anonymous_template(mark, parent, body)
-        } else if matches!(self.ast.get(constructor).kind, TreeKind::New(_)) {
-            let init = self.constructor_select(constructor);
-            self.alloc_from(
-                mark,
-                TreeKind::Apply(Apply {
-                    function: init,
-                    args: Vec::new(),
-                    kind: ApplyKind::Regular,
-                }),
-            )
+
+        let has_template_body = self.optional_template_body_starts_here();
+        if parents.len() > 1 || has_template_body {
+            let body = if has_template_body {
+                self.parse_optional_template_body()
+            } else {
+                crate::templates::TemplateBodyResult {
+                    self_val: None,
+                    members: Vec::new(),
+                }
+            };
+            self.new_with_anonymous_template(mark, parents, body)
         } else {
-            if let Some(position) = self.ast.get(constructor).position {
-                let end = position.span().range().end();
-                let range =
-                    TextRange::new(mark.start, end).expect("new expression span is ordered");
-                self.ast.get_mut(constructor).position =
-                    Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+            let parent = parents[0];
+            if matches!(self.ast.get(parent).kind, TreeKind::Apply(_)) {
+                if let Some(position) = self.ast.get(parent).position {
+                    let end = position.span().range().end();
+                    let range =
+                        TextRange::new(mark.start, end).expect("new expression span is ordered");
+                    self.ast.get_mut(parent).position =
+                        Some(SourceSpan::new(self.source_id, Span::without_point(range)));
+                }
+                parent
+            } else {
+                let constructor = self.alloc(
+                    TreeKind::New(New { tpt: parent }),
+                    self.ast.get(parent).position,
+                );
+                let init = self.constructor_select(constructor);
+                self.alloc_from(
+                    mark,
+                    TreeKind::Apply(Apply {
+                        function: init,
+                        args: Vec::new(),
+                        kind: ApplyKind::Regular,
+                    }),
+                )
             }
-            constructor
         }
+    }
+
+    fn consume_new_parent_separator(&mut self) -> bool {
+        let mut newlines = 0;
+        while matches!(
+            self.cursor.lookahead(newlines).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newlines += 1;
+        }
+        if self.cursor.lookahead(newlines).kind != TokenKind::Keyword(dotty_core::HardKeyword::With)
+        {
+            return false;
+        }
+        for _ in 0..newlines {
+            self.advance();
+        }
+        self.advance();
+        true
     }
 
     pub(crate) fn constructor_select(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
@@ -724,7 +747,7 @@ where
                 && let Some(parent) = self.new_template_parent(qualifier)
             {
                 let body = self.parse_optional_template_body();
-                qualifier = self.new_with_anonymous_template(mark, Some(parent), body);
+                qualifier = self.new_with_anonymous_template(mark, vec![parent], body);
                 can_apply = false;
             } else if self
                 .cursor
@@ -810,10 +833,10 @@ where
     fn new_with_anonymous_template(
         &mut self,
         mark: crate::Mark,
-        parent: Option<TreeId<Untyped>>,
+        parents: Vec<TreeId<Untyped>>,
         body: crate::templates::TemplateBodyResult,
     ) -> TreeId<Untyped> {
-        let template = self.allocate_anonymous_new_template(mark.start, parent, body);
+        let template = self.allocate_anonymous_new_template(mark.start, parents, body);
         self.ast.get_mut(template).position = Some(self.span_from(mark));
         self.alloc_from(mark, TreeKind::New(New { tpt: template }))
     }

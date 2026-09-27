@@ -460,6 +460,321 @@ fn parses_an_empty_anonymous_template_after_new() {
 }
 
 #[test]
+fn parses_a_mixin_parent_after_new_without_a_template_body() {
+    let mut names = NameInterner::new();
+    let expected_names = [names.intern("C"), names.intern("T")];
+    let mut parser = parser_for(
+        "new C with T",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Keyword(HardKeyword::With), 6, 10),
+            token(TokenKind::Identifier, 11, 12),
+            token(TokenKind::Eof, 12, 12),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a `new` expression with a mixin template");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected a template containing the parents");
+    };
+    assert_eq!(template.parents.len(), 2);
+    for (parent, expected) in template.parents.iter().zip(expected_names) {
+        let TreeKind::Ident(identifier) = parser.ast().get(*parent).kind else {
+            panic!("expected source-level type name parent");
+        };
+        assert_eq!(identifier.name.text(), expected);
+    }
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn preserves_multiple_mixin_parents_in_source_order() {
+    let mut names = NameInterner::new();
+    let expected_names = [names.intern("C"), names.intern("T"), names.intern("U")];
+    let mut parser = parser_for(
+        "new C with T with U",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Keyword(HardKeyword::With), 6, 10),
+            token(TokenKind::Identifier, 11, 12),
+            token(TokenKind::Keyword(HardKeyword::With), 13, 17),
+            token(TokenKind::Identifier, 18, 19),
+            token(TokenKind::Eof, 19, 19),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a `new` expression with a mixin template");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected a template containing the parents");
+    };
+    assert_eq!(template.parents.len(), 3);
+    for (parent, expected) in template.parents.iter().zip(expected_names) {
+        let TreeKind::Ident(identifier) = parser.ast().get(*parent).kind else {
+            panic!("expected source-level type name parent");
+        };
+        assert_eq!(identifier.name.text(), expected);
+    }
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 19).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn preserves_constructor_arguments_for_each_mixin_parent() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C(1) with T(2) { def value = 3 }",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 5, 6),
+            token(TokenKind::IntegerLiteral, 6, 7),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 7, 8),
+            token(TokenKind::Keyword(HardKeyword::With), 9, 13),
+            token(TokenKind::Identifier, 14, 15),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 15, 16),
+            token(TokenKind::IntegerLiteral, 16, 17),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 17, 18),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 19, 20),
+            token(TokenKind::Keyword(HardKeyword::Def), 21, 24),
+            token(TokenKind::Identifier, 25, 30),
+            token(TokenKind::Operator, 31, 32),
+            token(TokenKind::IntegerLiteral, 33, 34),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 35, 36),
+            token(TokenKind::Eof, 36, 36),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a `new` expression with an anonymous template");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an anonymous template");
+    };
+    assert_eq!(template.parents.len(), 2);
+    for parent in &template.parents {
+        let TreeKind::Apply(application) = &parser.ast().get(*parent).kind else {
+            panic!("expected each parent constructor application to be preserved");
+        };
+        assert_eq!(application.args.len(), 1);
+    }
+    assert_eq!(template.body.len(), 1);
+    assert!(matches!(
+        parser.ast().get(template.body[0]).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 36).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn preserves_type_arguments_for_mixin_parents() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C[A] with T[B]",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+            token(TokenKind::Identifier, 6, 7),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 7, 8),
+            token(TokenKind::Keyword(HardKeyword::With), 9, 13),
+            token(TokenKind::Identifier, 14, 15),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 15, 16),
+            token(TokenKind::Identifier, 16, 17),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a `new` expression with type-applied parents");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected a template containing the parents");
+    };
+    assert_eq!(template.parents.len(), 2);
+    let parent_kinds = template
+        .parents
+        .iter()
+        .map(|parent| &parser.ast().get(*parent).kind)
+        .collect::<Vec<_>>();
+    assert!(
+        parent_kinds
+            .iter()
+            .all(|kind| matches!(kind, TreeKind::AppliedTypeTree(_))),
+        "unexpected parent kinds: {parent_kinds:?}"
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn reports_a_missing_parent_after_a_new_mixin_separator() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C with",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Keyword(HardKeyword::With), 6, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::New(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(!parser.diagnostics().is_empty());
+}
+
+#[test]
+fn keeps_the_inner_new_span_on_its_type_name() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected the source-level empty constructor application");
+    };
+    let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+        panic!("expected constructor selection");
+    };
+    assert!(matches!(
+        parser.ast().get(selection.qualifier).kind,
+        TreeKind::New(_)
+    ));
+    assert_eq!(
+        parser
+            .ast()
+            .get(selection.qualifier)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 5).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn leaves_a_statement_separator_after_a_mixin_new_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "{ new C with T\nx }",
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Keyword(HardKeyword::New), 2, 5),
+            token(TokenKind::Identifier, 6, 7),
+            token(TokenKind::Keyword(HardKeyword::With), 8, 12),
+            token(TokenKind::Identifier, 13, 14),
+            token(TokenKind::Newline, 14, 15),
+            token(TokenKind::Identifier, 15, 16),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+            token(TokenKind::Eof, 18, 18),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Block(block) = &parser.ast().get(tree).kind else {
+        panic!("expected the enclosing expression block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::New(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_an_indented_template_body_after_mixin_parents() {
+    let source = "new C with T:\n  def value = 1\n";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Keyword(HardKeyword::With), 6, 10),
+            token(TokenKind::Identifier, 11, 12),
+            token(TokenKind::ColonEol, 12, 13),
+            token(TokenKind::Indent, 16, 16),
+            token(TokenKind::Keyword(HardKeyword::Def), 16, 19),
+            token(TokenKind::Identifier, 20, 25),
+            token(TokenKind::Operator, 26, 27),
+            token(TokenKind::IntegerLiteral, 28, 29),
+            token(TokenKind::Newline, 29, 30),
+            token(TokenKind::Outdent, 30, 30),
+            token(TokenKind::Eof, 30, 30),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+        panic!("expected a `new` expression with an indented template");
+    };
+    let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+        panic!("expected an indented anonymous template");
+    };
+    assert_eq!(template.parents.len(), 2);
+    assert_eq!(template.body.len(), 1);
+    assert!(matches!(
+        parser.ast().get(template.body[0]).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_a_parentless_anonymous_template_after_new() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

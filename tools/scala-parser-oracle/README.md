@@ -41,8 +41,9 @@ expressions and non-trailing missing arguments remain visible.
 
 The default fixtures cover the expression forms currently represented by the Rust
 parser: identifiers, numeric and string literals, `this`, parentheses, the
-empty tuple, tuples, simple selections and applications, `super`, `new`, and
-braced or indented anonymous template bodies after `new`,
+empty tuple, tuples, simple selections and applications, `super`, `new`,
+`new` parent/mixin chains (including constructor applications on each parent),
+and braced or indented anonymous template bodies after `new`,
 string interpolations with simple and braced splices,
 simple type applications, applied union/intersection types, repeated suffix
 chains, and brace blocks.
