@@ -6,7 +6,7 @@ use dotty_core::ast::{
     Ident, NumberKind, NumberLiteral, TreeKind, TypeBoundsTree, TypedAstBuilder, UntypedNode,
 };
 use dotty_core::types::{
-    ClassInfo, MethodKind, MethodParamSpec, Type, TypeParamSpec, TypeRefTarget,
+    ClassInfo, MethodKind, MethodParamSpec, TermRefTarget, Type, TypeParamSpec, TypeRefTarget,
     method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
@@ -320,6 +320,10 @@ pub enum TyperError {
     },
     /// The semantic type is not yet supported by expression widening.
     ExpressionTypeCannotBeWidened { ty: TypeId },
+    /// A term reference designates a symbol category that is not widenable.
+    TermReferenceCannotBeWidened { symbol: SymbolId, kind: SymbolKind },
+    /// The receiver prefix does not contain the referenced member symbol.
+    TermReferencePrefixMismatch { symbol: SymbolId, prefix: TypeId },
 }
 
 impl fmt::Display for TyperError {
@@ -522,10 +526,36 @@ impl<'a> SourceTyper<'a> {
     ///
     /// Literal expressions preserve their exact `Type::Constant` type in the
     /// typed AST; consumers use this operation when they need the canonical
-    /// builtin value type. Reference widening is added as supported by the
-    /// current typer slice.
-    pub fn widen_expression_type(&self, ty: TypeId) -> Result<TypeId, TyperError> {
-        let Some(expression_type) = self.store.types.try_get(ty) else {
+    /// builtin value type. A member reference is adapted to its receiver view.
+    pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
+        let store_checkpoint = self.store.checkpoint();
+        let type_index_checkpoint = self.type_index.checkpoint();
+        let mut info_journal = Vec::new();
+        let result = self.widen_expression_type_journaled(ty, &mut info_journal, 0);
+        if result.is_err() {
+            for (symbol, previous) in info_journal.into_iter().rev() {
+                if self.store.symbols.contains(symbol) {
+                    self.store.symbols.set_info(symbol, previous);
+                }
+            }
+            self.store.rollback_to(store_checkpoint);
+            self.type_index.restore(type_index_checkpoint);
+        }
+        result
+    }
+
+    fn widen_expression_type_journaled(
+        &mut self,
+        ty: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        depth: usize,
+    ) -> Result<TypeId, TyperError> {
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(TyperError::TypeNormalization(
+                crate::types::TypeNormalizeError::TooDeep,
+            ));
+        }
+        let Some(expression_type) = self.store.types.try_get(ty).cloned() else {
             return Err(TyperError::TypeNormalization(
                 if self.store.types.contains(ty) {
                     crate::types::TypeNormalizeError::UnfilledType { ty }
@@ -551,7 +581,47 @@ impl<'a> SourceTyper<'a> {
                 | Constant::Null
                 | Constant::Class(_) => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
             },
-            _ => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
+            Type::TermRef { prefix, target } => {
+                let TermRefTarget::Symbol(symbol) = target else {
+                    return Err(TyperError::ExpressionTypeCannotBeWidened { ty });
+                };
+                if !self.store.symbols.contains(symbol) {
+                    return Err(TyperError::UnknownSymbol { symbol });
+                }
+                let kind = self.store.symbols.get(symbol).kind;
+                if !matches!(
+                    kind,
+                    SymbolKind::Field
+                        | SymbolKind::Value
+                        | SymbolKind::Variable
+                        | SymbolKind::Parameter
+                        | SymbolKind::Method
+                ) {
+                    return Err(TyperError::TermReferenceCannotBeWidened { symbol, kind });
+                }
+                if prefix == self.definitions.no_prefix {
+                    self.completed_expression_symbol_info(symbol, info_journal)
+                } else {
+                    let receiver =
+                        self.widen_expression_type_journaled(prefix, info_journal, depth + 1)?;
+                    let name = self.store.symbols.get(symbol).name;
+                    let candidates = self
+                        .lookup_members_journaled(receiver, name, info_journal)
+                        .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                    let candidate = candidates
+                        .into_iter()
+                        .find(|candidate| candidate.symbol == symbol)
+                        .ok_or(TyperError::TermReferencePrefixMismatch {
+                            symbol,
+                            prefix: receiver,
+                        })?;
+                    self.member_type_on_journaled(&candidate, info_journal)
+                }
+            }
+            Type::NoType | Type::NoPrefix | Type::Error(_) => {
+                Err(TyperError::ExpressionTypeCannotBeWidened { ty })
+            }
+            _ => Ok(ty),
         }
     }
 
@@ -609,7 +679,12 @@ impl<'a> SourceTyper<'a> {
                     tree.index(),
                     source_tree.position,
                 )?;
-                let ty = self.expression_type_of_symbol(symbol, tree.index(), info_journal)?;
+                let ty = self.expression_type_of_symbol(
+                    symbol,
+                    context.owner,
+                    tree.index(),
+                    info_journal,
+                )?;
                 Ok(
                     TypedAstBuilder::new(&mut self.typed_arena).ident_with_backquoted(
                         ident.name,
@@ -632,7 +707,9 @@ impl<'a> SourceTyper<'a> {
                     info_journal,
                     new_mappings,
                 )?;
-                let receiver = self.typed_arena.get(qualifier).ty;
+                let receiver_type = self.typed_arena.get(qualifier).ty;
+                let receiver =
+                    self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let candidates = self
                     .lookup_members_journaled(receiver, selection.name, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
@@ -800,6 +877,7 @@ impl<'a> SourceTyper<'a> {
     fn expression_type_of_symbol(
         &mut self,
         symbol: SymbolId,
+        expression_owner: SymbolId,
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
@@ -829,12 +907,50 @@ impl<'a> SourceTyper<'a> {
                 });
             }
         }
+        self.completed_expression_symbol_info(symbol, info_journal)?;
+        let prefix = self.expression_term_prefix(symbol, expression_owner, tree_index)?;
+        Ok(self.store.types.alloc(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(symbol),
+        }))
+    }
+
+    fn completed_expression_symbol_info(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         match *self.store.symbols.info(symbol) {
             SymbolInfo::Complete(ty) => Ok(ty),
             SymbolInfo::Missing => self.complete_symbol_inner(symbol, info_journal),
             SymbolInfo::Deferred(_) => Err(TyperError::DeferredSymbolCompletion { symbol }),
             SymbolInfo::Error => Err(TyperError::SymbolAlreadyErrored { symbol }),
         }
+    }
+
+    fn expression_term_prefix(
+        &mut self,
+        symbol: SymbolId,
+        expression_owner: SymbolId,
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        let owner = self.store.symbols.get(symbol).owner;
+        if !owner.is_some_and(|owner| {
+            matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            )
+        }) {
+            return Ok(self.definitions.no_prefix);
+        }
+        let current_class = self.enclosing_this_owner(None, expression_owner, tree_index)?;
+        if owner != Some(current_class) {
+            return Ok(self.definitions.no_prefix);
+        }
+        let prefix = self.store.types.alloc(Type::ThisType {
+            class: current_class,
+        });
+        Ok(prefix)
     }
 
     fn literal_type(
@@ -3496,6 +3612,7 @@ mod tests {
         let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed literal node")
         };
+        let value = literal.value.clone();
         let own_type = typer
             .store()
             .types
@@ -3504,7 +3621,7 @@ mod tests {
         let widened = typer
             .widen_expression_type(typer.typed_ast().get(typed).ty)
             .unwrap();
-        (literal.value.clone(), own_type, widened, definitions)
+        (value, own_type, widened, definitions)
     }
 
     fn type_synthetic_literal(
@@ -3532,6 +3649,7 @@ mod tests {
         let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
             panic!("expected a typed literal node")
         };
+        let literal_value = literal.value.clone();
         let own_type = typer
             .store()
             .types
@@ -3540,13 +3658,13 @@ mod tests {
         let widened = typer
             .widen_expression_type(typer.typed_ast().get(typed).ty)
             .unwrap();
-        (literal.value.clone(), own_type, widened, definitions)
+        (literal_value, own_type, widened, definitions)
     }
 
     fn type_method_rhs(
         source_text: &str,
         method_name: &str,
-    ) -> Result<(TreeKind<Typed>, TypeId, Type, Definitions), TyperError> {
+    ) -> Result<(TreeKind<Typed>, Type, TypeId, Type, Definitions), TyperError> {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method_name);
         let parameter_context = parsed.ast.iter().find_map(|(tree, node)| {
@@ -3580,10 +3698,18 @@ mod tests {
         );
         let typed = typer.type_expression(rhs, context)?;
         let node = typer.typed_ast().get(typed);
+        let kind = node.kind.clone();
+        let own_type_id = node.ty;
+        let widened_id = if matches!(kind, TreeKind::Select(_)) {
+            own_type_id
+        } else {
+            typer.widen_expression_type(own_type_id)?
+        };
         Ok((
-            node.kind.clone(),
-            node.ty,
-            typer.store().types.get(node.ty).clone(),
+            kind,
+            typer.store().types.get(own_type_id).clone(),
+            widened_id,
+            typer.store().types.get(widened_id).clone(),
             definitions,
         ))
     }
@@ -9505,7 +9631,19 @@ mod tests {
             typer.typed_ast().get(typed).kind,
             TreeKind::Ident(_)
         ));
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let Type::TermRef { prefix, target } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("parameter identifier should retain a term reference")
+        };
+        assert_eq!(*prefix, definitions.no_prefix);
+        assert_eq!(*target, TermRefTarget::Symbol(parameter));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
@@ -9513,6 +9651,18 @@ mod tests {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val field: Int = 1; def method: Int = field }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let field = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::ValDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "field")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
@@ -9532,7 +9682,21 @@ mod tests {
             typer.typed_ast().get(typed).kind,
             TreeKind::Ident(_)
         ));
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let Type::TermRef { prefix, target } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("field identifier should retain a term reference")
+        };
+        assert_eq!(*target, TermRefTarget::Symbol(field));
+        assert!(
+            matches!(typer.store().types.get(*prefix), Type::ThisType { class: this } if *this == class)
+        );
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
@@ -9572,24 +9736,47 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == global
+        ));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
     fn variable_selection_uses_its_declared_type() {
         let source_text = "class C { var value: Int = 1; def use: Int = this.value }";
-        let (kind, ty, _, definitions) = type_method_rhs(source_text, "use").unwrap();
+        let (kind, _, widened, _, definitions) = type_method_rhs(source_text, "use").unwrap();
 
         assert!(matches!(kind, TreeKind::Select(_)));
-        assert_eq!(ty, definitions.int);
+        assert_eq!(widened, definitions.int);
     }
 
     #[test]
-    fn explicit_import_resolves_a_term_identifier() {
+    fn explicit_imported_field_identifier_retains_its_symbol_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Lib { val item: Int = 1 }; class C { import Lib.item; def use: Int = item }",
         );
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let imported = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::ValDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "item")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
@@ -9605,15 +9792,36 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+                if *prefix == definitions.no_prefix && *symbol == imported
+        ));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
-    fn wildcard_import_resolves_a_term_identifier() {
+    fn wildcard_imported_field_identifier_retains_its_symbol_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Lib { val item: Int = 1 }; class C { import Lib.*; def use: Int = item }",
         );
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let imported = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::ValDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "item")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
@@ -9629,49 +9837,62 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+                if *prefix == definitions.no_prefix && *symbol == imported
+        ));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
     fn direct_field_selection_produces_a_typed_select() {
-        let (kind, ty_id, _, definitions) = type_method_rhs(
+        let (kind, _, widened, _, definitions) = type_method_rhs(
             "class C { val value: Int = 1; def use: Int = this.value }",
             "use",
         )
         .unwrap();
 
         assert!(matches!(kind, TreeKind::Select(_)));
-        assert_eq!(ty_id, definitions.int);
+        assert_eq!(widened, definitions.int);
     }
 
     #[test]
     fn direct_unique_method_selection_keeps_the_methodic_type() {
-        let (kind, _, ty, _) = type_method_rhs(
+        let (kind, _, _, widened_type, _) = type_method_rhs(
             "class C { def get(): Int = 1; def use: Int = this.get }",
             "use",
         )
         .unwrap();
 
         assert!(matches!(kind, TreeKind::Select(_)));
-        assert!(matches!(ty, Type::Method(_) | Type::Poly(_)), "{ty:?}");
+        assert!(
+            matches!(widened_type, Type::Method(_) | Type::Poly(_)),
+            "{widened_type:?}"
+        );
     }
 
     #[test]
     fn inherited_unique_member_selection_finds_the_parent_field() {
-        let (kind, ty, _, definitions) = type_method_rhs(
+        let (kind, _, widened, _, definitions) = type_method_rhs(
             "class Parent { val value: Int }; class Child extends Parent; class Use { def use(child: Child): Int = child.value }",
             "use",
         )
         .unwrap();
 
         assert!(matches!(kind, TreeKind::Select(_)));
-        assert_eq!(ty, definitions.int);
+        assert_eq!(widened, definitions.int);
     }
 
     #[test]
     fn generic_receiver_selection_substitutes_its_type_argument() {
         let source_text = "class Text; class Box[A] { val value: A }; class Use { def use(box: Box[Text]): Text = box.value }";
-        let (kind, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
+        let (kind, _, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
         let (parsed, store, _, _, index, source) = parse_and_name(source_text);
         let text = class_symbol(&parsed, &store, &index, source, "Text");
 
@@ -9688,7 +9909,7 @@ mod tests {
     #[test]
     fn generic_inherited_selection_substitutes_through_the_parent_view() {
         let source_text = "class Text; class Parent[A] { val value: A }; class Child[B] extends Parent[B]; class Use { def use(child: Child[Text]): Text = child.value }";
-        let (kind, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
+        let (kind, _, _, ty, _) = type_method_rhs(source_text, "use").unwrap();
         let (parsed, store, _, _, index, source) = parse_and_name(source_text);
         let text = class_symbol(&parsed, &store, &index, source, "Text");
 
@@ -9795,11 +10016,22 @@ mod tests {
     }
 
     #[test]
-    fn unique_method_identifier_keeps_its_method_type_without_applying_it() {
+    fn unique_method_identifier_keeps_exact_reference_and_widens_to_signature() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def method(param: Int): Int = param; def use: Int = method }",
         );
         let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let referenced = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
@@ -9817,8 +10049,40 @@ mod tests {
 
         assert!(matches!(
             typer.store().types.get(typer.typed_ast().get(typed).ty),
-            Type::Method(_)
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == referenced
         ));
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap();
+        assert!(matches!(typer.store().types.get(widened), Type::Method(_)));
+    }
+
+    #[test]
+    fn repeated_identifier_typing_reuses_its_term_reference() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use(param: Int): Int = param }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (parameter, _) = val_symbol(&parsed, &store, &index, source, "param");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.type_expression(rhs, context).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let second = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.source_typed_index().len(), 1);
     }
 
     #[test]
