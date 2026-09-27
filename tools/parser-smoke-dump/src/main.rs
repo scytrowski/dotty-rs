@@ -532,6 +532,7 @@ fn render_tree(
                     .join(",")
             ));
         }
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => {}
         TreeKind::PhaseSpecific(UntypedNode::GenFrom(generator)) => {
             fields.push(format!(
                 "\"check_mode\":{}",
@@ -841,6 +842,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => "InterpolatedString",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => "CapturesAndResult",
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_)) => "PolyFunction",
         TreeKind::PhaseSpecific(UntypedNode::ForYield(_)) => "ForYield",
         TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => "ForDo",
@@ -1127,6 +1129,11 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
             let mut children = function.params.clone();
             children.push(function.result);
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) => {
+            let mut children = captures.captures.clone();
+            children.push(captures.result);
             children
         }
         TreeKind::PhaseSpecific(UntypedNode::PolyFunction(function)) => {

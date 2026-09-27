@@ -227,6 +227,7 @@ fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)) => "CapturesAndResult",
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "InfixOp",
         TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "Tuple",
@@ -337,6 +338,9 @@ fn extract_given_type_name(
                 let result = extract_given_type_name(arena, names, function.result, true)?;
                 format!("{params}_to_{result}")
             }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) => {
+            extract_given_type_name(arena, names, captures.result, follow_args)?
         }
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
             let operator = names.resolve(infix.op.text());

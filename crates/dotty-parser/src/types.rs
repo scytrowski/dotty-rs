@@ -69,17 +69,12 @@ where
             return self.parse_bracketed_function_type(mark);
         }
         if self.starts_empty_function_type() {
-            self.advance();
-            self.advance();
-            self.advance();
-            let body = self.type_expr();
-            return self.alloc_from(
-                mark,
-                TreeKind::PhaseSpecific(UntypedNode::Function(Function {
-                    params: Vec::new(),
-                    body,
-                })),
-            );
+            if let Some(arrow) = self.lookahead_function_type_arrow(2) {
+                self.advance();
+                self.advance();
+                self.advance();
+                return self.finish_function_type(mark, Vec::new(), arrow, Vec::new());
+            }
         }
         if self.starts_empty_context_function_type() {
             self.advance();
@@ -96,39 +91,21 @@ where
         if let Some(arrow) = self.unnamed_erased_function_type_arrow() {
             let params = self.parse_unnamed_erased_function_params();
             self.consume_function_type_arrow(arrow);
-            let body = self.type_expr();
-            self.recover_missing_function_results();
-            return self.alloc_function_type(
-                mark,
-                params.params,
-                body,
-                arrow,
-                params.erased_params,
-            );
+            return self.finish_function_type(mark, params.params, arrow, params.erased_params);
         }
 
         if let Some(arrow) = self.named_function_type_arrow() {
             let allow_erased = self.features().erased_definitions;
             let params = self.parse_named_function_params(allow_erased);
             self.consume_function_type_arrow(arrow);
-            let body = self.type_expr();
-            self.recover_missing_function_results();
-            return self.alloc_function_type(
-                mark,
-                params.params,
-                body,
-                arrow,
-                params.erased_params,
-            );
+            return self.finish_function_type(mark, params.params, arrow, params.erased_params);
         }
 
         if let Some(arrow) = self.unnamed_by_name_function_type_arrow() {
             let params = self.parse_unnamed_function_params();
             self.consume_function_type_arrow(arrow);
-            let body = self.type_expr();
-            self.recover_missing_function_results();
             let erased_params = vec![false; params.len()];
-            return self.alloc_function_type(mark, params, body, arrow, erased_params);
+            return self.finish_function_type(mark, params, arrow, erased_params);
         }
 
         let diagnostics_before = self.diagnostics.len();
@@ -137,22 +114,118 @@ where
             return parameter;
         }
 
-        let arrow = if self.current_is_arrow() {
-            self.advance();
-            FunctionTypeArrow::Ordinary
-        } else if self.current_is_context_arrow() {
-            self.advance();
-            FunctionTypeArrow::Context
-        } else if self.current().kind == TokenKind::Keyword(HardKeyword::Match) {
-            return self.parse_match_type(mark, parameter);
-        } else {
+        let Some(arrow) = self.current_function_type_arrow() else {
+            if self.current().kind == TokenKind::Keyword(HardKeyword::Match) {
+                return self.parse_match_type(mark, parameter);
+            }
             return parameter;
         };
-        let body = self.type_expr();
-        self.recover_missing_function_results();
+        self.advance();
         let params = self.function_type_params(parameter);
         let erased_params = vec![false; params.len()];
+        self.finish_function_type(mark, params, arrow, erased_params)
+    }
+
+    fn finish_function_type(
+        &mut self,
+        mark: crate::Mark,
+        params: Vec<TreeId<Untyped>>,
+        arrow: FunctionTypeArrow,
+        erased_params: Vec<bool>,
+    ) -> TreeId<Untyped> {
+        let captures = if arrow.is_pure() && self.capture_set_starts_here() {
+            let capture_mark = self.mark();
+            let captures = self.parse_capture_set();
+            Some((capture_mark, captures))
+        } else {
+            None
+        };
+        let mut body = self.type_expr();
+        self.recover_missing_function_results();
+        if let Some((capture_mark, captures)) = captures {
+            let capture_start = captures
+                .first()
+                .and_then(|capture| {
+                    self.ast()
+                        .get(*capture)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .or_else(|| {
+                    self.ast()
+                        .get(body)
+                        .position
+                        .map(|position| position.span().range().start())
+                })
+                .unwrap_or(capture_mark.start());
+            let capture_mark = crate::Mark {
+                start: capture_start,
+            };
+            body = self.alloc_from(
+                capture_mark,
+                TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(
+                    dotty_core::ast::CapturesAndResult {
+                        captures,
+                        result: body,
+                    },
+                )),
+            );
+        }
         self.alloc_function_type(mark, params, body, arrow, erased_params)
+    }
+
+    fn current_function_type_arrow(&self) -> Option<FunctionTypeArrow> {
+        if self.current_is_arrow() {
+            Some(FunctionTypeArrow::Ordinary)
+        } else if self.current_is_context_arrow() {
+            Some(FunctionTypeArrow::Context)
+        } else if self.features().capture_checking
+            && self.current().kind == TokenKind::Operator
+            && self.current_text_is("->")
+        {
+            Some(FunctionTypeArrow::Pure)
+        } else if self.features().capture_checking
+            && self.current().kind == TokenKind::Operator
+            && self.current_text_is("?->")
+        {
+            Some(FunctionTypeArrow::PureContext)
+        } else {
+            None
+        }
+    }
+
+    fn lookahead_function_type_arrow(&mut self, offset: usize) -> Option<FunctionTypeArrow> {
+        let token = self.cursor.lookahead(offset).clone();
+        if self.lookahead_is_arrow(offset) {
+            Some(FunctionTypeArrow::Ordinary)
+        } else if self.lookahead_is_context_arrow(offset) {
+            Some(FunctionTypeArrow::Context)
+        } else if self.features().capture_checking
+            && token.kind == TokenKind::Operator
+            && self.token_text(&token).ok() == Some("->")
+        {
+            Some(FunctionTypeArrow::Pure)
+        } else if self.features().capture_checking
+            && token.kind == TokenKind::Operator
+            && self.token_text(&token).ok() == Some("?->")
+        {
+            Some(FunctionTypeArrow::PureContext)
+        } else {
+            None
+        }
+    }
+
+    fn capture_set_starts_here(&mut self) -> bool {
+        if self.current().kind != TokenKind::Punctuation(Punctuation::LeftBrace) {
+            return false;
+        }
+        matches!(
+            self.cursor.lookahead(1).kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Keyword(HardKeyword::This)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+        )
     }
 
     /// Parses the first source-level match-type form:
@@ -414,13 +487,19 @@ where
     fn starts_empty_function_type(&mut self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
-            && self.lookahead_is_arrow(2)
+            && matches!(
+                self.lookahead_function_type_arrow(2),
+                Some(FunctionTypeArrow::Ordinary | FunctionTypeArrow::Pure)
+            )
     }
 
     fn starts_empty_context_function_type(&mut self) -> bool {
         self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
             && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::RightParen)
-            && self.lookahead_is_context_arrow(2)
+            && matches!(
+                self.lookahead_function_type_arrow(2),
+                Some(FunctionTypeArrow::Context | FunctionTypeArrow::PureContext)
+            )
     }
 
     /// Recognizes the disambiguating prefix of `(name: Type) => Result` or
@@ -461,13 +540,7 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        return if self.lookahead_is_arrow(offset + 1) {
-                            Some(FunctionTypeArrow::Ordinary)
-                        } else if self.lookahead_is_context_arrow(offset + 1) {
-                            Some(FunctionTypeArrow::Context)
-                        } else {
-                            None
-                        };
+                        return self.lookahead_function_type_arrow(offset + 1);
                     }
                 }
                 TokenKind::Eof => return None,
@@ -507,13 +580,7 @@ where
                         if !has_by_name {
                             return None;
                         }
-                        if self.lookahead_is_arrow(offset + 1) {
-                            return Some(FunctionTypeArrow::Ordinary);
-                        }
-                        if self.lookahead_is_context_arrow(offset + 1) {
-                            return Some(FunctionTypeArrow::Context);
-                        }
-                        return None;
+                        return self.lookahead_function_type_arrow(offset + 1);
                     }
                     parameter_start = false;
                 }
@@ -594,13 +661,7 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        if self.lookahead_is_arrow(offset + 1) {
-                            return Some(FunctionTypeArrow::Ordinary);
-                        }
-                        if self.lookahead_is_context_arrow(offset + 1) {
-                            return Some(FunctionTypeArrow::Context);
-                        }
-                        return None;
+                        return self.lookahead_function_type_arrow(offset + 1);
                     }
                 }
                 TokenKind::Eof => return None,
@@ -751,7 +812,8 @@ where
                 self.advance();
                 break;
             }
-            if self.current().kind == TokenKind::Eof || self.current_is_arrow() {
+            if self.current().kind == TokenKind::Eof || self.current_function_type_arrow().is_some()
+            {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected `)` after named function type parameters",
@@ -873,8 +935,7 @@ where
         while !matches!(
             self.current().kind,
             TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen) | TokenKind::Eof
-        ) && !self.current_is_arrow()
-            && !self.current_is_context_arrow()
+        ) && self.current_function_type_arrow().is_none()
         {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
@@ -885,10 +946,7 @@ where
     }
 
     fn consume_function_type_arrow(&mut self, arrow: FunctionTypeArrow) {
-        let matches_arrow = match arrow {
-            FunctionTypeArrow::Ordinary => self.current_is_arrow(),
-            FunctionTypeArrow::Context => self.current_is_context_arrow(),
-        };
+        let matches_arrow = self.current_function_type_arrow() == Some(arrow);
         if !matches_arrow {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -899,6 +957,10 @@ where
                     FunctionTypeArrow::Context => {
                         "expected `?=>` after named context function type parameters"
                     }
+                    FunctionTypeArrow::Pure => "expected `->` after named function type parameters",
+                    FunctionTypeArrow::PureContext => {
+                        "expected `?->` after named context function type parameters"
+                    }
                 },
             );
         } else {
@@ -907,7 +969,7 @@ where
     }
 
     fn recover_missing_function_results(&mut self) {
-        while self.current_is_arrow() || self.current_is_context_arrow() {
+        while self.current_function_type_arrow().is_some() {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {
@@ -926,18 +988,42 @@ where
         erased_params: Vec<bool>,
     ) -> TreeId<Untyped> {
         let kind = match arrow {
-            FunctionTypeArrow::Ordinary if erased_params.iter().any(|erased| *erased) => {
+            FunctionTypeArrow::Ordinary | FunctionTypeArrow::Pure
+                if erased_params.iter().any(|erased| *erased) =>
+            {
+                let modifiers =
+                    if arrow == FunctionTypeArrow::Ordinary && self.features().capture_checking {
+                        Modifiers {
+                            modifiers: vec![Modifier::Impure],
+                            ..Modifiers::default()
+                        }
+                    } else {
+                        Modifiers::default()
+                    };
                 TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
                     params,
                     result: body,
-                    modifiers: Modifiers::default(),
+                    modifiers,
                     erased_params,
                 }))
             }
-            FunctionTypeArrow::Ordinary => {
+            FunctionTypeArrow::Ordinary | FunctionTypeArrow::Pure
+                if arrow == FunctionTypeArrow::Ordinary && self.features().capture_checking =>
+            {
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
+                    params,
+                    result: body,
+                    modifiers: Modifiers {
+                        modifiers: vec![Modifier::Impure],
+                        ..Modifiers::default()
+                    },
+                    erased_params,
+                }))
+            }
+            FunctionTypeArrow::Ordinary | FunctionTypeArrow::Pure => {
                 TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body }))
             }
-            FunctionTypeArrow::Context => {
+            FunctionTypeArrow::Context | FunctionTypeArrow::PureContext => {
                 TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
                     erased_params,
                     modifiers: Modifiers {
@@ -1034,6 +1120,8 @@ where
         // Arrows, bounds, projections, a bare colon, and contextual markers
         // belong to their own type productions rather than to InfixType.
         if self.current_is_structural_operator()
+            || self.features().capture_checking
+                && matches!(self.current_text().ok(), Some("->" | "?->"))
             || self.current_text_is(":")
             || self.current_text_is("<:")
             || self.current_text_is(">:")
@@ -2383,6 +2471,14 @@ const fn is_function_param_colon(kind: TokenKind) -> bool {
 enum FunctionTypeArrow {
     Ordinary,
     Context,
+    Pure,
+    PureContext,
+}
+
+impl FunctionTypeArrow {
+    const fn is_pure(self) -> bool {
+        matches!(self, Self::Pure | Self::PureContext)
+    }
 }
 
 struct NamedFunctionParams {
@@ -2437,6 +2533,22 @@ mod tests {
                 }
                 b'^' | b'*' => {
                     offset += 1;
+                    TokenKind::Operator
+                }
+                b'-' if bytes.get(offset + 1) == Some(&b'>') => {
+                    offset += 2;
+                    TokenKind::Operator
+                }
+                b'?' if bytes.get(offset + 1..offset + 3) == Some(b"->") => {
+                    offset += 3;
+                    TokenKind::Operator
+                }
+                b'=' if bytes.get(offset + 1) == Some(&b'>') => {
+                    offset += 2;
+                    TokenKind::Operator
+                }
+                b'?' if bytes.get(offset + 1..offset + 3) == Some(b"=>") => {
+                    offset += 3;
                     TokenKind::Operator
                 }
                 _ => {
@@ -2766,6 +2878,120 @@ mod tests {
                 .message()
                 .contains("capture checking is not enabled")
         }));
+    }
+
+    #[test]
+    fn pure_function_type_keeps_its_capture_set_on_the_function_tree() {
+        let source = "A -> {cap} B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a pure function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        let TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) =
+            &parser.ast().get(function.body).kind
+        else {
+            panic!("expected the Dotty-compatible captures-and-result node");
+        };
+        assert_eq!(captures.captures.len(), 1);
+        assert_eq!(tree_name(captures.captures[0], &parser), Some("cap"));
+        assert_eq!(tree_name(captures.result, &parser), Some("B"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pure_context_function_type_keeps_context_metadata_and_capture_set() {
+        let source = "A ?-> {cap} B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function-with-modifiers type");
+        };
+        assert!(function.modifiers.modifiers.contains(&Modifier::Given));
+        assert_eq!(function.params.len(), 1);
+        let TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) =
+            &parser.ast().get(function.result).kind
+        else {
+            panic!("expected the captures-and-result node");
+        };
+        assert_eq!(tree_name(captures.result, &parser), Some("B"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pure_function_type_without_explicit_capture_set_keeps_plain_result() {
+        let source = "A -> B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a pure function type");
+        };
+        assert_eq!(tree_name(function.body, &parser), Some("B"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pure_function_type_preserves_an_explicit_empty_capture_set() {
+        let source = "A -> {} B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a pure function type");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) =
+            &parser.ast().get(function.body).kind
+        else {
+            panic!("expected an explicit empty capture set to remain represented");
+        };
+        assert!(captures.captures.is_empty());
+        assert_eq!(tree_name(captures.result, &parser), Some("B"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_checking_marks_the_ordinary_function_arrow_as_impure() {
+        let source = "A => B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, true);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &parser.ast().get(tree).kind
+        else {
+            panic!("expected the impure function type marker");
+        };
+        assert!(function.modifiers.modifiers.contains(&Modifier::Impure));
+        assert_eq!(tree_name(function.result, &parser), Some("B"));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pure_arrow_remains_an_infix_type_operator_when_capture_checking_is_disabled() {
+        let source = "A -> B";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type(source, &mut names, false);
+
+        let tree = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(tree).kind
+        else {
+            panic!("expected the disabled pure arrow to remain an infix type operator");
+        };
+        assert_eq!(parser.names.resolve(infix.op.text()), "->");
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]

@@ -67,6 +67,14 @@ pub struct FunctionWithMods {
     pub erased_params: Vec<bool>,
 }
 
+/// Capture references attached to a function type's result before typing,
+/// corresponding to Dotty's `untpd.CapturesAndResult` node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturesAndResult {
+    pub captures: Vec<TreeId<Untyped>>,
+    pub result: TreeId<Untyped>,
+}
+
 /// `[type_params] => body`, a polymorphic function literal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolyFunction {
@@ -252,6 +260,7 @@ pub enum UntypedNode {
 
     Function(Function),
     FunctionWithMods(FunctionWithMods),
+    CapturesAndResult(CapturesAndResult),
     PolyFunction(PolyFunction),
 
     InfixOp(InfixOp),
@@ -419,6 +428,20 @@ mod tests {
             vec![crate::ast::modifiers::Modifier::Given]
         );
         assert_eq!(function.erased_params, vec![false, true]);
+    }
+
+    #[test]
+    fn captures_and_result_keeps_capture_refs_separate_from_the_result_type() {
+        let node = UntypedNode::CapturesAndResult(CapturesAndResult {
+            captures: vec![tree_id(1), tree_id(2)],
+            result: tree_id(3),
+        });
+
+        let UntypedNode::CapturesAndResult(captures) = node else {
+            panic!("expected a captures-and-result node");
+        };
+        assert_eq!(captures.captures, vec![tree_id(1), tree_id(2)]);
+        assert_eq!(captures.result, tree_id(3));
     }
 
     #[test]
