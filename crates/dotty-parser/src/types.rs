@@ -1346,58 +1346,13 @@ where
         let mark = self.mark();
         let mut reference = self.parse_simple_capture_ref();
 
-        loop {
-            if self.current().kind == TokenKind::Operator && self.current_text_is("*") {
-                self.advance();
-                let annotation = self.make_capture_marker_annotation(
-                    mark,
-                    &["scala", "annotation", "internal", "reachCapability"],
-                    None,
-                );
-                reference = self.alloc_from(
-                    mark,
-                    TreeKind::Annotated(Annotated {
-                        expr: reference,
-                        annotation,
-                    }),
-                );
-                continue;
-            }
-
-            if self.current().kind != TokenKind::Punctuation(Punctuation::Dot) {
-                break;
-            }
-
-            if self.is_capture_only_filter() {
-                self.advance();
-                self.advance();
-                self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
-                let filter = match self.parse_qualified_reference(ReferenceNamespace::Type) {
-                    Ok(filter) => filter,
-                    Err(_) => {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedType,
-                            "expected a qualified type in capture filter",
-                        );
-                        self.error_type(self.current_span())
-                    }
-                };
-                self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
-                let annotation = self.make_capture_marker_annotation(
-                    mark,
-                    &["scala", "annotation", "internal", "onlyCapability"],
-                    Some(filter),
-                );
-                reference = self.alloc_from(
-                    mark,
-                    TreeKind::Annotated(Annotated {
-                        expr: reference,
-                        annotation,
-                    }),
-                );
-                continue;
-            }
-
+        // Dotty recursively parses the complete `SimpleRef` before applying
+        // reach/restriction suffixes. In particular, `cap*.member` is not a
+        // qualified capture reference.
+        while self.current().kind == TokenKind::Punctuation(Punctuation::Dot)
+            && !self.is_capture_only_filter()
+            && !self.is_capture_read_only_suffix()
+        {
             self.advance();
             let Some((name, backquoted)) = self.current_selector_name() else {
                 self.report(
@@ -1413,6 +1368,60 @@ where
                     qualifier: reference,
                     name,
                     backquoted,
+                }),
+            );
+        }
+
+        if self.is_capture_read_only_suffix() {
+            self.report(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                "the `.rd` capture suffix is not supported yet",
+            );
+            self.advance();
+            self.advance();
+        }
+
+        if self.current().kind == TokenKind::Operator && self.current_text_is("*") {
+            self.advance();
+            let annotation = self.make_capture_marker_annotation(
+                mark,
+                &["scala", "annotation", "internal", "reachCapability"],
+                None,
+            );
+            reference = self.alloc_from(
+                mark,
+                TreeKind::Annotated(Annotated {
+                    expr: reference,
+                    annotation,
+                }),
+            );
+        }
+
+        if self.is_capture_only_filter() {
+            self.advance();
+            self.advance();
+            self.expect(TokenKind::Punctuation(Punctuation::LeftBracket));
+            let filter = match self.parse_qualified_reference(ReferenceNamespace::Type) {
+                Ok(filter) => filter,
+                Err(_) => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "expected a qualified type in capture filter",
+                    );
+                    self.error_type(self.current_span())
+                }
+            };
+            self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
+            let annotation = self.make_capture_marker_annotation(
+                mark,
+                &["scala", "annotation", "internal", "onlyCapability"],
+                Some(filter),
+            );
+            reference = self.alloc_from(
+                mark,
+                TreeKind::Annotated(Annotated {
+                    expr: reference,
+                    annotation,
                 }),
             );
         }
@@ -1487,6 +1496,13 @@ where
         selector.kind == TokenKind::Identifier
             && self.token_text(&selector).ok() == Some("only")
             && left_bracket.kind == TokenKind::Punctuation(Punctuation::LeftBracket)
+    }
+
+    fn is_capture_read_only_suffix(&mut self) -> bool {
+        let selector = self.cursor.lookahead(1).clone();
+        self.current().kind == TokenKind::Punctuation(Punctuation::Dot)
+            && selector.kind == TokenKind::Identifier
+            && self.token_text(&selector).ok() == Some("rd")
     }
 
     fn make_capture_retaining(
@@ -2708,6 +2724,48 @@ mod tests {
     }
 
     #[test]
+    fn malformed_capture_set_without_a_closing_brace_reports_diagnostics() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{x", &mut names, true);
+
+        let tree = parser.type_expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn malformed_capture_set_with_a_missing_element_reports_diagnostics() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{,x}", &mut names, true);
+
+        let tree = parser.type_expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn pure_function_type_with_a_missing_result_reports_diagnostics() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("A -> {cap}", &mut names, true);
+
+        let tree = parser.type_expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn qualified_capture_references_keep_term_names_on_every_segment() {
         let source = "T^{pkg.cap}";
         let mut names = NameInterner::new();
@@ -2809,6 +2867,55 @@ mod tests {
             Some("pkg.Q")
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn reach_and_only_capture_suffixes_follow_the_qualified_reference() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{pkg.cap*.only[Foo]}", &mut names, true);
+
+        let tree = parser.type_expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::Annotated(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_reach_suffix_cannot_be_followed_by_a_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{cap*.field}", &mut names, true);
+
+        let _ = parser.type_expr();
+
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_only_suffix_cannot_be_followed_by_a_selection() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{cap.only[Foo].field}", &mut names, true);
+
+        let _ = parser.type_expr();
+
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn deferred_capture_read_only_suffix_is_diagnosed() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for_capture_type("T^{cap.rd}", &mut names, true);
+
+        let _ = parser.type_expr();
+
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        );
     }
 
     #[test]
