@@ -1,0 +1,421 @@
+//! Bounded, read-only operations on the outermost semantic type.
+//!
+//! These helpers return existing `TypeId`s and never complete symbols or
+//! allocate semantic values. They intentionally do not perform substitution,
+//! subtyping, member lookup, or recursive normalization of child types.
+
+use std::fmt;
+
+use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::{SemanticStore, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TypeId};
+
+/// Maximum number of alias/proxy links followed by one normalization request.
+pub const MAX_TYPE_NORMALIZATION_DEPTH: usize = 256;
+
+/// The symbol-info state reported when normalization cannot read a declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolInfoState {
+    Missing,
+    Deferred,
+    Error,
+}
+
+/// A soundness limitation or malformed reference encountered during
+/// top-level type normalization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeNormalizeError {
+    /// A `TypeId` is a reserved slot that has not been filled.
+    UnfilledType { ty: TypeId },
+    /// A symbol reference points outside this semantic store.
+    UnknownSymbol { symbol: SymbolId },
+    /// A type alias is opaque at this stage; its representation is hidden.
+    OpaqueAlias { symbol: SymbolId },
+    /// A type alias needs type-parameter substitution before it can be opened.
+    AliasRequiresSubstitution { symbol: SymbolId },
+    /// An alias declaration has no complete semantic info.
+    AliasInfoIncomplete {
+        symbol: SymbolId,
+        state: SymbolInfoState,
+    },
+    /// A completed alias does not have the required `AliasingBounds` shape.
+    AliasInfoNotAliasingBounds { symbol: SymbolId, info: TypeId },
+    /// Following aliases revisited a declaration symbol.
+    AliasCycle { symbol: SymbolId },
+    /// The alias chain or wrapper path exceeds the configured bound.
+    TooDeep,
+    /// A term reference uses a target represented by a structural name.
+    NameTargetCannotBeWidened { ty: TypeId },
+    /// A term reference designates a symbol category that is not a term value.
+    TermRefKindCannotBeWidened { symbol: SymbolId, kind: SymbolKind },
+    /// A term reference's symbol info is not complete.
+    TermRefInfoIncomplete {
+        symbol: SymbolId,
+        state: SymbolInfoState,
+    },
+    /// The input to term-reference widening is not a `TermRef`.
+    NotTermRef { ty: TypeId },
+}
+
+impl fmt::Display for TypeNormalizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for TypeNormalizeError {}
+
+/// Read-only, bounded semantic type normalization over an existing store.
+pub struct TypeNormalizer<'a> {
+    store: &'a SemanticStore,
+}
+
+impl<'a> TypeNormalizer<'a> {
+    /// Creates a normalizer over the supplied semantic store.
+    pub const fn new(store: &'a SemanticStore) -> Self {
+        Self { store }
+    }
+
+    /// Opens a chain of simple, non-opaque type aliases at the top level.
+    ///
+    /// Name-target references, non-alias symbols, and non-alias type forms are
+    /// returned unchanged. Alias declarations must already have complete
+    /// `AliasingBounds` info. Generic aliases are rejected because opening one
+    /// without substitution would return a semantically incorrect type.
+    pub fn dealias_top(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        let mut current = ty;
+        let mut visited = Vec::new();
+
+        for _ in 0..=MAX_TYPE_NORMALIZATION_DEPTH {
+            if !self.store.types.is_filled(current) {
+                return Err(TypeNormalizeError::UnfilledType { ty: current });
+            }
+            let (symbol, next) = match self.store.types.get(current) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } => {
+                    let Some(next) = self.alias_target(*symbol)? else {
+                        return Ok(current);
+                    };
+                    (*symbol, next)
+                }
+                Type::Applied { tycon, .. } => {
+                    if let Some(symbol) = self.alias_symbol(*tycon)? {
+                        if !self.store.symbols.contains(symbol) {
+                            return Err(TypeNormalizeError::UnknownSymbol { symbol });
+                        }
+                        if self
+                            .store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::OPAQUE)
+                        {
+                            return Err(TypeNormalizeError::OpaqueAlias { symbol });
+                        }
+                        return Err(TypeNormalizeError::AliasRequiresSubstitution { symbol });
+                    }
+                    return Ok(current);
+                }
+                _ => return Ok(current),
+            };
+            if visited.contains(&symbol) {
+                return Err(TypeNormalizeError::AliasCycle { symbol });
+            }
+            visited.push(symbol);
+            current = next;
+        }
+
+        Err(TypeNormalizeError::TooDeep)
+    }
+
+    fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {
+        if !self.store.types.is_filled(ty) {
+            return Err(TypeNormalizeError::UnfilledType { ty });
+        }
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = self.store.types.get(ty)
+        else {
+            return Ok(None);
+        };
+        if !self.store.symbols.contains(*symbol) {
+            return Err(TypeNormalizeError::UnknownSymbol { symbol: *symbol });
+        }
+        Ok(
+            matches!(self.store.symbols.get(*symbol).kind, SymbolKind::TypeAlias)
+                .then_some(*symbol),
+        )
+    }
+
+    fn alias_target(&self, symbol: SymbolId) -> Result<Option<TypeId>, TypeNormalizeError> {
+        if !self.store.symbols.contains(symbol) {
+            return Err(TypeNormalizeError::UnknownSymbol { symbol });
+        }
+        let declaration = self.store.symbols.get(symbol);
+        if declaration.kind != SymbolKind::TypeAlias {
+            return Ok(None);
+        }
+        if declaration.flags.contains(SymbolFlags::OPAQUE) {
+            return Err(TypeNormalizeError::OpaqueAlias { symbol });
+        }
+        let info = match declaration.info {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => {
+                return Err(TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: SymbolInfoState::Missing,
+                });
+            }
+            SymbolInfo::Deferred(_) => {
+                return Err(TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: SymbolInfoState::Deferred,
+                });
+            }
+            SymbolInfo::Error => {
+                return Err(TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: SymbolInfoState::Error,
+                });
+            }
+        };
+        if !self.store.types.is_filled(info) {
+            return Err(TypeNormalizeError::UnfilledType { ty: info });
+        }
+        match self.store.types.get(info) {
+            Type::AliasingBounds { alias } => Ok(Some(*alias)),
+            _ => Err(TypeNormalizeError::AliasInfoNotAliasingBounds { symbol, info }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::types::{TermRefTarget, Type};
+    use dotty_core::{Name, Namespace, Symbol, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility};
+
+    struct World {
+        store: SemanticStore,
+        prefix: TypeId,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let mut store = SemanticStore::new();
+            let prefix = store.types.alloc(Type::NoPrefix);
+            Self { store, prefix }
+        }
+
+        fn symbol(
+            &mut self,
+            text: &str,
+            kind: SymbolKind,
+            flags: SymbolFlags,
+            info: SymbolInfo,
+        ) -> SymbolId {
+            let name = Name::new(self.store.names.intern(text), Namespace::Type);
+            self.store.symbols.alloc(Symbol {
+                name,
+                owner: None,
+                kind,
+                flags,
+                info,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                visibility: Visibility::Public,
+                links: SymbolLinks::default(),
+            })
+        }
+
+        fn type_ref(&mut self, symbol: SymbolId) -> TypeId {
+            self.store.types.alloc(Type::TypeRef {
+                prefix: self.prefix,
+                target: TypeRefTarget::Symbol(symbol),
+            })
+        }
+
+        fn alias(&mut self, text: &str, target: TypeId, flags: SymbolFlags) -> (SymbolId, TypeId) {
+            let info = self
+                .store
+                .types
+                .alloc(Type::AliasingBounds { alias: target });
+            let symbol = self.symbol(
+                text,
+                SymbolKind::TypeAlias,
+                flags,
+                SymbolInfo::Complete(info),
+            );
+            let reference = self.type_ref(symbol);
+            (symbol, reference)
+        }
+    }
+
+    #[test]
+    fn dealiases_a_simple_complete_alias_without_allocating() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (_, reference) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let marker = w.store.types.alloc(Type::NoType);
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reference),
+            Ok(leaf)
+        );
+        let next = w.store.types.alloc(Type::NoType);
+        assert_eq!(next.index(), marker.index() + 1);
+    }
+
+    #[test]
+    fn follows_a_chain_of_simple_aliases() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (_, inner) = w.alias("B", leaf, SymbolFlags::EMPTY);
+        let (_, outer) = w.alias("A", inner, SymbolFlags::EMPTY);
+        assert_eq!(TypeNormalizer::new(&w.store).dealias_top(outer), Ok(leaf));
+    }
+
+    #[test]
+    fn leaves_non_alias_symbol_and_name_targets_unchanged() {
+        let mut w = World::new();
+        let class = w.symbol(
+            "C",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let class_ref = w.type_ref(class);
+        let name = dotty_core::TypeName::new(w.store.names.intern("T"));
+        let name_ref = w.store.types.alloc(Type::TypeRef {
+            prefix: w.prefix,
+            target: TypeRefTarget::Name(name),
+        });
+        let normalizer = TypeNormalizer::new(&w.store);
+        assert_eq!(normalizer.dealias_top(class_ref), Ok(class_ref));
+        assert_eq!(normalizer.dealias_top(name_ref), Ok(name_ref));
+    }
+
+    #[test]
+    fn rejects_opaque_aliases_without_opening_them() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (symbol, reference) = w.alias("Opaque", leaf, SymbolFlags::OPAQUE);
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reference),
+            Err(TypeNormalizeError::OpaqueAlias { symbol })
+        );
+    }
+
+    #[test]
+    fn rejects_aliases_without_complete_info() {
+        for (info, state) in [
+            (SymbolInfo::Missing, SymbolInfoState::Missing),
+            (SymbolInfo::Error, SymbolInfoState::Error),
+        ] {
+            let mut w = World::new();
+            let symbol = w.symbol("A", SymbolKind::TypeAlias, SymbolFlags::EMPTY, info);
+            let reference = w.type_ref(symbol);
+            assert_eq!(
+                TypeNormalizer::new(&w.store).dealias_top(reference),
+                Err(TypeNormalizeError::AliasInfoIncomplete { symbol, state })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_alias_info_without_aliasing_bounds() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::Bounds {
+            low: w.prefix,
+            high: w.prefix,
+        });
+        let symbol = w.symbol(
+            "A",
+            SymbolKind::TypeAlias,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = w.type_ref(symbol);
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reference),
+            Err(TypeNormalizeError::AliasInfoNotAliasingBounds { symbol, info })
+        );
+    }
+
+    #[test]
+    fn rejects_applied_generic_aliases_without_substitution() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (symbol, reference) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied = w.store.types.alloc(Type::Applied {
+            tycon: reference,
+            args: vec![argument],
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(applied),
+            Err(TypeNormalizeError::AliasRequiresSubstitution { symbol })
+        );
+    }
+
+    #[test]
+    fn reports_alias_cycles() {
+        let mut w = World::new();
+        let info = w.store.types.alloc(Type::NoType);
+        let symbol = w.symbol(
+            "A",
+            SymbolKind::TypeAlias,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Complete(info),
+        );
+        let reference = w.type_ref(symbol);
+        *w.store.types.get_mut(info) = Type::AliasingBounds { alias: reference };
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reference),
+            Err(TypeNormalizeError::AliasCycle { symbol })
+        );
+    }
+
+    #[test]
+    fn rejects_alias_chains_beyond_the_normalization_limit() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let mut current = leaf;
+        let mut outer = leaf;
+        for index in 0..=MAX_TYPE_NORMALIZATION_DEPTH {
+            let (_, reference) = w.alias(&format!("A{index}"), current, SymbolFlags::EMPTY);
+            current = reference;
+            outer = reference;
+        }
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(outer),
+            Err(TypeNormalizeError::TooDeep)
+        );
+    }
+
+    #[test]
+    fn reports_an_unfilled_type_slot_instead_of_reading_it() {
+        let mut w = World::new();
+        let reserved = w.store.types.reserve();
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reserved.id()),
+            Err(TypeNormalizeError::UnfilledType { ty: reserved.id() })
+        );
+    }
+
+    #[test]
+    fn term_name_targets_are_valid_types_but_not_aliases() {
+        let mut w = World::new();
+        let term = dotty_core::TermName::new(w.store.names.intern("x"));
+        let reference = w.store.types.alloc(Type::TermRef {
+            prefix: w.prefix,
+            target: TermRefTarget::Name(term),
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(reference),
+            Ok(reference)
+        );
+    }
+}
