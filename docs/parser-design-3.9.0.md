@@ -790,6 +790,11 @@ Parenthesized, braced, and indentation-based enumerator regions are supported,
 including the wrapped legacy form whose body has no explicit `do`. The parser
 emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 `map`, `flatMap`, or `withFilter`; that belongs to a later lowering phase.
+An indented body after `do` or `yield` uses the shared statement-sequence
+parser, so local definitions and a final expression form a `Block`. The parser
+uses scanner feedback when such a body is nested in a braced scope and consumes
+its matching outdent without absorbing the following outer statement. Inline
+bodies remain ordinary expressions.
 
 ## Scala parser oracle
 
