@@ -1,5 +1,5 @@
-use dotty_core::ast::{InfixOp, PrefixOp, UntypedNode};
-use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::ast::{Ident, InfixOp, PrefixOp, TypedExpr, UntypedNode};
+use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped};
 
 use super::{PendingOperator, can_start_prefix_expr, is_numeric_literal};
 use crate::Parser;
@@ -11,13 +11,32 @@ where
     /// Parses an expression at the current operator-expression boundary.
     pub(crate) fn postfix_expr(&mut self) -> TreeId<Untyped> {
         let first = self.prefix_expr();
-        self.infix_expr(first)
+        let tree = self.infix_expr(first);
+        if self.is_argument_vararg_splice() {
+            self.parse_argument_vararg_splice(tree)
+        } else {
+            tree
+        }
     }
 
     pub(super) fn infix_expr(&mut self, mut top: TreeId<Untyped>) -> TreeId<Untyped> {
         let mut operators = Vec::new();
 
-        while let Some(operator) = self.current_infix_operator() {
+        loop {
+            if self.is_argument_vararg_splice() {
+                break;
+            }
+            if self.is_nonfinal_argument_spread() {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "spread operator `*` not allowed here; must come last in a parameter list",
+                );
+                self.advance();
+                break;
+            }
+            let Some(operator) = self.current_infix_operator() else {
+                break;
+            };
             let checkpoint = self.cursor.checkpoint();
             if self.features().postfix_ops && !self.operator_has_following_operand() {
                 self.advance();
@@ -78,6 +97,56 @@ where
             tree = self.parse_match_clause(tree);
         }
         tree
+    }
+
+    fn is_argument_vararg_splice(&mut self) -> bool {
+        if self.context.location != crate::Location::InArgs || !self.current_text_is("*") {
+            return false;
+        }
+
+        match self.cursor.lookahead(1).kind {
+            TokenKind::Punctuation(dotty_core::Punctuation::RightParen) => true,
+            TokenKind::Punctuation(dotty_core::Punctuation::Comma) => matches!(
+                self.cursor.lookahead(2).kind,
+                TokenKind::Punctuation(dotty_core::Punctuation::RightParen) | TokenKind::Eof
+            ),
+            _ => false,
+        }
+    }
+
+    fn is_nonfinal_argument_spread(&mut self) -> bool {
+        self.context.location == crate::Location::InArgs
+            && self.current_text_is("*")
+            && self.cursor.lookahead(1).kind
+                == TokenKind::Punctuation(dotty_core::Punctuation::Comma)
+            && !matches!(
+                self.cursor.lookahead(2).kind,
+                TokenKind::Punctuation(dotty_core::Punctuation::RightParen) | TokenKind::Eof
+            )
+    }
+
+    fn parse_argument_vararg_splice(&mut self, expr: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(expr)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let star_span = self.current_span();
+        self.advance();
+
+        let wildcard_star = TypeName::new(self.names.intern("_*"));
+        let tpt = self.alloc(
+            TreeKind::Ident(Ident {
+                name: *wildcard_star.as_name(),
+                backquoted: false,
+            }),
+            Some(star_span),
+        );
+        self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Typed(TypedExpr { expr, tpt }),
+        )
     }
 
     fn current_infix_operator(&mut self) -> Option<PendingOperator> {
