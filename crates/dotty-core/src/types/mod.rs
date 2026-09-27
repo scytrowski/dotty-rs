@@ -21,7 +21,7 @@ pub use constant::Constant;
 pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, TypeParam, Variance};
 pub use rebind::{
     MethodParamSpec, TypeParamSpec, TypeRebindError, close_over_this, method_type_from_symbols,
-    poly_type_from_symbols, rebind_type_lambda, type_lambda_from_symbols,
+    poly_type_from_symbols, rebind_type_lambda, substitute_type_symbols, type_lambda_from_symbols,
 };
 pub use structural::{
     MAX_STRUCTURAL_DEPTH, StructuralLookupError, StructuralMemberLookup, lookup_structural_member,
