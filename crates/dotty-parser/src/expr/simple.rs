@@ -610,7 +610,10 @@ where
                 }
                 parent
             } else {
-                let constructor = self.alloc_from(mark, TreeKind::New(New { tpt: parent }));
+                let constructor = self.alloc(
+                    TreeKind::New(New { tpt: parent }),
+                    self.ast.get(parent).position,
+                );
                 let init = self.constructor_select(constructor);
                 self.alloc_from(
                     mark,

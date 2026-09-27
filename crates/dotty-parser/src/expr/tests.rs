@@ -636,6 +636,66 @@ fn preserves_type_arguments_for_mixin_parents() {
 }
 
 #[test]
+fn reports_a_missing_parent_after_a_new_mixin_separator() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C with",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Keyword(HardKeyword::With), 6, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::New(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(!parser.diagnostics().is_empty());
+}
+
+#[test]
+fn keeps_the_inner_new_span_on_its_type_name() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "new C",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected the source-level empty constructor application");
+    };
+    let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+        panic!("expected constructor selection");
+    };
+    assert!(matches!(
+        parser.ast().get(selection.qualifier).kind,
+        TreeKind::New(_)
+    ));
+    assert_eq!(
+        parser
+            .ast()
+            .get(selection.qualifier)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(4, 5).unwrap()
+    );
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_an_indented_template_body_after_mixin_parents() {
     let source = "new C with T:\n  def value = 1\n";
     let mut names = NameInterner::new();
