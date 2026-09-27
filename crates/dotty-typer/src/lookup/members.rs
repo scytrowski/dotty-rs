@@ -676,6 +676,35 @@ mod tests {
     }
 
     #[test]
+    fn transparent_parent_wrappers_keep_the_original_receiver_view() {
+        let mut w = World::new();
+        let base = w.class("Base");
+        let base_scope = w.scope(base);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(base_scope).enter(name, field);
+        w.publish_class(base, base_scope, Vec::new());
+
+        let child = w.class("Child");
+        let child_scope = w.scope(child);
+        let base_view = w.class_ref(base);
+        let flexible_parent = w.store.types.alloc(Type::Flexible {
+            underlying: base_view,
+        });
+        w.publish_class(child, child_scope, vec![flexible_parent]);
+        let receiver = w.class_ref(child);
+
+        let candidates = w.lookup(receiver, name).unwrap();
+        assert_eq!(candidates[0].receiver_view, flexible_parent);
+        assert_eq!(candidates[0].declaring_class, base);
+    }
+
+    #[test]
     fn applied_alias_parent_is_not_opened_without_substitution() {
         let mut w = World::new();
         let class = w.class("Base");
@@ -1054,6 +1083,29 @@ mod tests {
             w.lookup(receiver, missing),
             Err(MemberLookupError::TooDeep)
         ));
+    }
+
+    #[test]
+    fn inheritance_traversal_accepts_a_graph_at_the_depth_limit() {
+        let mut w = World::new();
+        let mut classes = Vec::new();
+        let mut scopes = Vec::new();
+        for index in 0..=MAX_MEMBER_LOOKUP_DEPTH {
+            let class = w.class(&format!("C{index}"));
+            classes.push(class);
+            scopes.push(w.scope(class));
+        }
+        for index in 0..classes.len() {
+            let parents = classes
+                .get(index + 1)
+                .map(|parent| vec![w.class_ref(*parent)])
+                .unwrap_or_default();
+            w.publish_class(classes[index], scopes[index], parents);
+        }
+        let receiver = w.class_ref(classes[0]);
+        let missing = Name::new(w.store.names.intern("missing"), Namespace::Term);
+
+        assert!(w.lookup(receiver, missing).unwrap().is_empty());
     }
 
     #[test]
