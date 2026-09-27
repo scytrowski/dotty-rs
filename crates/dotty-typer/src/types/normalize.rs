@@ -41,6 +41,8 @@ pub enum TypeNormalizeError {
     AliasInfoNotAliasingBounds { symbol: SymbolId, info: TypeId },
     /// Following aliases revisited a declaration symbol.
     AliasCycle { symbol: SymbolId },
+    /// A malformed alias/proxy cycle revisited the same outer type node.
+    NormalizationCycle { ty: TypeId },
     /// The alias chain or wrapper path exceeds the configured bound.
     TooDeep,
     /// A term reference uses a target represented by a structural name.
@@ -82,10 +84,20 @@ impl<'a> TypeNormalizer<'a> {
     /// `AliasingBounds` info. Generic aliases are rejected because opening one
     /// without substitution would return a semantically incorrect type.
     pub fn dealias_top(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        self.dealias_top_with_budget(ty, MAX_TYPE_NORMALIZATION_DEPTH)
+            .map(|(ty, _)| ty)
+    }
+
+    fn dealias_top_with_budget(
+        &self,
+        ty: TypeId,
+        budget: usize,
+    ) -> Result<(TypeId, usize), TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
+        let mut links = 0;
 
-        for _ in 0..=MAX_TYPE_NORMALIZATION_DEPTH {
+        for _ in 0..=budget {
             if !self.store.types.is_filled(current) {
                 return Err(TypeNormalizeError::UnfilledType { ty: current });
             }
@@ -95,7 +107,7 @@ impl<'a> TypeNormalizer<'a> {
                     ..
                 } => {
                     let Some(next) = self.alias_target(*symbol)? else {
-                        return Ok(current);
+                        return Ok((current, links));
                     };
                     (*symbol, next)
                 }
@@ -115,15 +127,19 @@ impl<'a> TypeNormalizer<'a> {
                         }
                         return Err(TypeNormalizeError::AliasRequiresSubstitution { symbol });
                     }
-                    return Ok(current);
+                    return Ok((current, links));
                 }
-                _ => return Ok(current),
+                _ => return Ok((current, links)),
             };
             if visited.contains(&symbol) {
                 return Err(TypeNormalizeError::AliasCycle { symbol });
             }
+            if links == budget {
+                return Err(TypeNormalizeError::TooDeep);
+            }
             visited.push(symbol);
             current = next;
+            links += 1;
         }
 
         Err(TypeNormalizeError::TooDeep)
@@ -180,6 +196,50 @@ impl<'a> TypeNormalizer<'a> {
                 symbol,
                 state: SymbolInfoState::Error,
             }),
+        }
+    }
+
+    /// Dealiases and unwraps `Annotated` / `Flexible` at the outermost level.
+    ///
+    /// The operation preserves `Applied` and all other type forms, and never
+    /// descends into their children. Alias links and wrappers share one depth
+    /// budget, and repeated outer nodes are reported as malformed cycles.
+    pub fn normalize_for_lookup(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        let mut current = ty;
+        let mut visited = Vec::new();
+        let mut depth = 0;
+
+        loop {
+            if visited.contains(&current) {
+                return Err(TypeNormalizeError::NormalizationCycle { ty: current });
+            }
+            visited.push(current);
+            if !self.store.types.is_filled(current) {
+                return Err(TypeNormalizeError::UnfilledType { ty: current });
+            }
+            // Applied aliases require substitution. Lookup normalization is
+            // intentionally shallow, so it preserves the entire application.
+            if matches!(self.store.types.get(current), Type::Applied { .. }) {
+                return Ok(current);
+            }
+            let (dealiased, links) = self.dealias_top_with_budget(
+                current,
+                MAX_TYPE_NORMALIZATION_DEPTH.saturating_sub(depth),
+            )?;
+            depth += links;
+            if dealiased != current {
+                current = dealiased;
+                continue;
+            }
+            let underlying = match self.store.types.get(current) {
+                Type::Annotated { underlying, .. } | Type::Flexible { underlying } => *underlying,
+                _ => return Ok(current),
+            };
+            if depth == MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(TypeNormalizeError::TooDeep);
+            }
+            depth += 1;
+            current = underlying;
         }
     }
 
@@ -681,6 +741,109 @@ mod tests {
         assert_eq!(
             TypeNormalizer::new(&w.store).widen_term_ref(ty),
             Err(TypeNormalizeError::NotTermRef { ty })
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_unwraps_flexible_types() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let flexible = w.store.types.alloc(Type::Flexible { underlying: leaf });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(flexible),
+            Ok(leaf)
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_unwraps_annotated_types() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let annotation = w
+            .store
+            .annotations
+            .alloc(dotty_core::types::Annotation::new(leaf, None));
+        let annotated = w.store.types.alloc(Type::Annotated {
+            underlying: leaf,
+            annotation,
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(annotated),
+            Ok(leaf)
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_repeats_dealiasing_and_proxy_unwrapping() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (_, alias) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let flexible = w.store.types.alloc(Type::Flexible { underlying: alias });
+        let annotation = w
+            .store
+            .annotations
+            .alloc(dotty_core::types::Annotation::new(leaf, None));
+        let annotated = w.store.types.alloc(Type::Annotated {
+            underlying: flexible,
+            annotation,
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(annotated),
+            Ok(leaf)
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_preserves_applied_types_without_normalizing_children() {
+        let mut w = World::new();
+        let leaf = w.store.types.alloc(Type::NoType);
+        let (symbol, alias) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let arg = w.store.types.alloc(Type::TypeRef {
+            prefix: w.prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        });
+        let applied = w.store.types.alloc(Type::Applied {
+            tycon: alias,
+            args: vec![arg],
+        });
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(applied),
+            Ok(applied)
+        );
+        assert_eq!(
+            TypeNormalizer::new(&w.store).dealias_top(applied),
+            Err(TypeNormalizeError::AliasRequiresSubstitution { symbol })
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_detects_cyclic_proxy_graphs() {
+        let mut w = World::new();
+        let reserved = w.store.types.reserve();
+        w.store.types.fill(
+            reserved,
+            Type::Flexible {
+                underlying: reserved.id(),
+            },
+        );
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(reserved.id()),
+            Err(TypeNormalizeError::NormalizationCycle { ty: reserved.id() })
+        );
+    }
+
+    #[test]
+    fn lookup_normalization_bounds_proxy_depth() {
+        let mut w = World::new();
+        let mut current = w.store.types.alloc(Type::NoType);
+        for _ in 0..=MAX_TYPE_NORMALIZATION_DEPTH {
+            current = w.store.types.alloc(Type::Flexible {
+                underlying: current,
+            });
+        }
+        assert_eq!(
+            TypeNormalizer::new(&w.store).normalize_for_lookup(current),
+            Err(TypeNormalizeError::TooDeep)
         );
     }
 }
