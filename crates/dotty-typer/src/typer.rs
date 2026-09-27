@@ -16,6 +16,11 @@ use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
 use crate::SourceTypeIndex;
 
+#[path = "lookup/mod.rs"]
+mod lookup;
+
+pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
+
 /// A recoverable failure while projecting or completing source semantics.
 #[derive(Debug)]
 pub enum TyperError {
