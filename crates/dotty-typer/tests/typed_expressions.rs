@@ -91,3 +91,77 @@ fn types_a_synthetic_field_selection_through_the_public_pipeline() {
         assert!(typer.store().types.contains(node.ty));
     }
 }
+
+#[test]
+fn types_a_monomorphic_application_through_the_public_pipeline() {
+    let text = "class C { def inc(x: Int): Int = x; def use: Int = inc(1) }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "typed-application.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method, rhs) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "use").then(|| {
+                (
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .expect("source should contain method use");
+    let context = ExpressionContext {
+        lexical: index.declaration_context_of(method).unwrap(),
+        owner: method,
+    };
+    let source_position = parsed.ast.get(rhs).position;
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("source method call should produce a typed Apply");
+    };
+    assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    assert_eq!(application.kind, dotty_core::ast::ApplyKind::Regular);
+    assert!(matches!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.args[0]).ty),
+        Type::Constant(dotty_core::Constant::Int(1))
+    ));
+    assert_eq!(typer.typed_ast().get(typed).position, source_position);
+    assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+    for (_, node) in typer.typed_ast().iter() {
+        assert!(typer.store().types.contains(node.ty));
+    }
+}

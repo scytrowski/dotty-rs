@@ -3,7 +3,8 @@
 use std::fmt;
 
 use dotty_core::ast::{
-    Ident, NumberKind, NumberLiteral, TreeKind, TypeBoundsTree, TypedAstBuilder, UntypedNode,
+    ApplyKind, Ident, NumberKind, NumberLiteral, TreeKind, TypeBoundsTree, TypedAstBuilder,
+    UntypedNode,
 };
 use dotty_core::types::{
     ClassInfo, MethodKind, MethodParamSpec, TermRefTarget, Type, TypeParamSpec, TypeRefTarget,
@@ -309,6 +310,71 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         name: dotty_core::Name,
+    },
+    /// A regular application callee does not widen to a method type.
+    ApplicationCalleeNotMethod {
+        source: SourceId,
+        tree_index: u32,
+        ty: TypeId,
+    },
+    /// Applying a polymorphic method requires explicit application or inference.
+    PolymorphicMethodApplicationDeferred { source: SourceId, tree_index: u32 },
+    /// Only plain method clauses are supported by ordinary application.
+    UnsupportedApplicationMethodKind {
+        source: SourceId,
+        tree_index: u32,
+        kind: MethodKind,
+    },
+    /// `using` application requires contextual argument insertion.
+    UsingApplicationDeferred { source: SourceId, tree_index: u32 },
+    /// The application supplies a different number of arguments than the method.
+    ApplicationArityMismatch {
+        source: SourceId,
+        tree_index: u32,
+        expected: usize,
+        actual: usize,
+    },
+    /// An erased parameter cannot be supplied by ordinary expression typing.
+    ErasedApplicationParameterDeferred {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+    },
+    /// A repeated parameter requires sequence adaptation outside this slice.
+    VarargsApplicationParameterDeferred {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+    },
+    /// A by-name parameter requires delayed evaluation outside this slice.
+    ByNameApplicationParameterDeferred {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+    },
+    /// The method result refers to a term parameter of the method being called.
+    DependentMethodApplicationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        result: TypeId,
+    },
+    /// An argument's widened type does not conform to the corresponding formal.
+    ApplicationArgumentTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        argument_index: usize,
+        actual: TypeId,
+        expected: TypeId,
+    },
+    /// The supported conformance relation cannot decide an argument comparison.
+    ApplicationArgumentConformanceUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        argument_index: usize,
+        actual: TypeId,
+        expected: TypeId,
+        error: Box<TypeRelationError>,
     },
     /// A type selection is outside expression typing.
     TypeSelectionInExpression { source: SourceId, tree_index: u32 },
@@ -717,6 +783,132 @@ impl<'a> SourceTyper<'a> {
                     ),
                 )
             }
+            TreeKind::Apply(application) => {
+                if application.kind == ApplyKind::Using {
+                    return Err(TyperError::UsingApplicationDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                    });
+                }
+                let function = self.type_expression_inner(
+                    application.function,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let function_type = self.typed_arena.get(function).ty;
+                let callable =
+                    self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                let method = match self.store.types.try_get(callable) {
+                    Some(Type::Method(method)) => method.clone(),
+                    Some(Type::Poly(_)) => {
+                        return Err(TyperError::PolymorphicMethodApplicationDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                        });
+                    }
+                    _ => {
+                        return Err(TyperError::ApplicationCalleeNotMethod {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            ty: callable,
+                        });
+                    }
+                };
+                if method.kind != MethodKind::Plain {
+                    return Err(TyperError::UnsupportedApplicationMethodKind {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        kind: method.kind,
+                    });
+                }
+                if application.args.len() != method.params.len() {
+                    return Err(TyperError::ApplicationArityMismatch {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        expected: method.params.len(),
+                        actual: application.args.len(),
+                    });
+                }
+                for (parameter_index, parameter) in method.params.iter().enumerate() {
+                    if parameter.erased {
+                        return Err(TyperError::ErasedApplicationParameterDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            parameter_index,
+                        });
+                    }
+                    if parameter.varargs {
+                        return Err(TyperError::VarargsApplicationParameterDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            parameter_index,
+                        });
+                    }
+                    if matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. })
+                    ) {
+                        return Err(TyperError::ByNameApplicationParameterDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            parameter_index,
+                        });
+                    }
+                }
+                if self.type_contains_param_ref(method.result, callable)? {
+                    return Err(TyperError::DependentMethodApplicationDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        binder: callable,
+                        result: method.result,
+                    });
+                }
+                let mut arguments = Vec::with_capacity(application.args.len());
+                for (argument_index, (argument_tree, parameter)) in
+                    application.args.iter().zip(&method.params).enumerate()
+                {
+                    let argument = self.type_expression_inner(
+                        *argument_tree,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?;
+                    let argument_type = self.typed_arena.get(argument).ty;
+                    let actual =
+                        self.widen_expression_type_journaled(argument_type, info_journal, 0)?;
+                    match self.conforms(actual, parameter.ty) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(TyperError::ApplicationArgumentTypeMismatch {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                argument_index,
+                                actual,
+                                expected: parameter.ty,
+                            });
+                        }
+                        Err(error) => {
+                            return Err(TyperError::ApplicationArgumentConformanceUnsupported {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                argument_index,
+                                actual,
+                                expected: parameter.ty,
+                                error: Box::new(error),
+                            });
+                        }
+                    }
+                    arguments.push(argument);
+                }
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).apply_with_kind(
+                    function,
+                    arguments,
+                    application.kind,
+                    method.result,
+                    source_tree.position,
+                ))
+            }
             TreeKind::Select(selection) => {
                 if !selection.name.is_term() {
                     return Err(TyperError::TypeSelectionInExpression {
@@ -784,6 +976,100 @@ impl<'a> SourceTyper<'a> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(typed)
+    }
+
+    fn type_contains_param_ref(&self, root: TypeId, binder: TypeId) -> Result<bool, TyperError> {
+        fn visit(
+            typer: &SourceTyper<'_>,
+            ty: TypeId,
+            binder: TypeId,
+            depth: usize,
+            seen: &mut std::collections::HashSet<TypeId>,
+        ) -> Result<bool, TyperError> {
+            if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::TooDeep,
+                ));
+            }
+            if !seen.insert(ty) {
+                return Ok(false);
+            }
+            let Some(node) = typer.store.types.try_get(ty) else {
+                return Err(TyperError::TypeNormalization(
+                    if typer.store.types.contains(ty) {
+                        crate::types::TypeNormalizeError::UnfilledType { ty }
+                    } else {
+                        crate::types::TypeNormalizeError::InvalidType { ty }
+                    },
+                ));
+            };
+            if matches!(node, Type::ParamRef { binder: found, .. } if *found == binder) {
+                return Ok(true);
+            }
+            let mut children = Vec::new();
+            match node {
+                Type::TermRef { prefix, .. } | Type::TypeRef { prefix, .. } => {
+                    children.push(*prefix);
+                }
+                Type::SuperType {
+                    this_type,
+                    super_type,
+                } => children.extend([*this_type, *super_type]),
+                Type::Applied { tycon, args } => {
+                    children.push(*tycon);
+                    children.extend(args.iter().copied());
+                }
+                Type::Bounds { low, high } => children.extend([*low, *high]),
+                Type::AliasingBounds { alias }
+                | Type::ByName { result: alias }
+                | Type::Flexible { underlying: alias }
+                | Type::Recursive { parent: alias }
+                | Type::Wildcard { bounds: alias }
+                | Type::JavaArray { element: alias } => children.push(*alias),
+                Type::And { left, right } | Type::Or { left, right } => {
+                    children.extend([*left, *right]);
+                }
+                Type::Refined { parent, info, .. } => children.extend([*parent, *info]),
+                Type::Method(method) => {
+                    children.extend(method.params.iter().map(|parameter| parameter.ty));
+                    children.push(method.result);
+                }
+                Type::Poly(poly) => {
+                    children.extend(poly.params.iter().map(|parameter| parameter.bounds));
+                    children.push(poly.result);
+                }
+                Type::TypeLambda(lambda) => {
+                    children.extend(lambda.params.iter().map(|parameter| parameter.bounds));
+                    children.push(lambda.result);
+                }
+                Type::MatchCase { pattern, result } => children.extend([*pattern, *result]),
+                Type::Annotated { underlying, .. } => children.push(*underlying),
+                Type::ParamRef { .. }
+                | Type::NoType
+                | Type::Error(_)
+                | Type::NoPrefix
+                | Type::ThisType { .. }
+                | Type::Constant(_)
+                | Type::RecThis { .. } => {}
+                Type::Match(match_type) => {
+                    children.extend([match_type.bound, match_type.scrutinee]);
+                    children.extend(match_type.cases.iter().copied());
+                }
+                Type::ClassInfo(info) => {
+                    children.push(info.prefix);
+                    children.extend(info.parents.iter().copied());
+                    children.extend(info.self_type);
+                }
+            }
+            for child in children {
+                if visit(typer, child, binder, depth + 1, seen)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        visit(self, root, binder, 0, &mut std::collections::HashSet::new())
     }
 
     fn enclosing_this_owner(
@@ -1316,6 +1602,18 @@ impl<'a> SourceTyper<'a> {
                         symbol,
                         kind,
                     });
+                };
+                let tpt = if kind == SymbolKind::Parameter {
+                    match self.arena.try_get(tpt).map(|node| &node.kind) {
+                        Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
+                            if self.store.names.resolve(postfix.op.text()) == "*" =>
+                        {
+                            postfix.operand
+                        }
+                        _ => tpt,
+                    }
+                } else {
+                    tpt
                 };
                 let context = self
                     .index
@@ -2482,7 +2780,11 @@ impl<'a> SourceTyper<'a> {
                 name: definition.name,
                 ty,
                 erased: flags.contains(SymbolFlags::ERASED),
-                varargs: false,
+                varargs: matches!(
+                    self.arena.try_get(definition.tpt).map(|node| &node.kind),
+                    Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
+                        if self.store.names.resolve(postfix.op.text()) == "*"
+                ),
             });
         }
         Ok((parameters, clause_kind.unwrap_or(MethodKind::Plain)))
@@ -4066,6 +4368,21 @@ mod tests {
 
         assert!(typer.is_subtype(definitions.int, definitions.int).unwrap());
         assert!(typer.conforms(definitions.int, definitions.int).unwrap());
+    }
+
+    #[test]
+    fn distinct_builtin_primitive_types_do_not_conform() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(
+            !typer
+                .conforms(definitions.boolean, definitions.int)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -10937,7 +11254,7 @@ mod tests {
     }
 
     #[test]
-    fn application_expression_is_explicitly_unsupported_in_this_slice() {
+    fn application_with_unresolved_callee_reports_name_error() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = method(1) }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -10956,10 +11273,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedExpression {
-                expression_kind: "expression or declaration tree",
-                ..
-            })
+            Err(TyperError::TermNameNotFound { .. })
         ));
     }
 
@@ -11264,5 +11578,523 @@ mod tests {
             }
             assert!(typer.typed_ast().iter().next().is_none());
         }
+    }
+
+    #[test]
+    fn regular_application_types_a_monomorphic_method() {
+        let source_text = "class C { def inc(x: Int): Int = x; def use: Int = inc(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let callee = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "inc" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("regular source call should produce a typed Apply")
+        };
+        assert_eq!(application.kind, ApplyKind::Regular);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let function_type = typer.typed_ast().get(application.function).ty;
+        assert!(matches!(
+            typer.store().types.get(function_type),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == callee
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.args[0]).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+        assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+    }
+
+    #[test]
+    fn application_reports_exact_arity_mismatch() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArityMismatch {
+                expected: 1,
+                actual: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn application_rejects_non_method_callees() {
+        let source_text = "class C { val value: Int = 1; def use: Int = value() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationCalleeNotMethod { ty, .. }) if ty == definitions.int
+        ));
+    }
+
+    #[test]
+    fn application_reports_argument_type_mismatch_with_index() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(false) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    actual,
+                    expected,
+                    ..
+                }) if *actual == definitions.boolean && *expected == definitions.int
+            ),
+            "unexpected application result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn failed_application_rolls_back_typed_children_and_semantic_changes() {
+        let source_text = "class C { def f(x: Int, y: Int): Int = x; def use: Int = f(1, false) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_before = typer.store().checkpoint();
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 1,
+                    ..
+                })
+            ),
+            "unexpected application result: {result:?}"
+        );
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.source_typed_index().len(), 0);
+        assert_eq!(typer.store().checkpoint(), store_before);
+    }
+
+    #[test]
+    fn too_many_application_arguments_reports_exact_arity() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1, 2) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArityMismatch {
+                expected: 1,
+                actual: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn polymorphic_method_application_is_deferred() {
+        let source_text = "class C { def id[A](x: A): A = x; def use: Int = id(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::PolymorphicMethodApplicationDeferred { .. })
+        ));
+    }
+
+    #[test]
+    fn contextual_method_application_is_deferred() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnsupportedApplicationMethodKind {
+                kind: MethodKind::Contextual,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn implicit_method_application_is_deferred() {
+        let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnsupportedApplicationMethodKind {
+                kind: MethodKind::Implicit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn using_application_is_deferred() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UsingApplicationDeferred { .. })
+        ));
+    }
+
+    #[test]
+    fn by_name_application_parameter_is_deferred() {
+        let source_text = "class C { def f(x: => Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ByNameApplicationParameterDeferred {
+                parameter_index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn erased_application_parameter_is_deferred() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    definition
+                        .value_param_clauses
+                        .first()
+                        .and_then(|clause| clause.first())
+                        .and_then(|tree| index.symbol_at(source, *tree))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let flags = store.symbols.get(parameter).flags;
+        store.symbols.get_mut(parameter).flags = flags | SymbolFlags::ERASED;
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ErasedApplicationParameterDeferred {
+                parameter_index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn varargs_application_parameter_is_deferred() {
+        let source_text = "class C { def f(xs: Int*): Int = 1; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::VarargsApplicationParameterDeferred {
+                    parameter_index: 0,
+                    ..
+                })
+            ),
+            "unexpected varargs result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn curried_monomorphic_application_types_each_clause() {
+        let source_text =
+            "class C { def f(x: Int)(y: Boolean): Boolean = y; def use: Boolean = f(1)(true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer clause should be an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(outer.function).ty),
+            Type::Method(method) if method.params.len() == 1 && method.params[0].ty == definitions.boolean
+        ));
+    }
+
+    #[test]
+    fn selected_generic_receiver_method_can_be_applied() {
+        let source_text = "class Box[A] { def accept(value: A): A = value }; class Use { def use(box: Box[Int]): Int = box.accept(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = val_symbol(&parsed, &store, &index, source, "box").0;
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn dependent_method_result_is_deferred() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let callee = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let reserved = typer.store.types.reserve();
+        let dependent = typer.store.types.alloc(Type::ParamRef {
+            binder: reserved.id(),
+            index: 0,
+        });
+        let callable = typer.store.types.fill(
+            reserved,
+            Type::Method(dotty_core::types::MethodType {
+                params: vec![dotty_core::types::MethodParam {
+                    name: dotty_core::TermName::new(typer.store.names.intern("x")),
+                    ty: definitions.int,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: dependent,
+                kind: MethodKind::Plain,
+            }),
+        );
+        typer
+            .store
+            .symbols
+            .set_info(callee, SymbolInfo::Complete(callable));
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::DependentMethodApplicationDeferred { binder, result, .. })
+                if binder == callable && result == dependent
+        ));
     }
 }
