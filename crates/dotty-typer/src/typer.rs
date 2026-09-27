@@ -331,7 +331,9 @@ impl std::error::Error for TyperError {}
 /// The lexical source scope and semantic owner used to type an expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpressionContext {
+    /// Lexical context for term name and import lookup.
     pub lexical: SourceContextId,
+    /// Semantic declaration that owns the expression, used for `this`.
     pub owner: SymbolId,
 }
 
@@ -842,10 +844,12 @@ impl<'a> SourceTyper<'a> {
                     .or_else(|| digits.strip_prefix("0B"));
                 let parsed = if radix == 10 {
                     digits.parse::<i32>().ok()
-                } else {
+                } else if (2..=36).contains(&radix) {
                     unsigned
                         .and_then(|digits| u32::from_str_radix(digits, radix).ok())
                         .map(|bits| bits as i32)
+                } else {
+                    None
                 };
                 parsed
                     .map(|value| (Constant::Int(value), self.definitions.int))
@@ -858,6 +862,7 @@ impl<'a> SourceTyper<'a> {
             NumberKind::Decimal | NumberKind::Floating => digits
                 .parse::<f64>()
                 .ok()
+                .filter(|value| value.is_finite())
                 .map(|value| (Constant::double(value), self.definitions.double))
                 .ok_or(TyperError::FloatingLiteralInvalid {
                     source: self.source,
@@ -9466,6 +9471,55 @@ mod tests {
     }
 
     #[test]
+    fn top_level_value_identifier_uses_its_declared_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = global }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let lexical = index.declaration_context_of(method).unwrap();
+        let name = Name::new(store.names.intern("global"), Namespace::Term);
+        let global = store.symbols.alloc(dotty_core::Symbol {
+            name,
+            owner: Some(class),
+            kind: SymbolKind::Value,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(definitions.int),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let scope = index.source_context(lexical).lexical_scope;
+        store.scopes.get_mut(scope).enter(name, global);
+        let context = ExpressionContext {
+            lexical,
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn variable_selection_uses_its_declared_type() {
+        let source_text = "class C { var value: Int = 1; def use: Int = this.value }";
+        let (kind, ty, _, definitions) = type_method_rhs(source_text, "use").unwrap();
+
+        assert!(matches!(kind, TreeKind::Select(_)));
+        assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
     fn explicit_import_resolves_a_term_identifier() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Lib { val item: Int = 1 }; class C { import Lib.item; def use: Int = item }",
@@ -9880,6 +9934,17 @@ mod tests {
     }
 
     #[test]
+    fn largest_positive_int_literal_and_separators_are_preserved() {
+        let (value, ty, definitions) = type_value_rhs("class C { val value = 2147483647 }");
+        assert_eq!(value, dotty_core::Constant::Int(i32::MAX));
+        assert_eq!(ty, definitions.int);
+
+        let (value, ty, definitions) = type_value_rhs("class C { val value = 4_2 }");
+        assert_eq!(value, dotty_core::Constant::Int(42));
+        assert_eq!(ty, definitions.int);
+    }
+
+    #[test]
     fn hexadecimal_integer_literal_preserves_radix_bits() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value = 0xffffffff }");
@@ -10024,6 +10089,60 @@ mod tests {
         assert!(typer.typed_ast().iter().next().is_none());
         assert_eq!(typer.source_typed_index().len(), 0);
         assert_eq!(typer.store().checkpoint(), store_before);
+    }
+
+    #[test]
+    fn overflowing_floating_literal_returns_a_typed_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 1e400 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::FloatingLiteralInvalid { spelling, .. }) if spelling == "1e400"
+        ));
+    }
+
+    #[test]
+    fn malformed_integer_radix_returns_an_error_instead_of_panicking() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = 1 }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let text = store.names.intern("1");
+        parsed.ast.get_mut(rhs).kind =
+            TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+                text,
+                kind: NumberKind::Whole(1),
+            }));
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::IntegerLiteralOutOfRange { .. })
+        ));
     }
 
     #[test]

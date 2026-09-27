@@ -30,6 +30,7 @@ impl<'a> TypedAstBuilder<'a> {
         self.ident_with_backquoted(name, false, ty, position)
     }
 
+    /// Allocates a typed identifier while retaining its source backquotes.
     pub fn ident_with_backquoted(
         &mut self,
         name: Name,
@@ -44,6 +45,7 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed literal with its already-determined semantic type.
     pub fn literal(
         &mut self,
         value: Constant,
@@ -57,6 +59,7 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed member selection referencing a typed qualifier.
     pub fn select(
         &mut self,
         qualifier: TreeId<Typed>,
@@ -76,6 +79,7 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed `this` reference with an optional source qualifier.
     pub fn this(
         &mut self,
         qual: Option<Name>,

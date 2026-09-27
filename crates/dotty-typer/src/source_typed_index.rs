@@ -8,9 +8,13 @@ use dotty_core::{SourceId, TreeId, Typed, Untyped};
 /// A source tree already has a different typed tree recorded in the index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConflictingTypedTree {
+    /// Source unit whose mapping conflicted.
     pub source: SourceId,
+    /// Untyped source tree with duplicate mappings.
     pub untyped: TreeId<Untyped>,
+    /// Typed tree already stored.
     pub existing: TreeId<Typed>,
+    /// Different typed tree that was attempted.
     pub attempted: TreeId<Typed>,
 }
 
@@ -29,15 +33,17 @@ pub struct SourceTypedIndex {
 }
 
 impl SourceTypedIndex {
+    /// Creates an empty source-to-typed mapping.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Looks up the typed replacement for one source tree.
     pub fn get(&self, source: SourceId, untyped: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.trees.get(&(source, untyped)).copied()
     }
 
-    /// Records a mapping, allowing an idempotent re-insertion of the same tree.
+    /// Records a source-to-typed mapping, allowing insertion of the same pair twice.
     pub fn insert(
         &mut self,
         source: SourceId,
@@ -59,14 +65,17 @@ impl SourceTypedIndex {
         Ok(())
     }
 
+    /// Removes the mapping for a source tree, if present.
     pub fn remove(&mut self, source: SourceId, untyped: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.trees.remove(&(source, untyped))
     }
 
+    /// Returns the number of recorded source trees.
     pub fn len(&self) -> usize {
         self.trees.len()
     }
 
+    /// Returns whether the index contains no mappings.
     pub fn is_empty(&self) -> bool {
         self.trees.is_empty()
     }
