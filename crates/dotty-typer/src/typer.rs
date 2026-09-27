@@ -346,6 +346,12 @@ pub enum TyperError {
         tree_index: u32,
         parameter_index: usize,
     },
+    /// A repeated parameter reference needs its concrete sequence type.
+    VarargsParameterReferenceDeferred {
+        source: SourceId,
+        tree_index: u32,
+        symbol: SymbolId,
+    },
     /// A by-name parameter requires delayed evaluation outside this slice.
     ByNameApplicationParameterDeferred {
         source: SourceId,
@@ -710,6 +716,7 @@ impl<'a> SourceTyper<'a> {
             Type::NoType | Type::NoPrefix | Type::Error(_) => {
                 Err(TyperError::ExpressionTypeCannotBeWidened { ty })
             }
+            Type::Repeated { .. } => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
             _ => Ok(ty),
         }
     }
@@ -1266,7 +1273,14 @@ impl<'a> SourceTyper<'a> {
             }
         }
         if kind != SymbolKind::Object {
-            self.completed_expression_symbol_info(symbol, info_journal)?;
+            let info = self.completed_expression_symbol_info(symbol, info_journal)?;
+            if matches!(self.store.types.try_get(info), Some(Type::Repeated { .. })) {
+                return Err(TyperError::VarargsParameterReferenceDeferred {
+                    source: self.source,
+                    tree_index,
+                    symbol,
+                });
+            }
         }
         let prefix =
             self.expression_term_prefix(symbol, expression_owner, tree_index, info_journal)?;
@@ -12009,7 +12023,7 @@ mod tests {
     }
 
     #[test]
-    fn varargs_parameter_reference_widens_to_repeated_type() {
+    fn varargs_parameter_reference_is_deferred_without_sequence_type() {
         let source_text = "class C { def f(xs: Int*): Int = xs }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
@@ -12037,22 +12051,6 @@ mod tests {
         );
 
         typer.complete_symbol(method).unwrap();
-        let TreeKind::Ident(ident) = &parsed.ast.get(rhs).kind else {
-            panic!("method body should be the parameter reference")
-        };
-        let typed = typer.type_expression(rhs, context).unwrap();
-        let expression_type = typer.typed_ast().get(typed).ty;
-        assert!(matches!(
-            typer.store().types.get(expression_type),
-            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
-        ));
-        let widened = typer.widen_expression_type(expression_type).unwrap();
-        assert!(matches!(
-            typer.store().types.get(widened),
-            Type::Repeated { element } if *element == definitions.int
-        ));
-        assert_eq!(typer.store().names.resolve(ident.name.text()), "xs");
-
         let method_type = typer.store().symbols.info(method);
         let SymbolInfo::Complete(method_type) = *method_type else {
             panic!("method signature should be complete")
@@ -12062,6 +12060,27 @@ mod tests {
         };
         assert!(method_type.params[0].varargs);
         assert_eq!(method_type.params[0].ty, definitions.int);
+
+        let parameter_info = typer.store().symbols.info(parameter);
+        let SymbolInfo::Complete(parameter_value_type) = *parameter_info else {
+            panic!("varargs parameter symbol should retain its repeated type")
+        };
+        assert!(matches!(
+            typer.store().types.get(parameter_value_type),
+            Type::Repeated { element } if *element == definitions.int
+        ));
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::VarargsParameterReferenceDeferred {
+                source: found_source,
+                tree_index,
+                symbol: found_symbol,
+            }) if found_source == source && tree_index == rhs.index() && found_symbol == parameter
+        ));
+        assert!(matches!(
+            typer.widen_expression_type(parameter_value_type),
+            Err(TyperError::ExpressionTypeCannotBeWidened { ty }) if ty == parameter_value_type
+        ));
     }
 
     #[test]

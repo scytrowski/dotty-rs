@@ -199,12 +199,14 @@ pub enum Type {
         element: TypeId,
     },
 
-    /// A Scala repeated parameter's sequence-shaped value type.
+    /// The declared type marker of a Scala repeated parameter.
     ///
-    /// This preserves the repeated marker and element type for references to
-    /// the parameter inside its method body. The owning method signature
-    /// stores the element type separately with `MethodParam::varargs`; this
-    /// wrapper does not claim a particular library `Seq` class identity.
+    /// The parameter symbol keeps this marker and its element type, while its
+    /// owning method signature stores the element type with
+    /// `MethodParam::varargs`. This is not the parameter's in-body value type:
+    /// until the concrete Scala sequence type is modeled, expression typing
+    /// defers references to this symbol. The marker does not claim a particular
+    /// library `Seq` class identity.
     Repeated {
         element: TypeId,
     },
