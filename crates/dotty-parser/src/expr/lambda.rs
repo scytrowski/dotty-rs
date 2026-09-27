@@ -1,6 +1,7 @@
 use dotty_core::ast::{Function, Modifiers, UntypedNode, ValDef};
 use dotty_core::{
-    Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+    HardKeyword, Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind,
+    Untyped,
 };
 
 use super::can_start_expr;
@@ -241,7 +242,7 @@ where
     fn parse_lambda_body(&mut self) -> TreeId<Untyped> {
         self.consume_lambda_newlines();
         if self.current().kind == TokenKind::Indent {
-            return self.parse_indented_block();
+            return self.parse_feedback_indented_block();
         }
 
         if self.context.location == Location::InBlock {
@@ -300,10 +301,27 @@ where
     }
 
     pub(super) fn arrow_starts_indented_body(&mut self) -> bool {
-        matches!(
-            self.cursor.lookahead(1).kind,
+        let mut body_offset = 1;
+        while matches!(
+            self.cursor.lookahead(body_offset).kind,
             TokenKind::Newline | TokenKind::Newlines
-        ) && can_start_expr(self.cursor.lookahead(2).kind)
+        ) {
+            body_offset += 1;
+        }
+        if self.cursor.lookahead(body_offset).kind == TokenKind::Indent {
+            body_offset += 1;
+        }
+
+        let body = self.cursor.lookahead(body_offset);
+        let body_kind = body.kind;
+        let body_start = body.span.start();
+        let arrow_end = self.current().span.end();
+        let has_line_break = self
+            .source
+            .as_str()
+            .get(arrow_end as usize..body_start as usize)
+            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+        has_line_break && (can_start_expr(body_kind) || can_start_local_definition(body_kind))
     }
 
     pub(super) fn fresh_wildcard_param_name(&mut self) -> TermName {
@@ -320,6 +338,30 @@ where
             Some(SourceSpan::new(self.source_id, Span::without_point(range))),
         )
     }
+}
+
+const fn can_start_local_definition(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Abstract
+                | HardKeyword::Class
+                | HardKeyword::Def
+                | HardKeyword::Enum
+                | HardKeyword::Final
+                | HardKeyword::Given
+                | HardKeyword::Lazy
+                | HardKeyword::Object
+                | HardKeyword::Override
+                | HardKeyword::Private
+                | HardKeyword::Protected
+                | HardKeyword::Sealed
+                | HardKeyword::Trait
+                | HardKeyword::Type
+                | HardKeyword::Val
+                | HardKeyword::Var
+        )
+    )
 }
 
 #[cfg(test)]
@@ -831,6 +873,82 @@ mod tests {
         assert!(matches!(
             parser.ast().get(function.body).kind,
             TreeKind::Block(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lambda_arrow_opens_layout_for_a_local_definition_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  val y = 1\n  y",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Keyword(HardKeyword::Val), 7, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::IntegerLiteral, 15, 16),
+                token(TokenKind::Newline, 16, 17),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Outdent, 20, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        parser.advance();
+        assert!(parser.arrow_starts_indented_body());
+    }
+
+    #[test]
+    fn parses_local_definitions_in_an_indented_lambda_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  val y = 1\n  y",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Indent, 7, 7),
+                token(TokenKind::Keyword(HardKeyword::Val), 7, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::IntegerLiteral, 15, 16),
+                token(TokenKind::Newline, 16, 17),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Outdent, 20, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        let TreeKind::Block(body) = &parser.ast().get(function.body).kind else {
+            panic!("expected a block lambda body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());

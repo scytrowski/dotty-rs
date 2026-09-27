@@ -120,6 +120,14 @@ where
     }
 
     fn parse_method_rhs(&mut self, location: Location, feedback_opened: bool) -> TreeId<Untyped> {
+        self.parse_definition_rhs(location, feedback_opened)
+    }
+
+    fn parse_definition_rhs(
+        &mut self,
+        location: Location,
+        feedback_opened: bool,
+    ) -> TreeId<Untyped> {
         self.consume_control_newlines();
         self.with_secondary_constructor_allowed(false, |parser| {
             if parser.current().kind == TokenKind::Indent {
@@ -132,6 +140,34 @@ where
                 parser.with_location(location, |parser| parser.expr())
             }
         })
+    }
+
+    fn observe_definition_rhs_indentation(&mut self) -> bool {
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+
+        if self.cursor.lookahead(lookahead).kind == TokenKind::Indent {
+            return false;
+        }
+
+        let next_start = self.cursor.lookahead(lookahead).span.start();
+        let current_end = self.current().span.end();
+        let gap_has_line_break = self
+            .source
+            .as_str()
+            .get(current_end as usize..next_start as usize)
+            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+        if lookahead == 1 && !gap_has_line_break {
+            return false;
+        }
+
+        self.observe_indented();
+        self.cursor.lookahead(1).kind == TokenKind::Indent
     }
 
     fn parse_method_name(&mut self) -> TermName {
@@ -222,10 +258,9 @@ where
         };
 
         let rhs = if is_bare_assignment(self) {
+            let feedback_opened = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.with_secondary_constructor_allowed(false, |parser| {
-                parser.with_location(location, |parser| parser.expr())
-            }))
+            Some(self.parse_definition_rhs(location, feedback_opened))
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
                 self.report(
@@ -316,10 +351,9 @@ where
         };
 
         let rhs = if is_bare_assignment(self) {
+            let feedback_opened = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.with_secondary_constructor_allowed(false, |parser| {
-                parser.with_location(location, |parser| parser.expr())
-            }))
+            Some(self.parse_definition_rhs(location, feedback_opened))
         } else if has_explicit_type
             && all_simple_identifiers
             && is_definition_boundary(self.current().kind)
@@ -463,6 +497,52 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
     use dotty_core::{NameInterner, Punctuation, TokenKind, TreeKind};
+
+    #[test]
+    fn parses_a_local_definition_block_as_a_value_rhs() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val result =\n  val local = 1\n  local",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 10),
+                token(TokenKind::Operator, 11, 12),
+                token(TokenKind::Newline, 12, 13),
+                token(TokenKind::Indent, 15, 15),
+                token(TokenKind::Keyword(HardKeyword::Val), 15, 18),
+                token(TokenKind::Identifier, 19, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::IntegerLiteral, 27, 28),
+                token(TokenKind::Newline, 28, 29),
+                token(TokenKind::Identifier, 31, 36),
+                token(TokenKind::Outdent, 36, 36),
+                token(TokenKind::Eof, 36, 36),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let rhs = definition.rhs.expect("value definition has an RHS");
+        let TreeKind::Block(body) = &parser.ast().get(rhs).kind else {
+            panic!("expected an indented block in the value RHS");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
 
     #[test]
     fn parses_a_val_definition_with_an_inferred_type() {

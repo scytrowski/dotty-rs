@@ -111,9 +111,11 @@ eager indentation, the parser requests the case-region indent after `match`
 and requests its outdent before parsing the following sibling statement or
 closing delimiter.
 
-For supported method RHSs and `if`/`while` bodies, the parser likewise asks
-the scanner for an indentation region at `=`, `then`, `else`, or `do` when the
-source continues on a more-indented line inside braces. These regions use the
+For supported method/value-definition RHSs and `if`/`while` bodies, the parser
+likewise asks the scanner for an indentation region at `=`, `then`, `else`, or
+`do` when the source continues on a more-indented line inside braces. Indented
+lambda bodies also open a region when they start with a local definition, not
+only when their first token can begin an expression. These regions use the
 shared expression-block statement sequence, so local definitions remain in
 `Block.stats` and the final expression remains `Block.expr`. The sequence asks
 for an outdent before it can mistake an enclosing `else`, closing brace, or
