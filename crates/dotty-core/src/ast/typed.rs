@@ -100,11 +100,23 @@ impl<'a> TypedAstBuilder<'a> {
         ty: TypeId,
         position: Option<SourceSpan>,
     ) -> TreeId<Typed> {
+        self.apply_with_kind(function, args, ApplyKind::Regular, ty, position)
+    }
+
+    /// Allocates a typed application while preserving its source application kind.
+    pub fn apply_with_kind(
+        &mut self,
+        function: TreeId<Typed>,
+        args: Vec<TreeId<Typed>>,
+        kind: ApplyKind,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
             kind: TreeKind::Apply(Apply {
                 function,
                 args,
-                kind: ApplyKind::Regular,
+                kind,
             }),
             position,
             ty,
@@ -155,6 +167,26 @@ mod tests {
         };
         assert_eq!(apply.function, function);
         assert_eq!(apply.args, vec![arg]);
+        assert_eq!(apply.kind, ApplyKind::Regular);
+    }
+
+    #[test]
+    fn apply_with_kind_preserves_using_applications() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let function = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+
+        let call =
+            builder.apply_with_kind(function, Vec::new(), ApplyKind::Using, TypeId::new(3), None);
+
+        let TreeKind::Apply(apply) = &arena.get(call).kind else {
+            panic!("expected an Apply node");
+        };
+        assert_eq!(apply.kind, ApplyKind::Using);
     }
 
     #[test]

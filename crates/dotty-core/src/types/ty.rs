@@ -199,6 +199,18 @@ pub enum Type {
         element: TypeId,
     },
 
+    /// The declared type marker of a Scala repeated parameter.
+    ///
+    /// The parameter symbol keeps this marker and its element type, while its
+    /// owning method signature stores the element type with
+    /// `MethodParam::varargs`. This is not the parameter's in-body value type:
+    /// until the concrete Scala sequence type is modeled, expression typing
+    /// defers references to this symbol. The marker does not claim a particular
+    /// library `Seq` class identity.
+    Repeated {
+        element: TypeId,
+    },
+
     ClassInfo(ClassInfo),
 }
 
@@ -488,6 +500,20 @@ mod tests {
         };
 
         assert_ne!(wildcard, array);
+    }
+
+    #[test]
+    fn repeated_parameter_type_retains_its_element_type() {
+        let repeated = Type::Repeated {
+            element: TypeId::new(4),
+        };
+
+        assert_eq!(
+            repeated,
+            Type::Repeated {
+                element: TypeId::new(4)
+            }
+        );
     }
 
     #[test]

@@ -341,6 +341,10 @@ fn render_type(
             "JavaArray({})",
             render_type(store, *element, binders, active)
         ),
+        Type::Repeated { element } => format!(
+            "Repeated({})",
+            render_type(store, *element, binders, active)
+        ),
         Type::ClassInfo(info) => normalized_class_info(store, info, binders, active),
     };
     active.pop();

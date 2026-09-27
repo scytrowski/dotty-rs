@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
-use dotty_core::{ScopeId, SymbolId, SymbolInfo, SymbolKind, TypeId};
+use dotty_core::{ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
@@ -141,6 +141,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if self.is_class(expected, self.typer.definitions.any_class) {
             return Ok(true);
         }
+        if self.is_builtin_class(found) && self.is_builtin_class(expected) {
+            return Ok(false);
+        }
 
         let found_node = self.type_at(found)?.clone();
         let expected_node = self.type_at(expected)?.clone();
@@ -175,6 +178,19 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             });
         }
         Ok(())
+    }
+
+    fn is_builtin_class(&self, ty: TypeId) -> bool {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.typer.store.types.try_get(ty)
+        else {
+            return false;
+        };
+        self.typer.store.symbols.contains(*symbol)
+            && self.typer.store.symbols.get(*symbol).kind == SymbolKind::Class
+            && self.typer.store.symbols.get(*symbol).origin == SymbolOrigin::Builtin
     }
 
     fn this_type_reference_prefix_matches(
