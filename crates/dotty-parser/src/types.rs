@@ -1184,6 +1184,7 @@ where
                 ParamOwner::Class
                     | ParamOwner::CaseClass
                     | ParamOwner::Def
+                    | ParamOwner::Given
                     | ParamOwner::ExtensionPrefix
                     | ParamOwner::ExtensionFollow
             )

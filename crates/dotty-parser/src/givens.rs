@@ -524,6 +524,57 @@ mod tests {
     }
 
     #[test]
+    fn preserves_and_diagnoses_repeated_parameters_in_a_named_given() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given c: (xs: A*) => C = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Colon), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Operator, 23, 24),
+                token(TokenKind::Identifier, 25, 30),
+                token(TokenKind::Eof, 30, 30),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a named given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        let TreeKind::ValDef(parameter) =
+            &parser.ast().get(definition.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected a given parameter ValDef");
+        };
+
+        assert!(matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PostfixOp(_))
+        ));
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
+                && diagnostic
+                    .message()
+                    .contains("not allowed in `given` or `implicit`")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_named_given_alias_with_a_parenthesized_function_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
