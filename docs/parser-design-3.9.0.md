@@ -272,6 +272,9 @@ clauses, inline parameters, default parameter expressions, and indented method
 bodies are supported. The soft name `inline` remains a parameter name when
 followed by `:`. Interleaved type/term parameter clauses are explicitly deferred
 because the current `DefDef` model keeps the leading type clause separate.
+Final repeated parameter types (`T*`, including applied types such as
+`List[T]*`) are represented as source-level `PostfixOp` type trees; a repeated
+parameter followed by another parameter in the same clause is diagnosed.
 Primary-constructor parameters preserve source annotations and the supported
 `private`/`protected` visibility, `override`, and `inline` modifiers in
 class-parameter contexts; explicit `val`/`var` accessor metadata remains

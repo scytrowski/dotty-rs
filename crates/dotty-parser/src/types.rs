@@ -1,7 +1,8 @@
 use dotty_core::ast::{
     Annotated, AppliedTypeTree, ByNameTypeTree, CaseDef, Function, FunctionWithMods, Ident,
     LambdaTypeTree, MatchTypeTree, Modifier, Modifiers, NamedArg, New, Parens, PolyFunction,
-    RefinedTypeTree, Select, SingletonTypeTree, Super, Tuple, TypeBoundsTree, UntypedNode, ValDef,
+    PostfixOp, RefinedTypeTree, Select, SingletonTypeTree, Super, Tuple, TypeBoundsTree,
+    UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, HardKeyword, Name, Punctuation, SourceSpan, Span, TokenKind, TreeId, TreeKind,
@@ -10,7 +11,7 @@ use dotty_core::{
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::ParsedStatement;
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{Location, ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -61,6 +62,45 @@ where
     /// higher-level entries own function-arrow precedence.
     pub(crate) fn type_expr(&mut self) -> TreeId<Untyped> {
         self.parse_function_type()
+    }
+
+    /// Parses a formal parameter type, whose final `*` is the source-level
+    /// repeated-parameter marker rather than an infix type operator.
+    pub(crate) fn parse_parameter_type(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let tpt = self.type_expr();
+        if !self.current_is_parameter_vararg_marker() {
+            return tpt;
+        }
+
+        if self.current_is_valid_parameter_vararg_suffix() {
+            let operator = match self.intern_current_type_name() {
+                Ok(operator) => *operator.as_name(),
+                Err(_) => {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedType,
+                        "invalid repeated-parameter marker",
+                    );
+                    self.advance();
+                    return tpt;
+                }
+            };
+            self.advance();
+            return self.alloc_from(
+                mark,
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(PostfixOp {
+                    operand: tpt,
+                    op: operator,
+                })),
+            );
+        }
+
+        self.report(
+            ParseDiagnosticKind::UnexpectedToken,
+            "spread operator `*` is not allowed here; it must come last in a parameter list",
+        );
+        self.advance();
+        tpt
     }
 
     fn parse_function_type(&mut self) -> TreeId<Untyped> {
@@ -1119,7 +1159,8 @@ where
 
         // Arrows, bounds, projections, a bare colon, and contextual markers
         // belong to their own type productions rather than to InfixType.
-        if self.current_is_structural_operator()
+        if self.current_is_parameter_vararg_marker()
+            || self.current_is_structural_operator()
             || self.features().capture_checking
                 && matches!(self.current_text().ok(), Some("->" | "?->"))
             || self.current_text_is(":")
@@ -1134,6 +1175,37 @@ where
 
         let operator = *self.intern_current_type_name().ok()?.as_name();
         Some((operator, self.current().span.start()))
+    }
+
+    fn current_is_parameter_vararg_marker(&mut self) -> bool {
+        matches!(
+            self.context().param_owner,
+            Some(
+                ParamOwner::Class
+                    | ParamOwner::CaseClass
+                    | ParamOwner::Def
+                    | ParamOwner::ExtensionPrefix
+                    | ParamOwner::ExtensionFollow
+            )
+        ) && matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::Operator
+        ) && self.current_text_is("*")
+            && matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen)
+            )
+    }
+
+    fn current_is_valid_parameter_vararg_suffix(&mut self) -> bool {
+        match self.cursor.lookahead(1).kind {
+            TokenKind::Punctuation(Punctuation::RightParen) => true,
+            TokenKind::Punctuation(Punctuation::Comma) => matches!(
+                self.cursor.lookahead(2).kind,
+                TokenKind::Punctuation(Punctuation::RightParen) | TokenKind::Eof
+            ),
+            _ => false,
+        }
     }
 
     fn type_operator_has_following_operand(&mut self) -> bool {

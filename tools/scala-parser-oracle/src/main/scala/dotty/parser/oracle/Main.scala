@@ -209,6 +209,11 @@ object Main:
     if normalizedKind == "InterpolatedString" then
       fields += field("prefix", quote(slice(tree, source).takeWhile(_ != '"')))
 
+    tree match
+      case postfix: dotty.tools.dotc.ast.untpd.PostfixOp =>
+        fields += field("operator", quote(postfix.op.name.toString))
+      case _ =>
+
     val rawChildren =
       if normalizedKind == "InterpolatedString" then
         childTrees(tree).flatMap: child =>
@@ -220,8 +225,9 @@ object Main:
       case "InfixOp"   => Some(1)
       case "PostfixOp" => Some(1)
       case _            => None
-    operatorIndex.flatMap(index => rawChildren.lift(index)).foreach: operatorTree =>
-      fields += field("operator", quote(operatorName(operatorTree, source)))
+    if normalizedKind != "PostfixOp" then
+      operatorIndex.flatMap(index => rawChildren.lift(index)).foreach: operatorTree =>
+        fields += field("operator", quote(operatorName(operatorTree, source)))
     val children = rawChildren.zipWithIndex
       .collect {
         case (child, index) if !operatorIndex.contains(index) => render(child, source, placeholderBase)
