@@ -431,3 +431,48 @@ The largest current first-failure buckets are `ExpectedExpression` (121),
 `UnexpectedToken` (76), `ExpectedToken` (66), and `ExpectedType` (54), with
 their representative paths in the JSON report. Hard failures, process
 failures, panics, and hangs remain zero.
+
+## Corpus rerun after PR #393
+
+Issue #399 reran the same 1,236-file source corpus at parser revision
+`d0c2f517a25d08f31e1f90bb34a1935dc038c4aa` (main after PR #393), using the
+unchanged Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The deterministic report is
+[`parser-post-issue-399-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-399-scala3-3.9.0.json).
+
+| Measure | After #378 (`e6cc85b0`) | After #393 (`d0c2f517`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 908 (73.46%) | 987 (79.85%) | +79 (+6.39 pp) |
+| Recoverable diagnostics | 328 (26.54%) | 249 (20.15%) | -79 (-6.39 pp) |
+| Hard parser failures / panics / hangs | 0 / 0 / 0 | 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+Both capture-checking cohorts improved: the disabled cohort gained 58 clean
+files (720 to 778 of 994), and the enabled cohort gained 21 (188 to 209 of
+242). Diagnostic occurrences fell from 9,076 to 6,746 (-2,330, or 25.7%):
+
+| Diagnostic occurrences | After #378 | After #393 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 3,091 | 2,112 | -979 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 1,071 | 989 | -82 |
+| `ExpectedType` | 428 | 376 | -52 |
+| `UnexpectedToken` | 2,837 | 1,932 | -905 |
+| `UnsupportedSyntax` | 1,644 | 1,332 | -312 |
+| **Total** | **9,076** | **6,746** | **-2,330 (-25.7%)** |
+
+The first-failure histogram also shifted substantially: `ExpectedExpression`
+fell from 121 to 48 files and `UnexpectedToken` from 76 to 56. `ExpectedToken`
+rose from 66 to 77 and `ExpectedType` from 54 to 56; one
+`UnsupportedSyntax` pattern-form bucket appeared, while the other unsupported
+syntax buckets were unchanged. First-failure counts identify only the earliest
+diagnostic in each file, so increases can mean parsing now reaches a later
+failure rather than a regression. The largest current buckets are
+`ExpectedToken` (77), `ExpectedType` and `UnexpectedToken` (56 each), and
+`ExpectedExpression` (48); inspect their representative paths in the JSON
+report before choosing follow-up grammar work. The aggregate clean-file gains
+are real for this corpus, but this measurement alone does not attribute each
+gain to a specific parser change. Hard failures, process failures, panics, and
+hangs remain zero.
