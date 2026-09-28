@@ -563,6 +563,33 @@ pub enum TyperError {
         expected: TypeId,
         error: Box<TypeRelationError>,
     },
+    /// An assignment's typed left-hand side is not a direct symbol reference.
+    AssignmentLhsNotAssignable {
+        source: SourceId,
+        tree_index: u32,
+        lhs_tree_index: u32,
+        expression_kind: &'static str,
+    },
+    /// An assignment target is a value-like declaration without MUTABLE.
+    AssignmentTargetImmutable {
+        source: SourceId,
+        tree_index: u32,
+        target: SymbolId,
+    },
+    /// This semantic symbol category is not writable by ordinary assignment.
+    AssignmentTargetKindUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        target: SymbolId,
+        kind: SymbolKind,
+    },
+    /// The writable type of the selected declaration could not be recovered.
+    WritableAssignmentTypeUnavailable {
+        source: SourceId,
+        tree_index: u32,
+        target: SymbolId,
+        error: Box<TyperError>,
+    },
     /// Every overload rejected the supplied arguments; reasons are kept per candidate.
     OverloadApplicationNoApplicable {
         source: SourceId,
@@ -1383,6 +1410,84 @@ impl<'a> SourceTyper<'a> {
                     expr,
                     tpt,
                     expected,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::Assign(assignment) => {
+                let lhs = self.type_expression_inner(
+                    assignment.lhs,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let lhs_type = self.typed_arena.get(lhs).ty;
+                let target = match self.store.types.try_get(lhs_type) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(target),
+                        ..
+                    }) => *target,
+                    _ => {
+                        let lhs_kind = self
+                            .arena
+                            .try_get(assignment.lhs)
+                            .map_or("tree outside source arena", |node| {
+                                tree_kind_name(&node.kind)
+                            });
+                        return Err(TyperError::AssignmentLhsNotAssignable {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            lhs_tree_index: assignment.lhs.index(),
+                            expression_kind: lhs_kind,
+                        });
+                    }
+                };
+                if !self.store.symbols.contains(target) {
+                    return Err(TyperError::UnknownSymbol { symbol: target });
+                }
+                let (target_kind, target_flags) = {
+                    let symbol = self.store.symbols.get(target);
+                    (symbol.kind, symbol.flags)
+                };
+                if !matches!(
+                    target_kind,
+                    SymbolKind::Local
+                        | SymbolKind::Field
+                        | SymbolKind::Variable
+                        | SymbolKind::Parameter
+                ) {
+                    return Err(TyperError::AssignmentTargetKindUnsupported {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        target,
+                        kind: target_kind,
+                    });
+                }
+                if !target_flags.contains(SymbolFlags::MUTABLE) {
+                    return Err(TyperError::AssignmentTargetImmutable {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        target,
+                    });
+                }
+                let expected = self
+                    .widen_expression_type_journaled(lhs_type, info_journal, 0)
+                    .map_err(|error| TyperError::WritableAssignmentTypeUnavailable {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        target,
+                        error: Box::new(error),
+                    })?;
+                let rhs = self.type_expression_expected_inner(
+                    assignment.rhs,
+                    context,
+                    expected,
+                    info_journal,
+                    new_mappings,
+                )?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).assign(
+                    lhs,
+                    rhs,
+                    self.definitions.unit,
                     source_tree.position,
                 ))
             }
@@ -17314,6 +17419,252 @@ mod tests {
             ),
             "unexpected ascription typing result: {result:?}"
         );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.type_index.type_at(source, rhs).is_none());
+    }
+
+    #[test]
+    fn assignment_to_mutable_local_uses_unit_result_and_keeps_exact_symbol() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Unit = { var value = 1; value = 2 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should remain a block");
+        };
+        let assignment = block.expr;
+        let TreeKind::Assign(assign) = &typer.typed_ast().get(assignment).kind else {
+            panic!("expected a typed assignment");
+        };
+        let target = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(assign.lhs).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a direct local reference, got {other:?}"),
+        };
+        let target_symbol = typer.store().symbols.get(target);
+        assert_eq!(target_symbol.kind, SymbolKind::Local);
+        assert!(target_symbol.flags.contains(SymbolFlags::MUTABLE));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(assign.rhs).ty),
+            Type::Constant(dotty_core::Constant::Int(2))
+        ));
+    }
+
+    #[test]
+    fn assignment_rejects_immutable_local_and_parameter() {
+        for (source_text, assigned_name) in [
+            (
+                "class C { def use: Unit = { val value = 1; value = 2 } }",
+                "value",
+            ),
+            ("class C { def use(value: Int): Unit = value = 2 }", "value"),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            let result = typer.type_expression(rhs, context);
+
+            assert!(
+                matches!(result, Err(TyperError::AssignmentTargetImmutable { .. })),
+                "assignment to `{assigned_name}` should reject immutable target: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_to_generic_mutable_field_uses_receiver_adapted_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A] { var value: A }; class C { def use(box: Box[Int]): Unit = box.value = 1 }",
+        );
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let (lhs, rhs) = match &typer.typed_ast().get(typed).kind {
+            TreeKind::Assign(assignment) => (assignment.lhs, assignment.rhs),
+            _ => panic!("expected a typed assignment"),
+        };
+        let qualifier = match &typer.typed_ast().get(lhs).kind {
+            TreeKind::Select(selection) => selection.qualifier,
+            _ => panic!("field assignment should retain its typed selection"),
+        };
+        let lhs_type = typer.typed_ast().get(lhs).ty;
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(lhs_type),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == field
+        ));
+        let adapted_lhs_type = typer.widen_expression_type(lhs_type).unwrap();
+        assert_eq!(adapted_lhs_type, definitions.int);
+        assert!(typer.typed_ast().get(qualifier).position.is_some());
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(rhs).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+    }
+
+    #[test]
+    fn assignment_rejects_immutable_source_field() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1; def use: Unit = value = 2 }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (field, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AssignmentTargetImmutable { target, .. }) if target == field
+        ));
+    }
+
+    #[test]
+    fn assignment_rejects_method_reference_targets_by_kind() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def value: Int = 1; def use: Unit = value = 2 }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (target, _) = method_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AssignmentTargetKindUnsupported {
+                target: actual,
+                kind: SymbolKind::Method,
+                ..
+            }) if actual == target
+        ));
+    }
+
+    #[test]
+    fn assignment_rejects_a_non_reference_lhs_explicitly() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Unit = 1 }");
+        let (method, literal) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let position = parsed.ast.get(literal).position;
+        let assignment = parsed.ast.alloc(Tree {
+            kind: TreeKind::Assign(dotty_core::ast::Assign {
+                lhs: literal,
+                rhs: literal,
+            }),
+            position,
+            ty: (),
+        });
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(assignment, context);
+        assert!(
+            matches!(
+            result,
+            Err(TyperError::AssignmentLhsNotAssignable {
+                lhs_tree_index,
+                ..
+            }) if lhs_tree_index == literal.index()
+            ),
+            "unexpected assignment result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn assignment_rhs_mismatch_rolls_back_all_expression_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Unit = { var value = 1; value = true } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ExpectedExpressionTypeMismatch { .. })
+        ));
         assert_eq!(typer.store().checkpoint(), before);
         assert!(typer.typed_ast().iter().next().is_none());
         assert!(typer.source_typed_index().is_empty());
