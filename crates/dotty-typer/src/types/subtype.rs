@@ -13,6 +13,8 @@ use crate::{SourceTyper, TyperError};
 pub const MAX_TYPE_RELATION_DEPTH: usize = 256;
 /// Maximum instantiated parent views inspected by one relation.
 pub const MAX_TYPE_RELATION_VIEWS: usize = 4096;
+/// Maximum union comparisons expanded by one subtype relation.
+pub const MAX_UNION_RELATION_COMPARISONS: usize = 4096;
 
 /// A malformed or unsupported semantic type relation.
 #[derive(Debug)]
@@ -198,7 +200,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     }
 
     fn bump_union_comparison(&mut self) -> Result<(), TypeRelationError> {
-        if self.union_comparisons >= MAX_TYPE_RELATION_VIEWS {
+        if self.union_comparisons >= MAX_UNION_RELATION_COMPARISONS {
             return Err(TypeRelationError::TooManyUnionRelations);
         }
         self.union_comparisons += 1;

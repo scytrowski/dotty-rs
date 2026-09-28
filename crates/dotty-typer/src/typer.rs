@@ -39,7 +39,10 @@ mod substitution;
 mod subtype;
 
 pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
-pub use subtype::{MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, TypeRelationError};
+pub use subtype::{
+    MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS,
+    TypeRelationError,
+};
 
 /// A recoverable failure while projecting or completing source semantics.
 #[derive(Debug)]
@@ -589,6 +592,43 @@ pub enum TyperError {
         tree_index: u32,
         target: SymbolId,
         error: Box<TyperError>,
+    },
+    /// The condition of an if expression does not conform to canonical Boolean.
+    IfConditionTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+    },
+    /// The supported relation cannot decide if-condition conformance.
+    IfConditionConformanceUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// A branch expression type could not be widened for the minimal join.
+    IfBranchTypeCannotBeWidened {
+        source: SourceId,
+        tree_index: u32,
+        branch_tree_index: u32,
+        error: Box<TyperError>,
+    },
+    /// The minimal branch join could not soundly decide a subtype relation.
+    IfBranchJoinUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        left: TypeId,
+        right: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// An if expression references a missing condition or branch tree.
+    IfChildTreeOutsideArena {
+        source: SourceId,
+        tree_index: u32,
+        child_tree_index: u32,
+        role: &'static str,
     },
     /// Every overload rejected the supplied arguments; reasons are kept per candidate.
     OverloadApplicationNoApplicable {
@@ -1180,6 +1220,42 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
+    fn join_expression_types(
+        &mut self,
+        left: TypeId,
+        right: TypeId,
+    ) -> Result<TypeId, TypeRelationError> {
+        if left == right {
+            return Ok(left);
+        }
+        let left_is_subtype = self.is_subtype(left, right);
+        let right_is_subtype = self.is_subtype(right, left);
+        match (left_is_subtype, right_is_subtype) {
+            (Ok(true), Ok(true)) => Ok(left),
+            (Ok(true), _) => Ok(right),
+            (_, Ok(true)) => Ok(left),
+            (Ok(false), Ok(false)) => Ok(self.store.types.alloc(Type::Or { left, right })),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    }
+
+    fn require_if_child_tree(
+        &self,
+        if_tree: TreeId<Untyped>,
+        child: TreeId<Untyped>,
+        role: &'static str,
+    ) -> Result<(), TyperError> {
+        if self.arena.try_get(child).is_none() {
+            return Err(TyperError::IfChildTreeOutsideArena {
+                source: self.source,
+                tree_index: if_tree.index(),
+                child_tree_index: child.index(),
+                role,
+            });
+        }
+        Ok(())
+    }
+
     fn run_expression_transaction<T>(
         &mut self,
         operation: impl FnOnce(
@@ -1410,6 +1486,93 @@ impl<'a> SourceTyper<'a> {
                     expr,
                     tpt,
                     expected,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::If(if_expr) => {
+                self.require_if_child_tree(tree, if_expr.cond, "condition")?;
+                self.require_if_child_tree(tree, if_expr.then_branch, "then branch")?;
+                self.require_if_child_tree(tree, if_expr.else_branch, "else branch")?;
+                let cond = self
+                    .type_expression_expected_inner(
+                        if_expr.cond,
+                        context,
+                        self.definitions.boolean,
+                        info_journal,
+                        new_mappings,
+                    )
+                    .map_err(|error| match error {
+                        TyperError::ExpectedExpressionTypeMismatch { actual, .. } => {
+                            TyperError::IfConditionTypeMismatch {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                actual,
+                                expected: self.definitions.boolean,
+                            }
+                        }
+                        TyperError::ExpectedExpressionConformanceUnsupported {
+                            actual,
+                            error,
+                            ..
+                        } => TyperError::IfConditionConformanceUnsupported {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            actual,
+                            expected: self.definitions.boolean,
+                            error,
+                        },
+                        other => other,
+                    })?;
+                let then_branch = self.type_expression_inner(
+                    if_expr.then_branch,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let else_branch = self.type_expression_inner(
+                    if_expr.else_branch,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let then_type = self
+                    .widen_expression_type_journaled(
+                        self.typed_arena.get(then_branch).ty,
+                        info_journal,
+                        0,
+                    )
+                    .map_err(|error| TyperError::IfBranchTypeCannotBeWidened {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        branch_tree_index: if_expr.then_branch.index(),
+                        error: Box::new(error),
+                    })?;
+                let else_type = self
+                    .widen_expression_type_journaled(
+                        self.typed_arena.get(else_branch).ty,
+                        info_journal,
+                        0,
+                    )
+                    .map_err(|error| TyperError::IfBranchTypeCannotBeWidened {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        branch_tree_index: if_expr.else_branch.index(),
+                        error: Box::new(error),
+                    })?;
+                let ty = self
+                    .join_expression_types(then_type, else_type)
+                    .map_err(|error| TyperError::IfBranchJoinUnsupported {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        left: then_type,
+                        right: else_type,
+                        error: Box::new(error),
+                    })?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).if_expr(
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ty,
                     source_tree.position,
                 ))
             }
@@ -7401,6 +7564,16 @@ mod tests {
                 right: definitions.boolean,
             });
         }
+        let mut wide = store.types.alloc(Type::Or {
+            left: definitions.int,
+            right: definitions.boolean,
+        });
+        for _ in 0..14 {
+            wide = store.types.alloc(Type::Or {
+                left: wide,
+                right: wide,
+            });
+        }
         let index = SourceSemanticIndex::new();
         let source = SourceId::from_index(0);
         let mut typer =
@@ -7413,6 +7586,10 @@ mod tests {
         assert!(matches!(
             typer.is_subtype(nested, definitions.any_type),
             Err(TypeRelationError::TooDeep)
+        ));
+        assert!(matches!(
+            typer.is_subtype(wide, definitions.any_type),
+            Err(TypeRelationError::TooManyUnionRelations)
         ));
     }
 
@@ -17720,6 +17897,241 @@ mod tests {
         assert!(typer.typed_ast().iter().next().is_none());
         assert!(typer.source_typed_index().is_empty());
         assert!(typer.type_index.type_at(source, rhs).is_none());
+    }
+
+    #[test]
+    fn if_expression_checks_boolean_and_joins_constant_branches_as_int() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose(flag: Boolean) = if flag then 1 else 2");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let (cond, then_branch, else_branch) = match &typer.typed_ast().get(typed).kind {
+            TreeKind::If(if_expr) => (if_expr.cond, if_expr.then_branch, if_expr.else_branch),
+            _ => panic!("expected a typed if expression"),
+        };
+        let condition_type = typer.typed_ast().get(cond).ty;
+        assert_eq!(
+            typer.widen_expression_type(condition_type).unwrap(),
+            definitions.boolean
+        );
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(then_branch).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(else_branch).ty),
+            Type::Constant(dotty_core::Constant::Int(2))
+        ));
+    }
+
+    #[test]
+    fn if_expression_joins_subtype_and_supertype_branches_to_supertype() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent; class Child extends Parent; def choose(flag: Boolean, child: Child, parent: Parent) = if flag then child else parent",
+        );
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(parent).unwrap();
+        typer.complete_symbol(child).unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("if join should choose the parent type");
+        };
+        assert_eq!(*symbol, parent);
+    }
+
+    #[test]
+    fn if_expression_joins_unrelated_classes_into_a_union() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Left; class Right; def choose(flag: Boolean, left: Left, right: Right) = if flag then left else right",
+        );
+        let left_class = class_symbol(&parsed, &store, &index, source, "Left");
+        let right_class = class_symbol(&parsed, &store, &index, source, "Right");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(left_class).unwrap();
+        typer.complete_symbol(right_class).unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let joined_type = typer.typed_ast().get(typed).ty;
+        let (left, right) = match typer.store().types.get(joined_type) {
+            Type::Or { left, right } => (*left, *right),
+            _ => panic!("unrelated branch types should be joined as a union"),
+        };
+        assert!(typer.is_subtype(left, joined_type).unwrap());
+        assert!(typer.is_subtype(right, joined_type).unwrap());
+        assert!(typer.is_subtype(joined_type, definitions.any_type).unwrap());
+    }
+
+    #[test]
+    fn non_boolean_if_condition_has_a_focused_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose = if 1 then 1 else 2");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::IfConditionTypeMismatch { expected, .. })
+                if expected == definitions.boolean
+        ));
+    }
+
+    #[test]
+    fn if_expression_types_block_branches_and_synthetic_unit_else() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1",
+        );
+        let (choose, choose_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let (partial, partial_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "partial");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let choose_context = typer.expression_context_for(choose).unwrap();
+        let chosen = typer.type_expression(choose_rhs, choose_context).unwrap();
+        assert_eq!(typer.typed_ast().get(chosen).ty, definitions.int);
+        let TreeKind::If(chosen_if) = &typer.typed_ast().get(chosen).kind else {
+            panic!("expected if with block branches");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(chosen_if.then_branch).kind,
+            TreeKind::Block(_)
+        ));
+        assert!(matches!(
+            typer.typed_ast().get(chosen_if.else_branch).kind,
+            TreeKind::Block(_)
+        ));
+
+        let partial_context = typer.expression_context_for(partial).unwrap();
+        let partial_tree = typer.type_expression(partial_rhs, partial_context).unwrap();
+        let TreeKind::If(partial_if) = &typer.typed_ast().get(partial_tree).kind else {
+            panic!("expected if with parser-synthesized Unit else branch");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(partial_if.else_branch).ty),
+            Type::Constant(dotty_core::Constant::Unit)
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(partial_tree).ty),
+            Type::Or { .. }
+        ));
+    }
+
+    #[test]
+    fn inferred_method_result_uses_joined_if_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose(flag: Boolean) = if flag then 1 else 2");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected a method signature");
+        };
+        assert_eq!(method_type.result, definitions.int);
+        assert!(typer.source_typed_index().get(source, rhs).is_some());
+    }
+
+    #[test]
+    fn failed_else_branch_rolls_back_if_expression_state() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def choose(flag: Boolean) = if flag then { val local = 1; local } else missing",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let scope_count = typer.expression_scopes.len();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.type_index.type_at(source, rhs).is_none());
+        assert!(typer.local_symbols.is_empty());
+        assert_eq!(typer.expression_scopes.len(), scope_count);
     }
 
     #[test]
