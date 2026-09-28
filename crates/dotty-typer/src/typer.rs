@@ -1856,6 +1856,7 @@ impl<'a> SourceTyper<'a> {
                     | Type::Method(_)
                     | Type::Poly(_)
                     | Type::TypeLambda(_)
+                    | Type::RecThis { .. }
                     | Type::Wildcard { .. }
                     | Type::MatchCase { .. }
                     | Type::ClassInfo(_)
@@ -12812,6 +12813,40 @@ mod tests {
         assert!(typer.local_symbol_at(source, local_tree).is_none());
         assert!(typer.source_typed_index().is_empty());
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    }
+
+    #[test]
+    fn inferred_local_rejects_standalone_recursive_this_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = 1 }");
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let recursive_binder = typer.store.types.reserve();
+        let binder = recursive_binder.id();
+        let recursive_this = typer.store.types.alloc(Type::RecThis { binder });
+        typer.store.types.fill(
+            recursive_binder,
+            Type::Recursive {
+                parent: recursive_this,
+            },
+        );
+        let standalone_recursive_this = typer.store.types.alloc(Type::RecThis { binder });
+
+        assert!(matches!(
+            typer.validate_inferred_local_value_type(standalone_recursive_this, 0),
+            Err(TyperError::InvalidInferredLocalValueType { inferred, .. })
+                if inferred == standalone_recursive_this
+        ));
+        assert!(matches!(
+            typer.store.types.get(binder),
+            Type::Recursive { parent } if *parent == recursive_this
+        ));
     }
 
     #[test]
