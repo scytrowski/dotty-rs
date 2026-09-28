@@ -123,8 +123,16 @@ pub enum TyperError {
     },
     /// Opaque alias completion is deferred until opaque visibility is modeled.
     OpaqueAliasDeferred { symbol: SymbolId, tree_index: u32 },
-    /// Method result inference is deferred to expression typing.
-    InferredMethodResultDeferred { symbol: SymbolId, tree_index: u32 },
+    /// The inferred-result method is already being completed through its RHS.
+    RecursiveInferredMethodResult { symbol: SymbolId },
+    /// An inferred-result method has no body from which to obtain a result.
+    InferredMethodResultRightHandSideMissing { symbol: SymbolId, tree_index: u32 },
+    /// The typed method body widened to a type that cannot be a method result.
+    InvalidInferredMethodResult {
+        symbol: SymbolId,
+        tree_index: u32,
+        inferred: TypeId,
+    },
     /// Extension signature normalization for right-associative methods is deferred.
     RightAssociativeExtensionDeferred { symbol: SymbolId, tree_index: u32 },
     /// A source method parameter tree has no symbol for this method owner.
@@ -692,6 +700,7 @@ pub struct SourceTyper<'a> {
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     initializing_local_symbols: HashSet<SymbolId>,
+    inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
@@ -877,6 +886,7 @@ impl<'a> SourceTyper<'a> {
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
             initializing_local_symbols: HashSet::new(),
+            inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             expression_scopes: Vec::new(),
@@ -3101,7 +3111,27 @@ impl<'a> SourceTyper<'a> {
         }
 
         let contexts = self.source_context_chain(context.lexical, tree_index)?;
-        for context_id in &contexts {
+        let fallback_scope = self
+            .store
+            .symbols
+            .contains(context.owner)
+            .then(|| self.store.symbols.get(context.owner).owner)
+            .flatten();
+        let fallback_scope = fallback_scope
+            .filter(|owner| {
+                self.store.symbols.contains(*owner)
+                    && matches!(
+                        self.store.symbols.get(*owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+            })
+            .and_then(|owner| self.index.scope_of(owner))
+            .filter(|scope| {
+                contexts.iter().all(|context_id| {
+                    self.index.source_context(*context_id).lexical_scope != *scope
+                })
+            });
+        for (context_position, context_id) in contexts.iter().enumerate() {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
                 .store
@@ -3111,6 +3141,18 @@ impl<'a> SourceTyper<'a> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(candidates);
+            }
+            // Top-level source methods are owned by their synthetic package
+            // module class, while their recorded lexical context is the
+            // package wrapper. Check those same-unit members before imports,
+            // matching their source-declaration precedence.
+            if context_position == 0
+                && let Some(scope) = fallback_scope
+            {
+                let candidates = self.store.scopes.get(scope).lookup_all(&name).to_vec();
+                if !candidates.is_empty() {
+                    return Ok(candidates);
+                }
             }
             for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
                 let candidates = self.lookup_import_candidates(
@@ -3458,6 +3500,12 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<T, TyperError> {
         let checkpoint = self.store.checkpoint();
         let cache_checkpoint = self.type_index.checkpoint();
+        let typed_ast_checkpoint = self.typed_arena.checkpoint();
+        let typed_index_checkpoint = self.typed_index.clone();
+        let local_symbols_checkpoint = self.local_symbols.clone();
+        let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
+        let expression_scope_checkpoint = self.expression_scopes.len();
         let mut info_journal = Vec::new();
         let result = operation(self, &mut info_journal);
         if result.is_err() {
@@ -3468,6 +3516,12 @@ impl<'a> SourceTyper<'a> {
             }
             self.store.rollback_to(checkpoint);
             self.type_index.restore(cache_checkpoint);
+            self.typed_arena.rollback_to(typed_ast_checkpoint);
+            self.typed_index = typed_index_checkpoint;
+            self.local_symbols = local_symbols_checkpoint;
+            self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+            self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
+            self.expression_scopes.truncate(expression_scope_checkpoint);
         }
         result
     }
@@ -4246,6 +4300,43 @@ impl<'a> SourceTyper<'a> {
                 tree_index: method_tree_index,
             });
         }
+        let Some(result_node) = self.arena.try_get(definition.tpt) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: definition.tpt.index(),
+            });
+        };
+        let infer_result = matches!(result_node.kind, TreeKind::TypeTree(_));
+        if infer_result && !self.inferred_method_results_in_progress.insert(method) {
+            return Err(TyperError::RecursiveInferredMethodResult { symbol: method });
+        }
+        let result = self.complete_method_signature_body(
+            method,
+            method_tree_index,
+            definition,
+            infer_result,
+            info_journal,
+        );
+        if infer_result {
+            self.inferred_method_results_in_progress.remove(&method);
+        }
+        result
+    }
+
+    fn complete_method_signature_body(
+        &mut self,
+        method: SymbolId,
+        method_tree_index: u32,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        infer_result: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let is_extension = self
+            .store
+            .symbols
+            .get(method)
+            .flags
+            .contains(SymbolFlags::EXTENSION);
         let declaration_context = self
             .index
             .declaration_context_of(method)
@@ -4321,13 +4412,33 @@ impl<'a> SourceTyper<'a> {
                 tree_index: definition.tpt.index(),
             });
         };
-        if matches!(&result_node.kind, TreeKind::TypeTree(_)) {
-            return Err(TyperError::InferredMethodResultDeferred {
-                symbol: method,
-                tree_index: definition.tpt.index(),
-            });
-        }
-        let mut signature = self.type_of_tpt_inner(definition.tpt, signature_parameter_context)?;
+        let result_type = if infer_result {
+            let rhs =
+                definition
+                    .rhs
+                    .ok_or(TyperError::InferredMethodResultRightHandSideMissing {
+                        symbol: method,
+                        tree_index: method_tree_index,
+                    })?;
+            let context = self.expression_context_for(method)?;
+            let mut new_mappings = Vec::new();
+            let typed_rhs =
+                self.type_expression_inner(rhs, context, info_journal, &mut new_mappings)?;
+            let rhs_type = self.typed_arena.get(typed_rhs).ty;
+            let inferred = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
+            self.validate_inferred_method_result(method, method_tree_index, inferred)?;
+            inferred
+        } else {
+            if matches!(&result_node.kind, TreeKind::TypeTree(_)) {
+                return Err(TyperError::MissingDeclaredType {
+                    source: self.source,
+                    tree_index: definition.tpt.index(),
+                    position: result_node.position,
+                });
+            }
+            self.type_of_tpt_inner(definition.tpt, signature_parameter_context)?
+        };
+        let mut signature = result_type;
         for clause in clauses.into_iter().rev() {
             signature = match clause {
                 MethodClauseSpec::Types(parameters) => {
@@ -4351,6 +4462,40 @@ impl<'a> SourceTyper<'a> {
             };
         }
         Ok(signature)
+    }
+
+    fn validate_inferred_method_result(
+        &self,
+        method: SymbolId,
+        tree_index: u32,
+        inferred: TypeId,
+    ) -> Result<(), TyperError> {
+        if matches!(
+            self.store.types.try_get(inferred),
+            None | Some(
+                Type::NoType
+                    | Type::NoPrefix
+                    | Type::Error(_)
+                    | Type::Bounds { .. }
+                    | Type::AliasingBounds { .. }
+                    | Type::ByName { .. }
+                    | Type::Repeated { .. }
+                    | Type::Method(_)
+                    | Type::Poly(_)
+                    | Type::TypeLambda(_)
+                    | Type::RecThis { .. }
+                    | Type::Wildcard { .. }
+                    | Type::MatchCase { .. }
+                    | Type::ClassInfo(_)
+            )
+        ) {
+            return Err(TyperError::InvalidInferredMethodResult {
+                symbol: method,
+                tree_index,
+                inferred,
+            });
+        }
+        Ok(())
     }
 
     fn complete_constructor_signature(
@@ -11688,10 +11833,9 @@ mod tests {
     }
 
     #[test]
-    fn method_without_result_type_is_deferred_without_store_changes() {
+    fn method_without_result_type_infers_its_body_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("def method = 1");
-        let before = store.checkpoint();
         let method = index
             .symbol_at(
                 source,
@@ -11702,6 +11846,13 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(method).unwrap() else {
+            panic!("source method should be canonical");
+        };
+        let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("source method should use a DefDef");
+        };
+        let rhs = definition.rhs.unwrap();
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -11711,20 +11862,287 @@ mod tests {
             &packages,
         );
 
-        let method_tree = index.definition_of(method).unwrap();
-        let SourceDefinition::Canonical { tree, .. } = method_tree else {
-            panic!("source method should be canonical");
+        let signature = typer.complete_symbol(method).unwrap();
+
+        assert_eq!(signature, definitions.int);
+        assert!(typer.source_typed_index().get(source, rhs).is_some());
+    }
+
+    #[test]
+    fn inferred_method_result_uses_typed_parameter_references() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def identity(value: Int) = value");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::DefDef(_)).then(|| index.symbol_at(source, tree))
+            })
+            .flatten()
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("parameterized inferred method should retain its method type");
         };
-        let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
-            panic!("source method should use a DefDef");
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert_eq!(method_type.result, definitions.int);
+    }
+
+    #[test]
+    fn inferred_generic_method_result_keeps_its_type_parameter_reference() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def identity[A](value: A) = value");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::DefDef(_)).then(|| index.symbol_at(source, tree))
+            })
+            .flatten()
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("inferred generic method should retain its polymorphic binder");
         };
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("generic method should retain its parameter clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+    }
+
+    #[test]
+    fn inferred_curried_method_result_keeps_each_parameter_clause() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose(first: Int)(second: Boolean) = first");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::DefDef(_)).then(|| index.symbol_at(source, tree))
+            })
+            .flatten()
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(first_clause) = typer.store().types.get(signature) else {
+            panic!("curried method should retain its first parameter clause");
+        };
+        let Type::Method(second_clause) = typer.store().types.get(first_clause.result) else {
+            panic!("curried method should retain its second parameter clause");
+        };
+        assert_eq!(first_clause.params[0].ty, definitions.int);
+        assert_eq!(second_clause.params[0].ty, definitions.boolean);
+        assert_eq!(second_clause.result, definitions.int);
+    }
+
+    #[test]
+    fn inferred_extension_method_result_uses_its_receiver_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("extension (value: Int) def identity = value");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    extension.methods.first().copied()
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(receiver_clause) = typer.store().types.get(signature) else {
+            panic!("extension signature should retain its receiver clause");
+        };
+        assert_eq!(receiver_clause.params[0].ty, definitions.int);
+        assert_eq!(receiver_clause.result, definitions.int);
+    }
+
+    #[test]
+    fn recursive_inferred_method_result_fails_and_rolls_back_typed_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def loop = loop");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::DefDef(_)).then_some(tree))
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let completion = typer.complete_symbol(method);
+        assert!(
+            matches!(completion, Err(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == method),
+            "unexpected completion result: {completion:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn mutually_recursive_inferred_methods_fail_and_roll_back_typed_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def first = second\ndef second = first");
+        let mut methods = HashMap::new();
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::DefDef(definition) = &node.kind {
+                let method = index.symbol_at(source, tree).unwrap();
+                methods.insert(
+                    store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        .to_owned(),
+                    method,
+                );
+            }
+        }
+        let first = methods["first"];
+        let second = methods["second"];
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == first
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(first), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(second), SymbolInfo::Missing);
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn top_level_method_beats_same_named_import_in_term_resolution() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Other { def value: Boolean = true }\nimport Other.value\ndef value = 2\ndef use = value",
+        );
+        let mut method_trees = HashMap::new();
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::DefDef(definition) = &node.kind {
+                let name = store.names.resolve(definition.name.as_name().text());
+                method_trees.insert(
+                    name.to_owned(),
+                    (tree, index.symbol_at(source, tree).unwrap()),
+                );
+            }
+        }
+        let (use_tree, use_method) = method_trees["use"];
+        let local_value = method_trees["value"].1;
+        let TreeKind::DefDef(definition) = &parsed.ast.get(use_tree).kind else {
+            unreachable!();
+        };
+        let rhs = definition.rhs.unwrap();
+        let position = parsed.ast.get(rhs).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+        let name = *dotty_core::TermName::new(typer.store.names.intern("value")).as_name();
+
+        let resolved = typer
+            .resolve_expression_term(name, context, rhs.index(), position)
+            .unwrap();
+
+        assert_eq!(resolved, local_value);
+    }
+
+    #[test]
+    fn failed_inferred_method_body_rolls_back_partial_typed_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def failed = { val local = 1; missing }");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::DefDef(_)).then_some(tree))
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
         assert!(matches!(
             typer.complete_symbol(method),
-            Err(TyperError::InferredMethodResultDeferred { symbol, tree_index })
-                if symbol == method && tree_index == definition.tpt.index()
+            Err(TyperError::TermNameNotFound { .. })
         ));
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_method_results_in_progress.is_empty());
     }
 
     #[test]
