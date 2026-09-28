@@ -793,13 +793,21 @@ impl<'a> SourceTyper<'a> {
                     let candidates = self
                         .lookup_members_journaled(receiver, name, info_journal)
                         .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-                    let candidate = candidates
+                    let candidate = match candidates
                         .into_iter()
                         .find(|candidate| candidate.symbol == symbol)
-                        .ok_or(TyperError::TermReferencePrefixMismatch {
-                            symbol,
-                            prefix: receiver,
-                        })?;
+                    {
+                        Some(candidate) => candidate,
+                        None => self
+                            .lookup_overload_members_journaled(receiver, name, info_journal)
+                            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                            .into_iter()
+                            .find(|candidate| candidate.symbol == symbol)
+                            .ok_or(TyperError::TermReferencePrefixMismatch {
+                                symbol,
+                                prefix: receiver,
+                            })?,
+                    };
                     self.member_type_on_journaled(&candidate, info_journal)
                 }
             }
@@ -12360,6 +12368,7 @@ mod tests {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
         };
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
         let base_method = parsed
             .ast
             .iter()
@@ -12394,6 +12403,14 @@ mod tests {
         assert!(matches!(
             typer.store().types.get(typer.typed_ast().get(application.function).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == base_method
+        ));
+        let function_type = typer.typed_ast().get(application.function).ty;
+        let widened = typer.widen_expression_type(function_type).unwrap();
+        assert!(matches!(
+            typer.store().types.get(widened),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == text_class)
         ));
     }
 
