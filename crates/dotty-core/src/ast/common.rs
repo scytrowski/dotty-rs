@@ -240,6 +240,7 @@ pub struct PackageDef<P: AstPhase> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImportSelector<P: AstPhase> {
     pub imported: Name,
+    pub imported_backquoted: bool,
     pub renamed: Option<TreeId<P>>,
     pub bound: Option<TreeId<P>>,
 }
@@ -550,6 +551,7 @@ mod tests {
     fn import_and_export_selectors_use_phase_generic_tree_ids() {
         let selector = ImportSelector {
             imported: name(1),
+            imported_backquoted: false,
             renamed: Some(tree_id(2)),
             bound: None,
         };

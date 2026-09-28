@@ -53,11 +53,15 @@ where
             && self.cursor.lookahead(2).kind == TokenKind::Keyword(HardKeyword::This)
     }
 
-    /// Returns the term name accepted after a selection dot. Scala's scanner
-    /// presents ordinary symbolic method names as identifiers; our scanner
-    /// keeps them as operators, so bridge those spellings here while leaving
-    /// grammar tokens such as `=`, arrows, and bounds reserved.
+    /// Returns a source term name accepted in a name position. Scala's scanner
+    /// presents ordinary symbolic names as identifiers; our scanner keeps
+    /// them as operators, so bridge those spellings while leaving grammar
+    /// tokens such as `=`, arrows, and bounds reserved.
     pub(crate) fn current_selector_name(&mut self) -> Option<(Name, bool)> {
+        self.current_term_name()
+    }
+
+    pub(crate) fn current_term_name(&mut self) -> Option<(Name, bool)> {
         let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
         let is_name = match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => true,

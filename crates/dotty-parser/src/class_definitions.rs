@@ -1338,23 +1338,15 @@ where
     }
 
     fn parse_object_name(&mut self) -> TermName {
-        match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                match self.intern_current_term_name() {
-                    Ok(name) => {
-                        self.advance();
-                        name
-                    }
-                    Err(_) => self.missing_object_name(),
-                }
-            }
-            _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an object name after `object`",
-                );
-                self.missing_object_name()
-            }
+        if let Some((name, _backquoted)) = self.current_term_name() {
+            self.advance();
+            TermName::new(name.text())
+        } else {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected an object name after `object`",
+            );
+            self.missing_object_name()
         }
     }
 
@@ -4961,6 +4953,33 @@ mod tests {
         };
         assert!(template.body.is_empty());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_symbolic_object_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "object #::",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Object), 0, 6),
+                token(TokenKind::Operator, 7, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_object_definition(Location::Elsewhere)
+        else {
+            panic!("expected a symbolic object definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected ModuleDef");
+        };
+        let name = module.name.as_name().text();
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name), "#::");
     }
 
     #[test]

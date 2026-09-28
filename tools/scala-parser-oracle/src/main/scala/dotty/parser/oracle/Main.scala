@@ -362,6 +362,8 @@ object Main:
     selectors.map: selector =>
       val fields = collection.mutable.ArrayBuffer.empty[String]
       fields += field("name", quote(selector.name.toString))
+      if isBackquotedIdent(selector.imported, source) then
+        fields += field("backquoted", "true")
       selector.renamed match
         case ident: dotty.tools.dotc.ast.Trees.Ident[?] if ident.span.exists =>
           fields += field("rename", quote(ident.name.toString))

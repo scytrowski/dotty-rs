@@ -876,6 +876,9 @@ fn render_selectors(
                     name => name,
                 })
             )];
+            if selector.imported_backquoted {
+                fields.push("\"backquoted\":true".to_owned());
+            }
             if let Some(rename) = selector.renamed {
                 match &arena.get(rename).kind {
                     TreeKind::Ident(ident) => fields.push(format!(
