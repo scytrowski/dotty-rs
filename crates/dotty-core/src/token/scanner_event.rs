@@ -6,6 +6,10 @@ pub enum ScannerEvent {
     },
     Indented,
     Outdented,
+    /// Closes a specific parser-opened indentation region, if still active.
+    OutdentedRegion {
+        indent_offset: u32,
+    },
     /// Opens the case region following a `match`, including same-indent cases
     /// in braced scopes where eager scanner layout is suppressed.
     MatchCasesIndented,

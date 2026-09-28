@@ -295,6 +295,12 @@ where
     /// reports whether scanner feedback inserted one. An already-present
     /// eager `Indent` belongs to the scanner's ordinary layout pass.
     pub(crate) fn observe_indented_body(&mut self) -> bool {
+        self.observe_indented_body_region().is_some()
+    }
+
+    /// Requests an indented body and returns the token offset that identifies
+    /// the feedback region when this call opens one.
+    pub(crate) fn observe_indented_body_region(&mut self) -> Option<u32> {
         let mut lookahead = 1;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -307,7 +313,18 @@ where
         };
         let already_indented = has_indentation_token(self);
         self.observe_indented();
-        !already_indented && has_indentation_token(self)
+        if already_indented || !has_indentation_token(self) {
+            return None;
+        }
+        (1..=lookahead)
+            .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
+            .map(|offset| self.cursor.lookahead(offset).span.start())
+    }
+
+    /// Closes the named scanner-feedback region if nested parsing has not
+    /// already closed it.
+    pub(crate) fn observe_outdented_region(&mut self, indent_offset: u32) {
+        self.observe(ScannerEvent::OutdentedRegion { indent_offset });
     }
 
     /// Requests a match-case region, which may use the same source indentation

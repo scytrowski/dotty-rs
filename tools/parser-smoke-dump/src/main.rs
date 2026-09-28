@@ -1330,4 +1330,60 @@ mod tests {
             TreeKind::New(_)
         ));
     }
+
+    #[test]
+    fn nested_indented_template_closes_before_following_method_at_eof() {
+        const SOURCE: &str = "object Outer:\n  def f =\n    val sf =\n      new Foo:\n        def x = 1\n    sf.foo\n  def next = 2";
+
+        for source in [SOURCE, &format!("{SOURCE}\n")] {
+            let scanner = ContextualScanner::new(source).expect("source scans");
+            assert!(scanner.diagnostics().is_empty());
+            let source_text = SourceText::new(source).expect("source text is valid");
+            let mut names = NameInterner::new();
+            let result =
+                parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+            assert!(
+                result.diagnostics.is_empty(),
+                "unexpected parser diagnostics with final newline={}: {:?}",
+                source.ends_with('\n'),
+                result.diagnostics
+            );
+
+            let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+                panic!("expected a package root");
+            };
+            let module_id = package
+                .stats
+                .iter()
+                .copied()
+                .find(|id| {
+                    matches!(
+                        &result.ast.get(*id).kind,
+                        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                            if names.resolve(module.name.as_name().text()) == "Outer"
+                    )
+                })
+                .expect("Outer module remains at compilation-unit scope");
+            let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+                &result.ast.get(module_id).kind
+            else {
+                unreachable!();
+            };
+            let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+                panic!("expected Outer template");
+            };
+            let member_names: Vec<_> = template
+                .body
+                .iter()
+                .filter_map(|id| match &result.ast.get(*id).kind {
+                    TreeKind::DefDef(definition) => {
+                        Some(names.resolve(definition.name.as_name().text()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(member_names, ["f", "next"]);
+        }
+    }
 }

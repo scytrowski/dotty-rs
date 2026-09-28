@@ -271,12 +271,21 @@ impl ContextualScanner {
         }
     }
 
-    fn insert_outdent_before_current(&mut self, allow_same_indent: bool) -> bool {
+    fn insert_outdent_before_current(
+        &mut self,
+        allow_same_indent: bool,
+        before_existing_outdent: bool,
+        feedback_indent_offset: Option<u32>,
+    ) -> bool {
         let index = self.current_index();
+        // A parser-feedback indent is added after eager layout tokens already
+        // exist. If one of those tokens is the current outdent, the feedback
+        // region still needs its own delimiter in front of it.
         if self
             .tokens
             .get(index)
             .is_some_and(|token| token.kind == TokenKind::Outdent)
+            && !before_existing_outdent
         {
             return false;
         }
@@ -302,13 +311,14 @@ impl ContextualScanner {
                 return false;
             };
             let indent_offset = self.tokens[indent_index].span.start();
-            let region_offset = self
-                .feedback_regions
-                .iter()
-                .rev()
-                .find(|region| region.indent_offset == indent_offset)
-                .and_then(|region| region.case_offset)
-                .unwrap_or(indent_offset);
+            let region_offset = feedback_indent_offset.unwrap_or_else(|| {
+                self.feedback_regions
+                    .iter()
+                    .rev()
+                    .find(|region| region.indent_offset == indent_offset)
+                    .and_then(|region| region.case_offset)
+                    .unwrap_or(indent_offset)
+            });
             let region_indent = line_indentation(&self.source, region_offset);
             let current_offset = if is_layout_token(self.tokens[index].kind) {
                 next_real_token(&self.tokens, index)
@@ -436,20 +446,35 @@ impl TokenSource for ContextualScanner {
             }
             ScannerEvent::Outdented => match self.feedback_regions.last().map(|region| region.kind)
             {
-                Some(FeedbackRegionKind::Indented) if self.insert_outdent_before_current(false) => {
+                Some(FeedbackRegionKind::Indented)
+                    if self.insert_outdent_before_current(false, false, None) =>
+                {
                     self.feedback_regions.pop();
                 }
                 Some(FeedbackRegionKind::MatchCases)
                     if !self.current_starts_match_case()
-                        && self.insert_outdent_before_current(true) =>
+                        && self.insert_outdent_before_current(true, false, None) =>
                 {
                     self.feedback_regions.pop();
                 }
-                Some(FeedbackRegionKind::CaseBody) if self.insert_outdent_before_current(true) => {
+                Some(FeedbackRegionKind::CaseBody)
+                    if self.insert_outdent_before_current(true, false, None) =>
+                {
                     self.feedback_regions.pop();
                 }
                 _ => {}
             },
+            ScannerEvent::OutdentedRegion { indent_offset } => {
+                let matches_top_region = self.feedback_regions.last().is_some_and(|region| {
+                    region.kind == FeedbackRegionKind::Indented
+                        && region.indent_offset == indent_offset
+                });
+                if matches_top_region
+                    && self.insert_outdent_before_current(false, true, Some(indent_offset))
+                {
+                    self.feedback_regions.pop();
+                }
+            }
             ScannerEvent::MatchCasesIndented => {
                 if self.insert_match_case_indent_after_current() {
                     self.feedback_regions.push(FeedbackRegion {
@@ -462,7 +487,7 @@ impl TokenSource for ContextualScanner {
             ScannerEvent::MatchCasesOutdented => {
                 if self.feedback_regions.last().map(|region| region.kind)
                     == Some(FeedbackRegionKind::MatchCases)
-                    && self.insert_outdent_before_current(true)
+                    && self.insert_outdent_before_current(true, false, None)
                 {
                     self.feedback_regions.pop();
                 }
@@ -4188,6 +4213,70 @@ mod tests {
         assert_eq!(
             outdent.span,
             TextRange::new(back.span.start(), back.span.start()).unwrap()
+        );
+    }
+
+    #[test]
+    fn parser_feedback_outdent_closes_its_specific_region_before_existing_outdent() {
+        let mut scanner = ContextualScanner::new("root\n  child\nback").expect("source scans");
+        let child_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && scanner
+                        .source
+                        .get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("child")
+            })
+            .expect("child token");
+        let indent_offset = scanner.tokens[child_index].span.start();
+        scanner.tokens.insert(
+            child_index,
+            Token::new(
+                TokenKind::Indent,
+                TextRange::new(indent_offset, indent_offset).unwrap(),
+            ),
+        );
+        let back_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && scanner
+                        .source
+                        .get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("back")
+            })
+            .expect("back token");
+        let back_offset = scanner.tokens[back_index].span.start();
+        scanner.tokens.insert(
+            back_index,
+            Token::new(
+                TokenKind::Outdent,
+                TextRange::new(back_offset, back_offset).unwrap(),
+            ),
+        );
+        scanner.position = back_index;
+        scanner.feedback_regions.push(FeedbackRegion {
+            kind: FeedbackRegionKind::Indented,
+            indent_offset,
+            case_offset: None,
+        });
+
+        scanner.observe(ScannerEvent::OutdentedRegion { indent_offset });
+
+        assert!(scanner.feedback_regions.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner
+                .tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::Outdent)
+                .count(),
+            2
         );
     }
 

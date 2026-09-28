@@ -1055,10 +1055,13 @@ where
                 self.observe_colon_eol(true);
             }
             if self.current().kind == TokenKind::ColonEol {
-                self.observe_indented();
+                let feedback_indent = self.observe_indented_body_region();
                 self.advance();
                 if self.current().kind == TokenKind::Indent {
-                    return self.parse_template_body(TemplateBody::Indented);
+                    return self.parse_template_body_with_feedback(
+                        TemplateBody::Indented,
+                        feedback_indent,
+                    );
                 }
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
