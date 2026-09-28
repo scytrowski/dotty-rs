@@ -661,6 +661,34 @@ mod tests {
     }
 
     #[test]
+    fn still_reports_a_missing_equals_before_a_non_boundary_token() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given config: Config )",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a recoverable given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("invalid alias syntax should retain its recovery tree");
+        };
+        assert!(definition.rhs.is_some());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(parser.diagnostics()[0].message().contains("expected `=`"));
+    }
+
+    #[test]
     fn parses_a_parameterized_given_alias_as_a_method_definition() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
