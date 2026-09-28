@@ -66,6 +66,20 @@ const MAX_DEPTH: usize = 512;
 pub enum TypeRebindError {
     /// `source` is not a [`Type::TypeLambda`].
     NotATypeLambda { source: TypeId },
+    /// `source` is not a [`Type::Poly`].
+    NotAPoly { source: TypeId },
+    /// Explicit type arguments do not match the polymorphic binder's arity.
+    PolyArityMismatch {
+        source: TypeId,
+        expected: usize,
+        actual: usize,
+    },
+    /// A parameter reference to the instantiated binder has an invalid index.
+    InvalidPolyParamRef {
+        binder: TypeId,
+        index: u32,
+        arity: usize,
+    },
     /// A referenced type id is outside the store's type arena.
     InvalidType { id: TypeId },
     /// An annotation id is outside the store's annotation arena.
@@ -109,6 +123,24 @@ impl fmt::Display for TypeRebindError {
             Self::NotATypeLambda { source } => {
                 write!(formatter, "type {} is not a type lambda", source.index())
             }
+            Self::NotAPoly { source } => {
+                write!(formatter, "type {} is not polymorphic", source.index())
+            }
+            Self::PolyArityMismatch {
+                expected, actual, ..
+            } => write!(
+                formatter,
+                "{actual} explicit type arguments were given for a polymorphic type with {expected} parameters"
+            ),
+            Self::InvalidPolyParamRef {
+                binder,
+                index,
+                arity,
+            } => write!(
+                formatter,
+                "polymorphic binder {} has {arity} parameters, but parameter reference {index} was used",
+                binder.index()
+            ),
             Self::VarianceArityMismatch {
                 expected, actual, ..
             } => write!(
@@ -184,6 +216,77 @@ pub fn substitute_type_symbols(
         rebinder.store.rollback_to(checkpoint);
     }
     result
+}
+
+/// The result and parameter bounds produced by explicit instantiation of a
+/// [`Type::Poly`] binder. Bounds are returned in parameter order and have
+/// references to the consumed binder replaced by the corresponding argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantiatedPoly {
+    /// The polymorphic result with the consumed type parameters substituted.
+    pub result: TypeId,
+    /// Instantiated bounds in the same order as the original parameters.
+    pub bounds: Vec<TypeId>,
+}
+
+/// Instantiates a polymorphic semantic type with explicit positional type
+/// arguments. Substitution uses the binder `TypeId` and parameter index, not
+/// the source parameter names. Nested binders are copied with their own
+/// `ParamRef`s rebound consistently. The original graph is unchanged, and an
+/// invalid graph rolls back every allocation made by this operation.
+pub fn instantiate_poly(
+    store: &mut SemanticStore,
+    source: TypeId,
+    arguments: &[TypeId],
+) -> Result<InstantiatedPoly, TypeRebindError> {
+    if !store.types.contains(source) {
+        return Err(TypeRebindError::InvalidType { id: source });
+    }
+    if !store.types.is_filled(source) {
+        return Err(TypeRebindError::UnfilledType { id: source });
+    }
+    let Type::Poly(poly) = store.types.get(source).clone() else {
+        return Err(TypeRebindError::NotAPoly { source });
+    };
+    if arguments.len() != poly.params.len() {
+        return Err(TypeRebindError::PolyArityMismatch {
+            source,
+            expected: poly.params.len(),
+            actual: arguments.len(),
+        });
+    }
+    for argument in arguments {
+        if !store.types.contains(*argument) {
+            return Err(TypeRebindError::InvalidType { id: *argument });
+        }
+        if !store.types.is_filled(*argument) {
+            return Err(TypeRebindError::UnfilledType { id: *argument });
+        }
+    }
+
+    let checkpoint = store.checkpoint();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.poly_source = Some(source);
+    rebinder.poly_arguments.extend(
+        arguments
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, ty)| (index as u32, ty)),
+    );
+    let result = rebinder.ty(poly.result);
+    let bounds = poly
+        .params
+        .iter()
+        .map(|parameter| rebinder.ty(parameter.bounds))
+        .collect::<Result<Vec<_>, _>>();
+    match (result, bounds) {
+        (Ok(result), Ok(bounds)) => Ok(InstantiatedPoly { result, bounds }),
+        (Err(error), _) | (_, Err(error)) => {
+            rebinder.store.rollback_to(checkpoint);
+            Err(error)
+        }
+    }
 }
 
 /// Scans without allocating so a graph with no relevant symbol keeps its
@@ -747,6 +850,11 @@ struct Rebinder<'a> {
     substitution: HashMap<SymbolId, (TypeId, u32)>,
     /// Exact symbol replacements used by `substitute_type_symbols`.
     replacements: HashMap<SymbolId, TypeId>,
+    /// Explicit argument types indexed by the outer Poly binder's parameter
+    /// position. The source binder itself is not copied during instantiation.
+    poly_arguments: HashMap<u32, TypeId>,
+    /// The exact outer binder whose parameter references are consumed.
+    poly_source: Option<TypeId>,
     /// `(target class, new recursive binder)` for [`close_over_this`]: every
     /// `ThisType { class: target }` becomes the one canonical `RecThis` of the
     /// new binder. `None` outside a close-over call.
@@ -768,6 +876,8 @@ impl<'a> Rebinder<'a> {
             annotations: HashMap::new(),
             substitution: HashMap::new(),
             replacements: HashMap::new(),
+            poly_arguments: HashMap::new(),
+            poly_source: None,
             close_over: None,
             close_over_rec_this: None,
             in_progress: HashSet::new(),
@@ -1088,13 +1198,25 @@ impl<'a> Rebinder<'a> {
                 new
             }
             Type::TypeLambda(lambda) => self.lambda(id, &lambda, None)?,
-            Type::ParamRef { binder, index } => match self.binders.get(&binder).copied() {
-                Some(new) => self
-                    .store
-                    .types
-                    .alloc(Type::ParamRef { binder: new, index }),
-                None => id,
-            },
+            Type::ParamRef { binder, index } => {
+                if self.poly_source == Some(binder) {
+                    self.poly_arguments.get(&index).copied().ok_or(
+                        TypeRebindError::InvalidPolyParamRef {
+                            binder,
+                            index,
+                            arity: self.poly_arguments.len(),
+                        },
+                    )?
+                } else {
+                    match self.binders.get(&binder).copied() {
+                        Some(new) => self
+                            .store
+                            .types
+                            .alloc(Type::ParamRef { binder: new, index }),
+                        None => id,
+                    }
+                }
+            }
 
             Type::Match(MatchType {
                 bound,
@@ -2073,6 +2195,123 @@ mod tests {
             Type::Method(method) => method,
             other => panic!("not a method: {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_poly_instantiation_substitutes_by_binder_index_in_result_and_bounds() {
+        let mut f = Fixture::new();
+        let second_argument = f.store.types.alloc(Type::ThisType {
+            class: SymbolId::new(1),
+        });
+        let outer = f.store.types.reserve();
+        let poly_id = outer.id();
+        let first_ref = f.param_ref(poly_id, 0);
+        let second_ref = f.param_ref(poly_id, 1);
+        let bounds = f.store.types.alloc(Type::Bounds {
+            low: first_ref,
+            high: second_ref,
+        });
+        let nested = f.store.types.reserve();
+        let nested_id = nested.id();
+        let nested_ref = f.param_ref(nested_id, 0);
+        let nested_method = f.store.types.fill(
+            nested,
+            Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: TermName::new(f.store.names.intern("x")),
+                    ty: nested_ref,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: second_ref,
+                kind: MethodKind::Plain,
+            }),
+        );
+        let params = vec![f.param("A", bounds), f.param("B", bounds)];
+        let poly = f.store.types.fill(
+            outer,
+            Type::Poly(PolyType {
+                params,
+                result: nested_method,
+            }),
+        );
+
+        let instantiated =
+            instantiate_poly(&mut f.store, poly, &[f.leaf, second_argument]).unwrap();
+
+        let Type::Method(method) = f.store.types.get(instantiated.result) else {
+            panic!("the instantiated result must remain a Method")
+        };
+        assert_eq!(method.result, second_argument);
+        assert_eq!(
+            f.param_ref_of(method.params[0].ty),
+            (instantiated.result, 0)
+        );
+        assert_eq!(instantiated.bounds.len(), 2);
+        for bound in instantiated.bounds {
+            assert!(matches!(
+                f.store.types.get(bound),
+                Type::Bounds { low, high } if *low == f.leaf && *high == second_argument
+            ));
+        }
+        let Type::Poly(original) = f.store.types.get(poly) else {
+            unreachable!()
+        };
+        assert_eq!(original.result, nested_method);
+    }
+
+    #[test]
+    fn explicit_poly_instantiation_rejects_wrong_arity_without_allocating() {
+        let mut f = Fixture::new();
+        let reserved = f.store.types.reserve();
+        let poly_id = reserved.id();
+        let result = f.param_ref(poly_id, 0);
+        let bounds = f.plain_bounds();
+        let params = vec![f.param("A", bounds), f.param("B", bounds)];
+        let poly = f
+            .store
+            .types
+            .fill(reserved, Type::Poly(PolyType { params, result }));
+        let argument = f.leaf;
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            instantiate_poly(&mut f.store, poly, &[argument]),
+            Err(TypeRebindError::PolyArityMismatch {
+                source: poly,
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn explicit_poly_instantiation_rejects_an_out_of_range_binder_index_atomically() {
+        let mut f = Fixture::new();
+        let outer = f.store.types.reserve();
+        let poly_id = outer.id();
+        let bad_reference = f.param_ref(poly_id, 1);
+        let bounds = f.plain_bounds();
+        let params = vec![f.param("A", bounds)];
+        let poly = f.store.types.fill(
+            outer,
+            Type::Poly(PolyType {
+                params,
+                result: bad_reference,
+            }),
+        );
+        let before = type_count(&mut f);
+
+        assert_eq!(
+            instantiate_poly(&mut f.store, poly, &[f.leaf]),
+            Err(TypeRebindError::InvalidPolyParamRef {
+                binder: poly,
+                index: 1,
+                arity: 1,
+            })
+        );
+        assert_eq!(type_count(&mut f), before + 1);
     }
 
     fn type_count(f: &mut Fixture) -> u32 {
