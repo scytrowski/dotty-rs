@@ -66,6 +66,31 @@ fn parses_a_character_literal_expression_with_its_source_span() {
 }
 
 #[test]
+fn parses_an_interpolated_string_as_a_lambda_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x => s\"hello\"",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 4),
+            token(TokenKind::InterpolationId, 5, 6),
+            token(TokenKind::StringPart, 6, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    assert!(matches!(
+        parser.ast().get(id).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Function(_))
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn decodes_an_escaped_character_literal_expression() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
