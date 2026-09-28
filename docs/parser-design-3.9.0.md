@@ -146,6 +146,9 @@ sequence; a marker that reaches the outermost sequence without a matching
 construct produces a `misaligned end marker` diagnostic. The parser does not
 infer layout from source indentation; it uses the scanner's existing
 Outdent-feedback contract when an enclosing template ends at an `end` marker.
+Nested feedback regions are closed by their owning indentation boundary, even
+when a nested body's `Outdent` is already present before the marker; the
+enclosing template then consumes its own marker and closing delimiter.
 
 Braced statement regions retain physical-line separators even when the braces
 occur inside an application or another parenthesized expression, as in an

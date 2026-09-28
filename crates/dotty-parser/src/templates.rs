@@ -79,9 +79,6 @@ where
             );
         }
 
-        // This state belongs to the enclosing template member loop. A
-        // completed body must not affect a later, unrelated template.
-        self.defer_template_outdent_feedback = false;
         result
     }
 
@@ -129,9 +126,6 @@ where
                     parser.parse_statement(Location::InBlock)
                 });
             let ended_nested_indented_body = self.last_advance_was_outdent;
-            if ended_nested_indented_body {
-                self.defer_template_outdent_feedback = true;
-            }
             match statement {
                 crate::statements::ParsedStatement::Definition(tree)
                 | crate::statements::ParsedStatement::Expression(tree) => members.push(tree),
@@ -352,7 +346,6 @@ where
         {
             return;
         }
-        self.defer_template_outdent_feedback = false;
         if self.current().kind != TokenKind::Outdent && self.current().kind != TokenKind::Eof {
             // The scanner owns the active layout stack and decides whether
             // this position closes a nested indented expression.
@@ -449,7 +442,9 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                ScannerEvent::Outdented if self.current().kind == TokenKind::Newline => {
+                ScannerEvent::Outdented | ScannerEvent::OutdentedRegion { .. }
+                    if self.current().kind == TokenKind::Newline =>
+                {
                     // The first feedback closes the indented method RHS; the
                     // second closes its enclosing anonymous template. The
                     // outer yield block is at the same indentation as the
@@ -463,7 +458,7 @@ mod tests {
                         self.tuple_line_outdents += 1;
                     }
                 }
-                ScannerEvent::Outdented
+                ScannerEvent::Outdented | ScannerEvent::OutdentedRegion { .. }
                     if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace)
                         && !self.yield_body_outdent =>
                 {

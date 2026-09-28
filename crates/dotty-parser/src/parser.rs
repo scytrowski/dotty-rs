@@ -35,7 +35,6 @@ where
     pub(crate) type_argument_depth: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
-    pub(crate) defer_template_outdent_feedback: bool,
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
@@ -83,7 +82,6 @@ where
             type_argument_depth: 0,
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
-            defer_template_outdent_feedback: false,
             expression_quote_depth: 0,
             quote_pattern_depth: 0,
             type_quote_depth: 0,

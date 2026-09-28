@@ -481,30 +481,40 @@ where
     }
 
     pub(crate) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
-        self.parse_indented_block_with_feedback(false)
+        self.parse_indented_block_with_feedback(None)
     }
 
     pub(crate) fn parse_feedback_indented_block(&mut self) -> TreeId<Untyped> {
-        self.parse_indented_block_with_feedback(true)
+        self.parse_indented_block_with_feedback(Some(self.current().span.start()))
     }
 
-    fn parse_indented_block_with_feedback(&mut self, feedback_outdent: bool) -> TreeId<Untyped> {
+    pub(crate) fn parse_region_feedback_indented_block(
+        &mut self,
+        indent_offset: u32,
+    ) -> TreeId<Untyped> {
+        self.parse_indented_block_with_feedback(Some(indent_offset))
+    }
+
+    fn parse_indented_block_with_feedback(
+        &mut self,
+        feedback_indent: Option<u32>,
+    ) -> TreeId<Untyped> {
         self.advance();
         let mark = self.mark();
-        let (stats, expr) = if feedback_outdent {
-            self.parse_feedback_expression_block_body()
+        let (stats, expr) = if let Some(indent_offset) = feedback_indent {
+            self.parse_region_feedback_expression_block_body(indent_offset)
         } else {
             self.parse_expression_block_body(TokenKind::Outdent)
         };
-        let closed_by_delimiter = feedback_outdent
+        let closed_by_delimiter = feedback_indent.is_some()
             && matches!(
                 self.current().kind,
                 TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
             );
         if closed_by_delimiter {
             self.observe_outdented_by_delimiter();
-        } else if feedback_outdent && !self.cursor.at(TokenKind::Outdent) {
-            self.observe_outdented();
+        } else if let Some(indent_offset) = feedback_indent {
+            self.observe_outdented_region(indent_offset);
         }
         if !closed_by_delimiter && !self.accept(TokenKind::Outdent) {
             self.report(
@@ -512,6 +522,15 @@ where
                 "expected an outdent to close an indented block",
             );
         }
+        self.finish_indented_block(mark, stats, expr)
+    }
+
+    fn finish_indented_block(
+        &mut self,
+        mark: crate::Mark,
+        stats: Vec<TreeId<Untyped>>,
+        expr: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
         let is_single_expression = stats.is_empty()
             && self.ast.get(expr).position.is_some_and(|position| {
                 let range = position.span().range();
