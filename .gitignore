@@ -1,4 +1,50 @@
-/target
+# Rust
+/target/
+
+# Environment / local secrets
+.env
+.env.*
+!.env.example
+.direnv/
+
+# Private keys / certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# IntelliJ / JetBrains
+.idea/
+*.iml
+
+# VS Code / other editors
+.vscode/
+.fleet/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Logs / temporary files
+*.log
+*.tmp
+*.temp
+
+# Scala / SBT tooling
+**/.bsp/
+**/.bloop/
+**/.metals/
+**/.scala-build/
+**/project/target/
+**/project/project/
 
 # Scala/SBT baseline generator build output
 tools/tasty-baseline/.bsp/
