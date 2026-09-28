@@ -102,7 +102,7 @@ impl SourceTyper<'_> {
         let store_checkpoint = self.store.checkpoint();
         let checkpoint = self.type_index.checkpoint();
         let mut journal = Vec::new();
-        let result = self.lookup_members_inner(receiver, name, &mut journal);
+        let result = self.lookup_members_inner(receiver, name, &mut journal, false);
         if result.is_err() {
             for (symbol, previous) in journal.into_iter().rev() {
                 if self.store.symbols.contains(symbol) {
@@ -121,7 +121,20 @@ impl SourceTyper<'_> {
         name: Name,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
-        self.lookup_members_inner(receiver, name, journal)
+        self.lookup_members_inner(receiver, name, journal, false)
+    }
+
+    /// Finds matching declarations on a receiver and its nominal parents,
+    /// including inherited buckets hidden by direct declarations on the path.
+    /// Overload application uses this view before applicability filtering and
+    /// removes only signatures overridden by a more-derived declaration.
+    pub(in crate::typer) fn lookup_overload_members_journaled(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
+        self.lookup_members_inner(receiver, name, journal, true)
     }
 
     fn lookup_members_inner(
@@ -129,6 +142,7 @@ impl SourceTyper<'_> {
         receiver: TypeId,
         name: Name,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        include_hidden_inherited: bool,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
         let receiver_view = TypeNormalizer::new(self.store)
             .normalize_for_lookup(receiver)
@@ -145,7 +159,23 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
 
         while let Some(pending) = queue.pop_front() {
-            let info = self.class_info(pending.symbol, journal)?;
+            let info = match self.class_info(pending.symbol, journal) {
+                Ok(info) => info,
+                Err(MemberLookupError::ClassInfoUnavailable { .. })
+                    if include_hidden_inherited
+                        && pending.symbol == self.definitions.object_class
+                        && !candidates.is_empty() =>
+                {
+                    // The bootstrapped Object symbol is the terminal fallback
+                    // parent in this typer's model and has no classpath metadata.
+                    // Do not extend this boundary to other missing ancestors:
+                    // they may contain overloads that change applicability.
+                    processed.push(pending.symbol);
+                    edges.insert(pending.symbol, Vec::new());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let direct = self.direct_candidates(
                 pending.symbol,
                 pending.receiver_view,
@@ -156,9 +186,12 @@ impl SourceTyper<'_> {
             processed.push(pending.symbol);
             if !direct.is_empty() {
                 candidates.extend(direct);
-                // A direct bucket hides all inherited buckets from this class.
-                edges.insert(pending.symbol, Vec::new());
-                continue;
+                if !include_hidden_inherited {
+                    // Ordinary member selection treats a direct bucket as a
+                    // complete override of inherited declarations.
+                    edges.insert(pending.symbol, Vec::new());
+                    continue;
+                }
             }
 
             let mut parent_symbols = Vec::with_capacity(info.parents.len());
@@ -1260,6 +1293,41 @@ mod tests {
         assert!(matches!(
             w.lookup(receiver, name),
             Err(MemberLookupError::ClassInfoUnavailable { symbol, state: SymbolInfoState::Missing }) if symbol == class
+        ));
+    }
+
+    #[test]
+    fn overload_lookup_rejects_incomplete_inherited_candidates() {
+        let mut w = World::new();
+        let source_class = w.class("Source");
+        let parent = w.class("ExternalParent");
+        let scope = w.scope(source_class);
+        let method = w.symbol(
+            "f",
+            Namespace::Term,
+            SymbolKind::Method,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(method).name;
+        w.store.scopes.get_mut(scope).enter(name, method);
+        let parent_view = w.class_ref(parent);
+        w.publish_class(source_class, scope, vec![parent_view]);
+        let receiver = w.class_ref(source_class);
+        let mut typer = SourceTyper::new(
+            &w.arena,
+            w.source,
+            &w.index,
+            &mut w.store,
+            w.definitions,
+            &w.packages,
+        );
+
+        assert!(matches!(
+            typer.lookup_overload_members_journaled(receiver, name, &mut Vec::new()),
+            Err(MemberLookupError::ClassInfoUnavailable {
+                symbol,
+                state: SymbolInfoState::Missing,
+            }) if symbol == parent
         ));
     }
 
