@@ -33,6 +33,14 @@ where
     /// indented form the scanner has already classified the layout and the
     /// parser only consumes the resulting `Indent`/`Outdent` tokens.
     pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> TemplateBodyResult {
+        self.parse_template_body_with_feedback(body, None)
+    }
+
+    pub(crate) fn parse_template_body_with_feedback(
+        &mut self,
+        body: TemplateBody,
+        feedback_indent: Option<u32>,
+    ) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
                 TokenKind::Punctuation(Punctuation::LeftBrace),
@@ -57,8 +65,12 @@ where
             })
         });
 
-        if body == TemplateBody::Indented && self.current().kind != TokenKind::Outdent {
-            self.observe_outdented();
+        if body == TemplateBody::Indented {
+            if let Some(indent_offset) = feedback_indent {
+                self.observe_outdented_region(indent_offset);
+            } else if self.current().kind != TokenKind::Outdent {
+                self.observe_outdented();
+            }
         }
         if !self.accept(closing) {
             self.report(
