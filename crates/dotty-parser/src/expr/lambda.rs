@@ -350,6 +350,7 @@ const fn can_start_local_definition(kind: TokenKind) -> bool {
                 | HardKeyword::Enum
                 | HardKeyword::Final
                 | HardKeyword::Given
+                | HardKeyword::Import
                 | HardKeyword::Lazy
                 | HardKeyword::Object
                 | HardKeyword::Override
@@ -360,6 +361,7 @@ const fn can_start_local_definition(kind: TokenKind) -> bool {
                 | HardKeyword::Type
                 | HardKeyword::Val
                 | HardKeyword::Var
+                | HardKeyword::Export
         )
     )
 }
@@ -899,6 +901,28 @@ mod tests {
                 token(TokenKind::Identifier, 19, 20),
                 token(TokenKind::Outdent, 20, 20),
                 token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        parser.advance();
+        assert!(parser.arrow_starts_indented_body());
+    }
+
+    #[test]
+    fn lambda_arrow_opens_layout_for_an_import_block_stat() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  import scala.util.*\n  x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Keyword(HardKeyword::Import), 7, 13),
             ],
             &mut names,
         );
