@@ -13,6 +13,8 @@ use crate::{SourceTyper, TyperError};
 pub const MAX_TYPE_RELATION_DEPTH: usize = 256;
 /// Maximum instantiated parent views inspected by one relation.
 pub const MAX_TYPE_RELATION_VIEWS: usize = 4096;
+/// Maximum union comparisons expanded by one subtype relation.
+pub const MAX_UNION_RELATION_COMPARISONS: usize = 4096;
 
 /// A malformed or unsupported semantic type relation.
 #[derive(Debug)]
@@ -55,6 +57,8 @@ pub enum TypeRelationError {
     /// The graph contains more distinct instantiated parent views than the
     /// relation's bounded worklist permits.
     TooManyParentViews,
+    /// A union relation expanded more comparisons than its work limit permits.
+    TooManyUnionRelations,
 }
 
 impl fmt::Display for TypeRelationError {
@@ -70,10 +74,12 @@ impl SourceTyper<'_> {
     ///
     /// The relation reads already completed class information. Call
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
-    /// completion is desired. `And`, `Or`, methodic, refined, recursive, match,
+    /// completion is desired. `And`, methodic, refined, recursive, match,
     /// wildcard, error, and name-designed structural types return
-    /// [`TypeRelationError::UnsupportedType`] instead of being treated as
-    /// unrelated types.
+    /// `Or` uses the bounded union rules documented on [`Self::conforms`];
+    /// intersection, methodic, refined, recursive, match, wildcard, error, and
+    /// name-designed structural types return [`TypeRelationError::UnsupportedType`]
+    /// instead of being treated as unrelated types.
     pub fn is_subtype(
         &mut self,
         found: TypeId,
@@ -85,8 +91,9 @@ impl SourceTyper<'_> {
 
     /// Tests value conformance for the supported fragment.
     ///
-    /// In this first iteration conformance is exactly [`Self::is_subtype`];
-    /// implicit conversions and numeric adaptations are intentionally absent.
+    /// Conformance uses [`Self::is_subtype`], including bounded rules for
+    /// `Or` types created by expression joins. Implicit conversions and
+    /// numeric adaptations are intentionally absent.
     pub fn conforms(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
         self.is_subtype(found, expected)
     }
@@ -96,6 +103,7 @@ struct TypeRelation<'typer, 'store> {
     typer: &'typer mut SourceTyper<'store>,
     equivalent_pairs: HashMap<(TypeId, TypeId), bool>,
     active_equivalent_pairs: HashSet<(TypeId, TypeId)>,
+    union_comparisons: usize,
 }
 
 impl<'typer, 'store> TypeRelation<'typer, 'store> {
@@ -104,6 +112,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             typer,
             equivalent_pairs: HashMap::new(),
             active_equivalent_pairs: HashSet::new(),
+            union_comparisons: 0,
         }
     }
 
@@ -130,6 +139,28 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         if self.equivalent(found, expected, 0)? {
             return Ok(true);
         }
+        let found_node = self.type_at(found)?.clone();
+        let expected_node = self.type_at(expected)?.clone();
+        if let Type::Or { left, right } = found_node {
+            self.bump_union_comparison()?;
+            let left_result = self.is_subtype(left, expected);
+            let right_result = self.is_subtype(right, expected);
+            return match (left_result, right_result) {
+                (Ok(false), _) | (_, Ok(false)) => Ok(false),
+                (Ok(true), Ok(true)) => Ok(true),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            };
+        }
+        if let Type::Or { left, right } = expected_node {
+            self.bump_union_comparison()?;
+            let left_result = self.is_subtype(found, left);
+            let right_result = self.is_subtype(found, right);
+            return match (left_result, right_result) {
+                (Ok(true), _) | (_, Ok(true)) => Ok(true),
+                (Ok(false), Ok(false)) => Ok(false),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            };
+        }
         if matches!(self.type_at(found)?, Type::ByName { .. })
             || matches!(self.type_at(expected)?, Type::ByName { .. })
         {
@@ -145,8 +176,6 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             return Ok(false);
         }
 
-        let found_node = self.type_at(found)?.clone();
-        let expected_node = self.type_at(expected)?.clone();
         if let (
             Type::ThisType { class },
             Type::TypeRef {
@@ -168,6 +197,14 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             return self.equivalent_class_views(&found_view, &expected_view, 0);
         }
         self.inherited_subtype(found_view, expected_view, expected)
+    }
+
+    fn bump_union_comparison(&mut self) -> Result<(), TypeRelationError> {
+        if self.union_comparisons >= MAX_UNION_RELATION_COMPARISONS {
+            return Err(TypeRelationError::TooManyUnionRelations);
+        }
+        self.union_comparisons += 1;
+        Ok(())
     }
 
     fn reject_unmodeled_external_generic(&self, view: &ClassView) -> Result<(), TypeRelationError> {
@@ -584,6 +621,10 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             Type::Applied { tycon, args } => {
                 children.push((tycon, true));
                 children.extend(args.into_iter().map(|argument| (argument, true)));
+            }
+            Type::Or { left, right } => {
+                children.push((left, true));
+                children.push((right, true));
             }
             Type::ByName { result } => children.push((result, true)),
             Type::ParamRef { binder, index } => {
