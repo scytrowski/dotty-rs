@@ -64,7 +64,7 @@ where
             if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
                 // Braced scopes suppress eager indentation in the scanner. Ask it
                 // to open a case region when the cases are laid out after `match`.
-                self.observe_indented_body()
+                self.observe_match_cases_indented()
             } else {
                 false
             };
@@ -91,7 +91,11 @@ where
                 if closed_by_delimiter && opened_feedback_case_region {
                     self.observe_outdented_by_delimiter();
                 } else if !self.cursor.at(TokenKind::Outdent) {
-                    self.observe_outdented();
+                    if opened_feedback_case_region {
+                        self.observe_match_cases_outdented();
+                    } else {
+                        self.observe_outdented();
+                    }
                 }
                 if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                     self.report(
@@ -174,7 +178,7 @@ mod tests {
                 self.closed_feedback_by_delimiter.set(true);
             }
             match (event, self.current().kind) {
-                (ScannerEvent::Indented, TokenKind::Keyword(HardKeyword::Match)) => {
+                (ScannerEvent::MatchCasesIndented, TokenKind::Keyword(HardKeyword::Match)) => {
                     let offset = self.current().span.end();
                     self.tokens.insert(
                         self.index + 1,
@@ -188,7 +192,7 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                (ScannerEvent::Outdented, _)
+                (ScannerEvent::Outdented | ScannerEvent::MatchCasesOutdented, _)
                     if self
                         .outdent_at
                         .is_none_or(|offset| self.current().span.start() == offset) =>
