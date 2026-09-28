@@ -575,6 +575,8 @@ pub enum TyperError {
     InferredLocalValueTypeDeferred { source: SourceId, tree_index: u32 },
     /// A local value declaration has no initializer.
     LocalValueRightHandSideMissing { source: SourceId, tree_index: u32 },
+    /// Local value declarations are only supported as statements in a block.
+    LocalValueOutsideBlock { source: SourceId, tree_index: u32 },
     /// Two local values with the same name occur in one block scope.
     DuplicateLocalValue {
         source: SourceId,
@@ -715,6 +717,7 @@ struct TypedArgument {
 struct ExpressionScopeFrame {
     scope: dotty_core::ScopeId,
     parent: Option<ExpressionScopeId>,
+    is_block_scope: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -944,6 +947,7 @@ impl<'a> SourceTyper<'a> {
         self.expression_scopes.push(ExpressionScopeFrame {
             scope,
             parent: context.local_scopes,
+            is_block_scope: false,
         });
         Ok(ExpressionContext {
             local_scopes: Some(stack),
@@ -1548,6 +1552,12 @@ impl<'a> SourceTyper<'a> {
                     .scopes
                     .alloc(dotty_core::Scope::new(Some(context.owner)));
                 let block_context = self.push_local_scope(context, block_scope)?;
+                if let Some(frame) = block_context
+                    .local_scopes
+                    .and_then(|stack| self.expression_scopes.get_mut(stack.index()))
+                {
+                    frame.is_block_scope = true;
+                }
                 let mut stats = Vec::with_capacity(block.stats.len());
                 for stat in block.stats {
                     let Some(source_stat) = self.arena.try_get(stat) else {
@@ -1691,11 +1701,17 @@ impl<'a> SourceTyper<'a> {
                 },
             });
         };
-        let scope = self
+        let frame = self
             .expression_scopes
             .get(local_stack.index())
-            .map(|frame| frame.scope)
             .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: local_stack })?;
+        if !frame.is_block_scope {
+            return Err(TyperError::LocalValueOutsideBlock {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        }
+        let scope = frame.scope;
         let name = *definition.name.as_name();
         if !self.store.scopes.get(scope).lookup_all(&name).is_empty() {
             return Err(TyperError::DuplicateLocalValue {
@@ -12642,6 +12658,42 @@ mod tests {
         assert!(typer.local_symbol_at(source, local_tree).is_none());
         assert_eq!(typer.expression_scopes.len(), scope_count);
         assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn typing_a_local_valdef_outside_a_block_does_not_mutate_the_method_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val local: Int = 1; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let method_scope = context.local_scopes.unwrap();
+        let scope = typer.expression_scopes[method_scope.index()].scope;
+        let name = match &parsed.ast.get(local_tree).kind {
+            TreeKind::ValDef(definition) => *definition.name.as_name(),
+            _ => unreachable!(),
+        };
+        let store_checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(local_tree, context),
+            Err(TyperError::LocalValueOutsideBlock { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert!(typer.store().scopes.get(scope).lookup_all(&name).is_empty());
+        assert!(typer.local_symbols.is_empty());
         assert!(typer.source_typed_index().is_empty());
     }
 
