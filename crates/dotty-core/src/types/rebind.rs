@@ -74,6 +74,8 @@ pub enum TypeRebindError {
         expected: usize,
         actual: usize,
     },
+    /// The Poly has more parameters than a `ParamRef` index can represent.
+    PolyArityExceedsIndex { source: TypeId, actual: usize },
     /// A parameter reference to the instantiated binder has an invalid index.
     InvalidPolyParamRef {
         binder: TypeId,
@@ -131,6 +133,10 @@ impl fmt::Display for TypeRebindError {
             } => write!(
                 formatter,
                 "{actual} explicit type arguments were given for a polymorphic type with {expected} parameters"
+            ),
+            Self::PolyArityExceedsIndex { actual, .. } => write!(
+                formatter,
+                "a polymorphic type with {actual} parameters exceeds the parameter index limit"
             ),
             Self::InvalidPolyParamRef {
                 binder,
@@ -255,6 +261,12 @@ pub fn instantiate_poly(
             actual: arguments.len(),
         });
     }
+    if poly.params.len() > u32::MAX as usize {
+        return Err(TypeRebindError::PolyArityExceedsIndex {
+            source,
+            actual: poly.params.len(),
+        });
+    }
     for argument in arguments {
         if !store.types.contains(*argument) {
             return Err(TypeRebindError::InvalidType { id: *argument });
@@ -267,13 +279,13 @@ pub fn instantiate_poly(
     let checkpoint = store.checkpoint();
     let mut rebinder = Rebinder::new(store);
     rebinder.poly_source = Some(source);
-    rebinder.poly_arguments.extend(
-        arguments
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, ty)| (index as u32, ty)),
-    );
+    for (index, ty) in arguments.iter().copied().enumerate() {
+        let index = u32::try_from(index).map_err(|_| TypeRebindError::PolyArityExceedsIndex {
+            source,
+            actual: arguments.len(),
+        })?;
+        rebinder.poly_arguments.insert(index, ty);
+    }
     let result = rebinder.ty(poly.result);
     let bounds = poly
         .params
@@ -2235,6 +2247,7 @@ mod tests {
                 result: nested_method,
             }),
         );
+        let original_poly = f.store.types.get(poly).clone();
 
         let instantiated =
             instantiate_poly(&mut f.store, poly, &[f.leaf, second_argument]).unwrap();
@@ -2254,10 +2267,101 @@ mod tests {
                 Type::Bounds { low, high } if *low == f.leaf && *high == second_argument
             ));
         }
-        let Type::Poly(original) = f.store.types.get(poly) else {
-            unreachable!()
+        assert_eq!(f.store.types.get(poly), &original_poly);
+    }
+
+    #[test]
+    fn explicit_poly_instantiation_preserves_an_independent_nested_poly_binder() {
+        let mut f = Fixture::new();
+        let outer = f.store.types.reserve();
+        let outer_id = outer.id();
+        let outer_ref = f.param_ref(outer_id, 0);
+        let inner = f.store.types.reserve();
+        let inner_id = inner.id();
+        let inner_ref = f.param_ref(inner_id, 0);
+        let dependent_bounds = f.store.types.alloc(Type::Bounds {
+            low: outer_ref,
+            high: outer_ref,
+        });
+        let inner_params = vec![f.param("B", dependent_bounds)];
+        let inner_poly = f.store.types.fill(
+            inner,
+            Type::Poly(PolyType {
+                params: inner_params,
+                result: inner_ref,
+            }),
+        );
+        let outer_bounds = f.plain_bounds();
+        let outer_params = vec![f.param("A", outer_bounds)];
+        let poly = f.store.types.fill(
+            outer,
+            Type::Poly(PolyType {
+                params: outer_params,
+                result: inner_poly,
+            }),
+        );
+
+        let instantiated = instantiate_poly(&mut f.store, poly, &[f.leaf]).unwrap();
+
+        let Type::Poly(inner) = f.store.types.get(instantiated.result) else {
+            panic!("nested Poly result should remain polymorphic")
         };
-        assert_eq!(original.result, nested_method);
+        assert_ne!(instantiated.result, inner_poly);
+        assert!(matches!(
+            f.store.types.get(inner.params[0].bounds),
+            Type::Bounds { low, high } if *low == f.leaf && *high == f.leaf
+        ));
+        assert!(matches!(
+            f.store.types.get(inner.result),
+            Type::ParamRef { binder, index: 0 } if *binder == instantiated.result
+        ));
+    }
+
+    #[test]
+    fn explicit_poly_instantiation_preserves_an_independent_nested_type_lambda() {
+        let mut f = Fixture::new();
+        let outer = f.store.types.reserve();
+        let outer_id = outer.id();
+        let outer_ref = f.param_ref(outer_id, 0);
+        let inner = f.store.types.reserve();
+        let inner_id = inner.id();
+        let inner_ref = f.param_ref(inner_id, 0);
+        let dependent_bounds = f.store.types.alloc(Type::Bounds {
+            low: outer_ref,
+            high: outer_ref,
+        });
+        let inner_params = vec![f.param("B", dependent_bounds)];
+        let inner_lambda = f.store.types.fill(
+            inner,
+            Type::TypeLambda(TypeLambda {
+                params: inner_params,
+                result: inner_ref,
+            }),
+        );
+        let outer_bounds = f.plain_bounds();
+        let outer_params = vec![f.param("A", outer_bounds)];
+        let poly = f.store.types.fill(
+            outer,
+            Type::Poly(PolyType {
+                params: outer_params,
+                result: inner_lambda,
+            }),
+        );
+
+        let instantiated = instantiate_poly(&mut f.store, poly, &[f.leaf]).unwrap();
+
+        let Type::TypeLambda(inner) = f.store.types.get(instantiated.result) else {
+            panic!("nested TypeLambda result should remain a type lambda")
+        };
+        assert_ne!(instantiated.result, inner_lambda);
+        assert!(matches!(
+            f.store.types.get(inner.params[0].bounds),
+            Type::Bounds { low, high } if *low == f.leaf && *high == f.leaf
+        ));
+        assert!(matches!(
+            f.store.types.get(inner.result),
+            Type::ParamRef { binder, index: 0 } if *binder == instantiated.result
+        ));
     }
 
     #[test]
@@ -2284,6 +2388,26 @@ mod tests {
             })
         );
         assert_eq!(type_count(&mut f), before + 1);
+    }
+
+    #[test]
+    fn repeated_explicit_poly_instantiation_produces_the_same_semantic_result() {
+        let mut f = Fixture::new();
+        let outer = f.store.types.reserve();
+        let outer_id = outer.id();
+        let result = f.param_ref(outer_id, 0);
+        let bounds = f.plain_bounds();
+        let params = vec![f.param("A", bounds)];
+        let poly = f
+            .store
+            .types
+            .fill(outer, Type::Poly(PolyType { params, result }));
+
+        let first = instantiate_poly(&mut f.store, poly, &[f.leaf]).unwrap();
+        let second = instantiate_poly(&mut f.store, poly, &[f.leaf]).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.result, f.leaf);
     }
 
     #[test]

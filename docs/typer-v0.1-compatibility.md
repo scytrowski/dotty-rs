@@ -66,6 +66,15 @@ Standalone overloaded identifiers and selections remain deferred. Generic
 overloads and matching-arity candidates with unsupported semantics return typed
 errors rather than being selected speculatively.
 
+Explicit positional type applications are supported for one resolved `Poly`
+callee. Type arguments use the expression's lexical context, require exact
+arity, and are checked against ordinary lower and upper bounds before the Poly
+binder is instantiated. Typed `TypeApply` nodes retain the exact function
+reference and carry projected type arguments as typed `TypeTree` nodes.
+Overloaded type applications, unsupported bounds, and unsupported source type
+argument forms return typed deferrals/errors. Type argument inference remains
+deferred.
+
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
 `java.lang.Object` references normalize to the source Typer's canonical
