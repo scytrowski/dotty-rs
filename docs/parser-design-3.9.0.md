@@ -312,9 +312,13 @@ Final repeated parameter types (`T*`, including applied types such as
 diagnoses repeated parameters in `given`/legacy `implicit` clauses and those
 followed by another parameter in the same clause.
 Primary-constructor parameters preserve source annotations and the supported
-`private`/`protected` visibility, `final`, `override`, and `inline` modifiers
-in class-parameter contexts; explicit `val`/`var` accessor metadata remains
-context-sensitive.
+`private`/`protected` visibility and Dotty's ordinary hard and contextual
+modifiers (`abstract`, `final`, `implicit`, `lazy`, `override`, `sealed`,
+`inline`, `transparent`, `open`, and `infix`) in class-parameter contexts;
+explicit `val`/`var` accessor metadata remains context-sensitive. As in
+Dotty's untyped tree, `sealed` and `open` are consumed but not retained on the
+parameter. Feature-gated modifier syntax continues to follow the parser's
+configured feature policy.
 Annotations on ordinary method parameters are also preserved. These prefixes
 are not treated as a blanket set of modifiers valid for every parameter kind.
 Ordinary named method and non-accessor class-constructor parameters also

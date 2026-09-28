@@ -246,12 +246,15 @@ where
             metadata.annotations.push(self.parse_annotation());
         }
 
-        if is_class_parameter_owner(owner) {
-            self.parse_class_parameter_modifiers(&mut metadata);
+        let requires_class_accessor = if is_class_parameter_owner(owner) {
+            self.parse_class_parameter_modifiers(&mut metadata)
         } else if self.current_is_inline_parameter_modifier() {
             self.add_modifier(&mut metadata, Modifier::Inline);
             self.advance();
-        }
+            false
+        } else {
+            false
+        };
 
         let explicit_accessor = match self.current().kind {
             TokenKind::Keyword(dotty_core::HardKeyword::Val) => {
@@ -277,12 +280,7 @@ where
                 }
             }
         } else if is_class_parameter_owner(owner) {
-            if metadata.visibility.is_some()
-                || metadata
-                    .modifiers
-                    .iter()
-                    .any(|modifier| matches!(modifier, Modifier::Final | Modifier::Override))
-            {
+            if requires_class_accessor {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "`val` or `var` expected",
@@ -361,30 +359,65 @@ where
         )
     }
 
-    fn parse_class_parameter_modifiers(&mut self, metadata: &mut Modifiers) {
+    fn parse_class_parameter_modifiers(&mut self, metadata: &mut Modifiers) -> bool {
+        let mut requires_accessor = false;
         loop {
             match self.current().kind {
                 TokenKind::Keyword(
                     dotty_core::HardKeyword::Private | dotty_core::HardKeyword::Protected,
-                ) => self.parse_visibility(metadata),
+                ) => {
+                    self.parse_visibility(metadata);
+                    requires_accessor = true;
+                }
                 TokenKind::Keyword(dotty_core::HardKeyword::Override) => {
                     self.add_modifier(metadata, Modifier::Override);
                     self.advance();
+                    requires_accessor = true;
                 }
-                TokenKind::Keyword(dotty_core::HardKeyword::Final) => {
-                    self.add_modifier(metadata, Modifier::Final);
+                TokenKind::Keyword(
+                    dotty_core::HardKeyword::Abstract
+                    | dotty_core::HardKeyword::Final
+                    | dotty_core::HardKeyword::Implicit
+                    | dotty_core::HardKeyword::Lazy,
+                ) => {
+                    let modifier = match self.current().kind {
+                        TokenKind::Keyword(dotty_core::HardKeyword::Abstract) => Modifier::Abstract,
+                        TokenKind::Keyword(dotty_core::HardKeyword::Final) => Modifier::Final,
+                        TokenKind::Keyword(dotty_core::HardKeyword::Implicit) => Modifier::Implicit,
+                        TokenKind::Keyword(dotty_core::HardKeyword::Lazy) => Modifier::Lazy,
+                        _ => unreachable!(),
+                    };
+                    self.add_modifier(metadata, modifier);
                     self.advance();
+                    requires_accessor = true;
+                }
+                TokenKind::Keyword(dotty_core::HardKeyword::Sealed) => {
+                    // Dotty consumes `sealed` here but does not retain it in
+                    // the constructor parameter's untyped modifier flags.
+                    self.advance();
+                    requires_accessor = true;
                 }
                 TokenKind::Identifier => {
-                    if !self.current_is_inline_parameter_modifier() {
+                    if is_parameter_colon_at(self, 1) {
                         break;
                     }
-                    self.add_modifier(metadata, Modifier::Inline);
+                    let Some(modifier) = self.soft_modifier() else {
+                        break;
+                    };
+                    // As with `sealed`, Dotty accepts and consumes `open`
+                    // here without retaining it on the parameter tree.
+                    if modifier != Modifier::Open {
+                        self.add_modifier(metadata, modifier);
+                    }
                     self.advance();
+                    if modifier != Modifier::Inline {
+                        requires_accessor = true;
+                    }
                 }
                 _ => break,
             }
         }
+        requires_accessor
     }
 
     fn current_is_inline_parameter_modifier(&mut self) -> bool {
@@ -1398,6 +1431,36 @@ mod tests {
         assert_eq!(
             mutable.metadata.modifiers,
             vec![Modifier::Final, Modifier::ParamAccessor, Modifier::Var]
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn preserves_other_ordinary_modifiers_on_class_accessors() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(lazy val x: A)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Lazy), 1, 5),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::ColonFollow, 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a class accessor parameter");
+        };
+
+        assert_eq!(
+            parameter.metadata.modifiers,
+            vec![Modifier::Lazy, Modifier::ParamAccessor]
         );
         assert!(parser.diagnostics().is_empty());
     }

@@ -237,7 +237,7 @@ where
         }
     }
 
-    fn soft_modifier(&mut self) -> Option<Modifier> {
+    pub(crate) fn soft_modifier(&mut self) -> Option<Modifier> {
         if self.current().kind != TokenKind::Identifier {
             return None;
         }
