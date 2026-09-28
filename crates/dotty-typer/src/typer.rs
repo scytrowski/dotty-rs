@@ -2620,10 +2620,7 @@ impl<'a> SourceTyper<'a> {
                         return Err(TyperError::DeferredSymbolCompletion { symbol });
                     }
                 };
-                if !matches!(
-                    typer.store.types.try_get(callable),
-                    Some(Type::Method(_) | Type::Poly(_))
-                ) {
+                if !typer.is_constructor_callable(callable) {
                     return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
                 }
                 candidates.push(ConstructorCandidate {
@@ -2699,6 +2696,22 @@ impl<'a> SourceTyper<'a> {
             ty,
             error: crate::types::TypeNormalizeError::TooDeep,
         })
+    }
+
+    fn is_constructor_callable(&self, callable: TypeId) -> bool {
+        let mut current = callable;
+        let mut visited = HashSet::new();
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            if !visited.insert(current) {
+                return false;
+            }
+            match self.store.types.try_get(current) {
+                Some(Type::Method(_)) => return true,
+                Some(Type::Poly(poly)) => current = poly.result,
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn ensure_constructor_class_info(
@@ -4836,7 +4849,9 @@ impl<'a> SourceTyper<'a> {
             Some(Type::ClassInfo(info))
                 if info.class == symbol
                     && info.prefix == self.definitions.no_prefix
-                    && expected_scope.is_none_or(|scope| info.declarations == scope) =>
+                    && expected_scope.is_none_or(|scope| info.declarations == scope)
+                    && self.store.scopes.contains(info.declarations)
+                    && self.store.scopes.get(info.declarations).owner == Some(symbol) =>
             {
                 Ok(())
             }
@@ -14176,6 +14191,25 @@ mod tests {
             prefix: definitions.no_prefix,
             target: TypeRefTarget::Symbol(malformed),
         });
+        let wrong_scope_owner = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let wrong_scope = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(wrong_scope_owner)));
+        let wrong_scope_class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let wrong_scope_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: wrong_scope_class,
+            parents: vec![definitions.object_type],
+            declarations: wrong_scope,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(wrong_scope_class, SymbolInfo::Complete(wrong_scope_info));
+        let wrong_scope_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(wrong_scope_class),
+        });
         let mut typer =
             SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
@@ -14187,6 +14221,47 @@ mod tests {
             typer.constructors_of(malformed_type),
             Err(TyperError::MalformedClassInfo { symbol, info })
                 if symbol == malformed && info == definitions.int
+        ));
+        assert!(matches!(
+            typer.constructors_of(wrong_scope_type),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == wrong_scope_class && info == wrong_scope_info
+        ));
+    }
+
+    #[test]
+    fn malformed_completed_constructor_type_is_rejected() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let primary = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => index.symbol_at(source, template.constructor),
+                _ => None,
+            })
+            .unwrap();
+        let malformed_callable = definitions.unit;
+        store
+            .symbols
+            .set_info(primary, SymbolInfo::Complete(malformed_callable));
+        let instance_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.constructors_of(instance_type),
+            Err(TyperError::MalformedConstructorCandidate { symbol, callable })
+                if symbol == primary && callable == malformed_callable
         ));
     }
 
