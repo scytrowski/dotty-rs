@@ -7,8 +7,8 @@ use dotty_core::ast::{
     UntypedNode,
 };
 use dotty_core::types::{
-    ClassInfo, MethodKind, MethodParamSpec, MethodType, TermRefTarget, Type, TypeParamSpec,
-    TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
+    ClassInfo, MethodKind, MethodParamSpec, MethodType, PolyType, TermRefTarget, Type,
+    TypeParamSpec, TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
@@ -317,8 +317,69 @@ pub enum TyperError {
         tree_index: u32,
         ty: TypeId,
     },
-    /// Applying a polymorphic method requires explicit application or inference.
-    PolymorphicMethodApplicationDeferred { source: SourceId, tree_index: u32 },
+    /// A supported polymorphic application leaves one type parameter without
+    /// constraints from its term arguments.
+    UnconstrainedTypeParameter {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: usize,
+    },
+    /// Two actual arguments constrain one Poly parameter to non-equivalent types.
+    ConflictingInferenceConstraints {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: usize,
+        first: TypeId,
+        second: TypeId,
+    },
+    /// A generic application uses a formal/actual shape outside the structural
+    /// inference rules supported by this typer increment.
+    UnsupportedInferenceShape {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: Option<usize>,
+        formal: TypeId,
+        actual: TypeId,
+    },
+    /// A unique polymorphic callee is not the supported one-clause Poly/Method form.
+    UnsupportedPolymorphicApplicationShape {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+    },
+    /// Candidate competition includes a polymorphic method and needs general
+    /// generic overload resolution.
+    GenericOverloadResolutionDeferred { source: SourceId, tree_index: u32 },
+    /// Inferred arguments violate the declared bounds of a Poly parameter.
+    InferredTypeArgumentBoundViolation {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bound: TypeId,
+        side: TypeArgumentBoundSide,
+    },
+    /// The inferred argument uses bounds this typer cannot validate soundly.
+    UnsupportedInferredTypeArgumentBounds {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bounds: TypeId,
+    },
+    /// A subtype relation needed to validate an inferred argument's bounds is
+    /// outside the current relation subset.
+    InferredTypeArgumentBoundCheckUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bound: TypeId,
+        error: Box<TypeRelationError>,
+    },
     /// An explicit type application callee does not widen to a Poly type.
     ExplicitTypeApplicationCalleeNotPoly {
         source: SourceId,
@@ -560,6 +621,13 @@ struct TypedArgument {
     typed: TreeId<Typed>,
     own_type: TypeId,
     widened_type: TypeId,
+}
+
+#[derive(Clone, Copy)]
+struct InferenceLocation {
+    tree_index: u32,
+    argument_index: usize,
+    depth: usize,
 }
 
 fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize> {
@@ -961,7 +1029,7 @@ impl<'a> SourceTyper<'a> {
                     info_journal,
                     new_mappings,
                 )?;
-                let (function, callable, typed_arguments) =
+                let (function, mut callable, mut typed_arguments) =
                     if let Some(resolved) = resolved_function {
                         (resolved.typed, resolved.callable, Some(resolved.arguments))
                     } else {
@@ -976,14 +1044,100 @@ impl<'a> SourceTyper<'a> {
                             self.widen_expression_type_journaled(function_type, info_journal, 0)?;
                         (function, callable, None)
                     };
+                if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
+                    let arguments = if let Some(arguments) = typed_arguments.take() {
+                        arguments
+                    } else {
+                        let mut arguments = Vec::with_capacity(application.args.len());
+                        for argument_tree in &application.args {
+                            let typed = self.type_expression_inner(
+                                *argument_tree,
+                                context,
+                                info_journal,
+                                new_mappings,
+                            )?;
+                            let own_type = self.typed_arena.get(typed).ty;
+                            let widened_type =
+                                self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                            arguments.push(TypedArgument {
+                                typed,
+                                own_type,
+                                widened_type,
+                            });
+                        }
+                        arguments
+                    };
+                    let type_arguments = self.infer_poly_application_arguments(
+                        callable,
+                        &poly,
+                        &arguments,
+                        tree.index(),
+                        info_journal,
+                    )?;
+                    let instantiated =
+                        dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
+                            .map_err(TyperError::PolyInstantiation)?;
+                    for (parameter_index, (argument, bounds)) in type_arguments
+                        .iter()
+                        .copied()
+                        .zip(instantiated.bounds.iter().copied())
+                        .enumerate()
+                    {
+                        self.check_explicit_type_argument_bounds(
+                            argument,
+                            bounds,
+                            parameter_index,
+                            tree.index(),
+                            info_journal,
+                        )
+                        .map_err(|error| match error {
+                            TyperError::ExplicitTypeArgumentBoundViolation {
+                                parameter_index,
+                                argument,
+                                bound,
+                                side,
+                                ..
+                            } => TyperError::InferredTypeArgumentBoundViolation {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bound,
+                                side,
+                            },
+                            TyperError::UnsupportedExplicitTypeArgumentBounds {
+                                parameter_index,
+                                bounds,
+                                ..
+                            } => TyperError::UnsupportedInferredTypeArgumentBounds {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bounds,
+                            },
+                            TyperError::ExplicitTypeArgumentBoundCheckUnsupported {
+                                parameter_index,
+                                argument,
+                                bound,
+                                error,
+                                ..
+                            } => TyperError::InferredTypeArgumentBoundCheckUnsupported {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bound,
+                                error,
+                            },
+                            error => error,
+                        })?;
+                    }
+                    callable = instantiated.result;
+                    typed_arguments = Some(arguments);
+                }
                 let method = match self.store.types.try_get(callable) {
                     Some(Type::Method(method)) => method.clone(),
-                    Some(Type::Poly(_)) => {
-                        return Err(TyperError::PolymorphicMethodApplicationDeferred {
-                            source: self.source,
-                            tree_index: tree.index(),
-                        });
-                    }
                     _ => {
                         return Err(TyperError::ApplicationCalleeNotMethod {
                             source: self.source,
@@ -1351,6 +1505,259 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
+    fn infer_poly_application_arguments(
+        &mut self,
+        binder: TypeId,
+        poly: &PolyType,
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TypeId>, TyperError> {
+        let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
+            return Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index,
+                binder,
+            });
+        };
+        if method.params.len() != arguments.len() {
+            return Err(TyperError::ApplicationArityMismatch {
+                source: self.source,
+                tree_index,
+                expected: method.params.len(),
+                actual: arguments.len(),
+            });
+        }
+        if method.kind != MethodKind::Plain
+            || method.params.iter().any(|param| {
+                param.erased
+                    || param.varargs
+                    || matches!(
+                        self.store.types.try_get(param.ty),
+                        Some(Type::ByName { .. })
+                    )
+            })
+            || self.type_contains_param_ref(poly.result, poly.result)?
+        {
+            return Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index,
+                binder,
+            });
+        }
+
+        let mut inferred = vec![None; poly.params.len()];
+        for (argument_index, (parameter, argument)) in
+            method.params.iter().zip(arguments).enumerate()
+        {
+            self.infer_type_constraints(
+                parameter.ty,
+                argument.widened_type,
+                binder,
+                &mut inferred,
+                InferenceLocation {
+                    tree_index,
+                    argument_index,
+                    depth: 0,
+                },
+                info_journal,
+            )?;
+        }
+        let mut type_arguments = Vec::with_capacity(poly.params.len());
+        for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {
+            let Some(inferred_type) = inferred_type else {
+                return Err(TyperError::UnconstrainedTypeParameter {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index,
+                });
+            };
+            type_arguments.push(inferred_type);
+        }
+        Ok(type_arguments)
+    }
+
+    fn infer_type_constraints(
+        &mut self,
+        formal: TypeId,
+        actual: TypeId,
+        binder: TypeId,
+        inferred: &mut [Option<TypeId>],
+        location: InferenceLocation,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let InferenceLocation {
+            tree_index,
+            argument_index,
+            depth,
+        } = location;
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            });
+        }
+        let Some(formal_node) = self.store.types.try_get(formal).cloned() else {
+            return Err(TyperError::TypeNormalization(
+                if self.store.types.contains(formal) {
+                    crate::types::TypeNormalizeError::UnfilledType { ty: formal }
+                } else {
+                    crate::types::TypeNormalizeError::InvalidType { ty: formal }
+                },
+            ));
+        };
+        if let Type::ParamRef {
+            binder: found,
+            index,
+        } = formal_node
+            && found == binder
+        {
+            let parameter_index = index as usize;
+            let Some(slot) = inferred.get_mut(parameter_index) else {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: Some(parameter_index),
+                    formal,
+                    actual,
+                });
+            };
+            if let Some(previous) = *slot {
+                let mut seen = std::collections::HashSet::new();
+                self.complete_relation_type(previous, info_journal, &mut seen, 0)?;
+                self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+                let equivalent = match (
+                    self.conforms(previous, actual),
+                    self.conforms(actual, previous),
+                ) {
+                    (Ok(true), Ok(true)) => true,
+                    (Ok(_), Ok(_)) => false,
+                    _ => {
+                        return Err(TyperError::UnsupportedInferenceShape {
+                            source: self.source,
+                            tree_index,
+                            binder,
+                            parameter_index: Some(parameter_index),
+                            formal,
+                            actual,
+                        });
+                    }
+                };
+                if !equivalent {
+                    return Err(TyperError::ConflictingInferenceConstraints {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index,
+                        first: previous,
+                        second: actual,
+                    });
+                }
+            } else {
+                *slot = Some(actual);
+            }
+            return Ok(());
+        }
+
+        if let Type::Applied { tycon, args } = formal_node
+            && self.type_contains_param_ref(formal, binder)?
+        {
+            let Some(Type::Applied {
+                tycon: actual_tycon,
+                args: actual_args,
+            }) = self.store.types.try_get(actual).cloned()
+            else {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: None,
+                    formal,
+                    actual,
+                });
+            };
+            let equivalent_constructor = match (
+                self.conforms(tycon, actual_tycon),
+                self.conforms(actual_tycon, tycon),
+            ) {
+                (Ok(true), Ok(true)) => true,
+                (Ok(_), Ok(_)) => false,
+                _ => {
+                    return Err(TyperError::UnsupportedInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index: None,
+                        formal,
+                        actual,
+                    });
+                }
+            };
+            if !equivalent_constructor || args.len() != actual_args.len() {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: None,
+                    formal,
+                    actual,
+                });
+            }
+            for (formal_argument, actual_argument) in args.into_iter().zip(actual_args) {
+                self.infer_type_constraints(
+                    formal_argument,
+                    actual_argument,
+                    binder,
+                    inferred,
+                    InferenceLocation {
+                        depth: depth + 1,
+                        ..location
+                    },
+                    info_journal,
+                )?;
+            }
+            return Ok(());
+        }
+
+        if self.type_contains_param_ref(formal, binder)? {
+            return Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.complete_relation_type(formal, info_journal, &mut seen, 0)?;
+        self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+        match self.conforms(actual, formal) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(TyperError::ApplicationArgumentTypeMismatch {
+                source: self.source,
+                tree_index,
+                argument_index,
+                actual,
+                expected: formal,
+            }),
+            Err(_) => Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            }),
+        }
+    }
+
     fn type_contains_param_ref(&self, root: TypeId, binder: TypeId) -> Result<bool, TyperError> {
         fn visit(
             typer: &SourceTyper<'_>,
@@ -1588,6 +1995,21 @@ impl<'a> SourceTyper<'a> {
         }
 
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
+
+        if candidates.iter().any(|candidate| {
+            let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable) else {
+                return false;
+            };
+            let Some(Type::Method(method)) = self.store.types.try_get(poly.result) else {
+                return false;
+            };
+            overload_arity_rejection(method, arguments.len()).is_none()
+        }) {
+            return Err(TyperError::GenericOverloadResolutionDeferred {
+                source: self.source,
+                tree_index: application_tree_index,
+            });
+        }
 
         let winner =
             self.choose_overload_candidate(&mut candidates, &arguments, application_tree_index)?;
@@ -5057,6 +5479,27 @@ mod tests {
             }
         }
         panic!("source method `{target}` not found");
+    }
+
+    fn method_parameter_context(
+        parsed: &dotty_parser::ParseResult,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        method: SymbolId,
+        parameter_index: usize,
+    ) -> SourceContextId {
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            if index.symbol_at(source, tree) != Some(method) {
+                continue;
+            }
+            let parameter_tree = definition.value_param_clauses[0][parameter_index];
+            let parameter = index.symbol_at(source, parameter_tree).unwrap();
+            return index.declaration_context_of(parameter).unwrap();
+        }
+        panic!("method parameter was not found");
     }
 
     fn type_value_rhs(source_text: &str) -> (dotty_core::Constant, Type, TypeId, Definitions) {
@@ -12458,11 +12901,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
-                candidate,
-                ..
-            }) if matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Missing)
-                || matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Complete(_))
+            Err(TyperError::GenericOverloadResolutionDeferred { .. })
         ));
     }
 
@@ -14166,8 +14605,200 @@ mod tests {
     }
 
     #[test]
-    fn polymorphic_method_application_is_deferred() {
+    fn polymorphic_method_application_infers_from_argument() {
         let source_text = "class C { def id[A](x: A): A = x; def use: Int = id(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let int = definitions.int;
+        let identity = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "id" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, int);
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Apply(_)
+        ));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            unreachable!()
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == identity
+        ));
+        let SymbolInfo::Complete(poly_id) = typer.store().symbols.get(identity).info else {
+            panic!("the original polymorphic method should remain complete")
+        };
+        assert!(matches!(typer.store().types.get(poly_id), Type::Poly(_)));
+        assert!(
+            typer
+                .type_contains_param_ref(poly_result(typer.store(), poly_id), poly_id)
+                .unwrap()
+        );
+    }
+
+    fn poly_result(store: &SemanticStore, poly: TypeId) -> TypeId {
+        match store.types.get(poly) {
+            Type::Poly(poly) => poly.result,
+            _ => panic!("expected original method info to remain polymorphic"),
+        }
+    }
+
+    #[test]
+    fn polymorphic_application_infers_multiple_parameters_by_binder_index() {
+        let source_text = "class C { def second[A, B](a: A, b: B): B = b; def use(a: Int, b: Boolean): Boolean = second(a, b) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let boolean = definitions.boolean;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, boolean);
+    }
+
+    #[test]
+    fn polymorphic_application_infers_nested_applied_type_arguments() {
+        let source_text = "class Text; class Box[A]; class Use { def unbox[A](box: Box[A]): A = ???; def use(box: Box[Text]): Text = unbox(box) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == text
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_rejects_conflicting_constraints_without_lub() {
+        let source_text = "class C { def pair[A](x: A, y: A): A = x; def use(x: Int, y: Boolean): Any = pair(x, y) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConflictingInferenceConstraints {
+                parameter_index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_accepts_equivalent_repeated_constraints() {
+        let source_text = "class C { def pair[A](x: A, y: A): A = x; def use: Int = pair(1, 2) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let int = definitions.int;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, int);
+    }
+
+    #[test]
+    fn polymorphic_application_still_checks_concrete_formal_fragments() {
+        let source_text = "class C { def accept[A](value: A, count: Int): A = value; def use: Any = accept(1, true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let int = definitions.int;
+        let boolean = definitions.boolean;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 1,
+                actual,
+                expected,
+                ..
+            }) if actual == boolean && expected == int
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_reports_unconstrained_parameters() {
+        let source_text = "class C { def make[A](): A = ???; def use: Any = make() }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let context = ExpressionContext {
@@ -14185,8 +14816,42 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::PolymorphicMethodApplicationDeferred { .. })
+            Err(TyperError::UnconstrainedTypeParameter {
+                parameter_index: 0,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn polymorphic_application_checks_inferred_type_argument_bounds() {
+        let source_text = "class Base; class Other; class Use { def accept[T <: Base](value: T): T = value; def use(value: Other): Other = accept(value) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_before = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InferredTypeArgumentBoundViolation {
+                parameter_index: 0,
+                side: TypeArgumentBoundSide::Upper,
+                ..
+            })
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.store().checkpoint(), store_before);
     }
 
     #[test]
