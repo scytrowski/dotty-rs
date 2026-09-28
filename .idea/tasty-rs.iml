@@ -2,7 +2,28 @@
 <module type="EMPTY_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-classfile/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-classfile/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-classloader/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-classloader/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-lexer/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-lexer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-lexer/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-namer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-namer/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-parser/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-tasty-unpickler/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-tasty-unpickler/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-tasty/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-tasty/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-typer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/dotty-typer/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/parser-corpus-report/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/parser-smoke-dump/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
